@@ -1,6 +1,6 @@
 # Cargo build
 **/target
-
+temp
 /*.tar.gz
 /riscof
 /build*
