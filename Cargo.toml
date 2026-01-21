@@ -12,6 +12,7 @@ gha_pil2_compiler_branch = "tags/v0.8.0"
 
 [workspace]
 members = [
+    # Zisk crates
     "cli",
     "core",
     "data-bus",
@@ -47,6 +48,39 @@ members = [
     "distributed/crates/worker",
     "sdk",
     "ziskbuild",
+
+    # pil2-proofman core crates
+    "pil2-proofman/cli",
+    "pil2-proofman/curves",
+    "pil2-proofman/common",
+    "pil2-proofman/fields",
+    "pil2-proofman/hints",
+    "pil2-proofman/pilout",
+    "pil2-proofman/proofman",
+    "pil2-proofman/macros",
+    "pil2-proofman/provers/starks-lib-c",
+    "pil2-proofman/witness",
+    "pil2-proofman/util",
+    "pil2-proofman/verifier",
+
+    # pil2-proofman PIL2 components library
+    "pil2-proofman/pil2-components/lib/std/rs",
+
+    # pil2-proofman PIL2 component tests
+    "pil2-proofman/pil2-components/test/connection/rs",
+    "pil2-proofman/pil2-components/test/diff_buses/rs",
+    "pil2-proofman/pil2-components/test/direct_update/rs",
+    "pil2-proofman/pil2-components/test/lookup/rs",
+    "pil2-proofman/pil2-components/test/one_instance/rs",
+    "pil2-proofman/pil2-components/test/permutation/rs",
+    "pil2-proofman/pil2-components/test/range_check/rs",
+    "pil2-proofman/pil2-components/test/simple/rs",
+    "pil2-proofman/pil2-components/test/virtual_tables/rs",
+
+    # pil2-proofman examples
+    "pil2-proofman/examples/fibonacci-square",
+    "pil2-proofman/examples/test-recursive",
+    "pil2-proofman/macros-test",
 ]
 
 resolver = "2"
@@ -102,24 +136,20 @@ zisk-distributed-coordinator = { path = "distributed/crates/coordinator" }
 zisk-distributed-grpc-api = { path = "distributed/crates/grpc-api" }
 zisk-distributed-prover = { path = "distributed/crates/worker" }
 
-# Proofman
-proofman = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.15.0" }
-proofman-common = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.15.0" }
-proofman-macros = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.15.0" }
-proofman-verifier = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.15.0" }
-proofman-util = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.15.0" }
-pil-std-lib = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.15.0" }
-witness = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.15.0" }
-fields = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.15.0" }
-# Proofman Local development
-# proofman = { path = "../pil2-proofman/proofman" }
-# proofman-common = { path = "../pil2-proofman/common" }
-# proofman-macros = { path = "../pil2-proofman/macros" }
-# proofman-verifier = { path = "../pil2-proofman/verifier" }
-# proofman-util = { path = "../pil2-proofman/util" }
-# pil-std-lib = { path = "../pil2-proofman/pil2-components/lib/std/rs" }
-# witness = { path = "../pil2-proofman/witness" }
-# fields = { path = "../pil2-proofman/fields" }
+# Proofman (local monorepo)
+proofman = { path = "pil2-proofman/proofman" }
+proofman-common = { path = "pil2-proofman/common" }
+proofman-macros = { path = "pil2-proofman/macros" }
+proofman-verifier = { path = "pil2-proofman/verifier" }
+proofman-util = { path = "pil2-proofman/util" }
+proofman-cli = { path = "pil2-proofman/cli" }
+proofman-hints = { path = "pil2-proofman/hints" }
+proofman-starks-lib-c = { path = "pil2-proofman/provers/starks-lib-c" }
+pil-std-lib = { path = "pil2-proofman/pil2-components/lib/std/rs" }
+witness = { path = "pil2-proofman/witness" }
+fields = { path = "pil2-proofman/fields" }
+pilout = { path = "pil2-proofman/pilout" }
+curves = { path = "pil2-proofman/curves" }
 
 # External dependencies
 rayon = "1.10"
@@ -179,3 +209,14 @@ reqwest = { version = "0.12", features = [
 ], default-features = false }
 bytemuck = "1.23"
 zstd = "0.13"
+
+# pil2-proofman additional dependencies
+log = { version = "0.4", default-features = false }
+env_logger = "0.11"
+rand = "0.9"
+crossbeam-channel = "0.5.15"
+serde_arrays = "0.2"
+blake3 = "1.3.1"
+csv = "1.3.1"
+tokio-util = "0.7.16"
+prost-build = "0.13"

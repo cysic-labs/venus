@@ -1,0 +1,118 @@
+use std::sync::{RwLock, Arc};
+
+use fields::PrimeField64;
+use proofman_common::{BufferPool, DebugInfo, ProofCtx, ProofmanResult, SetupCtx};
+
+pub trait WitnessComponent<F: PrimeField64>: Send + Sync {
+    fn execute(&self, _pctx: Arc<ProofCtx<F>>, _global_ids: &RwLock<Vec<usize>>) -> ProofmanResult<()> {
+        Ok(())
+    }
+
+    fn debug(&self, _pctx: Arc<ProofCtx<F>>, _sctx: Arc<SetupCtx<F>>, _instance_ids: &[usize]) -> ProofmanResult<()> {
+        Ok(())
+    }
+
+    fn calculate_witness(
+        &self,
+        _stage: u32,
+        _pctx: Arc<ProofCtx<F>>,
+        _sctx: Arc<SetupCtx<F>>,
+        _instance_ids: &[usize],
+        _n_cores: usize,
+        _buffer_pool: &dyn BufferPool<F>,
+    ) -> ProofmanResult<()> {
+        Ok(())
+    }
+
+    fn pre_calculate_witness(
+        &self,
+        _stage: u32,
+        pctx: Arc<ProofCtx<F>>,
+        _sctx: Arc<SetupCtx<F>>,
+        instance_ids: &[usize],
+        _n_cores: usize,
+        _buffer_pool: &dyn BufferPool<F>,
+    ) -> ProofmanResult<()> {
+        for instance_id in instance_ids {
+            pctx.set_witness_ready(*instance_id, false);
+        }
+        Ok(())
+    }
+
+    fn end(&self, _pctx: Arc<ProofCtx<F>>, _sctx: Arc<SetupCtx<F>>, _debug_info: &DebugInfo) -> ProofmanResult<()> {
+        Ok(())
+    }
+
+    fn gen_custom_commits_fixed(
+        &self,
+        _pctx: Arc<ProofCtx<F>>,
+        _sctx: Arc<SetupCtx<F>>,
+        _check: bool,
+    ) -> ProofmanResult<()> {
+        Ok(())
+    }
+}
+
+#[macro_export]
+macro_rules! execute {
+    ($Trace:ident, $num_instances: expr) => {
+        fn execute(&self, pctx: Arc<ProofCtx<F>>, global_ids: &std::sync::RwLock<Vec<usize>>) -> ProofmanResult<()> {
+            let mut instance_ids = Vec::new();
+            for _ in 0..$num_instances {
+                let global_id = pctx.add_instance($Trace::<F>::AIRGROUP_ID, $Trace::<F>::AIR_ID)?;
+                instance_ids.push(global_id);
+                global_ids.write().unwrap().push(global_id);
+            }
+            *self.instance_ids.write().unwrap() = instance_ids.clone();
+            Ok(())
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! define_wc {
+    ($StructName:ident, $name:expr) => {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        pub struct $StructName {
+            instance_ids: std::sync::RwLock<Vec<usize>>,
+            seed: AtomicU64,
+        }
+
+        impl $StructName {
+            pub fn new() -> std::sync::Arc<Self> {
+                std::sync::Arc::new(Self { instance_ids: std::sync::RwLock::new(Vec::new()), seed: AtomicU64::new(0) })
+            }
+
+            pub fn set_seed(&self, seed: u64) {
+                self.seed.store(seed, Ordering::Relaxed);
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! define_wc_with_std {
+    ($StructName:ident, $name:expr) => {
+        use pil_std_lib::Std;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        pub struct $StructName<F: PrimeField64> {
+            std_lib: Arc<Std<F>>,
+            instance_ids: std::sync::RwLock<Vec<usize>>,
+            seed: AtomicU64,
+        }
+
+        impl<F: PrimeField64> $StructName<F> {
+            pub fn new(std_lib: Arc<Std<F>>) -> std::sync::Arc<Self> {
+                std::sync::Arc::new(Self {
+                    std_lib,
+                    instance_ids: std::sync::RwLock::new(Vec::new()),
+                    seed: AtomicU64::new(0),
+                })
+            }
+
+            pub fn set_seed(&self, seed: u64) {
+                self.seed.store(seed, Ordering::Relaxed);
+            }
+        }
+    };
+}

@@ -602,7 +602,7 @@ dependencies = [
  "serde",
  "serde_json",
  "server",
- "sysinfo 0.37.2",
+ "sysinfo",
  "target-lexicon",
  "tokio",
  "tracing",
@@ -787,7 +787,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b30fa8254caad766fc03cb0ccae691e14bf3bd72bfff27f72802ce729551b3d6"
 dependencies = [
  "async-trait",
- "convert_case",
+ "convert_case 0.6.0",
  "json5",
  "pathdiff",
  "ron",
@@ -798,6 +798,23 @@ dependencies = [
  "toml 0.9.10+spec-1.1.0",
  "winnow",
  "yaml-rust2",
+]
+
+[[package]]
+name = "connection"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "pil-std-lib",
+ "proofman",
+ "proofman-cli",
+ "proofman-common",
+ "proofman-macros",
+ "rand 0.9.2",
+ "rayon",
+ "tracing",
+ "witness",
 ]
 
 [[package]]
@@ -859,6 +876,15 @@ name = "convert_case"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec182b0ca2f35d8fc196cf3404988fd8b8c739a4d270ff118a398feb0cbec1ca"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "convert_case"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baaaa0ecca5b51987b9423ccdc971514dd8b0bb7b4060b983d3664dad3f1f89f"
 dependencies = [
  "unicode-segmentation",
 ]
@@ -1040,7 +1066,6 @@ dependencies = [
 [[package]]
 name = "curves"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "fields",
  "num-bigint",
@@ -1105,6 +1130,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "diff-buses"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "num-traits",
+ "pil-std-lib",
+ "proofman",
+ "proofman-cli",
+ "proofman-common",
+ "proofman-macros",
+ "rand 0.9.2",
+ "rayon",
+ "tracing",
+ "witness",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1114,6 +1157,27 @@ dependencies = [
  "const-oid",
  "crypto-common",
  "subtle",
+]
+
+[[package]]
+name = "direct-update"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "num-traits",
+ "pil-std-lib",
+ "proofman",
+ "proofman-cli",
+ "proofman-common",
+ "proofman-macros",
+ "rand 0.9.2",
+ "rayon",
+ "serde",
+ "serde_arrays",
+ "serde_json",
+ "tracing",
+ "witness",
 ]
 
 [[package]]
@@ -1381,12 +1445,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "fibonacci-square"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "pil-std-lib",
+ "proofman",
+ "proofman-common",
+ "proofman-macros",
+ "rayon",
+ "serde",
+ "serde_arrays",
+ "serde_json",
+ "tracing",
+ "witness",
+]
+
+[[package]]
 name = "fields"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "num-bigint",
  "paste",
+ "proofman-starks-lib-c",
+ "rand 0.9.2",
  "serde",
 ]
 
@@ -2263,10 +2346,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "lookup"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "pil-std-lib",
+ "proofman",
+ "proofman-cli",
+ "proofman-common",
+ "proofman-macros",
+ "rand 0.9.2",
+ "rayon",
+ "tracing",
+ "witness",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "macros-test"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "proofman",
+ "proofman-common",
+ "proofman-macros",
+ "rayon",
+ "serde",
+ "serde_arrays",
+]
 
 [[package]]
 name = "matchers"
@@ -2568,6 +2681,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "one-instance"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "pil-std-lib",
+ "proofman",
+ "proofman-cli",
+ "proofman-common",
+ "proofman-macros",
+ "rand 0.9.2",
+ "rayon",
+ "tracing",
+ "witness",
+]
+
+[[package]]
 name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2646,6 +2776,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "permutation"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "pil-std-lib",
+ "proofman",
+ "proofman-cli",
+ "proofman-common",
+ "proofman-macros",
+ "rand 0.9.2",
+ "rayon",
+ "tracing",
+ "witness",
+]
+
+[[package]]
 name = "pest"
 version = "2.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2701,7 +2848,6 @@ dependencies = [
 [[package]]
 name = "pil-std-lib"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "colored",
  "fields",
@@ -2713,6 +2859,16 @@ dependencies = [
  "rayon",
  "tracing",
  "witness",
+]
+
+[[package]]
+name = "pilout"
+version = "0.15.0"
+dependencies = [
+ "bytes",
+ "prost 0.14.1",
+ "prost-build 0.13.5",
+ "tracing",
 ]
 
 [[package]]
@@ -3051,7 +3207,6 @@ dependencies = [
 [[package]]
 name = "proofman"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "blake3",
  "borsh",
@@ -3084,9 +3239,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "proofman-cli"
+version = "0.15.0"
+dependencies = [
+ "blake3",
+ "bytemuck",
+ "clap",
+ "colored",
+ "convert_case 0.8.0",
+ "fields",
+ "libloading",
+ "mpi",
+ "pilout",
+ "proofman",
+ "proofman-common",
+ "proofman-util",
+ "proofman-verifier",
+ "regex",
+ "serde",
+ "serde_json",
+ "tinytemplate",
+ "toml 0.9.10+spec-1.1.0",
+ "tracing",
+ "witness",
+]
+
+[[package]]
 name = "proofman-common"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "borsh",
  "colored",
@@ -3106,7 +3286,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "sysinfo 0.35.2",
+ "sysinfo",
  "tabled",
  "thiserror 2.0.17",
  "tracing",
@@ -3117,7 +3297,6 @@ dependencies = [
 [[package]]
 name = "proofman-hints"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "fields",
  "proofman-common",
@@ -3129,7 +3308,6 @@ dependencies = [
 [[package]]
 name = "proofman-macros"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3140,7 +3318,6 @@ dependencies = [
 [[package]]
 name = "proofman-starks-lib-c"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "crossbeam-channel",
  "tracing",
@@ -3149,18 +3326,16 @@ dependencies = [
 [[package]]
 name = "proofman-util"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "colored",
  "fields",
- "sysinfo 0.35.2",
+ "sysinfo",
  "tracing",
 ]
 
 [[package]]
 name = "proofman-verifier"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "bytemuck",
  "fields",
@@ -3170,12 +3345,42 @@ dependencies = [
 
 [[package]]
 name = "prost"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
+dependencies = [
+ "bytes",
+ "prost-derive 0.13.5",
+]
+
+[[package]]
+name = "prost"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7231bd9b3d3d33c86b58adbac74b5ec0ad9f496b19d22801d773636feaa95f3d"
 dependencies = [
  "bytes",
- "prost-derive",
+ "prost-derive 0.14.1",
+]
+
+[[package]]
+name = "prost-build"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
+dependencies = [
+ "heck",
+ "itertools 0.14.0",
+ "log",
+ "multimap",
+ "once_cell",
+ "petgraph",
+ "prettyplease",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "regex",
+ "syn 2.0.111",
+ "tempfile",
 ]
 
 [[package]]
@@ -3191,13 +3396,26 @@ dependencies = [
  "once_cell",
  "petgraph",
  "prettyplease",
- "prost",
- "prost-types",
+ "prost 0.14.1",
+ "prost-types 0.14.1",
  "pulldown-cmark",
  "pulldown-cmark-to-cmark",
  "regex",
  "syn 2.0.111",
  "tempfile",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
+dependencies = [
+ "anyhow",
+ "itertools 0.14.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]
@@ -3215,11 +3433,20 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
+dependencies = [
+ "prost 0.13.5",
+]
+
+[[package]]
+name = "prost-types"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9b4db3d6da204ed77bb26ba83b6122a73aeb2e87e25fbf7ad2e84c4ccbf8f72"
 dependencies = [
- "prost",
+ "prost 0.14.1",
 ]
 
 [[package]]
@@ -3378,6 +3605,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "range-check"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "num-traits",
+ "pil-std-lib",
+ "proofman",
+ "proofman-cli",
+ "proofman-common",
+ "proofman-macros",
+ "rand 0.9.2",
+ "rayon",
+ "tracing",
+ "witness",
 ]
 
 [[package]]
@@ -3910,6 +4155,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
+name = "simple"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "pil-std-lib",
+ "pilout",
+ "proofman",
+ "proofman-cli",
+ "proofman-common",
+ "proofman-macros",
+ "rand 0.9.2",
+ "rayon",
+ "tracing",
+ "witness",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4172,20 +4435,6 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.35.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3ffa3e4ff2b324a57f7aeb3c349656c7b127c3c189520251a648102a92496e"
-dependencies = [
- "libc",
- "memchr",
- "ntapi",
- "objc2-core-foundation",
- "objc2-io-kit",
- "windows",
-]
-
-[[package]]
-name = "sysinfo"
 version = "0.37.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16607d5caffd1c07ce073528f9ed972d88db15dd44023fa57142963be3feb11f"
@@ -4236,6 +4485,27 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "test-recursive"
+version = "0.15.0"
+dependencies = [
+ "bytemuck",
+ "fields",
+ "libloading",
+ "num-bigint",
+ "pil-std-lib",
+ "proofman",
+ "proofman-common",
+ "proofman-macros",
+ "proofman-starks-lib-c",
+ "rayon",
+ "serde",
+ "serde_arrays",
+ "serde_json",
+ "tracing",
+ "witness",
 ]
 
 [[package]]
@@ -4566,7 +4836,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66bd50ad6ce1252d87ef024b3d64fe4c3cf54a86fb9ef4c631fdd0ded7aeaa67"
 dependencies = [
  "bytes",
- "prost",
+ "prost 0.14.1",
  "tonic",
 ]
 
@@ -4578,8 +4848,8 @@ checksum = "b4a16cba4043dc3ff43fcb3f96b4c5c154c64cbd18ca8dce2ab2c6a451d058a2"
 dependencies = [
  "prettyplease",
  "proc-macro2",
- "prost-build",
- "prost-types",
+ "prost-build 0.14.1",
+ "prost-types 0.14.1",
  "quote",
  "syn 2.0.111",
  "tempfile",
@@ -4907,6 +5177,23 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtual-tables"
+version = "0.15.0"
+dependencies = [
+ "fields",
+ "num-bigint",
+ "pil-std-lib",
+ "proofman",
+ "proofman-cli",
+ "proofman-common",
+ "proofman-macros",
+ "rand 0.9.2",
+ "rayon",
+ "tracing",
+ "witness",
+]
 
 [[package]]
 name = "virtue"
@@ -5410,7 +5697,6 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 [[package]]
 name = "witness"
 version = "0.15.0"
-source = "git+https://github.com/0xPolygonHermez/pil2-proofman.git?tag=v0.15.0#78497c5a05ea316df2188f98c1df66bffb80192f"
 dependencies = [
  "colored",
  "fields",
@@ -5646,7 +5932,7 @@ dependencies = [
  "futures-util",
  "humantime",
  "proofman",
- "prost-types",
+ "prost-types 0.14.1",
  "reqwest",
  "serde",
  "serde_json",
@@ -5669,8 +5955,8 @@ version = "0.15.0"
 dependencies = [
  "anyhow",
  "chrono",
- "prost",
- "prost-types",
+ "prost 0.14.1",
+ "prost-types 0.14.1",
  "serde",
  "serde_json",
  "tonic",
@@ -5810,7 +6096,7 @@ dependencies = [
  "sm-mem",
  "symbolic-common",
  "symbolic-demangle",
- "sysinfo 0.37.2",
+ "sysinfo",
  "vergen",
  "zisk-common",
  "zisk-core",

@@ -1,0 +1,24 @@
+[package]
+name = "witness"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+[dependencies]
+proofman-common = { path = "../common" }
+proofman-util = { path = "../util" }
+
+tracing.workspace = true
+fields.workspace = true
+libloading.workspace = true
+
+colored.workspace = true
+serde_json.workspace = true
+
+[features]
+default = []
+no_lib_link = []
+disable_distributed = []

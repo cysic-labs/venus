@@ -1,0 +1,20 @@
+[package]
+name = "proofman-hints"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+[dependencies]
+proofman-starks-lib-c = { path = "../provers/starks-lib-c" }
+proofman-common = { path = "../common" }
+proofman-util = { path = "../util" }
+fields = { path = "../fields" }
+
+tracing.workspace = true
+
+[features]
+default = []
+gpu = ["proofman-starks-lib-c/gpu"]

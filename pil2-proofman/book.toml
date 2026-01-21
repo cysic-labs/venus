@@ -1,0 +1,8 @@
+[book]
+authors = ["Xavier Pinsach"]
+language = "en"
+src = "book"
+title = "PIL2 Proofman"
+
+[build]
+build-dir = "target/book"

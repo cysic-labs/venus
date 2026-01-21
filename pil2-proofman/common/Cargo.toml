@@ -1,0 +1,52 @@
+[package]
+name = "proofman-common"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+build = "build.rs"
+
+[dependencies]
+proofman-starks-lib-c = { path = "../provers/starks-lib-c" }
+proofman-util = { path = "../util" }
+
+libloading.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+fields.workspace = true
+proofman-macros.workspace = true
+rayon.workspace = true
+sysinfo.workspace = true
+crossbeam-channel.workspace = true
+borsh.workspace = true
+thiserror.workspace = true
+csv.workspace = true
+num_cpus = "1.17.0"
+env = "1.0.1"
+yansi = "1.0.1"
+colored.workspace = true
+tabled = "0.7"
+indexmap = { version = "2", features = ["serde"] }
+
+tracing-subscriber = { version = "0.3.19" }
+crossbeam-queue = "0.3.12"
+lazy_static = "1.5.0"
+
+# Distributed mode (mpi) is only supported on Linux x86_64
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+mpi = { version = "0.8.0" }
+
+[features]
+default = []
+no_lib_link = ["proofman-starks-lib-c/no_lib_link"]
+disable_distributed = []
+diagnostic = ["proofman-macros/diagnostic"]
+gpu = ["proofman-starks-lib-c/gpu"]
+packed = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(distributed)'] }

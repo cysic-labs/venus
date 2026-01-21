@@ -1,0 +1,240 @@
+require "goldilocks.pil"
+
+/*
+Available std modes:
+
+    name      | code | note
+--------------|------|----------------------------------------------------------------------------
+ Default      |  0   | default mode
+ One instance |  1   | one instance mode
+*/
+
+const int STD_MODE_DEFAULT = 0;
+const int STD_MODE_ONE_INSTANCE = 1;
+
+int STD_MODE = STD_MODE_DEFAULT;
+
+function set_std_mode(const int mode) {
+    if (mode != STD_MODE_DEFAULT && mode != STD_MODE_ONE_INSTANCE) {
+        error(`Unknown std mode: ${mode}`);
+    }
+
+    // Set the std mode
+    STD_MODE = mode;
+}
+
+/*
+Available PIOPs:
+
+    name     | code | note
+-------------|------|----------------------------------------------------------------------------
+ Default     |  0   | default name set by the library
+ Permutation |  1   | name as "Permutation"
+ Lookup      |  2   | name as "Lookup"
+ Range Check |  3   | name as "Range Check"
+ Connection  |  4   | name as "Connection"
+ Direct      |  5   | name used for direct updates of the proof constraint
+*/
+
+const int PIOP_NAME_DEFAULT = 0;
+const int PIOP_NAME_PERMUTATION = 1;
+const int PIOP_NAME_LOOKUP = 2;
+const int PIOP_NAME_RANGE_CHECK = 3;
+const int PIOP_NAME_CONNECTION = 4;
+const int PIOP_NAME_DIRECT = 5;
+
+function get_piop_name(const int name): string {
+    switch (name) {
+        case PIOP_NAME_DEFAULT:
+            return "";
+        case PIOP_NAME_PERMUTATION:
+            return "Permutation";
+        case PIOP_NAME_LOOKUP:
+            return "Lookup";
+        case PIOP_NAME_RANGE_CHECK:
+            return "Range Check";
+        case PIOP_NAME_CONNECTION:
+            return "Connection";
+        case PIOP_NAME_DIRECT:
+            return "Direct";
+        default:
+            error(`Unknown name code: ${name}`);
+    }
+}
+
+/*
+Available PIOPs types:
+
+    name     | code | note
+-------------|------|----------------------------------------------------------------------------
+ Default     |  0   | default name set by the library
+ Isolated    |  1   | name used for isolated components which avoids checks with other components
+ Dynamic     |  2   | name used for dynamic components which adapts to changes
+*/
+
+const int PIOP_SURNAME_DEFAULT = 0;
+const int PIOP_SURNAME_ISOLATED = 1;
+const int PIOP_SURNAME_DYNAMIC = 2;
+
+function get_piop_surname(const int name): string {
+    switch (name) {
+        case PIOP_SURNAME_DEFAULT:
+            return "";
+        case PIOP_SURNAME_ISOLATED:
+            return "Isolated";
+        case PIOP_SURNAME_DYNAMIC:
+            return "Dynamic";
+        default:
+            error(`Unknown name code: ${name}`);
+    }
+}
+
+/*
+Available bus types:
+
+    name    | code | note
+------------|------|----------------------------------------------------------------------------
+ Default    |  0   | default bus set by the library
+ Sum        |  1   | use the sum bus
+ Prod       |  2   | use the product bus
+*/
+
+const int PIOP_BUS_DEFAULT = 0;
+const int PIOP_BUS_SUM = 1;
+const int PIOP_BUS_PROD = 2;
+
+int PIOP_BUS_TYPE = PIOP_BUS_DEFAULT;
+
+function set_std_bus_type(const int bus_type) {
+    if (bus_type != PIOP_BUS_SUM && bus_type != PIOP_BUS_PROD) {
+        error(`Unknown bus type: ${bus_type}`);
+    }
+
+    // Set the bus type
+    PIOP_BUS_TYPE = bus_type;
+}
+
+// FIX: dynamic arrays not ready yet
+// Set the array size across the library
+int ARRAY_SIZE = 750;
+
+function set_array_size(const int limit) {
+    ARRAY_SIZE = limit;
+}
+
+/*
+    name    | code | note
+------------|------|-------------------------------------------------------------------------- 
+ Goldilocks |  0   | 2^64 - 2^32 + 1
+*/
+
+const int FIELD_GOLDILOCKS = 0;
+
+int ACTIVE_FIELD = FIELD_GOLDILOCKS;
+
+int GEN[256];
+for (int i = 0; i < length(GEN); i++) {
+    GEN[i] = 0;
+}
+
+int k_coset = 0;
+
+switch (ACTIVE_FIELD) {
+    case FIELD_GOLDILOCKS:
+        assert(length(Goldilocks_Gen) <= length(GEN));
+
+        for (int i = 0; i < length(Goldilocks_Gen); i++) {
+            GEN[i] = Goldilocks_Gen[i];
+        }
+
+        k_coset = Goldilocks_k;
+
+    default:
+        error("Unknown field");
+}
+
+// Maximum constraint degree
+int MAX_CONSTRAINT_DEGREE = 3;
+
+function set_max_constraint_degree(const int degree) {
+    if (degree < 1) {
+        error(`Max constraint degree must be at least 1 but got ${degree}`);
+    }
+
+    // Update the maximum constraint degree
+    MAX_CONSTRAINT_DEGREE = degree;
+}
+
+// Controls opid diagram print
+int PRINT_OPID_DIAGRAM = 0;
+
+function enable_opid_diagram() {
+    PRINT_OPID_DIAGRAM = 1;
+}
+
+// Controls range stats print
+int PRINT_RANGE_STATS = 0;
+
+function enable_range_stats() {
+    PRINT_RANGE_STATS = 1;
+}
+
+// Powers of 2
+const int P2_1 = 2**1;
+const int P2_2 = 2**2;
+const int P2_3 = 2**3;
+const int P2_4 = 2**4;
+const int P2_5 = 2**5;
+const int P2_6 = 2**6;
+const int P2_7 = 2**7;
+const int P2_8 = 2**8;
+const int P2_9 = 2**9;
+const int P2_10 = 2**10;
+const int P2_11 = 2**11;
+const int P2_12 = 2**12;
+const int P2_13 = 2**13;
+const int P2_14 = 2**14;
+const int P2_15 = 2**15;
+const int P2_16 = 2**16;
+const int P2_17 = 2**17;
+const int P2_18 = 2**18;
+const int P2_19 = 2**19;
+const int P2_20 = 2**20;
+const int P2_21 = 2**21;
+const int P2_22 = 2**22;
+const int P2_23 = 2**23;
+const int P2_24 = 2**24;
+const int P2_31 = 2**31;
+const int P2_32 = 2**32;
+const int P2_63 = 2**63;
+const int P2_64 = 2**64;
+
+// Masks
+const int MASK_1 = P2_1 - 1;
+const int MASK_2 = P2_2 - 1;
+const int MASK_3 = P2_3 - 1;
+const int MASK_4 = P2_4 - 1;
+const int MASK_5 = P2_5 - 1;
+const int MASK_6 = P2_6 - 1;
+const int MASK_7 = P2_7 - 1;
+const int MASK_8 = P2_8 - 1;
+const int MASK_9 = P2_9 - 1;
+const int MASK_10 = P2_10 - 1;
+const int MASK_11 = P2_11 - 1;
+const int MASK_12 = P2_12 - 1;
+const int MASK_13 = P2_13 - 1;
+const int MASK_14 = P2_14 - 1;
+const int MASK_15 = P2_15 - 1;
+const int MASK_16 = P2_16 - 1;
+const int MASK_17 = P2_17 - 1;
+const int MASK_18 = P2_18 - 1;
+const int MASK_19 = P2_19 - 1;
+const int MASK_20 = P2_20 - 1;
+const int MASK_21 = P2_21 - 1;
+const int MASK_22 = P2_22 - 1;
+const int MASK_23 = P2_23 - 1;
+const int MASK_24 = P2_24 - 1;
+const int MASK_31 = P2_31 - 1;
+const int MASK_32 = P2_32 - 1;
+const int MASK_63 = P2_63 - 1;
+const int MASK_64 = P2_64 - 1;
