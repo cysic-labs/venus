@@ -2,423 +2,452 @@
 
 ## Overview
 
-Compiler integration enables standard programming languages to target the zkVM. Developers write code in familiar languages like Rust or C, and the compiler produces RISC-V binaries suitable for zkVM execution. This approach leverages existing compiler infrastructure, language ecosystems, and developer expertise while abstracting the complexities of the underlying proving system.
+Compiler integration enables standard programming languages to target the zkVM. Developers write code in familiar languages, and the compiler produces machine code suitable for zkVM execution. This approach leverages existing compiler infrastructure, language ecosystems, and developer expertise while abstracting the complexities of the underlying proving system.
 
-The toolchain typically involves multiple stages: language-specific frontend compilation, LLVM-based code generation targeting RISC-V, linking with zkVM-specific runtime libraries, and final binary preparation. Understanding this pipeline helps developers configure their build systems, debug compilation issues, and optimize output for proving. This document covers compiler toolchains, configuration, and integration patterns.
+The toolchain typically involves multiple stages: language-specific frontend compilation, intermediate representation optimization, target code generation, linking with zkVM-specific runtime libraries, and final binary preparation. Understanding this pipeline helps developers configure their build systems, debug compilation issues, and optimize output for proving. This document covers compiler toolchain concepts, optimization strategies, and integration patterns at a conceptual level.
 
-## Toolchain Components
+## Toolchain Architecture
 
-### Language Frontend
+### Multi-Stage Pipeline
 
-Initial compilation stage:
-
-```
-Rust:
-  rustc: Rust compiler
-  Generates LLVM IR
-  Applies Rust-specific optimizations
-
-C/C++:
-  clang: Clang compiler
-  Generates LLVM IR
-  C/C++ semantics
-
-Other languages:
-  Any language with LLVM backend
-  Or direct RISC-V target
-```
-
-### LLVM Backend
-
-Code generation:
+The compilation process:
 
 ```
-LLVM components:
-  Middle-end optimization
+Stage 1 - Frontend:
+  Source language parsing
+  Semantic analysis
+  Intermediate representation generation
+
+Stage 2 - Optimization:
+  Language-independent transformations
+  Dead code elimination
+  Constant propagation
+  Loop optimizations
+
+Stage 3 - Code Generation:
   Target-specific lowering
-  RISC-V code generation
+  Instruction selection
+  Register allocation
+  Machine code emission
 
-Target triple:
-  riscv32-unknown-elf (32-bit)
-  riscv64-unknown-elf (64-bit)
-
-Output:
-  RISC-V object files
-  Assembly (optional)
+Stage 4 - Linking:
+  Symbol resolution
+  Section merging
+  Runtime library integration
+  Final executable creation
 ```
 
-### Linker
+### Language Support
 
-Combining objects:
-
-```
-Linker:
-  lld or riscv-ld
-  Combines object files
-  Resolves symbols
-
-Output:
-  ELF executable
-  Bare-metal or with runtime
-```
-
-### zkVM Runtime
-
-Execution support:
+Languages that can target zkVM:
 
 ```
-Runtime components:
-  Entry point (_start)
-  System call interface
-  I/O wrappers
-  Memory allocator
+Systems languages:
+  Compile to efficient machine code
+  Direct memory control
+  Suitable for performance-critical code
 
-Linking:
-  Statically linked with program
-  Provides zkVM integration
+Higher-level languages:
+  May require additional runtime support
+  Trade convenience for control
+  Suitable for application logic
+
+Requirements for zkVM targeting:
+  Deterministic execution semantics
+  No unsupported system calls
+  Compatible with embedded/bare-metal model
 ```
 
-## Build Configuration
+### Target Architecture
 
-### Rust Configuration
-
-Setting up Rust for zkVM:
+Properties of the zkVM target:
 
 ```
-Target setup:
-  rustup target add riscv32im-unknown-none-elf
+Architecture characteristics:
+  Specific instruction set (typically RISC-V)
+  Defined register count and width
+  Memory model and alignment requirements
+  Available ISA extensions
 
-Cargo configuration (.cargo/config.toml):
-  [build]
-  target = "riscv32im-unknown-none-elf"
-
-  [target.riscv32im-unknown-none-elf]
-  rustflags = [
-    "-C", "link-arg=-Tlink.ld",
-    "-C", "target-feature=+m"
-  ]
+Target specification:
+  Architecture family (e.g., RISC-V 32-bit)
+  Supported extensions (multiplication, etc.)
+  ABI conventions
+  Endianness
 ```
 
-### Compiler Flags
+## Compilation Concepts
 
-Optimization and features:
+### Source to Intermediate Representation
 
-```
-Optimization:
-  -O2: Balanced optimization
-  -Os: Size optimization
-  -O3: Maximum optimization
-
-Features:
-  +m: Multiply extension
-  +a: Atomic extension (if needed)
-  +c: Compressed instructions
-
-No-std:
-  #![no_std]
-  Removes standard library
-  Uses core library only
-```
-
-### Linker Script
-
-Memory layout:
+Frontend compilation:
 
 ```
-Linker script (link.ld):
-  ENTRY(_start)
+Parsing:
+  Lexical analysis (tokenization)
+  Syntactic analysis (parse tree)
+  Abstract syntax tree construction
 
-  MEMORY {
-    RAM : ORIGIN = 0x10000000, LENGTH = 256M
-  }
+Semantic analysis:
+  Type checking
+  Name resolution
+  Scope analysis
+  Error detection
 
-  SECTIONS {
-    .text : { *(.text*) } > RAM
-    .rodata : { *(.rodata*) } > RAM
-    .data : { *(.data*) } > RAM
-    .bss : { *(.bss*) } > RAM
-    .heap : { ... } > RAM
-    .stack : { ... } > RAM
-  }
+IR generation:
+  Language-independent representation
+  Preserves program semantics
+  Enables cross-language optimization
 ```
 
-## Compilation Pipeline
+### Optimization Passes
 
-### Source to Object
-
-First compilation stage:
+Common compiler optimizations:
 
 ```
-Source file:
-  main.rs / main.c
+Local optimizations:
+  Constant folding
+  Strength reduction
+  Algebraic simplification
+  Common subexpression elimination
 
-Compilation:
-  rustc --target riscv32im-unknown-none-elf main.rs
-  # or
-  clang --target=riscv32 -c main.c
+Global optimizations:
+  Dead code elimination
+  Function inlining
+  Loop transformations
+  Register allocation
 
-Output:
-  main.o (object file)
+Interprocedural:
+  Cross-function inlining
+  Whole-program optimization
+  Link-time optimization (LTO)
 ```
 
-### Object to Executable
+### Code Generation
 
-Linking stage:
-
-```
-Input:
-  main.o + runtime.o + libraries
-
-Linking:
-  riscv32-unknown-elf-ld -T link.ld main.o runtime.o -o program.elf
-
-Output:
-  program.elf (executable)
-```
-
-### Executable to zkVM Input
-
-Final preparation:
+Producing machine code:
 
 ```
-Processing:
-  Extract loadable sections
-  Prepare memory image
-  Include metadata
+Instruction selection:
+  Map IR operations to machine instructions
+  Pattern matching on IR graph
+  Architecture-specific lowering
 
-Output:
-  Binary for zkVM execution
-  Entry point address
-  Memory layout information
+Register allocation:
+  Assign variables to physical registers
+  Spill to memory when necessary
+  Minimize register pressure
+
+Instruction scheduling:
+  Order instructions for efficiency
+  Respect data dependencies
+  Utilize pipeline opportunities
 ```
 
 ## Runtime Integration
 
-### Entry Point
+### Entry Point Design
 
-Program start:
-
-```
-Runtime entry (_start):
-  Initialize stack
-  Initialize heap
-  Clear BSS
-  Call main()
-  Handle return (exit syscall)
-
-Assembly:
-  _start:
-    la sp, __stack_top
-    call __init_heap
-    call main
-    li a7, SYS_exit
-    ecall
-```
-
-### System Calls
-
-zkVM interface:
+Program initialization:
 
 ```
-System call wrapper:
-  fn syscall(num: usize, args: ...) -> usize {
-    // a7 = syscall number
-    // a0-a5 = arguments
-    // ecall
-    // a0 = return value
-  }
+Bootstrap sequence:
+  Stack initialization
+  Heap setup
+  Runtime data structure preparation
+  Transition to user code
 
-Common syscalls:
-  read(), write(), exit()
-  Implemented in runtime library
+Design principles:
+  Minimal overhead
+  Deterministic initialization
+  Proper resource setup
 ```
 
-### Memory Allocator
+### System Interface
 
-Heap management:
+zkVM system services:
 
 ```
-Allocator:
-  Track heap pointer
-  Simple bump allocator
-  Or more sophisticated
+Interface mechanism:
+  Defined calling convention
+  Service identification
+  Parameter passing
+  Result retrieval
 
-Integration:
-  Global allocator trait (Rust)
-  malloc/free implementation (C)
-
-Example:
-  #[global_allocator]
-  static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+Common services:
+  Input data access
+  Output data production
+  Memory allocation
+  Program termination
 ```
 
-## Optimization
+### Memory Model
+
+How programs use memory:
+
+```
+Segments:
+  Code: Executable instructions (read-only)
+  Data: Initialized globals
+  Uninitialized: Zero-initialized globals
+  Heap: Dynamic allocation
+  Stack: Local variables and call frames
+
+Layout principles:
+  Non-overlapping regions
+  Proper alignment
+  Efficient access patterns
+```
+
+## Optimization Strategies
 
 ### Size Optimization
 
-Reducing binary size:
+Minimizing binary footprint:
 
 ```
-Flags:
-  -Os: Optimize for size
-  LTO: Link-time optimization
-  Strip: Remove symbols
+Techniques:
+  Aggressive dead code elimination
+  Function merging
+  String deduplication
+  Section garbage collection
 
-Rust:
-  [profile.release]
-  opt-level = 's'
-  lto = true
-  strip = true
-
-Effect:
-  Smaller binary
-  Fewer instructions
+Benefits for zkVM:
+  Fewer instructions to prove
+  Reduced trace size
   Faster proving
+
+Trade-offs:
+  May reduce runtime performance
+  Debugging more difficult
+  Longer compile times
 ```
 
-### Instruction Selection
+### Speed Optimization
 
-Efficient code generation:
+Maximizing execution efficiency:
 
 ```
-Considerations:
-  Avoid expensive instructions when possible
-  Use strength reduction
-  Prefer simpler alternatives
-
-Compiler usually handles:
-  Division to multiplication
-  Shift for power-of-2 multiply
+Techniques:
+  Loop unrolling
+  Vectorization (where applicable)
   Branch optimization
-```
+  Cache-aware layout
 
-### Inlining
+Benefits for zkVM:
+  Faster witness generation
+  Potentially fewer cycles to prove
 
-Function call overhead:
-
-```
-Inlining benefits:
-  Reduces call overhead
-  Enables cross-function optimization
+Considerations:
   May increase code size
-
-Control:
-  #[inline(always)]
-  #[inline(never)]
-  LTO for cross-module
+  Balance with proving costs
 ```
 
-## Debugging Support
+### Proving-Aware Optimization
 
-### Debug Symbols
-
-Including debug info:
+Optimizing for proof generation:
 
 ```
-Generation:
-  -g flag during compilation
-  DWARF debug information
+zkVM-specific considerations:
+  Some operations more expensive to prove
+  Memory access patterns affect proving
+  Instruction choice impacts constraint count
 
-Usage:
-  GDB with RISC-V support
-  Source-level debugging
-  Stack traces
-
-Trade-off:
-  Larger binary
-  Slower compilation
-  Essential for development
-```
-
-### Disassembly
-
-Inspecting generated code:
-
-```
-Tools:
-  objdump -d program.elf
-  riscv32-unknown-elf-objdump
-
-Output:
-  Assembly instructions
-  Addresses
-  Symbol information
-
-Usage:
-  Verify compilation
-  Identify hot spots
-  Debug low-level issues
+Strategies:
+  Prefer operations with efficient circuits
+  Minimize expensive operations (division, etc.)
+  Structure memory access for proving efficiency
 ```
 
 ## Cross-Compilation
 
-### Host vs Target
+### Development Model
 
-Development environment:
+Compiling for different target:
 
 ```
-Host:
-  Development machine (x86, ARM)
-  Runs compiler, tools
-  Development environment
+Host system:
+  Development machine
+  Runs compiler and tools
+  Debugging and testing environment
 
-Target:
-  RISC-V (zkVM)
-  Runs compiled program
-  Execution environment
+Target system:
+  zkVM execution environment
+  Different architecture
+  Constrained capabilities
 
 Cross-compilation:
   Compile on host
-  Execute on target
-  Different architectures
+  Produce code for target
+  Standard embedded development pattern
 ```
 
-### Sysroot
+### Environment Configuration
 
-Target libraries:
+Setting up cross-compilation:
 
 ```
-Sysroot contents:
-  Target libraries
-  Header files
-  Runtime support
+Requirements:
+  Compiler with target support
+  Target-specific libraries
+  Appropriate linker
 
-Configuration:
-  --sysroot=/path/to/riscv-sysroot
-  Points to target libraries
+Configuration elements:
+  Target architecture specification
+  Library search paths
+  Default compilation flags
+
+Verification:
+  Test compilation produces valid output
+  Check binary format correctness
+```
+
+### Target Libraries
+
+Libraries for zkVM environment:
+
+```
+Core library:
+  Fundamental types and operations
+  Memory operations
+  Basic utilities
+
+Runtime library:
+  System call wrappers
+  Memory allocator
+  I/O handling
+
+Math libraries:
+  Field arithmetic (if needed)
+  Cryptographic primitives
+  Standard math functions (software)
+```
+
+## Debugging Support
+
+### Debug Information
+
+Aiding development:
+
+```
+Debug data includes:
+  Source-to-instruction mapping
+  Variable location information
+  Type descriptions
+  Call frame information
+
+Usage:
+  Step-through debugging
+  Variable inspection
+  Stack traces
+  Crash analysis
+
+Trade-off:
+  Increases binary size
+  Essential for development
+  Remove for production
+```
+
+### Inspection Tools
+
+Analyzing compiler output:
+
+```
+Binary analysis:
+  Instruction examination
+  Section layout
+  Symbol information
+  Size analysis
+
+Useful for:
+  Verifying compilation correctness
+  Understanding generated code
+  Identifying optimization opportunities
+```
+
+## Build Process Integration
+
+### Automation Principles
+
+Systematic build process:
+
+```
+Goals:
+  Reproducible builds
+  Incremental compilation
+  Parallel processing
+  Clear dependency tracking
+
+Elements:
+  Source file tracking
+  Dependency management
+  Compilation orchestration
+  Output generation
+```
+
+### Dependency Management
+
+Handling external code:
+
+```
+Library dependencies:
+  Version specification
+  Compatibility verification
+  Transitive dependency resolution
+
+Source dependencies:
+  External code integration
+  Version control
+  Update management
+```
+
+### Configuration Management
+
+Build system settings:
+
+```
+Configuration levels:
+  Project-wide defaults
+  Target-specific overrides
+  Build profile variations
+
+Common configurations:
+  Development: Fast compile, debug info
+  Release: Optimized, stripped
+  Test: Debug info, test features
 ```
 
 ## Key Concepts
 
-- **Toolchain**: Compiler, linker, runtime
-- **Target triple**: Architecture specification
-- **Linker script**: Memory layout definition
-- **Runtime**: Execution support library
-- **Cross-compilation**: Host to target compilation
+- **Toolchain**: Complete set of compilation tools
+- **Target triple**: Specification of target architecture
+- **Cross-compilation**: Compiling for different architecture than host
+- **Runtime library**: Code providing zkVM integration
+- **Link-time optimization**: Optimization across compilation units
 
 ## Design Considerations
 
-### Optimization Level
+### Optimization Level Selection
 
-| Debug | Release |
-|-------|---------|
-| -O0 | -O2/-O3 |
-| Fast compile | Slow compile |
-| Large binary | Small binary |
-| Easy debugging | Hard debugging |
+| Development | Production |
+|-------------|------------|
+| Fast compilation | Full optimization |
+| Debug information | Minimal size |
+| Easy debugging | Maximum performance |
+| Quick iteration | Proving efficiency |
 
-### Standard Library
+### Library Strategy
 
-| std | no_std |
-|-----|--------|
-| Full library | Core only |
-| Easier | More work |
-| May not work | Compatible |
-| Familiar | Restricted |
+| Full Runtime | Minimal Runtime |
+|--------------|-----------------|
+| More functionality | Smaller footprint |
+| Easier development | Better for proving |
+| Standard patterns | Custom solutions |
+| Higher overhead | Lower overhead |
 
 ## Related Topics
 
-- [Build System](02-build-system.md) - Build automation
+- [Build System](02-build-system.md) - Build automation concepts
 - [Program Structure](../01-programming-model/01-program-structure.md) - Program patterns
-- [Instruction Set Support](../../06-emulation-layer/01-risc-v-emulation/01-instruction-set-support.md) - Target ISA
-- [Testing and Debugging](../01-programming-model/03-testing-and-debugging.md) - Debug workflow
+- [Testing and Debugging](../01-programming-model/03-testing-and-debugging.md) - Development workflow
+

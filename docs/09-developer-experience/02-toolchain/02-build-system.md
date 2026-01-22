@@ -2,403 +2,454 @@
 
 ## Overview
 
-A build system automates the compilation, linking, and preparation of programs for the zkVM. Managing the multi-stage toolchain manually is error-prone and tedious; a well-configured build system handles dependencies, applies correct flags, and produces ready-to-prove binaries. Most zkVM projects use Cargo (for Rust) or Make/CMake (for C/C++) with custom configurations for the RISC-V target.
+A build system automates the compilation, linking, and preparation of programs for the zkVM. Managing the multi-stage toolchain manually is error-prone and tedious; a well-configured build system handles dependencies, applies correct compiler options, and produces ready-to-prove binaries. This automation ensures consistency across development, testing, and production environments.
 
-The build system must handle cross-compilation, manage zkVM-specific runtime libraries, apply appropriate optimizations, and integrate with testing and proving infrastructure. This document covers build system configuration, common patterns, and integration with the proving workflow.
+The build system must handle cross-compilation targeting the zkVM architecture, manage zkVM-specific runtime libraries, apply appropriate optimizations, and integrate with testing and proving infrastructure. Effective build systems enable incremental compilation, parallel processing, and reproducible outputs. This document covers build system concepts, patterns, and integration strategies at a conceptual level.
 
-## Cargo Configuration
+## Build System Concepts
 
-### Project Structure
+### Build Process Stages
 
-Standard Rust project layout:
+What a build system coordinates:
 
 ```
-project/
-├── Cargo.toml
-├── .cargo/
-│   └── config.toml
-├── src/
-│   ├── main.rs
-│   └── lib.rs
-├── build.rs (optional)
-└── link.ld
+Stage 1 - Dependency Resolution:
+  Identify required libraries
+  Resolve version constraints
+  Fetch external dependencies
+  Verify compatibility
+
+Stage 2 - Compilation:
+  Invoke compiler for each source file
+  Apply appropriate flags
+  Generate object files
+  Track dependencies for incremental builds
+
+Stage 3 - Linking:
+  Combine object files
+  Resolve symbols
+  Apply linker configuration
+  Generate executable
+
+Stage 4 - Post-Processing:
+  Binary format conversion
+  Size optimization
+  Metadata generation
+  Artifact organization
 ```
 
-### Cargo.toml
+### Project Organization
 
+Structuring zkVM projects:
+
+```
+Logical organization:
+  Source files: Program implementation
+  Library dependencies: External code
+  Build configuration: Compilation settings
+  Output artifacts: Compiled binaries
+
+Separation principles:
+  Source separate from build output
+  Configuration explicitly defined
+  Dependencies tracked
+  Artifacts organized by purpose
+```
+
+### Configuration Management
+
+Specifying build parameters:
+
+```
 Project configuration:
+  Target architecture
+  Optimization level
+  Feature flags
+  Dependency versions
 
-```toml
-[package]
-name = "zkvm-program"
-version = "0.1.0"
-edition = "2021"
+Build profiles:
+  Development: Fast iteration
+  Testing: Debug enabled
+  Release: Fully optimized
 
-[dependencies]
-zkvm-runtime = "1.0"
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-panic = "abort"
-
-[profile.dev]
-opt-level = 0
-debug = true
+Environment-specific:
+  Local development settings
+  CI/CD settings
+  Production settings
 ```
 
-### .cargo/config.toml
-
-Build settings:
-
-```toml
-[build]
-target = "riscv32im-unknown-none-elf"
-
-[target.riscv32im-unknown-none-elf]
-runner = "zkvm-run"
-rustflags = [
-  "-C", "link-arg=-Tlink.ld",
-  "-C", "target-feature=+m",
-]
-
-[env]
-RUSTFLAGS = "-C target-feature=+m"
-```
-
-### Build Script
-
-Custom build logic (build.rs):
-
-```rust
-fn main() {
-  // Tell cargo to link against linker script
-  println!("cargo:rustc-link-arg=-Tlink.ld");
-
-  // Rerun if linker script changes
-  println!("cargo:rerun-if-changed=link.ld");
-
-  // Include assembly files
-  cc::Build::new()
-    .file("src/startup.S")
-    .compile("startup");
-}
-```
-
-## Make-Based Builds
-
-### Makefile Structure
-
-For C/C++ or multi-language:
-
-```makefile
-# Toolchain
-CC = riscv32-unknown-elf-gcc
-LD = riscv32-unknown-elf-ld
-OBJCOPY = riscv32-unknown-elf-objcopy
-
-# Flags
-CFLAGS = -O2 -march=rv32im -mabi=ilp32
-LDFLAGS = -T link.ld
-
-# Sources
-SRCS = main.c utils.c
-OBJS = $(SRCS:.c=.o)
-
-# Targets
-all: program.elf
-
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
-
-program.elf: $(OBJS)
-	$(LD) $(LDFLAGS) $^ -o $@
-
-clean:
-	rm -f $(OBJS) program.elf
-```
-
-### Multi-Target Builds
-
-Supporting different configurations:
-
-```makefile
-# Configurations
-DEBUG_FLAGS = -O0 -g
-RELEASE_FLAGS = -O3
-
-# Targets
-debug: CFLAGS += $(DEBUG_FLAGS)
-debug: program-debug.elf
-
-release: CFLAGS += $(RELEASE_FLAGS)
-release: program.elf
-
-test: program-debug.elf
-	./run-tests.sh
-```
-
-## Build Patterns
+## Compilation Management
 
 ### Incremental Builds
 
 Avoiding unnecessary work:
 
 ```
-Cargo:
-  Automatic dependency tracking
-  Only recompiles changed files
-  Caches intermediate results
+Dependency tracking:
+  Track which outputs depend on which inputs
+  Detect when inputs change
+  Rebuild only affected outputs
 
-Make:
-  Dependency rules
-  Timestamp-based rebuilds
-  Explicit dependencies
+Granularity:
+  File-level tracking
+  Function-level (advanced)
+  Module-level
+
+Benefits:
+  Faster development cycle
+  Reduced resource usage
+  Quick feedback loop
 ```
 
-### Parallel Builds
+### Parallel Compilation
 
-Faster compilation:
+Utilizing multiple cores:
 
 ```
-Cargo:
-  cargo build -j N
-  Parallel by default
+Parallelization opportunities:
+  Independent source files
+  Independent modules
+  Independent targets
 
-Make:
-  make -j N
-  Parallel rule execution
+Constraints:
+  Respect dependencies
+  Manage resource limits
+  Handle tool limitations
 
-CI:
-  Maximize parallelism
-  Balance with resources
+Benefits:
+  Significantly faster builds
+  Better hardware utilization
 ```
 
 ### Reproducible Builds
 
-Consistent output:
+Consistent output across builds:
 
 ```
-Strategies:
-  Pin toolchain version
-  Lock dependencies
-  Fixed timestamps
-  Deterministic flags
+Requirements:
+  Same inputs produce same outputs
+  Independent of build time
+  Independent of build environment
 
-Cargo:
-  Cargo.lock commits
-  rust-toolchain.toml
+Techniques:
+  Pin dependency versions
+  Use deterministic compilation
+  Control timestamp embedding
+  Document toolchain versions
 
 Verification:
-  Same source → same binary
-  Hash comparison
+  Compare binary hashes
+  Audit build process
+  Detect unintended changes
 ```
 
 ## Dependency Management
 
-### Rust Dependencies
+### Library Dependencies
 
-Managing crates:
-
-```toml
-[dependencies]
-# Regular dependencies
-serde = { version = "1.0", features = ["derive"] }
-
-# Platform-specific
-[target.'cfg(target_arch = "riscv32")'.dependencies]
-zkvm-runtime = "1.0"
-
-# Build dependencies
-[build-dependencies]
-cc = "1.0"
-```
-
-### C Dependencies
-
-Managing libraries:
-
-```makefile
-# External libraries
-LIBS = -lm
-
-# Include paths
-INCLUDES = -I./include -I/path/to/zkvm-runtime/include
-
-# Library paths
-LDPATHS = -L./lib -L/path/to/zkvm-runtime/lib
-
-program.elf: $(OBJS)
-	$(LD) $(LDFLAGS) $^ $(LDPATHS) $(LIBS) -o $@
-```
-
-### Submodules/Vendoring
-
-Including source dependencies:
+Handling external libraries:
 
 ```
-Git submodules:
-  git submodule add url path
-  Version controlled dependency
+Dependency specification:
+  Library identifier
+  Version requirements
+  Feature selections
+  Platform constraints
 
+Resolution process:
+  Find compatible versions
+  Resolve transitive dependencies
+  Detect conflicts
+  Download and cache
+
+Version strategies:
+  Exact versions (reproducibility)
+  Version ranges (flexibility)
+  Lock files (capture resolution)
+```
+
+### Dependency Types
+
+Categories of dependencies:
+
+```
+Build dependencies:
+  Needed only during compilation
+  Code generators
+  Build tools
+  Not included in final binary
+
+Runtime dependencies:
+  Linked into final binary
+  Required for execution
+  Affects binary size
+
+Development dependencies:
+  Testing frameworks
+  Documentation tools
+  Not in production builds
+```
+
+### Vendoring and Caching
+
+Managing dependency artifacts:
+
+```
 Vendoring:
-  Copy source into project
+  Include dependency source in project
   Full control over code
-  Manual updates
+  Independence from external sources
+  Manual update process
+
+Caching:
+  Store downloaded dependencies
+  Avoid repeated downloads
+  Speed up clean builds
+  Share across projects
+```
+
+## Build Profiles
+
+### Development Profile
+
+Optimizing for iteration:
+
+```
+Characteristics:
+  Fast compilation (low optimization)
+  Debug information included
+  Assertions enabled
+  Larger binary acceptable
+
+Purpose:
+  Quick code-compile-test cycle
+  Easy debugging
+  Rapid experimentation
+```
+
+### Release Profile
+
+Optimizing for production:
+
+```
+Characteristics:
+  Full optimization
+  Debug info removed
+  Assertions disabled
+  Minimal binary size
+
+Purpose:
+  Production deployment
+  Performance testing
+  Proof generation
+```
+
+### Custom Profiles
+
+Specialized build configurations:
+
+```
+Testing profile:
+  Debug info for test debugging
+  Test framework integration
+  Coverage instrumentation optional
+
+Proving profile:
+  Size-optimized
+  Proving-specific settings
+  Minimal runtime overhead
+
+Benchmark profile:
+  Performance optimizations
+  Measurement instrumentation
+  Repeatable execution
 ```
 
 ## Testing Integration
 
-### Test Targets
+### Test Execution
 
-Build system test support:
+Build system support for testing:
 
-```makefile
-# Test targets
-test: test-unit test-integration test-proof
+```
+Test discovery:
+  Identify test code
+  Build test executables
+  Organize test runs
 
-test-unit:
-	cargo test --lib
+Test types:
+  Unit tests (component level)
+  Integration tests (system level)
+  Property tests (invariant checking)
 
-test-integration:
-	cargo test --test '*'
-
-test-proof:
-	./prove-test-program.sh
+Execution modes:
+  Run all tests
+  Run specific tests
+  Run tests matching pattern
 ```
 
-### Test Builds
+### Test Infrastructure
 
-Separate test configuration:
+Supporting test development:
 
-```toml
-[profile.test]
-opt-level = 0
-debug = true
+```
+Test dependencies:
+  Testing framework
+  Mock libraries
+  Test utilities
 
-# Different output
-target-dir = "target-test"
+Test fixtures:
+  Test data management
+  Environment setup
+  Cleanup procedures
+
+Test output:
+  Results reporting
+  Coverage reports
+  Performance metrics
 ```
 
-## CI/CD Integration
+## Continuous Integration
 
-### GitHub Actions
+### Automated Builds
 
-Example workflow:
+Build system in CI/CD:
 
-```yaml
-name: Build and Test
+```
+Pipeline stages:
+  Dependency resolution
+  Compilation
+  Testing
+  Artifact generation
 
-on: [push, pull_request]
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-
-      - name: Install toolchain
-        run: |
-          rustup target add riscv32im-unknown-none-elf
-
-      - name: Build
-        run: cargo build --release
-
-      - name: Test
-        run: cargo test
-
-      - name: Prove
-        run: ./scripts/prove.sh
+Automation requirements:
+  Command-line invocation
+  Exit codes for success/failure
+  Parseable output
+  Artifact publishing
 ```
 
-### Artifacts
+### Build Caching
 
-Build outputs:
+Accelerating CI builds:
 
-```yaml
-- name: Upload binary
-  uses: actions/upload-artifact@v2
-  with:
-    name: zkvm-program
-    path: target/release/program.elf
+```
+Cache targets:
+  Downloaded dependencies
+  Compiled artifacts
+  Intermediate files
+
+Cache strategies:
+  Key-based lookup
+  Incremental updates
+  Size management
+
+Benefits:
+  Faster CI runs
+  Reduced resource usage
+  Quicker feedback
 ```
 
-## Optimization
+### Build Artifacts
+
+Managing build outputs:
+
+```
+Artifact types:
+  Compiled binaries
+  Debug symbols
+  Documentation
+  Package archives
+
+Artifact handling:
+  Versioned storage
+  Distribution preparation
+  Archive management
+```
+
+## Optimization Strategies
 
 ### Build Time Optimization
 
 Faster compilation:
 
 ```
-Strategies:
-  Incremental compilation
-  Parallel jobs
-  Compiler caching (sccache)
-  Minimal dependencies
+Techniques:
+  Parallel compilation
+  Incremental builds
+  Compilation caching
+  Precompiled dependencies
 
-sccache setup:
-  export RUSTC_WRAPPER=sccache
+Trade-offs:
+  Cache storage costs
+  Initial cache population
+  Cache invalidation complexity
 ```
 
 ### Binary Size Optimization
 
-Smaller output:
-
-```toml
-[profile.release]
-opt-level = 's'  # Size
-lto = true
-codegen-units = 1
-strip = true
-panic = 'abort'
-```
-
-### Proving Time Optimization
-
-Better proof performance:
+Smaller outputs:
 
 ```
-Compile-time flags:
-  Target appropriate ISA subset
-  Enable necessary extensions only
+Techniques:
+  Dead code elimination
+  Link-time optimization
+  Symbol stripping
+  Section removal
 
-Example:
-  -C target-feature=+m  # Only multiply
-  # Not: +m,+a,+f,+d (unnecessary)
+Configuration:
+  Size-optimized profile
+  Aggressive optimization flags
+  Custom linker settings
+```
+
+### Proving Efficiency
+
+Optimizing for proof generation:
+
+```
+Considerations:
+  Instruction count affects proving time
+  Some operations more expensive
+  Memory access patterns matter
+
+Strategies:
+  Target appropriate ISA features
+  Minimize complex operations
+  Structure for proving efficiency
 ```
 
 ## Key Concepts
 
 - **Build system**: Automation of compilation process
-- **Cross-compilation**: Building for different target
-- **Incremental builds**: Only rebuild what changed
-- **Dependency management**: Handling external code
-- **CI/CD integration**: Automated building and testing
+- **Incremental build**: Recompiling only changed components
+- **Reproducible build**: Same inputs produce same outputs
+- **Build profile**: Configuration preset for specific purpose
+- **Dependency management**: Handling external library requirements
 
 ## Design Considerations
 
-### Build System Choice
+### Automation Level
 
-| Cargo | Make |
-|-------|------|
-| Rust-native | Language-agnostic |
-| Automatic | Manual rules |
-| Convention | Flexibility |
-| Less control | Full control |
+| Manual Control | Full Automation |
+|----------------|-----------------|
+| Explicit steps | Implicit rules |
+| Flexible | Consistent |
+| Learning required | Convention-based |
+| Customizable | Opinionated |
 
-### Optimization Strategy
+### Optimization Trade-offs
 
-| Dev Build | Release Build |
-|-----------|---------------|
-| Fast compile | Slow compile |
-| Large binary | Small binary |
-| Debug info | Stripped |
-| Quick iteration | Production ready |
+| Fast Builds | Optimized Output |
+|-------------|------------------|
+| Quick feedback | Better performance |
+| Debug-friendly | Smaller size |
+| Development focus | Production focus |
+| Higher resource use | Longer build time |
 
 ## Related Topics
 
-- [Compiler Integration](01-compiler-integration.md) - Toolchain details
+- [Compiler Integration](01-compiler-integration.md) - Toolchain concepts
 - [Testing and Debugging](../01-programming-model/03-testing-and-debugging.md) - Test integration
-- [Program Structure](../01-programming-model/01-program-structure.md) - Source organization
-- [Proof Generation Pipeline](../../07-runtime-system/03-prover-runtime/01-proof-generation-pipeline.md) - Proving integration
+- [Program Structure](../01-programming-model/01-program-structure.md) - Project organization
+
