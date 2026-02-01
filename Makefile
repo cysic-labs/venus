@@ -10,7 +10,7 @@
 #   make clean      # Clean all build artifacts
 
 # Paths
-CARGO_ZISK := cargo run --release --bin cargo-zisk --
+CARGO_ZISK := cargo run --release --features gpu --bin cargo-zisk --
 WITNESS_LIB := ./target/release/libzisk_witness.so
 PROVING_KEY := ./provingKey
 GUEST_DIR := ./guest/zisk-eth-client/bin/client/rsp
@@ -20,12 +20,13 @@ INPUT := $(GUEST_DIR)/inputs/20852412_38_3_rsp.bin
 # Proving key download URL (fill in your URL here)
 PROVING_KEY_URL := <YOUR_PROVING_KEY_URL_HERE>
 
-.PHONY: all setup build install-toolchain download-key build-guest rom-setup run clean help
+.PHONY: all setup build install-toolchain download-key build-guest rom-setup compile-key run clean help
 
 all: setup
+	@$(MAKE) run
 
 # Full setup: build everything needed for proving
-setup: build install-toolchain check-key build-guest rom-setup
+setup: build install-toolchain check-key build-guest rom-setup compile-key
 	@echo ""
 	@echo "Setup complete! You can now run: make run"
 
@@ -61,7 +62,13 @@ build-guest: install-toolchain
 # Step 5: ROM setup for the compiled ELF
 rom-setup: build-guest check-key
 	@echo "==> Running ROM setup..."
-	$(CARGO_ZISK) rom-setup -e $(ELF) -k $(PROVING_KEY)
+	$(CARGO_ZISK) rom-setup -e $(ELF) -k $(PROVING_KEY) -z $(CURDIR)
+
+# Step 6: Compile proving key (check-setup)
+compile-key: rom-setup
+	@echo "==> Compiling proving key (check-setup)..."
+	cargo run --bin proofman-cli check-setup --proving-key $(PROVING_KEY)
+	cargo run --bin proofman-cli check-setup --proving-key $(PROVING_KEY) -a
 
 # Run the smoke test
 run: check-key
@@ -91,6 +98,7 @@ help:
 	@echo "  install-toolchain - Install the ZisK RISC-V toolchain"
 	@echo "  build-guest     - Build the guest ETH client"
 	@echo "  rom-setup       - Run ROM setup for the guest ELF"
+	@echo "  compile-key     - Compile proving key (check-setup)"
 	@echo "  run             - Run the smoke test (prove)"
 	@echo "  clean           - Clean build artifacts"
 	@echo ""
