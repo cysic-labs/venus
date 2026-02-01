@@ -1,5 +1,6 @@
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock, Mutex};
+use std::mem::ManuallyDrop;
+use std::sync::{Arc, Mutex, RwLock};
 use std::path::PathBuf;
 
 use fields::PrimeField64;
@@ -18,7 +19,9 @@ pub struct WitnessManager<F: PrimeField64> {
     sctx: Arc<SetupCtx<F>>,
     public_inputs_path: RwLock<Option<PathBuf>>,
     init: AtomicBool,
-    library: Mutex<Option<Library>>,
+    // Keep the dynamically-loaded witness library alive for the process lifetime.
+    // Dropping it can trigger dlclose() and crash in some OMP runtimes.
+    library: Mutex<Option<ManuallyDrop<Library>>>,
     execution_done: AtomicBool,
 }
 
@@ -47,7 +50,7 @@ impl<F: PrimeField64> WitnessManager<F> {
 
     pub fn set_init_witness(&self, init: bool, library: Library) {
         self.init.store(init, Ordering::SeqCst);
-        self.library.lock().unwrap().replace(library);
+        self.library.lock().unwrap().replace(ManuallyDrop::new(library));
     }
 
     pub fn is_init_witness(&self) -> bool {
