@@ -1,0 +1,66 @@
+[package]
+name = "zec-zeth"
+description = ""
+version = "0.4.0"
+edition = "2021"
+
+[workspace.package]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[dependencies]
+bincode = "1.3.3"
+
+# TODO: Optimizie with c-kzg = { version = "=2.1.5" }
+blst = { version = "=0.3.15" }
+revm = { version = "31.0.2", default-features = false, features = [
+    "std",
+    # "c-kzg",
+    "blst",
+    "portable",
+    "bn",
+] }
+
+# Enable this for deterministic Hashmap sort
+# alloy-primitives = { version = "1.4.1", default-features = false, features = ["std", "map", "map-fxhash"] }
+
+zeth-core = { git = "https://github.com/boundless-xyz/zeth.git", rev = "e8460d3e516fa01e45f00366b233d7d8e5cb8e67" }
+zeth-chainspec = { git = "https://github.com/boundless-xyz/zeth.git", rev = "e8460d3e516fa01e45f00366b233d7d8e5cb8e67" }
+# zeth-core = { path = "../../../../zeth/crates/core" }
+# zeth-chainspec = { path = "../../../../zeth/crates/chainspec" }
+
+ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.15.0" }
+# Local development
+# ziskos = { path = "../../../../../zisk/ziskos/entrypoint" }
+
+
+[patch.crates-io]
+# # Enable this for deterministic Hashmap sort
+# alloy-evm ={ path = "../../../../alloy-evm/crates/evm" }
+# alloy-primitives = { path = "../../../../core/crates/primitives" }
+
+ruint = { git = "https://github.com/0xPolygonHermez/zisk-patch-ruint.git", tag = "patch-1.17.0-zisk-0.15.0" }
+sha2 = { git = "https://github.com/0xPolygonHermez/zisk-patch-hashes.git", tag = "patch-sha2-0.10.9-zisk-0.15.0" }
+tiny-keccak ={ git = "https://github.com/0xPolygonHermez/zisk-patch-tiny-keccak.git", tag = "patch-2.0.2-zisk-0.15.0" }
+k256 = { git = "https://github.com/0xPolygonHermez/zisk-patch-elliptic-curves.git", tag = "patch-k256-0.13.4-zisk-0.15.0" }
+substrate-bn = { git = "https://github.com/0xPolygonHermez/zisk-patch-bn.git", tag = "patch-0.6.0-zisk-0.15.0" }
+# c-kzg = { git = "https://github.com/0xPolygonHermez/zisk-patch-c-kzg.git", tag = "TODO" }
+blst = { git = "https://github.com/0xPolygonHermez/zisk-patch-blst.git", tag = "patch-0.3.15-zisk-0.15.0" }
+aurora-engine-modexp = { git = "https://github.com/0xPolygonHermez/zisk-patch-modexp.git", tag = "patch-1.2.0-zisk-0.15.0" }
+# Local development
+# ruint = { path = "../../../../zisk-patch-ruint" }
+# sha2 = { path = "../../../../zisk-patch-sha2/sha2" }
+# tiny-keccak = { path = "../../../../zisk-patch-tiny-keccak" }
+# k256 = { path = "../../../../zisk-patch-k256/k256" }
+# substrate-bn = { path = "../../../../zisk-patch-bn" }
+# # c-kzg = { path = "../../../../zisk-patch-c-kzg" }
+# blst = { path = "../../../../zisk-patch-blst/bindings/rust" }
+# aurora-engine-modexp = { path = "../../../../zisk-patch-modexp/engine-modexp" }
+
+# [patch."https://github.com/paradigmxyz/reth.git"]
+# # Enable this for deterministic Hashmap sort
+# reth-trie-common = { path = "../../../../reth/crates/trie/common" }

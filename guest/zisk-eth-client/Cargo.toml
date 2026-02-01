@@ -1,0 +1,36 @@
+[workspace]
+members = ["bin/input-gen", "crates/input"]
+exclude = []
+resolver = "2"
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+
+[workspace.dependencies]
+alloy = { version = "1.1.0", features = ["full"] }
+alloy-consensus = { version = "1.1.0", default-features = false }
+alloy-json-rpc = { version = "1.1.0", default-features = false }
+alloy-provider = { version = "1.1.0", default-features = false, features = [
+    "reqwest",
+    "reqwest-rustls-tls",
+] }
+alloy-rpc-client = { version = "1.1.0", default-features = false }
+alloy-transport = { version = "1.1.0", default-features = false }
+anyhow = "1.0"
+async-trait = "0.1"
+bincode = "1.3.3"
+clap = { version = "4.5.7", features = ["derive", "env"] }
+dotenv = "0.15.0"
+eyre = "0.6.12"
+k256 = "0.13"
+rayon = "1.11.0"
+serde = "1.0"
+serde_with = "3.14"
+serde_json = "1.0"
+tokio = { version = "1.21", default-features = false, features = [
+    "rt",
+    "rt-multi-thread",
+] }
+url = "2.3"
+

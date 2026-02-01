@@ -1,3 +1,0 @@
-[submodule "guest/zisk-eth-client"]
-	path = guest/zisk-eth-client
-	url = git@github.com:0xPolygonHermez/zisk-eth-client.git

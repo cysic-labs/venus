@@ -1,0 +1,7 @@
+[target.riscv64ima-zisk-zkvm-elf]
+linker = "rust-lld"
+
+[env]
+CC_riscv64ima_zisk_zkvm_elf = "riscv64-unknown-elf-gcc"
+AR_riscv64ima_zisk_zkvm_elf = "riscv64-unknown-elf-ar"
+CFLAGS_riscv64ima_zisk_zkvm_elf = "-march=rv64ima -mabi=lp64 -ffreestanding"
