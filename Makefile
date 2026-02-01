@@ -77,8 +77,8 @@ rom-setup: build-guest check-key
 # Step 6: Compile proving key (check-setup)
 compile-key: rom-setup
 	@echo "==> Compiling proving key (check-setup)..."
-	cargo run --bin proofman-cli check-setup --proving-key $(PROVING_KEY)
-	cargo run --bin proofman-cli check-setup --proving-key $(PROVING_KEY) -a
+	cargo run --bin proofman-cli --features gpu check-setup --proving-key $(PROVING_KEY)
+	cargo run --bin proofman-cli --features gpu check-setup --proving-key $(PROVING_KEY) -a
 
 # Step 7: Prove the block
 prove: check-key

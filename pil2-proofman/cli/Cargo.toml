@@ -41,6 +41,7 @@ mpi = { version = "0.8.0" }
 [features]
 default = []
 disable_distributed = ["proofman-common/disable_distributed"]
+gpu = ["proofman-common/gpu", "proofman/gpu"]
 dev = []
 
 [lints.rust]
