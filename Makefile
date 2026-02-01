@@ -9,6 +9,10 @@
 #   make prove      # Prove the sample block
 #   make verify     # Verify the generated proof
 #   make clean      # Clean all build artifacts
+#
+# Full smoke pipeline:
+#   module load intel/compiler && module load cuda && module load openmpi && \
+#   make clean && rm -rf ~/.zisk && make all
 
 # Paths
 CARGO_ZISK := cargo run --release --features gpu --bin cargo-zisk --
@@ -29,6 +33,7 @@ PROVING_KEY_URL := <YOUR_PROVING_KEY_URL_HERE>
 
 all: setup
 	@$(MAKE) prove
+	@$(MAKE) verify
 
 # Full setup: build everything needed for proving
 setup: build install-toolchain check-key build-guest rom-setup compile-key
@@ -127,3 +132,7 @@ help:
 	@echo "     curl -L -o ./pk.tgz $(PROVING_KEY_URL) && tar -xzf ./pk.tgz"
 	@echo "  2. Run: make setup"
 	@echo "  3. Run: make prove"
+	@echo ""
+	@echo "Full smoke pipeline:"
+	@echo "  module load intel/compiler && module load cuda && module load openmpi && \\"
+	@echo "  make clean && rm -rf ~/.zisk && make all"
