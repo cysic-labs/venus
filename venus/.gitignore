@@ -1,0 +1,20 @@
+# Vitis HLS build artifacts
+_x_*/
+*.exe
+*.o
+*.d
+*.log
+*.jou
+*.aps
+
+# Compiled test binaries
+test/tb_gl64
+test/tb_ntt
+test/tb_poseidon2
+
+# Vitis/Vivado project files
+*.xo
+*.xclbin
+*.ltx
+*.wdb
+*.wcfg
