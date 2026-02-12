@@ -36,7 +36,7 @@ XO_DIR     := $(BUILD_DIR)/xo
 XCLBIN_DIR := $(BUILD_DIR)
 
 # HLS components (in dependency order)
-COMPONENTS := goldilocks ntt poseidon2 merkle expressions fri transcript
+COMPONENTS := goldilocks ntt poseidon2 merkle expressions fri transcript proof
 
 # ---- Link configuration ----
 
@@ -54,11 +54,11 @@ LINK_CFG   := link_config_$(TARGET).ini
 
 csim:
 	@echo "=== Venus: C-Simulation (all components) ==="
-	$(MAKE) -C $(HLS_DIR) csim
+	$(MAKE) -C $(HLS_DIR) PART="$(PART)" csim
 
 # Per-component csim
 $(addprefix csim-,$(COMPONENTS)):
-	$(MAKE) -C $(HLS_DIR) $@
+	$(MAKE) -C $(HLS_DIR) PART="$(PART)" $@
 
 # ==================================================================
 #  HLS Synthesis (generates RTL for target device)
@@ -66,11 +66,11 @@ $(addprefix csim-,$(COMPONENTS)):
 
 synth:
 	@echo "=== Venus: HLS Synthesis for $(TARGET) ($(PART)) ==="
-	$(MAKE) -C $(HLS_DIR) csynth
+	$(MAKE) -C $(HLS_DIR) PART="$(PART)" csynth
 
 # Per-component synth
 $(addprefix synth-,$(COMPONENTS)):
-	$(MAKE) -C $(HLS_DIR) $(subst synth-,csynth-,$@)
+	$(MAKE) -C $(HLS_DIR) PART="$(PART)" $(subst synth-,csynth-,$@)
 
 # ==================================================================
 #  Co-Simulation (RTL vs C model verification)
@@ -78,7 +78,7 @@ $(addprefix synth-,$(COMPONENTS)):
 
 cosim:
 	@echo "=== Venus: Co-Simulation (all components) ==="
-	$(MAKE) -C $(HLS_DIR) cosim
+	$(MAKE) -C $(HLS_DIR) PART="$(PART)" cosim
 
 # ==================================================================
 #  Package (generate XO files for Vitis linking)
@@ -86,7 +86,7 @@ cosim:
 
 package:
 	@echo "=== Venus: Package XO files ==="
-	$(MAKE) -C $(HLS_DIR) package
+	$(MAKE) -C $(HLS_DIR) PART="$(PART)" package
 
 # ==================================================================
 #  Full Build (link XO kernels into xclbin)
@@ -110,10 +110,18 @@ build: package
 		echo "See venus/docs/ for examples."; \
 		exit 1; \
 	fi
+	@XO_FILES="$$(find $(HLS_DIR) -type f -name '*.xo' | tr '\n' ' ')"; \
+	if [ -z "$$XO_FILES" ]; then \
+		echo ""; \
+		echo "ERROR: No packaged XO files were found under $(HLS_DIR)."; \
+		echo "Run 'make package TARGET=$(TARGET)' and inspect component packaging logs."; \
+		echo ""; \
+		exit 1; \
+	fi; \
 	$(VPP) -l --platform $(PART) --config $(LINK_CFG) \
 		--clock.defaultFreqHz $(shell echo $$(($(CLOCK_MHZ) * 1000000))) \
 		-o $(XCLBIN_DIR)/venus_$(TARGET).xclbin \
-		$(wildcard $(HLS_DIR)/*/test/_x_*/$(TARGET)/*.xo)
+		$$XO_FILES
 
 # ==================================================================
 #  Clean
@@ -121,7 +129,7 @@ build: package
 
 clean:
 	@echo "=== Venus: Cleaning all build artifacts ==="
-	$(MAKE) -C $(HLS_DIR) clean
+	$(MAKE) -C $(HLS_DIR) PART="$(PART)" clean
 	rm -rf _build
 
 # ==================================================================

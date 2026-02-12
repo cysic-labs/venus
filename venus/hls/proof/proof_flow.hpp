@@ -57,11 +57,11 @@ static void proof_fri_fold(
     ap_uint<64> ch_raw[3];
     tr_get_field(tr, ch_raw);
 
-    gl64_3_t challenge(
+    gl64_3_t challenge{
         gl64_t(ch_raw[0]),
         gl64_t(ch_raw[1]),
         gl64_t(ch_raw[2])
-    );
+    };
 
     // Export challenge if requested
     if (challenge_out) {

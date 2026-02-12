@@ -12,7 +12,8 @@
 VPP       ?= v++
 VITIS_RUN ?= vitis-run
 
-CFG       := hls_config.cfg
+CFG_BASE  := hls_config.cfg
+CFG       := _hls_config.cfg
 WORK_DIR  := _x_expressions
 HDR_DIR   := ..
 
@@ -27,6 +28,10 @@ TB_SRC    := tb_expressions.cpp
 
 .PHONY: csim csynth cosim package clean
 
+$(CFG): $(CFG_BASE)
+	@sed 's/^part=.*/part=$(PART)/' $(CFG_BASE) > $(CFG)
+
+
 # C-Simulation: validate functional correctness
 csim: $(SRCS) $(TB_SRC) $(CFG)
 	@echo "=== Running C-Simulation via vitis-run ==="
@@ -35,7 +40,7 @@ csim: $(SRCS) $(TB_SRC) $(CFG)
 # C-Synthesis: generate RTL and resource/timing reports
 csynth: $(SRCS) $(CFG)
 	@echo "=== Running C-Synthesis via v++ ==="
-	$(VPP) -c -m hls --config $(CFG) --work_dir $(WORK_DIR)
+	$(VPP) --compile --mode hls --config $(CFG) --work_dir $(WORK_DIR)
 
 # Co-Simulation: verify RTL matches C model
 cosim: $(SRCS) $(TB_SRC) $(CFG)
@@ -48,4 +53,4 @@ package: csynth
 	$(VITIS_RUN) --mode hls --package --config $(CFG) --work_dir $(WORK_DIR)
 
 clean:
-	rm -rf $(WORK_DIR) *.log *.jou
+	rm -rf $(WORK_DIR) *.log *.jou $(CFG)

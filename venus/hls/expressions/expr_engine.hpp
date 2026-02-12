@@ -62,6 +62,111 @@
 //   - Temporaries: stored in local BRAM arrays
 //   - Constants: loaded from numbers[], challenges[], etc.
 
+// NOTE:
+// Keep operand loaders as standalone helpers instead of lambdas.
+// Vitis HLS 2025.2 can crash in object decomposition on this kernel
+// when complex capturing lambdas are inlined inside expr_eval_single.
+static inline gl64_t expr_load_dim1(
+    unsigned int type,
+    unsigned int idx,
+    unsigned int off,
+    unsigned int row,
+    unsigned int domainSize,
+    const ap_uint<64>* trace,
+    unsigned int nTraceCols,
+    const ap_uint<64>* constPols,
+    unsigned int nConstCols,
+    const gl64_t numbers[EXPR_MAX_NUMBERS],
+    const gl64_t challenges[EXPR_MAX_CHALLENGES],
+    const gl64_t evals[EXPR_MAX_EVALS],
+    const gl64_t publicInputs[EXPR_MAX_PUBLICS],
+    const gl64_t airValues[EXPR_MAX_AIR_VALUES],
+    const int openingStrides[EXPR_MAX_OPENINGS],
+    unsigned int bufferCommitSize,
+    const gl64_t tmp1[EXPR_MAX_TEMP1]
+) {
+    #pragma HLS INLINE
+    if (type == bufferCommitSize) {
+        // tmp1 buffer
+        return tmp1[idx];
+    } else if (type >= bufferCommitSize + 2) {
+        // Constants: direct index access
+        unsigned int const_type = type - (bufferCommitSize + 2);
+        switch (const_type) {
+            case 0: return publicInputs[idx];
+            case 1: return numbers[idx];
+            case 2: return airValues[idx];
+            // proofValues, airgroupValues, challenges, evals
+            case 5: return challenges[idx];
+            case 6: return evals[idx];
+            default: return gl64_t::zero();
+        }
+    } else if (type == 0) {
+        // Constant polynomials
+        int stride = (off < EXPR_MAX_OPENINGS) ? openingStrides[off] : 0;
+        unsigned int r = (row + stride + domainSize) % domainSize;
+        gl64_t val;
+        val.val = constPols[(ap_uint<64>)r * nConstCols + idx];
+        return val;
+    } else {
+        // Trace polynomial (simplified: type 1 = trace)
+        int stride = (off < EXPR_MAX_OPENINGS) ? openingStrides[off] : 0;
+        unsigned int r = (row + stride + domainSize) % domainSize;
+        gl64_t val;
+        val.val = trace[(ap_uint<64>)r * nTraceCols + idx];
+        return val;
+    }
+}
+
+static inline gl64_3_t expr_load_dim3(
+    unsigned int type,
+    unsigned int idx,
+    unsigned int off,
+    unsigned int row,
+    unsigned int domainSize,
+    const ap_uint<64>* trace,
+    unsigned int nTraceCols,
+    const gl64_t challenges[EXPR_MAX_CHALLENGES],
+    const gl64_t evals[EXPR_MAX_EVALS],
+    const int openingStrides[EXPR_MAX_OPENINGS],
+    unsigned int bufferCommitSize,
+    const gl64_3_t tmp3[EXPR_MAX_TEMP3]
+) {
+    #pragma HLS INLINE
+    if (type == bufferCommitSize + 1) {
+        // tmp3 buffer
+        return tmp3[idx];
+    } else if (type >= bufferCommitSize + 2) {
+        // Constants (dim3 = 3 consecutive elements)
+        unsigned int const_type = type - (bufferCommitSize + 2);
+        gl64_3_t val;
+        switch (const_type) {
+            case 5: // challenges
+                val.v[0] = challenges[idx];
+                val.v[1] = challenges[idx + 1];
+                val.v[2] = challenges[idx + 2];
+                return val;
+            case 6: // evals
+                val.v[0] = evals[idx];
+                val.v[1] = evals[idx + 1];
+                val.v[2] = evals[idx + 2];
+                return val;
+            default:
+                return gl64_3_t::zero();
+        }
+    } else {
+        // Trace polynomial (dim3 = 3 consecutive columns)
+        int stride = (off < EXPR_MAX_OPENINGS) ? openingStrides[off] : 0;
+        unsigned int r = (row + stride + domainSize) % domainSize;
+        gl64_3_t val;
+        ap_uint<64> base = (ap_uint<64>)r * nTraceCols + idx;
+        val.v[0].val = trace[base];
+        val.v[1].val = trace[base + 1];
+        val.v[2].val = trace[base + 2];
+        return val;
+    }
+}
+
 template<int MAX_N_OPS>
 static void expr_eval_single(
     // Bytecode
@@ -122,90 +227,23 @@ static void expr_eval_single(
         unsigned int idx_b     = (unsigned int)args[i_args + 6];
         unsigned int off_b     = (unsigned int)args[i_args + 7];
 
-        // ---- Load operand A (dim1) ----
-        auto load_dim1 = [&](unsigned int type, unsigned int idx,
-                             unsigned int off) -> gl64_t {
-            #pragma HLS INLINE
-            if (type == bufferCommitSize) {
-                // tmp1 buffer
-                return tmp1[idx];
-            } else if (type >= bufferCommitSize + 2) {
-                // Constants: direct index access
-                unsigned int const_type = type - (bufferCommitSize + 2);
-                switch (const_type) {
-                    case 0: return publicInputs[idx];
-                    case 1: return numbers[idx];
-                    case 2: return airValues[idx];
-                    // proofValues, airgroupValues, challenges, evals
-                    case 5: return challenges[idx];
-                    case 6: return evals[idx];
-                    default: return gl64_t::zero();
-                }
-            } else if (type == 0) {
-                // Constant polynomials
-                int stride = (off < EXPR_MAX_OPENINGS) ?
-                             openingStrides[off] : 0;
-                unsigned int r = (row + stride + domainSize) % domainSize;
-                gl64_t val;
-                val.val = constPols[(ap_uint<64>)r * nConstCols + idx];
-                return val;
-            } else {
-                // Trace polynomial (simplified: type 1 = trace)
-                int stride = (off < EXPR_MAX_OPENINGS) ?
-                             openingStrides[off] : 0;
-                unsigned int r = (row + stride + domainSize) % domainSize;
-                gl64_t val;
-                val.val = trace[(ap_uint<64>)r * nTraceCols + idx];
-                return val;
-            }
-        };
-
-        // ---- Load operand A (dim3) ----
-        auto load_dim3 = [&](unsigned int type, unsigned int idx,
-                             unsigned int off) -> gl64_3_t {
-            #pragma HLS INLINE
-            if (type == bufferCommitSize + 1) {
-                // tmp3 buffer
-                return tmp3[idx];
-            } else if (type >= bufferCommitSize + 2) {
-                // Constants (dim3 = 3 consecutive elements)
-                unsigned int const_type = type - (bufferCommitSize + 2);
-                gl64_3_t val;
-                switch (const_type) {
-                    case 5: // challenges
-                        val.v[0] = challenges[idx];
-                        val.v[1] = challenges[idx + 1];
-                        val.v[2] = challenges[idx + 2];
-                        return val;
-                    case 6: // evals
-                        val.v[0] = evals[idx];
-                        val.v[1] = evals[idx + 1];
-                        val.v[2] = evals[idx + 2];
-                        return val;
-                    default:
-                        return gl64_3_t::zero();
-                }
-            } else {
-                // Trace polynomial (dim3 = 3 consecutive columns)
-                int stride = (off < EXPR_MAX_OPENINGS) ?
-                             openingStrides[off] : 0;
-                unsigned int r = (row + stride + domainSize) % domainSize;
-                gl64_3_t val;
-                ap_uint<64> base = (ap_uint<64>)r * nTraceCols + idx;
-                val.v[0].val = trace[base];
-                val.v[1].val = trace[base + 1];
-                val.v[2].val = trace[base + 2];
-                return val;
-            }
-        };
-
         // ---- Execute instruction ----
         bool isLastOp = (kk == nOps - 1);
 
         switch ((unsigned int)opcode) {
         case EXPR_OPCODE_DIM1: {
-            gl64_t a = load_dim1(type_a, idx_a, off_a);
-            gl64_t b = load_dim1(type_b, idx_b, off_b);
+            gl64_t a = expr_load_dim1(
+                type_a, idx_a, off_a, row, domainSize,
+                trace, nTraceCols, constPols, nConstCols,
+                numbers, challenges, evals, publicInputs, airValues, openingStrides,
+                bufferCommitSize, tmp1
+            );
+            gl64_t b = expr_load_dim1(
+                type_b, idx_b, off_b, row, domainSize,
+                trace, nTraceCols, constPols, nConstCols,
+                numbers, challenges, evals, publicInputs, airValues, openingStrides,
+                bufferCommitSize, tmp1
+            );
             gl64_t res = expr_op_dim1(arith_op, a, b);
             if (isLastOp) {
                 result1 = res;
@@ -215,8 +253,18 @@ static void expr_eval_single(
             break;
         }
         case EXPR_OPCODE_DIM31: {
-            gl64_3_t a = load_dim3(type_a, idx_a, off_a);
-            gl64_t   b = load_dim1(type_b, idx_b, off_b);
+            gl64_3_t a = expr_load_dim3(
+                type_a, idx_a, off_a, row, domainSize,
+                trace, nTraceCols,
+                challenges, evals, openingStrides,
+                bufferCommitSize, tmp3
+            );
+            gl64_t b = expr_load_dim1(
+                type_b, idx_b, off_b, row, domainSize,
+                trace, nTraceCols, constPols, nConstCols,
+                numbers, challenges, evals, publicInputs, airValues, openingStrides,
+                bufferCommitSize, tmp1
+            );
             gl64_3_t res = expr_op_dim31(arith_op, a, b);
             if (isLastOp) {
                 result3 = res;
@@ -226,8 +274,18 @@ static void expr_eval_single(
             break;
         }
         case EXPR_OPCODE_DIM33: {
-            gl64_3_t a = load_dim3(type_a, idx_a, off_a);
-            gl64_3_t b = load_dim3(type_b, idx_b, off_b);
+            gl64_3_t a = expr_load_dim3(
+                type_a, idx_a, off_a, row, domainSize,
+                trace, nTraceCols,
+                challenges, evals, openingStrides,
+                bufferCommitSize, tmp3
+            );
+            gl64_3_t b = expr_load_dim3(
+                type_b, idx_b, off_b, row, domainSize,
+                trace, nTraceCols,
+                challenges, evals, openingStrides,
+                bufferCommitSize, tmp3
+            );
             gl64_3_t res = expr_op_dim33(arith_op, a, b);
             if (isLastOp) {
                 result3 = res;

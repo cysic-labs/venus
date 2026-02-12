@@ -30,21 +30,27 @@ static uint64_t ref_sub(uint64_t a, uint64_t b) {
 
 static uint64_t ref_mul(uint64_t a, uint64_t b) {
     __uint128_t prod = (__uint128_t)a * b;
-    uint64_t lo = (uint64_t)prod;
-    uint64_t hi = (uint64_t)(prod >> 64);
-    // Goldilocks reduction: p = 2^64 - 2^32 + 1
-    uint64_t rhh = hi >> 32;
-    uint64_t rhl = (hi << 32) - hi;
-    __uint128_t r = (__uint128_t)lo + rhl;
-    uint64_t carry = (uint64_t)(r >> 64);
-    uint64_t rl = (uint64_t)r;
-    // Subtract rhh
-    uint64_t res = ref_sub(rl, rhh);
-    // Add carry
-    if (carry) res = ref_add(res, 1);
-    // Final reduction
-    if (res >= GL_P) res -= GL_P;
-    return res;
+    uint64_t rl = (uint64_t)prod;
+    uint64_t rh = (uint64_t)(prod >> 64);
+    uint32_t rhh = (uint32_t)(rh >> 32);
+    uint32_t rhl = (uint32_t)rh;
+
+    // aux1 = rl - rhh (mod p)
+    uint64_t aux1;
+    if (rl >= rhh) {
+        aux1 = rl - rhh;
+    } else {
+        aux1 = (uint64_t)((__uint128_t)rl + GL_P - rhh);
+    }
+
+    // aux = 0xFFFFFFFF * rhl = (rhl << 32) - rhl
+    uint64_t rhl64 = (uint64_t)rhl;
+    uint64_t aux = (rhl64 << 32) - rhl64;
+
+    // result = (aux1 + aux) mod p
+    __uint128_t sum = (__uint128_t)aux1 + aux;
+    if (sum >= GL_P) sum -= GL_P;
+    return (uint64_t)sum;
 }
 
 static uint64_t ref_neg(uint64_t a) {

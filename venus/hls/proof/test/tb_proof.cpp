@@ -168,11 +168,11 @@ static void test_fri_step_integration() {
     tr_get_field(ref_tr, challenge_ref);
 
     // Step 3: Fold
-    gl64_3_t challenge(
+    gl64_3_t challenge{
         gl64_t(challenge_ref[0]),
         gl64_t(challenge_ref[1]),
         gl64_t(challenge_ref[2])
-    );
+    };
 
     ap_uint<64> output_ref[12];
     memset(output_ref, 0, sizeof(output_ref));

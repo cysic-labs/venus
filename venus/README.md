@@ -56,6 +56,21 @@ make synth TARGET=vh1782
 make build TARGET=vu47p
 ```
 
+## Runtime Integration
+
+`venus` is integrated as an opt-in proving backend and does not change the
+default GPU flow.
+
+```bash
+module load intel/compiler cuda openmpi
+make prove-venus
+make verify
+```
+
+`make prove-venus` sets `ZISK_PROVER_BACKEND=venus` and routes proving through
+the venus-compatible backend path while keeping cryptographic behavior equivalent
+to the reference prover.
+
 ## Cryptographic Equivalence
 
 The FPGA implementation produces proofs that pass the existing ZisK verifier.

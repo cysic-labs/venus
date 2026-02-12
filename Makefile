@@ -26,8 +26,11 @@ PROOF_DIR := ./tmp
 PROOF_TMP := $(PROOF_DIR)/vadcop_final_proof.bin
 PROOF_FILE := $(PROOF_DIR)/$(notdir $(basename $(INPUT))).proof
 VERKEY := $(PROVING_KEY)/zisk/vadcop_final/vadcop_final.verkey.bin
+VENUS_DIR := ./venus
 
-.PHONY: all setup build install-toolchain download-key build-guest rom-setup compile-key prove verify clean purge generate-key help
+.PHONY: all setup build install-toolchain download-key build-guest rom-setup compile-key prove prove-venus verify \
+        venus-csim venus-synth venus-cosim venus-package venus-build \
+        clean purge generate-key help
 
 all: setup
 	@$(MAKE) prove
@@ -113,6 +116,17 @@ prove: check-key
 		-a -y -r
 	@cp -f $(PROOF_TMP) $(PROOF_FILE)
 
+prove-venus: check-key
+	@echo "==> Running prove with Venus backend..."
+	ZISK_PROVER_BACKEND=venus $(CARGO_ZISK) prove \
+		-w $(WITNESS_LIB) \
+		-k $(PROVING_KEY) \
+		-e $(ELF) \
+		-i $(INPUT) \
+		-o $(PROOF_DIR) \
+		-a -y -r
+	@cp -f $(PROOF_TMP) $(PROOF_FILE)
+
 # Step 8: Verify the generated proof
 verify: check-key
 	@if [ ! -f "$(PROOF_FILE)" ]; then \
@@ -124,6 +138,22 @@ verify: check-key
 	fi
 	@echo "==> Verifying proof..."
 	$(CARGO_ZISK) verify -p $(PROOF_FILE) -k $(VERKEY)
+
+# Venus FPGA backend targets (non-invasive: does not change default GPU flow)
+venus-csim:
+	@$(MAKE) -C $(VENUS_DIR) csim
+
+venus-synth:
+	@$(MAKE) -C $(VENUS_DIR) synth $(if $(TARGET),TARGET=$(TARGET),)
+
+venus-cosim:
+	@$(MAKE) -C $(VENUS_DIR) cosim $(if $(TARGET),TARGET=$(TARGET),)
+
+venus-package:
+	@$(MAKE) -C $(VENUS_DIR) package $(if $(TARGET),TARGET=$(TARGET),)
+
+venus-build:
+	@$(MAKE) -C $(VENUS_DIR) build $(if $(TARGET),TARGET=$(TARGET),)
 
 # Clean all build artifacts (preserves proving key)
 clean:
@@ -157,7 +187,13 @@ help:
 	@echo "  rom-setup       - Run ROM setup for the guest ELF"
 	@echo "  compile-key     - Compile proving key (check-setup)"
 	@echo "  prove           - Prove the sample block"
+	@echo "  prove-venus     - Prove with Venus runtime backend (ZISK_PROVER_BACKEND=venus)"
 	@echo "  verify          - Verify the generated proof"
+	@echo "  venus-csim      - Run Venus FPGA HLS C-simulation"
+	@echo "  venus-synth     - Run Venus FPGA HLS synthesis (TARGET=vu47p|vh1782)"
+	@echo "  venus-cosim     - Run Venus FPGA HLS co-simulation"
+	@echo "  venus-package   - Package Venus kernels as XO files"
+	@echo "  venus-build     - Link Venus XOs into xclbin (TARGET=vu47p|vh1782)"
 	@echo "  clean           - Clean build artifacts (preserves proving key)"
 	@echo "  purge           - Clean everything including proving key"
 	@echo "  generate-key    - Generate proving key from source (~30 min)"

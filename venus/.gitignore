@@ -16,6 +16,7 @@ _x_*/
 **/tb_fri
 **/tb_transcript
 **/tb_proof
+**/_hls_config.cfg
 
 # Vitis/Vivado project files
 *.xo

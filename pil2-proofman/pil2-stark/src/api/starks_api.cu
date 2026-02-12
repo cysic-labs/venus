@@ -4,10 +4,13 @@
 #include "omp.h"
 #include "starks_api.hpp"
 #include "starks_api_internal.hpp"
+#include "const_pols.hpp"
 #include <cstring>
 #include <cstdlib>
 #include <sstream>
 #include <thread>
+#include <vector>
+#include "../../../../venus/host/venus_runtime.hpp"
 
 #ifdef __USE_CUDA__
 #include "gen_recursive_proof.cuh"
@@ -33,6 +36,16 @@ void reserveStream(DeviceCommitBuffers* d_buffers, uint32_t streamId);
 void closeStreamTimer(TimerGPU &timer, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, bool isProve);
 void get_proof(DeviceCommitBuffers *d_buffers, uint64_t streamId);
 void get_commit_root(DeviceCommitBuffers *d_buffers, uint64_t streamId);
+void genProof(
+    SetupCtx &setupCtx,
+    uint64_t airgroupId,
+    uint64_t airId,
+    uint64_t instanceId,
+    StepsParams &params,
+    Goldilocks::Element *globalChallenge,
+    uint64_t *proofBuffer,
+    std::string proofFile,
+    bool recursive = false);
 
 bool parse_env_bool(const char *value) {
     if (value == nullptr || *value == '\0') return false;
@@ -393,6 +406,13 @@ void launch_proof_with_optional_cuda_graph(
 
 
 void get_instances_ready(void *d_buffers_, int64_t* instances_ready) {
+    if (use_venus_backend()) {
+        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
+        for (uint64_t i = 0; i < d_buffers->n_total_streams; i++) {
+            instances_ready[i] = -1;
+        }
+        return;
+    }
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     for (uint32_t i = 0; i < d_buffers->n_total_streams; i++) {
         instances_ready[i] = d_buffers->streamsData[i].instanceId;
@@ -401,6 +421,17 @@ void get_instances_ready(void *d_buffers_, int64_t* instances_ready) {
 
 void *gen_device_buffers(void *maxSizes_, uint32_t node_rank, uint32_t node_size, uint32_t arity)
 {
+    if (use_venus_backend()) {
+        MaxSizes *maxSizes = (MaxSizes *)maxSizes_;
+        VenusDeviceBuffers *venus_buffers = new VenusDeviceBuffers();
+        if (maxSizes != nullptr) {
+            venus_buffers->n_streams = std::max<uint64_t>(1, maxSizes->nStreams);
+            venus_buffers->n_recursive_streams = maxSizes->nRecursiveStreams;
+            venus_buffers->n_total_streams = venus_buffers->n_streams + venus_buffers->n_recursive_streams;
+        }
+        return (void *)venus_buffers;
+    }
+
     int deviceCount;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
     if (err != cudaSuccess) {
@@ -569,6 +600,16 @@ void *gen_device_buffers(void *maxSizes_, uint32_t node_rank, uint32_t node_size
 }
 
 uint64_t gen_device_streams(void *d_buffers_, uint64_t maxSizeProverBuffer, uint64_t maxSizeProverBufferAggregation, uint64_t maxProofSize, uint64_t max_n_bits_ext, uint64_t merkleTreeArity) {
+    if (use_venus_backend()) {
+        (void)maxSizeProverBuffer;
+        (void)maxSizeProverBufferAggregation;
+        (void)maxProofSize;
+        (void)max_n_bits_ext;
+        (void)merkleTreeArity;
+        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
+        d_buffers->n_total_streams = std::max<uint64_t>(1, d_buffers->n_streams + d_buffers->n_recursive_streams);
+        return 1;
+    }
     
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     d_buffers->max_size_proof = maxProofSize;
@@ -600,6 +641,10 @@ uint64_t gen_device_streams(void *d_buffers_, uint64_t maxSizeProverBuffer, uint
 }
 
 void reset_device_streams(void *d_buffers_) {
+    if (use_venus_backend()) {
+        (void)d_buffers_;
+        return;
+    }
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
    
     for(uint64_t i=0; i< d_buffers->n_total_streams; ++i){
@@ -610,6 +655,12 @@ void reset_device_streams(void *d_buffers_) {
 
 void free_device_buffers(void *d_buffers_)
 {
+    if (use_venus_backend()) {
+        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
+        delete d_buffers;
+        return;
+    }
+
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
 
     for (int i = 0; i < d_buffers->n_gpus; ++i) {
@@ -681,6 +732,18 @@ void free_device_buffers(void *d_buffers_)
 
 
 void load_device_setup(uint64_t airgroupId, uint64_t airId, char *proofType, void *pSetupCtx_, void *d_buffers_, void *verkeyRoot_, void *packed_info) {
+    if (use_venus_backend()) {
+        (void)proofType;
+        (void)verkeyRoot_;
+        SetupCtx *setupCtx = (SetupCtx *)pSetupCtx_;
+        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
+        PackedInfo *packedInfo = (PackedInfo *)packed_info;
+        if (packedInfo != nullptr) {
+            uint64_t nCols = setupCtx->starkInfo.mapSectionsN["cm1"];
+            d_buffers->addPackedInfoCPU(airgroupId, airId, nCols, packedInfo->is_packed, packedInfo->num_packed_words, packedInfo->unpack_info);
+        }
+        return;
+    }
     
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     SetupCtx *setupCtx = (SetupCtx *)pSetupCtx_;
@@ -701,6 +764,19 @@ void load_device_setup(uint64_t airgroupId, uint64_t airId, char *proofType, voi
 }
 
 void load_device_const_pols(uint64_t airgroupId, uint64_t airId, uint64_t initial_offset, void *d_buffers_, char *constFilename, uint64_t constSize, char *constTreeFilename, uint64_t constTreeSize, char *proofType) {
+    if (use_venus_backend()) {
+        (void)airgroupId;
+        (void)airId;
+        (void)initial_offset;
+        (void)d_buffers_;
+        (void)constFilename;
+        (void)constSize;
+        (void)constTreeFilename;
+        (void)constTreeSize;
+        (void)proofType;
+        return;
+    }
+
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     uint64_t sizeConstPols = constSize * sizeof(Goldilocks::Element);
     
@@ -747,6 +823,67 @@ void load_device_const_pols(uint64_t airgroupId, uint64_t airId, uint64_t initia
 }
 
 uint64_t gen_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *params_, void *globalChallenge, uint64_t* proofBuffer, char *proofFile, void *d_buffers_, bool skipRecalculation, uint64_t streamId_, char *constPolsPath,  char *constTreePath) {
+    if (use_venus_backend()) {
+        (void)skipRecalculation;
+        (void)streamId_;
+
+        SetupCtx *setupCtx = (SetupCtx *)pSetupCtx_;
+        StepsParams *params = (StepsParams *)params_;
+        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
+
+        StepsParams local_params = *params;
+
+        uint64_t N = (1ULL << setupCtx->starkInfo.starkStruct.nBits);
+        uint64_t nCols = setupCtx->starkInfo.mapSectionsN["cm1"];
+        uint64_t offsetCm1 = setupCtx->starkInfo.mapOffsets[std::make_pair("cm1", false)];
+
+        std::vector<Goldilocks::Element> aux_trace_owned;
+        if (local_params.aux_trace == nullptr) {
+            aux_trace_owned.resize(setupCtx->starkInfo.mapTotalN);
+            local_params.aux_trace = aux_trace_owned.data();
+        }
+
+        std::vector<Goldilocks::Element> const_pols_owned;
+        if (local_params.pConstPolsAddress == nullptr) {
+            uint64_t const_size = N * setupCtx->starkInfo.nConstants;
+            const_pols_owned.resize(const_size);
+            venus_load_const_pols(d_buffers, const_pols_owned.data(), constPolsPath, N, setupCtx->starkInfo.nConstants);
+            local_params.pConstPolsAddress = const_pols_owned.data();
+        }
+
+        std::vector<Goldilocks::Element> const_tree_owned;
+        if (local_params.pConstPolsExtendedTreeAddress == nullptr) {
+            uint64_t const_tree_size = get_const_tree_size((void *)&setupCtx->starkInfo);
+            const_tree_owned.resize(const_tree_size);
+            loadFileParallel(const_tree_owned.data(), constTreePath, const_tree_size * sizeof(Goldilocks::Element));
+            local_params.pConstPolsExtendedTreeAddress = const_tree_owned.data();
+        }
+
+        PackedInfoCPU *packed_info = d_buffers->getPackedInfo(airgroupId, airId);
+        if (packed_info != nullptr && packed_info->is_packed) {
+            d_buffers->unpack_cpu(
+                (const uint64_t *)local_params.trace,
+                (uint64_t *)&local_params.aux_trace[offsetCm1],
+                N,
+                nCols,
+                packed_info->num_packed_words,
+                packed_info->unpack_info);
+            local_params.trace = &local_params.aux_trace[offsetCm1];
+        }
+
+        genProof(
+            *setupCtx,
+            airgroupId,
+            airId,
+            instanceId,
+            local_params,
+            (Goldilocks::Element *)globalChallenge,
+            proofBuffer,
+            std::string(proofFile));
+
+        venus_notify_proof_done(instanceId, "basic");
+        return 0;
+    }
 
     auto key = std::make_pair(airgroupId, airId);
     std::string proofType = "basic";
@@ -881,6 +1018,10 @@ void get_proof(DeviceCommitBuffers *d_buffers, uint64_t streamId) {
 }
 
 void get_stream_proofs(void *d_buffers_){
+    if (use_venus_backend()) {
+        (void)d_buffers_;
+        return;
+    }
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     for (uint64_t i = 0; i < d_buffers->n_total_streams; i++) {
         d_buffers->streamsData[i].mutex_stream_selection.lock();
@@ -901,6 +1042,10 @@ void get_stream_proofs(void *d_buffers_){
 }
 
 void get_stream_proofs_non_blocking(void *d_buffers_){
+    if (use_venus_backend()) {
+        (void)d_buffers_;
+        return;
+    }
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     for (uint64_t i = 0; i < d_buffers->n_total_streams; i++) {
         if (d_buffers->streamsData[i].mutex_stream_selection.try_lock()) {
@@ -919,6 +1064,11 @@ void get_stream_proofs_non_blocking(void *d_buffers_){
 }
 
 void get_stream_id_proof(void *d_buffers_, uint64_t streamId) {
+    if (use_venus_backend()) {
+        (void)d_buffers_;
+        (void)streamId;
+        return;
+    }
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     cudaSetDevice(d_buffers->streamsData[streamId].gpuId);
     CHECKCUDAERR(cudaStreamSynchronize(d_buffers->streamsData[streamId].stream));
@@ -933,6 +1083,64 @@ void get_stream_id_proof(void *d_buffers_, uint64_t streamId) {
 
 uint64_t gen_recursive_proof(void *pSetupCtx_, char *globalInfoFile, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *trace, void *aux_trace, void *pConstPols, void *pConstTree, void *pPublicInputs, uint64_t* proofBuffer, char *proof_file, bool vadcop, void *d_buffers_, char *constPolsPath, char *constTreePath, char *proofType, bool force_recursive_stream)
 {
+    if (use_venus_backend()) {
+        (void)globalInfoFile;
+        (void)vadcop;
+        (void)force_recursive_stream;
+
+        SetupCtx *setupCtx = (SetupCtx *)pSetupCtx_;
+        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
+        uint64_t N = (1ULL << setupCtx->starkInfo.starkStruct.nBits);
+
+        std::vector<Goldilocks::Element> aux_trace_owned;
+        Goldilocks::Element *aux_trace_ptr = (Goldilocks::Element *)aux_trace;
+        if (aux_trace_ptr == nullptr) {
+            aux_trace_owned.resize(setupCtx->starkInfo.mapTotalN);
+            aux_trace_ptr = aux_trace_owned.data();
+        }
+
+        std::vector<Goldilocks::Element> const_pols_owned;
+        Goldilocks::Element *const_pols_ptr = (Goldilocks::Element *)pConstPols;
+        if (const_pols_ptr == nullptr) {
+            uint64_t const_size = N * setupCtx->starkInfo.nConstants;
+            const_pols_owned.resize(const_size);
+            venus_load_const_pols(d_buffers, const_pols_owned.data(), constPolsPath, N, setupCtx->starkInfo.nConstants);
+            const_pols_ptr = const_pols_owned.data();
+        }
+
+        std::vector<Goldilocks::Element> const_tree_owned;
+        Goldilocks::Element *const_tree_ptr = (Goldilocks::Element *)pConstTree;
+        if (const_tree_ptr == nullptr) {
+            uint64_t const_tree_size = get_const_tree_size((void *)&setupCtx->starkInfo);
+            const_tree_owned.resize(const_tree_size);
+            loadFileParallel(const_tree_owned.data(), constTreePath, const_tree_size * sizeof(Goldilocks::Element));
+            const_tree_ptr = const_tree_owned.data();
+        }
+
+        std::vector<Goldilocks::Element> evals(setupCtx->starkInfo.evMap.size() * FIELD_EXTENSION, Goldilocks::zero());
+        std::vector<Goldilocks::Element> challenges(setupCtx->starkInfo.challengesMap.size() * FIELD_EXTENSION, Goldilocks::zero());
+        Goldilocks::Element airgroupValues[FIELD_EXTENSION] = {Goldilocks::zero(), Goldilocks::zero(), Goldilocks::zero()};
+
+        StepsParams params = {
+            .trace = (Goldilocks::Element *)trace,
+            .aux_trace = aux_trace_ptr,
+            .publicInputs = (Goldilocks::Element *)pPublicInputs,
+            .proofValues = nullptr,
+            .challenges = challenges.data(),
+            .airgroupValues = airgroupValues,
+            .airValues = nullptr,
+            .evals = evals.data(),
+            .xDivXSub = nullptr,
+            .pConstPolsAddress = const_pols_ptr,
+            .pConstPolsExtendedTreeAddress = const_tree_ptr,
+            .pCustomCommitsFixed = nullptr,
+        };
+
+        genProof(*setupCtx, airgroupId, airId, instanceId, params, nullptr, proofBuffer, std::string(proof_file), true);
+        venus_notify_proof_done(instanceId, proofType);
+        return 0;
+    }
+
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     bool aggregation = false;
     if(string(proofType) == "recursive1" || string(proofType) == "recursive2") {
@@ -1012,6 +1220,40 @@ uint64_t gen_recursive_proof(void *pSetupCtx_, char *globalInfoFile, uint64_t ai
 }
 
 uint64_t commit_witness(uint64_t arity, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, void *root, void *trace, void *auxTrace, void *d_buffers_, void *pSetupCtx_) {
+    if (use_venus_backend()) {
+        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
+        Goldilocks::Element *rootGL = (Goldilocks::Element *)root;
+        uint64_t N = 1ULL << nBits;
+        uint64_t NExtended = 1ULL << nBitsExt;
+
+        SetupCtx *setupCtx = (SetupCtx *)pSetupCtx_;
+        MerkleTreeGL mt(arity, setupCtx->starkInfo.starkStruct.lastLevelVerification, true, NExtended, nCols);
+
+        std::vector<Goldilocks::Element> trace_buffer(N * nCols);
+        std::vector<Goldilocks::Element> tree_buffer(NExtended * nCols + mt.numNodes, Goldilocks::zero());
+
+        PackedInfoCPU *packed_info = d_buffers->getPackedInfo(airgroupId, airId);
+        if (packed_info != nullptr && packed_info->is_packed) {
+            d_buffers->unpack_cpu(
+                (const uint64_t *)trace,
+                (uint64_t *)trace_buffer.data(),
+                N,
+                nCols,
+                packed_info->num_packed_words,
+                packed_info->unpack_info);
+        } else {
+            memcpy(trace_buffer.data(), trace, N * nCols * sizeof(Goldilocks::Element));
+        }
+
+        NTT_Goldilocks ntt(N);
+        mt.setSource(tree_buffer.data());
+        mt.setNodes(&tree_buffer[NExtended * nCols]);
+        ntt.extendPol(mt.source, trace_buffer.data(), NExtended, N, nCols);
+        mt.merkelize();
+        mt.getRoot(rootGL);
+        (void)auxTrace;
+        return 0;
+    }
 
     SetupCtx *setupCtx = (SetupCtx *)pSetupCtx_;
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
@@ -1064,6 +1306,10 @@ void get_commit_root(DeviceCommitBuffers *d_buffers, uint64_t streamId) {
 }
 
 void init_gpu_setup(uint64_t maxBitsExt) {
+    if (use_venus_backend()) {
+        (void)maxBitsExt;
+        return;
+    }
     int deviceId;
     CHECKCUDAERR(cudaGetDevice(&deviceId));
     cudaSetDevice(deviceId);
@@ -1075,6 +1321,12 @@ void init_gpu_setup(uint64_t maxBitsExt) {
 }
 
 void prepare_blocks(uint64_t *pol, uint64_t N, uint64_t nCols) {
+    if (use_venus_backend()) {
+        (void)pol;
+        (void)N;
+        (void)nCols;
+        return;
+    }
     gl64_t *d_pol;
     gl64_t *d_aux;
     cudaMalloc(&d_pol, N * nCols * sizeof(gl64_t));
@@ -1099,6 +1351,39 @@ void prepare_blocks(uint64_t *pol, uint64_t N, uint64_t nCols) {
 
 void write_custom_commit(void* root, uint64_t arity, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, void *buffer, char *bufferFile, bool check)
 {   
+    if (use_venus_backend()) {
+        uint64_t N = 1ULL << nBits;
+        uint64_t NExtended = 1ULL << nBitsExt;
+
+        MerkleTreeGL mt(arity, 0, true, NExtended, nCols, true, true);
+        NTT_Goldilocks ntt(N);
+        ntt.extendPol(mt.source, (Goldilocks::Element *)buffer, NExtended, N, nCols);
+        mt.merkelize();
+
+        Goldilocks::Element *rootGL = (Goldilocks::Element *)root;
+        mt.getRoot(&rootGL[0]);
+
+        if (!check) {
+            std::string buffFile = string(bufferFile);
+            ofstream fw(buffFile.c_str(), std::fstream::out | std::fstream::binary);
+            writeFileParallel(buffFile, root, 32, 0);
+            writeFileParallel(buffFile, buffer, N * nCols * sizeof(Goldilocks::Element), 32);
+            writeFileParallel(
+                buffFile,
+                mt.source,
+                NExtended * nCols * sizeof(Goldilocks::Element),
+                32 + N * nCols * sizeof(Goldilocks::Element));
+            writeFileParallel(
+                buffFile,
+                mt.nodes,
+                mt.numNodes * sizeof(Goldilocks::Element),
+                32 + (NExtended + N) * nCols * sizeof(Goldilocks::Element));
+            fw.close();
+        }
+
+        return;
+    }
+
     int deviceId;
     CHECKCUDAERR(cudaGetDevice(&deviceId));
     cudaSetDevice(deviceId);
@@ -1158,6 +1443,12 @@ void write_custom_commit(void* root, uint64_t arity, uint64_t nBits, uint64_t nB
 }
 
 void calculate_const_tree(void *pStarkInfo, void *pConstPolsAddress, void *pConstTreeAddress_) {
+    if (use_venus_backend()) {
+        ConstTree constTree;
+        constTree.calculateConstTreeGL(*(StarkInfo *)pStarkInfo, (Goldilocks::Element *)pConstPolsAddress, pConstTreeAddress_);
+        return;
+    }
+
     int deviceId;
     CHECKCUDAERR(cudaGetDevice(&deviceId));
     cudaSetDevice(deviceId);
@@ -1196,6 +1487,12 @@ void calculate_const_tree(void *pStarkInfo, void *pConstPolsAddress, void *pCons
 }
 
 uint64_t check_device_memory(uint32_t node_rank, uint32_t node_size) {
+    if (use_venus_backend()) {
+        (void)node_rank;
+        (void)node_size;
+        return 64ULL * 1024ULL * 1024ULL * 1024ULL;
+    }
+
     int deviceCount;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
     if (err != cudaSuccess) {
@@ -1232,6 +1529,10 @@ uint64_t check_device_memory(uint32_t node_rank, uint32_t node_size) {
 }
 
 uint64_t get_num_gpus() {
+    if (use_venus_backend()) {
+        return 1;
+    }
+
     int deviceCount;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
     if (err != cudaSuccess) {
