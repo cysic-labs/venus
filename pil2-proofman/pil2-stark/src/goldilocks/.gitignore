@@ -9,3 +9,4 @@ benchcpu
 benchgpu
 deviceQuery
 *.o
+CudaArch.mk
