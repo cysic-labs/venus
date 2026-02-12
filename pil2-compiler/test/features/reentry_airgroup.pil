@@ -1,0 +1,73 @@
+airtemplate AirA(int N = 2**16, int type = 0) {
+    col witness a,b,c,d;
+    // std_call_bus();
+    std_call_range_check();
+}
+
+airtemplate AirB(int N = 2**16) {
+    col witness a,b;
+    // std_call_bus();
+    // std_call_range_check();
+}
+
+
+
+function std_call_bus() {
+    println("std_call_BUS", AIRGROUP, AIRGROUP_ID);  
+    on final airgroup final_bus();
+}
+
+function final_bus() {
+    println("final_BUS", AIRGROUP_ID);
+}
+
+function std_call_range_check() {
+    container proof.range_check {
+        int max_airgroup_id = 0;
+    }
+    if (proof.range_check.max_airgroup_id < AIRGROUP_ID) {
+        proof.range_check.max_airgroup_id = AIRGROUP_ID;
+    }
+    println("std_call_RANGE_CHECK", AIRGROUP, AIRGROUP_ID); 
+    on final airgroup range_check_in_same_airgroup();
+}
+
+function range_check_in_same_airgroup() {
+    println("range_check_in_same_airgroup");
+    if (defined(proof.range_check) && proof.range_check.max_airgroup_id > 0) {
+        return;
+    }
+    println("ADD AIR IN CURRENT AIRGROUP");
+    // create_and_instance_range_check();
+}
+
+
+function final_range_check() {
+    if (!defined(proof.range_check)) {
+        return;
+    }
+    if (proof.range_check.max_airgroup_id == 0) {
+        println("IGNORE BECAUSE SAME AIRGROUP");
+        return;
+    }
+    println("final_RANGE_CHECK (begin)", proof.range_check.max_airgroup_id);
+    // airgroup RangeCheck {
+    create_and_instance_range_check();
+    // }
+    println("final_RANGE_CHECK (end)", proof.range_check.max_airgroup_id);
+}
+
+function create_and_instance_range_check() {
+    airtemplate RangeCheck(int N = 2**18) {
+        col witness a,b;
+        std_call_bus();
+    }
+    RangeCheck();
+}
+on final airgroup final_range_check();
+airgroup Reentry {
+    int rows = 2**3;
+    AirA(rows, 0);
+    AirA(rows, 1);
+    AirB(rows);
+}

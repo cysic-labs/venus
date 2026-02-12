@@ -1,0 +1,31 @@
+airtemplate AirA(int N = 2**16) {
+    col witness a,b,c,d;
+    std_call_range_check();
+}
+
+airtemplate AirB(int N = 2**16) {
+    col witness a,b;
+    std_call_range_check();
+}
+
+function std_call_range_check() {
+    on final airgroup range_check();
+}
+
+function range_check() {
+    // TODO: Expected to print 0 and 1, but prints 1 and 2
+    println("AIRGROUP_ID",AIRGROUP_ID);
+    // adding air...
+    AirC();
+}
+
+airtemplate AirC(int N = 2**16) {
+    col witness a,b;
+}
+
+airgroup AirA {
+    AirA();
+}
+airgroup AirB {
+    AirB();
+}

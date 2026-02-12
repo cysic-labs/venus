@@ -1,0 +1,23 @@
+
+airtemplate MyAirTemplate(int N = 2**22) {
+    col witness bitIn;
+    col fixed K = [0,1]...;
+
+    bitIn * (bitIn - 1) === 0;
+    println("I'm here");
+    if (defined(pepe)) {
+        println(`pepe is defined as ${pepe}`);
+    } else {
+        println("pepe is undefined");
+    }
+}  
+#pragma feature greetings
+#pragma timer t1
+println("Hello");
+
+airgroup MyAirGroup {
+    MyAirTemplate();
+}
+
+#pragma feature greetings
+println("Bye");

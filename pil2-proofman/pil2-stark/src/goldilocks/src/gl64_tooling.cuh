@@ -7,6 +7,7 @@
 #ifndef __GOLDILOCKS_ENV__
 #include "gpu_timer.cuh"
 #include <mutex>
+#include <unordered_map>
 #include "cuda_utils.cuh"
 #include "transcriptGL.cuh"
 #include "expressions_gpu.cuh"
@@ -251,7 +252,6 @@ struct AirInstanceInfo {
 
 
 struct StreamData{
-
     //const data
     cudaStream_t stream;
     uint32_t gpuId;
@@ -265,6 +265,15 @@ struct StreamData{
     uint32_t status; //0: unused, 1: loading, 2: full
     cudaEvent_t end_event;
     TimerGPU timer;
+    cudaGraph_t cuda_graph = nullptr;
+    cudaGraphExec_t cuda_graph_exec = nullptr;
+    bool cuda_graph_ready = false;
+    bool cuda_graph_enabled = true;
+    string cuda_graph_signature;
+    std::unordered_map<string, uint32_t> cuda_graph_seen_signatures;
+    uint64_t cuda_graph_capture_count = 0;
+    uint64_t cuda_graph_skip_capture_count = 0;
+    uint64_t cuda_graph_replay_count = 0;
 
     TranscriptGL_GPU *transcript;
     TranscriptGL_GPU *transcript_helper;
@@ -287,6 +296,20 @@ struct StreamData{
     bool recursive;
 
     std::mutex mutex_stream_selection;
+
+    void clear_cuda_graph() {
+        cudaSetDevice(gpuId);
+        if (cuda_graph_exec != nullptr) {
+            cudaGraphExecDestroy(cuda_graph_exec);
+            cuda_graph_exec = nullptr;
+        }
+        if (cuda_graph != nullptr) {
+            cudaGraphDestroy(cuda_graph);
+            cuda_graph = nullptr;
+        }
+        cuda_graph_ready = false;
+        cuda_graph_signature.clear();
+    }
     
     void initialize(uint64_t max_size_proof, uint32_t gpuId_, uint32_t localStreamId_, bool recursive_, uint64_t merkleTreeArity){
         uint64_t maxExps = 20000; // TODO: CALCULATE IT PROPERLY!
@@ -299,6 +322,15 @@ struct StreamData{
         cudaEventCreate(&end_event);
         instanceId = -1;
         status = 0;
+        cuda_graph = nullptr;
+        cuda_graph_exec = nullptr;
+        cuda_graph_ready = false;
+        cuda_graph_enabled = true;
+        cuda_graph_signature.clear();
+        cuda_graph_seen_signatures.clear();
+        cuda_graph_capture_count = 0;
+        cuda_graph_skip_capture_count = 0;
+        cuda_graph_replay_count = 0;
         CHECKCUDAERR(cudaMallocHost((void **)&pinned_buffer_proof, max_size_proof * sizeof(Goldilocks::Element)));
         CHECKCUDAERR(cudaMallocHost((void **)&pinned_buffer_exps_params, maxExps * 2 * sizeof(DestParamsGPU)));
         CHECKCUDAERR(cudaMallocHost((void **)&pinned_buffer_exps_args, maxExps * sizeof(ExpsArguments)));
@@ -345,6 +377,7 @@ struct StreamData{
 
     void free(){
         cudaSetDevice(gpuId);
+        clear_cuda_graph();
         cudaStreamDestroy(stream);
         cudaEventDestroy(end_event);
         cudaFreeHost(pinned_buffer_proof);

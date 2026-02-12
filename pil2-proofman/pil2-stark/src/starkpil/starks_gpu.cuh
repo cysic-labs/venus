@@ -11,7 +11,7 @@ class gl64_t;
 
 extern Goldilocks::Element omegas_inv_[33];
 
-__device__ __constant__ uint64_t domain_size_inverse_[33] = {
+static __device__ __constant__ uint64_t domain_size_inverse_[33] = {
     0x0000000000000001, // 1^{-1}
     0x7fffffff80000001, // 2^{-1}
     0xbfffffff40000001, // (1 << 2)^{-1}

@@ -1,0 +1,9 @@
+
+airtemplate PSA(int N = 2**11, int chunks = 16, int loops = 3) {
+    col fixed W = [1,0...];
+    W' === W';
+}
+
+airgroup PSA {
+    PSA();
+}

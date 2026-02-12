@@ -9,7 +9,7 @@
 #include "data_layout.cuh"
 #include "gpu_timer.cuh"
 
-__device__ __constant__ uint64_t omegas[33] = {
+static __device__ __constant__ uint64_t omegas[33] = {
     1,
     18446744069414584320ULL,
     281474976710656ULL,
@@ -45,7 +45,7 @@ __device__ __constant__ uint64_t omegas[33] = {
     7277203076849721926ULL,
 };
 
-__device__ __constant__ uint64_t omegas_inv[33] = {
+static __device__ __constant__ uint64_t omegas_inv[33] = {
     0x1,
     0xffffffff00000000,
     0xfffeffff00000001,
@@ -81,7 +81,7 @@ __device__ __constant__ uint64_t omegas_inv[33] = {
     0x16d265893b5b7e85,
 };
 
-__device__ __constant__ uint64_t domain_size_inverse[33] = {
+static __device__ __constant__ uint64_t domain_size_inverse[33] = {
     0x0000000000000001, // 1^{-1}
     0x7fffffff80000001, // 2^{-1}
     0xbfffffff40000001, // (1 << 2)^{-1}
@@ -132,8 +132,8 @@ public:
        : NTT_Goldilocks() {
         assert(BATCH_HEIGHT == (1 << BATCH_HEIGHT_LOG2));
         assert(BATCH_HEIGHT_DIV2 == (BATCH_HEIGHT>>1));
-        assert(BATCH_HEIGHT * BATCH_WIDTH <= 1024); 
-        assert(TILE_HEIGHT * TILE_WIDTH <= 1024);
+        assert(BATCH_HEIGHT * BATCH_WIDTH <= 2048);
+        assert(TILE_HEIGHT * TILE_WIDTH <= 2048);
     }
 
     NTT_Goldilocks_GPU(uint64_t maxLogDomainSize_, uint32_t nGPUs_input = 0, uint32_t* gpu_ids = nullptr)
@@ -141,8 +141,8 @@ public:
         init_twiddle_factors_and_r(maxLogDomainSize_, nGPUs_input, gpu_ids);
         assert(BATCH_HEIGHT == (1 << BATCH_HEIGHT_LOG2));
         assert(BATCH_HEIGHT_DIV2 == (BATCH_HEIGHT>>1));
-        assert(BATCH_HEIGHT * BATCH_WIDTH <= 1024); 
-        assert(TILE_HEIGHT * TILE_WIDTH <= 1024); 
+        assert(BATCH_HEIGHT * BATCH_WIDTH <= 2048);
+        assert(TILE_HEIGHT * TILE_WIDTH <= 2048); 
     }
 
     void LDE_MerkleTree_GPU(Goldilocks::Element *d_tree, gl64_t* d_dst_ntt, uint64_t offset_dst_ntt,

@@ -1,0 +1,23 @@
+airtemplate airA (int N=2**16) {
+    col fixed FA = [N-1..0];
+    col witness Aa;
+    col witness stage(2) Ac;
+
+    Aa + FA * 4 === 0;
+
+    airB();
+}
+
+airtemplate airB (int N=2**16){
+    col fixed FB = [0..N-1];
+    col witness Ba;
+    col witness Bb;
+    col witness stage(2) Bc;
+
+    Ba + Bb - FB * 2 === 0;
+}
+
+airgroup AB {
+    airA();
+//    airB();
+}

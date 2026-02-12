@@ -1,0 +1,31 @@
+airtemplate ContinueTest(int N = 2**13) {
+    int value = 0;
+    int count = 0;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            println(`i:${i} of [0..3] j:${j} of [0..3]`);
+            if (i > 1 && i == j) {
+                println("i > 1 && i == j   i:", i, "j:", j, " ===> CONTINUE");
+                value = value << 8 + (i * 8 + j);
+                continue;
+                value = 99999999999999;
+                println("this line must not be shown");
+            }
+            value = value * 2 + 1;
+            println("end-of-loop i, only if no-continue");
+            ++count;
+        }
+        value = value * 4 + 3;
+    }
+    // i = 0 ==> count = count + 4
+    // i = 1 ==> count = count + 4
+    // i = 2 ==> count = count + 3 (jump j=2)
+    // i = 3 ==> count = count + 3 (jump j=3)
+    // total count = 14
+    assert(count == 14);
+    assert(value == 9670816261115333346066435);
+}
+
+airgroup ContinueTest {
+    ContinueTest();
+}

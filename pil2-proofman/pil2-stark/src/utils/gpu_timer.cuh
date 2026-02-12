@@ -20,6 +20,7 @@ struct TimerEntry {
 
 class TimerGPU {
 public:
+    inline static thread_local bool capture_active = false;
     std::unordered_map<std::string, TimerEntry> timers;
     std::unordered_map<std::string, std::vector<TimerEntry>> multiTimers;
     std::unordered_map<std::string, TimerEntry*> activeCategoryTimers;
@@ -30,6 +31,12 @@ public:
     explicit TimerGPU(cudaStream_t s) : stream(s) {}
 
     void init(cudaStream_t s) { stream = s; }
+
+    static void set_capture_active(bool active) { capture_active = active; }
+
+    bool is_capturing() const {
+        return capture_active;
+    }
 
     bool createEvent(cudaEvent_t& event) {
         cudaError_t err = cudaEventCreate(&event);
@@ -43,6 +50,7 @@ public:
     }
 
     void start(const std::string& name) {
+        if (is_capturing()) return;
         if (timers.find(name) == timers.end()) {
             cudaEvent_t start, stop;
             if (!createEvent(start) || !createEvent(stop)) return;
@@ -53,6 +61,7 @@ public:
     }
 
     void stop(const std::string& name) {
+        if (is_capturing()) return;
         auto it = timers.find(name);
         if (it == timers.end()) {
 #ifndef __GOLDILOCKS_ENV__
@@ -64,6 +73,7 @@ public:
     }
 
     void startCategory(const std::string& name) {
+        if (is_capturing()) return;
         if (activeCategoryTimers.find(name) != activeCategoryTimers.end()) {
 #ifndef __GOLDILOCKS_ENV__
             zklog.error("TimerGPU::startCategory called without stop for previous timer: " + name);
@@ -82,6 +92,7 @@ public:
     }
 
     void stopCategory(const std::string& name) {
+        if (is_capturing()) return;
         auto it = activeCategoryTimers.find(name);
         if (it == activeCategoryTimers.end()) {
 #ifndef __GOLDILOCKS_ENV__

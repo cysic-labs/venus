@@ -521,14 +521,14 @@ __global__ void prescan_correction(gl64_t *g_odata, gl64_t* correction, bool isS
     }
 }
 
-void accOperationGPU(gl64_t* vals, uint64_t N, bool add, uint32_t dim, gl64_t* helper, cudaStream_t stream) {    
+void accOperationGPU(gl64_t* vals, uint64_t N, bool add, uint32_t dim, gl64_t* helper, cudaStream_t stream) {
     gl64_t* helper1;
     gl64_t* helper2;
     uint32_t nthreads1 = min(256, (uint32_t)N>>1);
     dim3 threads1(nthreads1);
     dim3 blocks1((N + 2*threads1.x - 1) / (2*threads1.x));
     uint32_t n_shared = 2*dim*threads1.x;
-    prescan<<<blocks1, threads1, (n_shared+CONFLICT_FREE_OFFSET(n_shared))*sizeof(gl64_t), stream>>>(vals, vals, add, 1, dim, N);  
+    prescan<<<blocks1, threads1, (n_shared+CONFLICT_FREE_OFFSET(n_shared))*sizeof(gl64_t), stream>>>(vals, vals, add, 1, dim, N);
     if(N > 2*nthreads1){
         helper1 = helper;
         uint32_t N2 = blocks1.x;

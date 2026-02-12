@@ -1,0 +1,25 @@
+subproof Main(2**23) {
+    expr cols[3];
+
+    col witness a;
+    col witness b;
+    col witness c;
+
+    
+    cols[0] = a;
+    cols[1] = b;
+    cols[2] = c;
+
+    cols[0] * (1 - cols[0]) === 0;
+    cols[0] * (1 - cols[0]) * (2 - cols[0]) === 0;
+
+
+    expr res = 100;
+    #pragma dump res
+    res = res + 2 * a;
+    #pragma dump res
+    res = res + 4 * b;
+    #pragma dump res
+    res === 0;
+    #pragma dump res
+}

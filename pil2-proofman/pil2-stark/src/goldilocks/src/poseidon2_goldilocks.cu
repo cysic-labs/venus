@@ -16,8 +16,10 @@ namespace cg = cooperative_groups;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-// CUDA Threads per Block
-#define TPB 128
+// CUDA Threads per Block — use POSEIDON2_TPB from data_layout.cuh
+// P3: 256 at OPT_LEVEL >= 1 for better SM occupancy
+// Shared mem: 256*16*8=32KB per block, well within sm_120's 228KB limit
+#define TPB POSEIDON2_TPB
 
 __device__ __constant__ uint64_t GPU_C_4[53]; 
 __device__ __constant__ uint64_t GPU_D_4[4];
@@ -131,9 +133,11 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::merkletreeCoalesced(uint32_t arity,
 
 //repassar assumtions que faig, sponge width es 16
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
+GPU_LAUNCH_BOUNDS(TPB, 2)
 __global__ void hash_gpu_16(uint64_t* data, int N)
 {
- 
+    int blockStart = blockIdx.x * blockDim.x;
+
     for(int i=threadIdx.x; i <150; i+= blockDim.x){
         scratchpad[16*blockDim.x + i] = GPU_C_16[i];
     }
@@ -144,26 +148,32 @@ __global__ void hash_gpu_16(uint64_t* data, int N)
     gl64_t* D = scratchpad + 16*blockDim.x + 150;
 
     __syncthreads();
-    uint64_t* blockData = data + (blockIdx.x * blockDim.x) * 16;
+    uint64_t* blockData = data + blockStart * 16;
 
-    //coalesced read of hasshes which are "romajor" sthore in scratchpad in colmajor
+    // Coalesced read: row-major input to col-major scratchpad, with bounds check
+    // row = hash index within block; invalid hashes get zero-filled
     for(uint32_t i=0; i<16; i++){
         uint32_t offset = i * blockDim.x + threadIdx.x;
         uint32_t row = offset >> 4;
         uint32_t col = offset & 0xF;
-        scratchpad[col * blockDim.x + row] = gl64_t(blockData[offset]);        
+        if (blockStart + (int)row < N) {
+            scratchpad[col * blockDim.x + row] = gl64_t(blockData[offset]);
+        } else {
+            scratchpad[col * blockDim.x + row] = gl64_t(uint64_t(0));
+        }
     }
     __syncthreads();
-    //poseidon2_hash<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>();
     poseidon2_hash_with_constants<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>((gl64_t*) C,(gl64_t*) D);
-    uint64_t* outData = data + 16 * N + (blockIdx.x * blockDim.x) * 4;
-    //coalesced write of hashes that are in "colummajor" in scratchpad and write them in rowmajor in d_tree
+    uint64_t* outData = data + 16 * N + blockStart * 4;
+    // Coalesced write: col-major scratchpad to row-major output, with bounds check
     __syncthreads();
     for(uint32_t i=0; i<4; i++){
         uint32_t offset = i * blockDim.x + threadIdx.x;
         uint32_t row = offset >> 2;
         uint32_t col = offset & 0x3;
-        outData[(row << 2) + col] = scratchpad[col * blockDim.x + row];
+        if (blockStart + (int)row < N) {
+            outData[(row << 2) + col] = scratchpad[col * blockDim.x + row];
+        }
     }
 }
 
@@ -209,11 +219,17 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::merkletreeCoalescedBlocks(uint32_t 
         else
         {
             actual_tpb = TPB;
-            actual_blks = nextN / TPB + 1;
+            actual_blks = (nextN + TPB - 1) / TPB;
         }
-        if(actual_tpb == TPB && SPONGE_WIDTH == 16 && nextN >=128 && 0){
-            hash_gpu_16<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS> <<<actual_blks, actual_tpb, actual_tpb * SPONGE_WIDTH * sizeof(gl64_t)+ (150+16) * sizeof(gl64_t), stream>>>(d_tree + nextIndex, nextN);  
-        }else{
+        // P6: Enable coalesced hash_gpu_16 for inner Merkle tree levels at OPT_LEVEL >= 2
+#if defined(OPT_LEVEL) && OPT_LEVEL >= 2
+        if(actual_tpb == TPB && SPONGE_WIDTH == 16 && nextN >=128){
+            hash_gpu_16<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS>
+                <<<actual_blks, actual_tpb, actual_tpb * SPONGE_WIDTH * sizeof(gl64_t) + (150+16) * sizeof(gl64_t), stream>>>
+                (d_tree + nextIndex, nextN);
+        }else
+#endif
+        {
             hash_gpu_3<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, 0, stream>>>(nextN, nextIndex, pending + extraZeros, d_tree);
         }
         nextIndex += (pending + extraZeros) * CAPACITY;
@@ -224,6 +240,7 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::merkletreeCoalescedBlocks(uint32_t 
 }
 
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
+GPU_LAUNCH_BOUNDS(TPB, 2)
 __global__ void linearHashGPUTiles_(uint64_t *__restrict__ output, uint64_t *__restrict__ input, uint32_t num_cols, uint32_t num_rows)
 {
 
@@ -410,7 +427,9 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::grinding(uint64_t * d_nonce, uint64
     uint64_t log_launch_iters = 7; //64 launch iterations
     uint64_t launch_iters = 1ULL << log_launch_iters;
     uint64_t log_N = NONCES_LAUNCH_BITS; //512K nonces per launch
+#if !defined(OPT_LEVEL) || OPT_LEVEL < 2
     uint64_t N = 1 << log_N;
+#endif
     uint64_t security = 128;
     // we need to determine log_hashesPerThread such that, suthat probabilty of not finding a valid nonce is lower
     // than 2^(-security)
@@ -430,6 +449,30 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::grinding(uint64_t * d_nonce, uint64
     dim3 gridSize( NONCES_LAUNCH_GRID_SIZE );
 
     size_t shared_mem_size = blockSize.x * SPONGE_WIDTH * sizeof(gl64_t) + blockSize.x * sizeof(uint64_t);
+
+#if defined(OPT_LEVEL) && OPT_LEVEL >= 2
+    // P5: Use persistent kernel with cooperative groups for reduced launch overhead
+    // Query max cooperative grid size for this kernel/block config
+    {
+        int device;
+        cudaGetDevice(&device);
+        int numBlocksPerSm = 0;
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocksPerSm,
+            (void*)grinding_persistent_kernel<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS>,
+            blockSize.x, shared_mem_size);
+        int numSMs = 0;
+        cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, device);
+        int maxCoopBlocks = numBlocksPerSm * numSMs;
+        if ((int)gridSize.x > maxCoopBlocks) {
+            gridSize.x = maxCoopBlocks;
+        }
+    }
+    uint32_t hashesPerThread32 = (uint32_t)hashesPerThread;
+    void* args[] = {(void*)&d_nonce, (void*)&d_nonceBlock, (void*)&d_in, (void*)&n_bits, (void*)&hashesPerThread32, (void*)&launch_iters};
+    cudaLaunchCooperativeKernel(
+        (void*)grinding_persistent_kernel<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS>,
+        gridSize, blockSize, args, shared_mem_size, stream);
+#else
     uint64_t nonces_offset = 0;
     uint64_t nonces_per_iteration = N * hashesPerThread;
 
@@ -437,6 +480,7 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::grinding(uint64_t * d_nonce, uint64
         grinding_calc_<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<gridSize, blockSize, shared_mem_size, stream>>>((uint64_t *)d_nonce, (uint64_t *)d_nonceBlock, (uint64_t *)d_in, n_bits, hashesPerThread, nonces_offset);
         nonces_offset += nonces_per_iteration;
     }
+#endif
 }
 
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>

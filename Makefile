@@ -11,25 +11,23 @@
 #   make clean      # Clean all build artifacts
 #
 # Full smoke pipeline:
-#   module load intel/compiler && module load cuda && module load openmpi && \
+#   module load intel/compiler cuda openmpi && \
 #   make clean && rm -rf ~/.zisk && make all
 
 # Paths
 CARGO_ZISK := cargo run --release --features gpu --bin cargo-zisk --
 WITNESS_LIB := ./target/release/libzisk_witness.so
-PROVING_KEY := ./provingKey
+BUILD_DIR := ./build
+PROVING_KEY := $(BUILD_DIR)/provingKey
 GUEST_DIR := ./guest/zisk-eth-client/bin/client/rsp
 ELF := $(GUEST_DIR)/target/riscv64ima-zisk-zkvm-elf/release/zec-rsp
-INPUT := $(GUEST_DIR)/inputs/20852412_38_3_rsp.bin
+INPUT ?= $(GUEST_DIR)/inputs/20852412_38_3_rsp.bin
 PROOF_DIR := ./tmp
 PROOF_TMP := $(PROOF_DIR)/vadcop_final_proof.bin
 PROOF_FILE := $(PROOF_DIR)/$(notdir $(basename $(INPUT))).proof
 VERKEY := $(PROVING_KEY)/zisk/vadcop_final/vadcop_final.verkey.bin
 
-# Proving key download URL (fill in your URL here)
-PROVING_KEY_URL := <YOUR_PROVING_KEY_URL_HERE>
-
-.PHONY: all setup build install-toolchain download-key build-guest rom-setup compile-key prove verify clean help
+.PHONY: all setup build install-toolchain download-key build-guest rom-setup compile-key prove verify clean purge generate-key help
 
 all: setup
 	@$(MAKE) prove
@@ -50,19 +48,42 @@ install-toolchain: build
 	@echo "==> Installing ZisK toolchain..."
 	$(CARGO_ZISK) sdk install-toolchain
 
-# Step 3: Check if provingKey exists (user must download manually)
+# Step 3: Check if proving key folder exists; offer to generate if missing
 check-key:
 	@if [ ! -d "$(PROVING_KEY)" ]; then \
 		echo ""; \
-		echo "ERROR: provingKey directory not found!"; \
+		echo "WARNING: proving key directory not found at $(PROVING_KEY)"; \
 		echo ""; \
-		echo "Please download and extract the proving key:"; \
-		echo "  curl -L -o ./pk.tgz $(PROVING_KEY_URL) && tar -xzf ./pk.tgz"; \
-		echo ""; \
-		echo "This will create the ./provingKey directory."; \
-		exit 1; \
+		echo "Would you like to generate it? This may take ~30 minutes."; \
+		printf "Type CONFIRM to generate, or anything else to abort: "; \
+		read answer; \
+		if [ "$$answer" = "CONFIRM" ]; then \
+			$(MAKE) generate-key; \
+		else \
+			echo "Aborted. Cannot proceed without proving key."; \
+			exit 1; \
+		fi; \
 	fi
 	@echo "==> Proving key found at $(PROVING_KEY)"
+
+# Generate proving key from source
+generate-key:
+	@echo "==> Installing npm dependencies..."
+	npm i --prefix pil2-compiler
+	npm i --prefix pil2-proofman-js
+	@echo "==> Generating fixed columns..."
+	cargo run --release --bin arith_frops_fixed_gen
+	cargo run --release --bin binary_basic_frops_fixed_gen
+	cargo run --release --bin binary_extension_frops_fixed_gen
+	@echo "==> Compiling PIL..."
+	node --max-old-space-size=16384 ./pil2-compiler/src/pil.js pil/zisk.pil \
+		-I pil,./pil2-proofman/pil2-components/lib/std/pil,state-machines,precompiles \
+		-o pil/zisk.pilout -u tmp/fixed -O fixed-to-file
+	@echo "==> Running setup to generate proving key..."
+	node --max-old-space-size=16384 --stack-size=8192 ./pil2-proofman-js/src/main_setup.js \
+		-a ./pil/zisk.pilout -b $(BUILD_DIR) -t ./pil2-proofman/pil2-components/lib/std/pil \
+		-u tmp/fixed -r -s ./state-machines/starkstructs.json
+	@echo "==> Proving key generated at $(PROVING_KEY)"
 
 # Step 4: Build the guest application (ETH client)
 build-guest: install-toolchain
@@ -104,13 +125,25 @@ verify: check-key
 	@echo "==> Verifying proof..."
 	$(CARGO_ZISK) verify -p $(PROOF_FILE) -k $(VERKEY)
 
-# Clean all build artifacts
+# Clean all build artifacts (preserves proving key)
 clean:
 	@echo "==> Cleaning..."
-	rm -rf target
-	rm -rf $(GUEST_DIR)/target
-	rm -rf ~/.zisk/cache
-	@echo "Note: provingKey is preserved. Remove manually if needed."
+	rm -rf target lib-c/target lib-float/target $(GUEST_DIR)/target ~/.zisk tmp
+	@echo "Note: proving key in build/ is preserved. Use 'make purge' to remove everything."
+
+# Full clean including proving key (~30 min to regenerate)
+purge: clean
+	@echo ""
+	@echo "WARNING: This will delete $(BUILD_DIR)/ which contains the proving key."
+	@echo "Regenerating the proving key takes ~30 minutes."
+	@printf "Type CONFIRM to proceed, or anything else to abort: "
+	@read answer; \
+	if [ "$$answer" = "CONFIRM" ]; then \
+		rm -rf $(BUILD_DIR); \
+		echo "==> $(BUILD_DIR)/ removed."; \
+	else \
+		echo "Aborted. $(BUILD_DIR)/ was preserved."; \
+	fi
 
 # Help
 help:
@@ -125,14 +158,14 @@ help:
 	@echo "  compile-key     - Compile proving key (check-setup)"
 	@echo "  prove           - Prove the sample block"
 	@echo "  verify          - Verify the generated proof"
-	@echo "  clean           - Clean build artifacts"
+	@echo "  clean           - Clean build artifacts (preserves proving key)"
+	@echo "  purge           - Clean everything including proving key"
+	@echo "  generate-key    - Generate proving key from source (~30 min)"
 	@echo ""
 	@echo "First time setup:"
-	@echo "  1. Download proving key:"
-	@echo "     curl -L -o ./pk.tgz $(PROVING_KEY_URL) && tar -xzf ./pk.tgz"
-	@echo "  2. Run: make setup"
-	@echo "  3. Run: make prove"
+	@echo "  1. Run: make setup (will offer to generate proving key if missing)"
+	@echo "  2. Run: make prove"
 	@echo ""
 	@echo "Full smoke pipeline:"
-	@echo "  module load intel/compiler && module load cuda && module load openmpi && \\"
+	@echo "  module load intel/compiler cuda openmpi && \\"
 	@echo "  make clean && rm -rf ~/.zisk && make all"

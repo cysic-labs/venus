@@ -1,0 +1,26 @@
+airtemplate ExprIntEqual(int N = 2**13) {
+    const int a = 1;
+    const int b = 2;
+    compare_int(a);
+    compare_int(b);
+    compare_expr(a);
+    compare_expr(b);
+    col witness colA;
+    compare_expr(colA);
+}
+
+function compare_int(int value) {
+    int _value = value;
+    println(_value);
+    if (value == 1) println(value, "value is equal to 1");
+    if (value != 1) println(value, "value is not equal to 1");
+}
+
+function compare_expr(expr evalue) {
+    if (evalue == 1) println(evalue, "evalue(expr) is equal to 1");
+    if (evalue != 1) println(evalue, "evalue(expr) is not equal to 1");
+}
+
+airgroup ExprIntEqual {
+    ExprIntEqual(N: 2**10);
+}

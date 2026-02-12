@@ -1,0 +1,13 @@
+col witness a;
+expr _a = -a;
+expr _b = 3 * a;
+expr _c = -_b;
+
+println(_a);
+assert_eq(string(_a), "-a");
+
+println(_b);
+assert_eq(string(_b), "3 * a");
+
+println(_c);
+assert_eq(string(_c), "-(3 * a)");

@@ -566,6 +566,7 @@ __device__ __forceinline__ void op_33_gpu_p2(uint64_t op, gl64_t *C, const gl64_
     }
 }
 
+GPU_LAUNCH_BOUNDS(512, 1)
 __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)
 {
 
@@ -672,6 +673,7 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
 }
 
 
+GPU_LAUNCH_BOUNDS(512, 1)
 __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)
 {
 

@@ -1,0 +1,426 @@
+require "std_connection.pil";
+
+const int POSEIDON_C[118] = [
+    0x13dcf33aba214f46,
+    0x30b3b654a1da6d83,
+    0x1fc634ada6159b56,
+    0x937459964dc03466,
+    0xedd2ef2ca7949924,
+    0xede9affde0e22f68,
+    0x8515b9d6bac9282d,
+    0x6b5c07b4e9e900d8,
+    0x1ec66368838c8a08,
+    0x9042367d80d1fbab,
+    0x400283564a3c3799,
+    0x4a00be0466bca75e,
+    0x7913beee58e3817f,
+    0xf545e88532237d90,
+    0x22f8cb8736042005,
+    0x6f04990e247a2623,
+    0xfe22e87ba37c38cd,
+    0xd20e32c85ffe2815,
+    0x117227674048fe73,
+    0x4e9fb7ea98a6b145,
+    0xe0866c232b8af08b,
+    0x00bbc77916884964,
+    0x7031c0fb990d7116,
+    0x240a9e87cf35108f,
+    0x2e6363a5a12244b3,
+    0x5e1c3787d1b5011c,
+    0x4132660e2a196e8b,
+    0x3a013b648d3d4327,
+    0xf79839f49888ea43,
+    0xfe85658ebafe1439,
+    0xb6889825a14240bd,
+    0x578453605541382b,
+    0x4508cda8f6b63ce9,
+    0x9c3ef35848684c91,
+    0x0812bde23c87178c,
+    0xfe49638f7f722c14,
+    0x8e3f688ce885cbf5,
+    0xb8e110acf746a87d,
+    0xb4b2e8973a6dabef,
+    0x9e714c5da3d462ec,
+    0x6438f9033d3d0c15,
+    0x24312f7cf1a27199,
+    0x23f843bb47acbf71,
+    0x9183f11a34be9f01,
+    0x839062fbb9d45dbf,
+    0x24b56e7e6c2e43fa,
+    0xe1683da61c962a72,
+    0xa95c63971a19bfa7,
+    0x4adf842aa75d4316,
+    0xf8fbb871aa4ab4eb,
+    0x68e85b6eb2dd6aeb,
+    0x07a0b06b2d270380,
+    0xd94e0228bd282de4,
+    0x8bdd91d3250c5278,
+    0x209c68b88bba778f,
+    0xb5e18cdab77f3877,
+    0xb296a3e808da93fa,
+    0x8370ecbda11a327e,
+    0x3f9075283775dad8,
+    0xb78095bb23c6aa84,
+    0x3f36b9fe72ad4e5f,
+    0x69bc96780b10b553,
+    0x3f1d341f2eb7b881,
+    0x4e939e9815838818,
+    0xda366b3ae2a31604,
+    0xbc89db1e7287d509,
+    0x6102f411f9ef5659,
+    0x58725c5e7ac1f0ab,
+    0x0df5856c798883e7,
+    0xf7bb62a8da4c961b,
+    0xc68be7c94882a24d,
+    0xaf996d5d5cdaedd9,
+    0x9717f025e7daf6a5,
+    0x6436679e6e7216f4,
+    0x8a223d99047af267,
+    0xbb512e35a133ba9a,
+    0xfbbf44097671aa03,
+    0xf04058ebf6811e61,
+    0x5cca84703fac7ffb,
+    0x9b55c7945de6469f,
+    0x8e05bf09808e934f,
+    0x2ea900de876307d7,
+    0x7748fff2b38dfb89,
+    0x6b99a676dd3b5d81,
+    0xac4bb7c627cf7c13,
+    0xadb6ebe5e9e2f5ba,
+    0x2d33378cafa24ae3,
+    0x1e5b73807543f8c2,
+    0x09208814bfebb10f,
+    0x782e64b6bb5b93dd,
+    0xadd5a48eac90b50f,
+    0xadd4c54c736ea4b1,
+    0xd58dbb86ed817fd8,
+    0x6d5ed1a533f34ddd,
+    0x28686aa3e36b7cb9,
+    0x591abd3476689f36,
+    0x047d766678f13875,
+    0xa2a11112625f5b49,
+    0x21fd10a3f8304958,
+    0xf9b40711443b0280,
+    0xd2697eb8b2bde88e,
+    0x3493790b51731b3f,
+    0x11caf9dd73764023,
+    0x7acfb8f72878164e,
+    0x744ec4db23cefc26,
+    0x1e00e58f422c6340,
+    0x21dd28d906a62dda,
+    0xf32a46ab5f465b5f,
+    0xbfce13201f3f7e6b,
+    0xf30d2e7adb5304e2,
+    0xecdf4ee4abad48e9,
+    0xf94e82182d395019,
+    0x4ee52e3744d887c5,
+    0xa1341c7cac0083b2,
+    0x2302fb26c30c834a,
+    0xaea3c587273bf7d3,
+    0xf798e24961823ec7,
+    0x962deba3e9a2cd94
+];
+
+function define_publics(const int nPublics) {
+
+    #pragma fixed
+    for (int i = 0; i < nPublics; ++i) {
+        public `pub_${i}`;
+    }
+}
+
+function pow7(expr input): expr {
+    const expr input2 = input * input;
+    const expr input4 = input2 * input2;
+    const expr input6 = input4 * input2;
+    return input6 * input;
+}
+
+function getPoseidonConstant(const int index, expr poseidonRow[]) : expr {
+    if(index < 11) {
+        return poseidonRow[1] *  POSEIDON_C[12 + index] + poseidonRow[2] * POSEIDON_C[36 + index] + poseidonRow[3] * POSEIDON_C[48 + index] + poseidonRow[4] * POSEIDON_C[59 + index] + poseidonRow[5] * POSEIDON_C[82 + index] + poseidonRow[6] * POSEIDON_C[106 + index];
+    } else if(index == 11) {
+        return poseidonRow[1] *  POSEIDON_C[12 + index] + poseidonRow[2] * POSEIDON_C[36 + index] + poseidonRow[5] * POSEIDON_C[82 + index] + poseidonRow[6] * POSEIDON_C[106 + index];
+    } else {
+        return poseidonRow[0] *  POSEIDON_C[(index - 12)] + poseidonRow[1] * POSEIDON_C[24 + (index - 12)] + poseidonRow[4] * POSEIDON_C[70 + (index - 12)] + poseidonRow[5] * POSEIDON_C[94 + (index - 12)];
+    }
+}
+
+function poseidonFullRound(expr output[], expr input[], expr sel) {
+    const expr mat[12];
+    for (int i = 0; i < 3; i++) {
+        mat[4*i] =     5*input[i] + 7*input[i+1] +   input[i+2] + 3*input[i+3];
+        mat[4*i + 1] = 4*input[i] + 6*input[i+1] +   input[i+2] +   input[i+3];
+        mat[4*i + 2] =   input[i] + 3*input[i+1] + 5*input[i+2] + 7*input[i+3];
+        mat[4*i + 3] =   input[i] +   input[i+1] + 4*input[i+2] + 6*input[i+3];
+    }
+
+    const expr stored[4];
+    for (int i = 0; i < 4; i++) {
+        stored[i] = mat[i] + mat[i+4] + mat[i+8];
+    }
+
+    for (int i = 0; i < 12; i++) {
+        sel * (output[i] -  (mat[i] + stored[i%4])) === 0;
+    }
+}
+
+function poseidonPartialRound(expr output[], expr initialValues[], expr intermediateValues[], expr input[], expr sel) {
+    const expr sR[12][12];
+    const expr sum_partial[11];
+    for (int i = 0; i < 12; ++i) {
+        sR[0][i] = initialValues[i];
+    }
+
+    for (int i = 0; i < 11; i++) {
+        sum_partial[i] = input[i] + sR[i][1] + sR[i][2] + sR[i][3] + sR[i][4] + sR[i][5] + sR[i][6] + sR[i][7] + sR[i][8] + sR[i][9] + sR[i][10] + sR[i][11];
+        sR[i+1][0]  = input[i]  * 0xc3b6c08e23ba9300 + sum_partial[i];
+        sR[i+1][1]  = sR[i][1]  * 0xd84b5de94a324fb6 + sum_partial[i];
+        sR[i+1][2]  = sR[i][2]  * 0x0d0c371c5b35b84f + sum_partial[i];
+        sR[i+1][3]  = sR[i][3]  * 0x7964f570e7188037 + sum_partial[i];
+        sR[i+1][4]  = sR[i][4]  * 0x5daf18bbd996604b + sum_partial[i];
+        sR[i+1][5]  = sR[i][5]  * 0x6743bc47b9595257 + sum_partial[i];
+        sR[i+1][6]  = sR[i][6]  * 0x5528b9362c59bb70 + sum_partial[i];
+        sR[i+1][7]  = sR[i][7]  * 0xac45e25b7127b68b + sum_partial[i];
+        sR[i+1][8]  = sR[i][8]  * 0xa2077d7dfbb606b5 + sum_partial[i];
+        sR[i+1][9]  = sR[i][9]  * 0xf3faac6faee378ae + sum_partial[i];
+        sR[i+1][10] = sR[i][10] * 0x0c6388b51545e883 + sum_partial[i];
+        sR[i+1][11] = sR[i][11] * 0xd27dbb6944917b60 + sum_partial[i];
+
+        if (i < 10)  { sR[i+1][0] === intermediateValues[i]; }
+    }
+
+
+    for (int i = 0; i < 12; i++) {
+       sel * (output[i] - sR[11][i]) === 0;
+    }
+}
+
+function plonk(const expr a[], const expr c[], const expr sel) {
+    sel * (c[0]*(a[0]*a[1]) + c[1]*a[0] + c[2]*a[1] + c[3]*a[2] + c[4]) === 0;
+}
+
+// CMUL GATE - Check that a * b in Fp³ using (X³ - X - 1) as a generator is performed correctly
+// In this particular case,
+// a = [a[3], a[4], a[5]]
+// b = [a[6], a[7], a[8]]
+// and this must be equal to [ a[9], a[10], a[11] ]
+
+// Since the modulo is known (X³ - X - 1) we can calculate the coefficients in general form by calculating
+// (a0 + a1*x + a2*x²)*(b0 + b1*x + b2*x²) and then using long division to get the residue when dividing by the modulo
+// We get the following result: (a0*b0 + a1*b2 + a2*b1) + (a0*b1 + a1*b0 + a1*b2 + a2*b1 + a2*b2)x + (a0*b2 + a2*b2 + a2*b0 + a1*b1)x²
+function cmul(const expr a[], const expr b[], const expr c[], const expr sel) {
+    sel * (c[0] - (a[0]*b[0] + a[1]*b[2] + a[2]*b[1])) === 0;
+    sel * (c[1] - (a[0]*b[1] + a[1]*b[0] + a[1]*b[2] + a[2]*b[1] + a[2]*b[2])) === 0;
+    sel * (c[2] - (a[0]*b[2] + a[2]*b[2] + a[2]*b[0] + a[1]*b[1])) === 0;
+}
+
+function fft4(const expr a[], const expr c[], const expr res[], const expr sel) {
+    sel * (res[0] - (c[0]*a[0] + c[1]*a[3] + c[2]*a[6] + c[3]*a[9]  + c[6]*a[0] + c[7]*a[3])) === 0;
+    sel * (res[1] - (c[0]*a[1] + c[1]*a[4] + c[2]*a[7] + c[3]*a[10] + c[6]*a[1] + c[7]*a[4])) === 0;
+    sel * (res[2] - (c[0]*a[2] + c[1]*a[5] + c[2]*a[8] + c[3]*a[11] + c[6]*a[2] + c[7]*a[5])) === 0;
+    sel * (res[3] - (c[0]*a[0] - c[1]*a[3] + c[4]*a[6] - c[5]*a[9]  + c[6]*a[0] - c[7]*a[3])) === 0;
+    sel * (res[4] - (c[0]*a[1] - c[1]*a[4] + c[4]*a[7] - c[5]*a[10] + c[6]*a[1] - c[7]*a[4])) === 0;
+    sel * (res[5] - (c[0]*a[2] - c[1]*a[5] + c[4]*a[8] - c[5]*a[11] + c[6]*a[2] - c[7]*a[5])) === 0;
+    sel * (res[6] - (c[0]*a[0] + c[1]*a[3] - c[2]*a[6] - c[3]*a[9]  + c[6]*a[6] + c[8]*a[9])) === 0;
+    sel * (res[7] - (c[0]*a[1] + c[1]*a[4] - c[2]*a[7] - c[3]*a[10] + c[6]*a[7] + c[8]*a[10])) === 0;
+    sel * (res[8] - (c[0]*a[2] + c[1]*a[5] - c[2]*a[8] - c[3]*a[11] + c[6]*a[8] + c[8]*a[11])) === 0;
+    sel * (res[9] - (c[0]*a[0] - c[1]*a[3] - c[4]*a[6] + c[5]*a[9]  + c[6]*a[6] - c[8]*a[9])) === 0;
+    sel * (res[10] - (c[0]*a[1] - c[1]*a[4] - c[4]*a[7] + c[5]*a[10] + c[6]*a[7] - c[8]*a[10])) === 0;
+    sel * (res[11] - (c[0]*a[2] - c[1]*a[5] - c[4]*a[8] + c[5]*a[11] + c[6]*a[8] - c[8]*a[11])) === 0;
+}
+
+function cmuladd(const expr a[], const expr b[], const expr c[]) : expr[] {
+    return [
+        (a[0]*b[0] + a[1]*b[2] + a[2]*b[1]) + c[0],
+        (a[0]*b[1] + a[1]*b[0] + a[1]*b[2] + a[2]*b[1] + a[2]*b[2]) + c[1],
+        (a[0]*b[2] + a[2]*b[2] + a[2]*b[0] + a[1]*b[1]) + c[2]
+    ];
+}
+
+
+// TREESELECTOR4 GATE - Check that given 4 values and a key, checks that the output is correct
+// The tree is created as follows: if key = 0, even values are pushed up the tree, if the key = 1 the odd ones are pushed.
+// Therefore, we need to check that
+// key == [0,0] -> [value1, value2, value3, value4] -> [value1, value3] -> [value1]
+// key == [1,0] -> [value1, value2, value3, value4] -> [value2, value4] -> [value2]
+// key == [0,1] -> [value1, value2, value3, value4] -> [value1, value3] -> [value3]
+// key == [1,1] -> [value1, value2, value3, value4] -> [value2, value4] -> [value4]
+
+// The values are stored from a[0], a[1], a[2] // a[3], a[4], a[5] // a[6], a[7], a[8] // a[9], a[10], a[11]
+// The key is stored in [a[12], a[13]]
+// The output is stored in [a[14], a[15], a[16]]
+function treeselector4(const expr vals[][], const expr key[], const expr res[], const expr sel) {
+
+    sel * ((1 - key[0])*(1 - key[1]) * (vals[0][0] - res[0])) === 0;
+    sel * ((1 - key[0])*(1 - key[1]) * (vals[0][1] - res[1])) === 0;
+    sel * ((1 - key[0])*(1 - key[1]) * (vals[0][2] - res[2])) === 0;
+
+    sel * ((key[0])*(1 - key[1]) * (vals[1][0] - res[0])) === 0;
+    sel * ((key[0])*(1 - key[1]) * (vals[1][1] - res[1])) === 0;
+    sel * ((key[0])*(1 - key[1]) * (vals[1][2] - res[2])) === 0;
+
+    sel * (1 - key[0])*(key[1]) * (vals[2][0] - res[0]) === 0;
+    sel * (1 - key[0])*(key[1]) * (vals[2][1] - res[1]) === 0;
+    sel * (1 - key[0])*(key[1]) * (vals[2][2] - res[2]) === 0;
+
+    sel * (key[0])*(key[1]) * (vals[3][0] - res[0]) === 0;
+    sel * (key[0])*(key[1]) * (vals[3][1] - res[1]) === 0;
+    sel * (key[0])*(key[1]) * (vals[3][2] - res[2]) === 0;
+
+    sel * key[0]*(1 - key[0]) === 0;
+    sel * key[1]*(1 - key[1]) === 0;
+}
+
+// EVPOL4 GATE - Check that the polynomial evaluation is valid
+// Evaluate p(x) = d0*x⁴ + d1*x³ + d2*x²+ d3*x + d4 at point z = a[0]' + a[1]'x + a[2]'x² where
+// d0 = a[0]' + a[1]' * x + a[2]' * x²
+// d1 = a[9] + a[10] * x + a[11] * x²
+// d2 = a[6] + a[7] * x + a[8] * x²
+// d3 = a[3] + a[4] * x + a[5] * x²
+// d4 = a[0] + a[1] * x + a[2] * x²
+// The result must be equal to a[6]' + a[7]' * x + a[8]' * x²
+// The evaluation is performed using the Horner's rule, which means that p(x) is rewritten as
+// p(x) = (d0 * x + d1)*x + d2)*x + d3)*x + d4
+// Note: All operations are performed in Fp³ and so multiplications are performed using CMulAdd
+function evpol4(const expr coefs[][], const expr x[], const expr res[], const expr sel) {
+
+    const expr acc[5][3];
+    acc[0] = coefs[0];
+    for(int i = 0; i < 4; i++) {
+        acc[i + 1][0] = (acc[i][0]*x[0] + acc[i][1]*x[2] + acc[i][2]*x[1]) + coefs[i+1][0];
+        acc[i + 1][1] = (acc[i][0]*x[1] + acc[i][1]*x[0] + acc[i][1]*x[2] + acc[i][2]*x[1] + acc[i][2]*x[2]) + coefs[i+1][1];
+        acc[i + 1][2] = (acc[i][0]*x[2] + acc[i][2]*x[2] + acc[i][2]*x[0] + acc[i][1]*x[1]) + coefs[i+1][2];
+    }
+
+    sel * (acc[4][0] - res[0]) === 0;
+    sel * (acc[4][1] - res[1]) === 0;
+    sel * (acc[4][2] - res[2]) === 0;
+}
+
+airtemplate Compressor(const int N, const int nPublics, const int nPlonkRows, const int nPoseidonCompressor, const int nPoseidonSponge, const int nCMulRows, const int nEvPol4Rows, const int nFFT4Rows, const int nTreeSelector4Rows) {
+    col witness a[24];
+
+    #pragma fixed_external
+    col fixed S[24];
+
+    #pragma fixed_external
+    col fixed C[10];
+
+    col fixed POSEIDONSPONGE = [0:nPlonkRows,[1,0:6]:nPoseidonCompressor,0...];
+    col fixed POSEIDONCOMPRESSION = [0:nPlonkRows + 7*nPoseidonCompressor,[1,0:6]:nPoseidonSponge,0...];
+
+    const int nPoseidon = nPoseidonCompressor + nPoseidonSponge;
+
+    col fixed POSEIDON_0 = [0:nPlonkRows, [1,0:6]:nPoseidon, 0...];
+    col fixed POSEIDON_1 = [0:nPlonkRows, [0,1,0:5]:nPoseidon, 0...];
+    col fixed POSEIDON_2 = [0:nPlonkRows, [0:2,1,0:4]:nPoseidon, 0...];
+    col fixed POSEIDON_3 = [0:nPlonkRows, [0:3,1,0:3]:nPoseidon, 0...];
+    col fixed POSEIDON_4 = [0:nPlonkRows, [0:4,1,0:2]:nPoseidon, 0...];
+    col fixed POSEIDON_5 = [0:nPlonkRows, [0:5,1,0]:nPoseidon, 0...];
+    col fixed POSEIDON_6 = [0:nPlonkRows, [0:6,6]:nPoseidon, 0...];
+
+    col fixed PLONK = [1:nPlonkRows, 0...];
+
+    col fixed CMUL = [0:(nPlonkRows + 7*nPoseidon),1:nCMulRows, 0...];
+
+    col fixed EVPOL4 = [0:(nPlonkRows + 7*nPoseidon + nCMulRows), 1:nEvPol4Rows, 0...];
+
+    col fixed FFT4 = [0:(nPlonkRows + 7*nPoseidon + nCMulRows + nEvPol4Rows), 1:nFFT4Rows, 0...];
+
+    col fixed TREESELECTOR4 = [0:(nPlonkRows + 7*nPoseidon + nCMulRows + nEvPol4Rows + nFFT4Rows), 1:nTreeSelector4Rows, 0...];
+
+    const expr q0[5] = [C[0], C[1], C[2], C[3], C[4]];
+    const expr q1[5] = [C[5], C[6], C[7], C[8], C[9]];
+
+    plonk([a[0], a[1], a[2]], q0, PLONK);
+    plonk([a[3], a[4], a[5]], q0, PLONK);
+    plonk([a[6], a[7], a[8]], q0, PLONK);
+    plonk([a[9], a[10], a[11]], q0, PLONK);
+    plonk([a[12], a[13], a[14]], q1, PLONK);
+    plonk([a[15], a[16], a[17]], q1, PLONK);
+    plonk([a[18], a[19], a[20]], q1, PLONK);
+    plonk([a[21], a[22], a[23]], q1, PLONK);
+
+    POSEIDONSPONGE * a[8] * (a[8] - 1) === 0;
+    const expr input[12];
+    const expr output[12];
+    for (int i = 0; i < 12; i++) {
+        if(i < 4) {
+            input[i] = POSEIDONSPONGE * (a[8] * (a[i] - a[i+4]) + a[i+4]) + POSEIDONCOMPRESSION * a[i];
+        } else if (i < 8) {
+            input[i] = POSEIDONSPONGE * (a[8] * (a[i] - a[i-4]) + a[i-4]) + POSEIDONCOMPRESSION * a[i];
+        } else {
+            input[i] = POSEIDONCOMPRESSION * a[i];
+        }
+        output[i] = a[i]';
+    }
+
+    poseidonFullRound(input, output,(POSEIDONCOMPRESSION + POSEIDONSPONGE));
+
+    const expr poseidonConstants[7] = [POSEIDON_0, POSEIDON_1, POSEIDON_2, POSEIDON_3, POSEIDON_4, POSEIDON_5, POSEIDON_6];
+
+    const expr inputP[12];
+    const expr outputP[12];
+    const expr inputP2[12];
+    const expr outputP2[12];
+    for (int i = 0; i < 12; i++) {
+        inputP[i] = pow7(a[i] + getPoseidonConstant(i, poseidonConstants));
+        outputP[i] = a[i + 12];
+        inputP2[i] = pow7(a[i + 12] + getPoseidonConstant(i, poseidonConstants));
+        outputP2[i] = a[i]';
+    }
+
+    const expr initialValues[12];
+    const expr intermediateValues[10];
+    for (int i = 0; i < 12; i++) {
+        initialValues[i] = 'a[i + 12];
+        if (i < 10) { intermediateValues[i] = a[i]; }
+    }
+
+    poseidonFullRound(outputP2, inputP2, POSEIDON_0 + POSEIDON_1 + POSEIDON_4 + POSEIDON_5);
+
+    poseidonFullRound(outputP, inputP, POSEIDON_1 + POSEIDON_2 + POSEIDON_5 + POSEIDON_6);
+
+    poseidonPartialRound(outputP, initialValues, intermediateValues, inputP, POSEIDON_3 + POSEIDON_4);
+
+    const expr res[3] = [a[0], a[1], a[2]];
+    const expr inA1[3] = [a[3], a[4], a[5]];
+    const expr inB1[3] = [a[6], a[7], a[8]];
+    cmul(res, inA1, inB1, CMUL);
+
+    const expr res2[3] = [a[9], a[10], a[11]];
+    const expr inA2[3] = [a[12], a[13], a[14]];
+    const expr inB2[3] = [a[15], a[16], a[17]];
+    cmul(res2, inA2, inB2, CMUL);
+
+    const expr inpFFT[12] = [a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]];
+    const expr outFFT[12] = [a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23]];
+    const expr constFFT[9] = [C[0], C[1], C[2], C[3], C[4], C[5], C[6], C[7], C[8]];
+    fft4(inpFFT, constFFT, outFFT, FFT4);
+
+    const expr coefs[5][3];
+    coefs[0] = [a[12], a[13], a[14]];
+    coefs[1] = [a[9], a[10], a[11]];
+    coefs[2] = [a[6], a[7], a[8]];
+    coefs[3] = [a[3], a[4], a[5]];
+    coefs[4] = [a[0], a[1], a[2]];
+    const expr x[3] = [a[15], a[16], a[17]];
+    const expr resEVPOL[3] = [a[18], a[19], a[20]];
+    evpol4(coefs, x, resEVPOL, EVPOL4);
+
+    const expr treevals[4][3];
+    treevals[0] = [a[0], a[1], a[2]];
+    treevals[1] = [a[3], a[4], a[5]];
+    treevals[2] = [a[6], a[7], a[8]];
+    treevals[3] = [a[9], a[10], a[11]];
+    const expr key[2] = [a[13], a[14]];
+    const expr resTREE[3] = [a[15], a[16], a[17]];
+    treeselector4(treevals, key, resTREE, TREESELECTOR4);
+
+    connection(1, a, S);
+}
+
+airgroup C18 {
+    Compressor(N: 2**17, nPublics: 2, nPlonkRows: 2, nPoseidonCompressor: 2, nPoseidonSponge: 2, nCMulRows: 2, nEvPol4Rows: 2, nFFT4Rows: 2, nTreeSelector4Rows: 2);
+}

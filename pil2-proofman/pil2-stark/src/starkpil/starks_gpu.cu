@@ -424,19 +424,20 @@ void calculateXis_inplace(SetupCtx &setupCtx, StepsParams &h_params, int64_t *d_
     CHECKCUDAERR(cudaGetLastError());
 }
 
+GPU_LAUNCH_BOUNDS(256, 2)
 __global__ void computeEvals_v2(
     uint64_t NExtended,
     uint64_t extendBits,
     uint64_t size_eval,
     uint64_t N,
     uint64_t openingsSize,
-    gl64_t *d_evals,
-    EvalInfo *d_evalInfo,
-    gl64_t *d_cmPols,
-    gl64_t *d_fixedPols,
-    gl64_t *d_customComits,
-    gl64_t *d_LEv,
-    gl64_t *d_helper)
+    gl64_t * GPU_RESTRICT d_evals,
+    EvalInfo * GPU_RESTRICT d_evalInfo,
+    gl64_t * GPU_RESTRICT d_cmPols,
+    gl64_t * GPU_RESTRICT d_fixedPols,
+    gl64_t * GPU_RESTRICT d_customComits,
+    gl64_t * GPU_RESTRICT d_LEv,
+    gl64_t * GPU_RESTRICT d_helper)
 {
 
     extern __shared__ Goldilocks3GPU::Element shared_sum[];
@@ -540,7 +541,12 @@ void evmap_inplace(SetupCtx &setupCtx, StepsParams &h_params, uint64_t chunk, ui
     EvalInfo *d_evalsInfo = air_instance_info->evalsInfo[chunk];
     uint64_t nEvals = air_instance_info->evalsInfoSizes[chunk];
 
+    // R2-P5: Adaptive n_eval_chunks for small inputs
+#if defined(ENABLE_ADAPTIVE_CHUNKS) || (defined(OPT_LEVEL) && OPT_LEVEL >= 3)
+    uint64_t n_eval_chunks = std::min(uint64_t(16), std::max(uint64_t(1), NExtended / 256));
+#else
     uint64_t n_eval_chunks = 16;
+#endif
 
     gl64_t *d_helper = (gl64_t *)h_params.aux_trace + offset_helper;
     
@@ -600,7 +606,8 @@ __device__ void intt_tinny(gl64_t *data, uint32_t N, uint32_t logN, gl64_t *d_tw
     }
 }
 
-__global__ void fold(uint64_t step, gl64_t *friPol, gl64_t *d_challenge, gl64_t *d_ppar, Goldilocks::Element omega_inv, uint64_t shift_, uint64_t W_, uint64_t nBitsExt, uint64_t prevBits, uint64_t currentBits)
+GPU_LAUNCH_BOUNDS(256, 2)
+__global__ void fold(uint64_t step, gl64_t * GPU_RESTRICT friPol, gl64_t * GPU_RESTRICT d_challenge, gl64_t * GPU_RESTRICT d_ppar, Goldilocks::Element omega_inv, uint64_t shift_, uint64_t W_, uint64_t nBitsExt, uint64_t prevBits, uint64_t currentBits)
 {
 
     extern __shared__ gl64_t s_twiddles[];
@@ -691,6 +698,90 @@ __global__ void fold(uint64_t step, gl64_t *friPol, gl64_t *d_challenge, gl64_t 
     }
 }
 
+// R2-P1: fold_v2 with precomputed invShift and invW
+#if defined(ENABLE_FOLD_V2) || (defined(OPT_LEVEL) && OPT_LEVEL >= 3)
+GPU_LAUNCH_BOUNDS(256, 2)
+__global__ void fold_v2(uint64_t step, gl64_t * GPU_RESTRICT friPol, gl64_t * GPU_RESTRICT d_challenge, gl64_t * GPU_RESTRICT d_ppar, Goldilocks::Element omega_inv, uint64_t invShift_precomp, uint64_t invW_precomp, uint64_t prevBits, uint64_t currentBits)
+{
+    extern __shared__ gl64_t s_twiddles[];
+    if (threadIdx.x == 0) {
+        uint64_t halfRatio = (1 << (prevBits - currentBits)) >> 1;
+        s_twiddles[0] = gl64_t(uint64_t(1));
+        for (uint32_t i = 1; i < halfRatio; i++) {
+            s_twiddles[i] = s_twiddles[i - 1] * gl64_t(omega_inv.fe);
+        }
+    }
+    __syncthreads();
+
+    uint32_t polBits = prevBits;
+    uint64_t sizePol = 1 << polBits;
+    uint32_t foldedPolBits = currentBits;
+    uint64_t sizeFoldedPol = 1 << foldedPolBits;
+    uint32_t ratio = sizePol / sizeFoldedPol;
+
+    int id = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (id < sizeFoldedPol)
+    {
+        gl64_t invShift(invShift_precomp);
+        gl64_t invW(invW_precomp);
+
+        gl64_t sinv = invShift;
+        gl64_t base = invW;
+        uint32_t exponent = id;
+
+        while (exponent > 0)
+        {
+            if (exponent % 2 == 1)
+            {
+                sinv *= base;
+            }
+            base *= base;
+            exponent /= 2;
+        }
+
+        gl64_t *ppar = (gl64_t *)d_ppar + id * ratio * FIELD_EXTENSION;
+        for (int i = 0; i < ratio; i++)
+        {
+            int ind = i * FIELD_EXTENSION;
+            for (int k = 0; k < FIELD_EXTENSION; k++)
+            {
+                ppar[ind + k] = gl64_t(friPol[(i * sizeFoldedPol + id) * FIELD_EXTENSION + k]);
+            }
+        }
+        intt_tinny(ppar, ratio, prevBits - currentBits, s_twiddles, FIELD_EXTENSION);
+
+        gl64_t r(1);
+        for (uint64_t i = 0; i < ratio; i++)
+        {
+            Goldilocks3GPU::Element *component = (Goldilocks3GPU::Element *)&ppar[i * FIELD_EXTENSION];
+            Goldilocks3GPU::mul(*component, *component, r);
+            r *= sinv;
+        }
+        if (ratio == 0)
+        {
+            for (uint32_t i = 0; i < FIELD_EXTENSION; i++)
+            {
+                friPol[id * FIELD_EXTENSION + i]= gl64_t(uint64_t(0));
+            }
+        }
+        else
+        {
+            for (uint32_t i = 0; i < FIELD_EXTENSION; i++)
+            {
+                friPol[id * FIELD_EXTENSION + i] = ppar[(ratio - 1) * FIELD_EXTENSION + i];
+            }
+            for (int i = ratio - 2; i >= 0; i--)
+            {
+                Goldilocks3GPU::Element aux;
+                Goldilocks3GPU::mul(aux, *((Goldilocks3GPU::Element *)&friPol[id * FIELD_EXTENSION]), *((Goldilocks3GPU::Element *)&d_challenge[0]));
+                Goldilocks3GPU::add(*((Goldilocks3GPU::Element *)&friPol[id * FIELD_EXTENSION]), aux, *((Goldilocks3GPU::Element *)&ppar[i * FIELD_EXTENSION]));
+            }
+        }
+    }
+}
+#endif
+
 void fold_inplace(uint64_t step, uint64_t friPol_offset, uint64_t offset_helper, Goldilocks::Element *d_challenge, uint64_t nBitsExt, uint64_t prevBits, uint64_t currentBits, gl64_t *d_aux_trace, TimerGPU &timer, cudaStream_t stream)
 {
 
@@ -702,12 +793,22 @@ void fold_inplace(uint64_t step, uint64_t friPol_offset, uint64_t offset_helper,
     uint64_t sizeFoldedPol = 1 << currentBits;
 
     Goldilocks::Element omega_inv = omegas_inv_[prevBits - currentBits];
-    
+
     dim3 nThreads(256);
-    dim3 nBlocks((sizeFoldedPol) + nThreads.x - 1 / nThreads.x);
+    dim3 nBlocks((sizeFoldedPol + nThreads.x - 1) / nThreads.x);
     size_t sharedMem = halfRatio * sizeof(gl64_t);
     TimerStartCategoryGPU(timer, FRI);
+    // R2-P1: fold_v2 with precomputed inverses
+    // invShift must be (1/shift)^(2^(nBitsExt-prevBits)), not just 1/shift
+#if defined(ENABLE_FOLD_V2) || (defined(OPT_LEVEL) && OPT_LEVEL >= 3)
+    {
+        Goldilocks::Element invShift_precomp = Goldilocks::exp(Goldilocks::inv(Goldilocks::shift()), 1ULL << (nBitsExt - prevBits));
+        Goldilocks::Element invW_precomp = Goldilocks::inv(Goldilocks::w(prevBits));
+        fold_v2<<<nBlocks, nThreads, sharedMem, stream>>>(step, d_friPol, (gl64_t *)d_challenge, d_ppar, omega_inv, invShift_precomp.fe, invW_precomp.fe, prevBits, currentBits);
+    }
+#else
     fold<<<nBlocks, nThreads, sharedMem, stream>>>(step, d_friPol, (gl64_t *)d_challenge, d_ppar, omega_inv, Goldilocks::shift().fe, Goldilocks::w(prevBits).fe, nBitsExt, prevBits, currentBits);
+#endif
     TimerStopCategoryGPU(timer, FRI);
     CHECKCUDAERR(cudaGetLastError());
 }

@@ -1,0 +1,32 @@
+airtemplate Test(int N = 2**16) {
+    col witness a,b,c,d;
+    col fixed L1 = [1,0...];
+
+    int _a = 18;
+    expr conn[2][4];
+    // conn[0] = [[L1,3,6,0],[a,1,c,0]:2];
+    conn[0] = [b,3,c,0];
+    conn[1] = [a,1,c,0];
+
+    expr e1 = a;
+    assert_eq(string(e1), "Test.a");
+    assert_eq(string(conn[0][0]), "Test.b");
+    assert_eq(string(conn[0][1]), "3");
+    assert_eq(string(conn[0][2]), "Test.c");
+    assert_eq(string(conn[0][3]), "0");
+    assert_eq(string(conn[1][0]), "Test.a");
+    assert_eq(string(conn[1][1]), "1");
+    assert_eq(string(conn[1][2]), "Test.c");
+    assert_eq(string(conn[1][3]), "0");
+
+
+    assert_eq(string(conn[0]), "Test.b,3,Test.c,0");
+    assert_eq(string(conn[1]), "Test.a,1,Test.c,0");
+    conn[0] = conn[1];
+    assert_eq(string(conn[0]), "Test.a,1,Test.c,0");
+    assert_eq(string(conn[1]), "Test.a,1,Test.c,0");
+}
+
+airgroup ArrayOfAssign {
+    Test(2**10);
+}

@@ -1,0 +1,21 @@
+airtemplate NamedParams(const int bits = 10,
+                        const int N = 2**23) {
+
+    if (!defined(inc)) {
+        function inc (int a = 0, int b = 100, int c = 1000):int {
+            int res = a + 2 * b + 4 * c;
+            c = 8000;
+            return res;
+        }
+    }
+    
+    println(bits);
+    println(N);
+}
+
+
+airgroup NamedParams {
+    NamedParams(bits: 12, N: 2**16);
+    NamedParams(bits: 14, N: 2**18);
+}
+

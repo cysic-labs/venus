@@ -56,7 +56,30 @@ WITNESS_LIB := ./witness_lib
 CXX := g++
 AS := nasm
 ASFLAGS := -f elf64
-NVCCFLAGS := -std=c++17 -Xcompiler -fPIC -Xcompiler -mavx2 -O3 -arch=$(CUDA_ARCH) -DGL64_PARTIALLY_REDUCED -D__AVX2__ -D__USE_ASSEMBLY__
+OPT_LEVEL ?= 0
+NVCCFLAGS := -std=c++17 -Xcompiler -fPIC -Xcompiler -mavx2 -O3 -arch=$(CUDA_ARCH) -DGL64_PARTIALLY_REDUCED -D__AVX2__ -D__USE_ASSEMBLY__ -DOPT_LEVEL=$(OPT_LEVEL)
+
+# P2: Enhanced NVCC optimization flags at OPT_LEVEL >= 1
+ifeq ($(shell test $(OPT_LEVEL) -ge 1 && echo yes),yes)
+    NVCCFLAGS += --extra-device-vectorization -Xptxas -O3
+endif
+
+# R4-P1: Cherry-picked OPT_3 features at OPT_LEVEL >= 4
+# Enables fold_v2 and adaptive chunks WITHOUT GPU_RESTRICT
+ifeq ($(shell test $(OPT_LEVEL) -ge 4 && echo yes),yes)
+    NVCCFLAGS += -DENABLE_FOLD_V2 -DENABLE_ADAPTIVE_CHUNKS
+endif
+
+# R3-P3: Print register usage per kernel at OPT_LEVEL >= 5 for profiling
+ifeq ($(shell test $(OPT_LEVEL) -ge 5 && echo yes),yes)
+    NVCCFLAGS += -Xptxas=-v
+endif
+
+# P5: Cooperative kernel support at OPT_LEVEL >= 2
+# Note: CUDA 13.1+ does not require -rdc=true for cooperative groups when all
+# device code is in the same translation unit. Avoiding -rdc=true prevents
+# breakage of cudaMemcpyToSymbol and kernel launch issues.
+NVCCFLAGS_RDC :=
 
 # Use the following flag to solve amxtileintrin.h incompatibility or use PROOFMAN_HOST_COMPILER_BIN variable to set the host compiler
 # NVCCFLAGS += --compiler-bindir=/usr/bin/g++-10
@@ -224,7 +247,7 @@ $(BUILD_DIR_GPU)/%.cc.o: %.cc
 $(BUILD_DIR)/$(TARGET_BINFILE): $(OBJS_BINFILE)
 	$(CXX) $(OBJS_BINFILE) $(CXXFLAGS) -o $(BUILD_DIR)/$(TARGET_BIN_FILE) $(LDFLAGS) $(LDFLAGS_EXT) $(CFLAGS) $(CPPFLAGS) $(CXXFLAGS) 
 
-# cuda source
+# cuda source (general rule)
 $(BUILD_DIR_GPU)/%.cu.o: %.cu
 	$(MKDIR_P) $(dir $@)
 	$(NVCC) -D__USE_CUDA__ $(NVCCFLAGS) $(CPPFLAGS) -c $< -o $@

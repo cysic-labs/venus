@@ -26,12 +26,12 @@
 
 __global__ void br_ntt_8_steps(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size, uint32_t log_domain_size, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t col_min, uint32_t col_max);
 __global__ void br_ntt_8_steps_blocks(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize);
-__global__ void br_ntt_batch_steps_blocks_par(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize);
-__global__ void br_ntt_batch_steps_blocks_par_dif( gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize);
-__global__ void br_ntt_batch_steps_blocks_par2(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize);
-__global__ void br_ntt_batch_steps_blocks_par_noBR(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor);
-__global__ void br_ntt_batch_steps_blocks_par_dif_noBR( gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor);
-__global__ void br_ntt_batch_steps_blocks_par_dif_noBR_compact( gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor);
+__global__ void br_ntt_batch_steps_blocks_par(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize);
+__global__ void br_ntt_batch_steps_blocks_par_dif(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize);
+__global__ void br_ntt_batch_steps_blocks_par2(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize);
+__global__ void br_ntt_batch_steps_blocks_par_noBR(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor);
+__global__ void br_ntt_batch_steps_blocks_par_dif_noBR(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor);
+__global__ void br_ntt_batch_steps_blocks_par_dif_noBR_compact(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor);
 
 __global__ void br_ntt_group(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t stage, uint32_t domain_size, uint32_t log_domain_size, uint32_t nCols, bool inverse, bool extend, uint64_t maxLogDomainSize);
 
@@ -51,36 +51,32 @@ void ntt_cuda_blocks_par1_noBR( gl64_t *data, gl64_t **d_r_, gl64_t **d_fwd_twid
 void ntt_cuda_blocks_par1_noBR_compact( gl64_t *data, gl64_t **d_r_, gl64_t **d_fwd_twiddle_factors, gl64_t **d_inv_twiddle_factors, uint32_t log_domain_size_in, uint32_t log_domain_size_out, uint32_t nCols, bool inverse, bool extend, cudaStream_t stream, uint64_t maxLogDomainSize);
 void ntt_cuda_blocks_par2_noBR( gl64_t *data, gl64_t **d_r_, gl64_t **d_fwd_twiddle_factors, gl64_t **d_inv_twiddle_factors, uint32_t log_domain_size_in, uint32_t log_domain_size_out, uint32_t nCols, bool inverse, bool extend, cudaStream_t stream, uint64_t maxLogDomainSize);
 
-__global__ void applyS(gl64_t *d_cmQ, gl64_t *d_q, gl64_t *d_S, Goldilocks::Element shiftIn, uint64_t N, uint64_t NExtended, uint64_t extendBits, uint64_t qDeg, uint64_t qDim)
+// R4-P2: Register-local applyS (unconditional) — computes S_p iteratively per-thread,
+// avoids d_S global memory allocation and redundant writes from baseline version.
+// R4-P3: Zero-fill of extension rows removed — handled by cudaMemsetAsync before launch.
+__global__ void applyS(gl64_t *d_cmQ, gl64_t *d_q, Goldilocks::Element shiftIn, uint64_t N, uint64_t NExtended, uint64_t extendBits, uint64_t qDeg, uint64_t qDim)
 {
-    d_S[0] = gl64_t(uint64_t(1));
-    for(uint64_t i = 1; i < qDeg; ++i) {
-        d_S[i] = gl64_t(shiftIn.fe) * d_S[i - 1];
-    }
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= N)
         return;
 
+    gl64_t S_p = gl64_t(uint64_t(1));
+    gl64_t shiftIn_gl = gl64_t(shiftIn.fe);
     for (uint64_t p = 0; p < qDeg; p++)
-    {      
+    {
         Goldilocks3GPU::Element src;
         src[0] = d_q[getBufferOffsetRowMajor(row + p * N, 0, NExtended, qDim)];
         src[1] = d_q[getBufferOffsetRowMajor(row + p * N, 1, NExtended, qDim)];
         src[2] = d_q[getBufferOffsetRowMajor(row + p * N, 2, NExtended, qDim)];
 
         Goldilocks3GPU::Element dst;
-        
         Goldilocks3GPU::mul((Goldilocks3GPU::Element &)dst,
                             (Goldilocks3GPU::Element &)src,
-                            d_S[p]);
+                            S_p);
         d_cmQ[getBufferOffsetRowMajor(row, p * qDim, NExtended, qDeg * qDim)] = dst[0];
         d_cmQ[getBufferOffsetRowMajor(row, p * qDim + 1, NExtended, qDeg * qDim)] = dst[1];
         d_cmQ[getBufferOffsetRowMajor(row, p * qDim + 2, NExtended, qDeg * qDim)] = dst[2];
-        for (uint64_t j = 1; j < (1 << extendBits); j++) {
-            d_cmQ[getBufferOffsetRowMajor(row + j * N, p * qDim, NExtended, qDeg * qDim)] = gl64_t(uint64_t(0));
-            d_cmQ[getBufferOffsetRowMajor(row + j * N, p * qDim + 1, NExtended, qDeg * qDim)] = gl64_t(uint64_t(0));
-            d_cmQ[getBufferOffsetRowMajor(row + j * N, p * qDim + 2, NExtended, qDeg * qDim)] = gl64_t(uint64_t(0));
-        }
+        S_p = S_p * shiftIn_gl;
     }
 }
 
@@ -107,7 +103,7 @@ void NTT_Goldilocks_GPU::prepare_blocks_trace(
     TimerGPU &timer
 ) {
     if (nCols == 0 || nRows == 0) return;
-    dim3 block(TILE_HEIGHT, TILE_WIDTH);
+    dim3 block(TILE_BLOCK_HEIGHT, TILE_WIDTH);
     dim3 grid((nRows + block.x - 1) / block.x,
              (nCols + block.y - 1) / block.y);
     int sharedMemSize = block.x * block.y * sizeof(gl64_t);
@@ -115,36 +111,51 @@ void NTT_Goldilocks_GPU::prepare_blocks_trace(
     CHECKCUDAERR(cudaGetLastError());
 }
 
+// P4-FIX: In-place transpose kernels use 1D blocks of TILE_HEIGHT threads
+// looping over columns, so each block covers a full tile and avoids inter-block
+// race conditions when TILE_BLOCK_HEIGHT < TILE_HEIGHT (i.e. TILE_WIDTH=8).
 __global__ void transposeSubBlocksInPlace(gl64_t * data, uint64_t nRows, uint64_t nCols)
-{ 
+{
     extern __shared__ gl64_t shared[];
 
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    int col = blockIdx.y * blockDim.y + threadIdx.y;
-    if (row >= nRows || col >= nCols)
-        return;
+    uint64_t row = blockIdx.x * TILE_HEIGHT + threadIdx.x;
+    if (row >= nRows) return;
 
-    uint64_t offset_src = getBufferOffsetRowMajor(row, col, nRows, nCols);
-    shared[threadIdx.y * blockDim.x + threadIdx.x] = data[offset_src];
+    uint64_t colStart = blockIdx.y * TILE_WIDTH;
+    uint64_t nCols_local = (nCols - colStart < TILE_WIDTH)
+                           ? (nCols - colStart) : (uint64_t)TILE_WIDTH;
+
+    for (uint64_t c = 0; c < nCols_local; c++) {
+        uint64_t offset_src = getBufferOffsetRowMajor(row, colStart + c, nRows, nCols);
+        shared[c * TILE_HEIGHT + threadIdx.x] = data[offset_src];
+    }
     __syncthreads();
-    uint64_t offset_dst = getBufferOffset(row, col, nRows, nCols);
-    data[offset_dst] = shared[threadIdx.y * blockDim.x + threadIdx.x];
+    for (uint64_t c = 0; c < nCols_local; c++) {
+        uint64_t offset_dst = getBufferOffset(row, colStart + c, nRows, nCols);
+        data[offset_dst] = shared[c * TILE_HEIGHT + threadIdx.x];
+    }
 }
 
 __global__ void transposeSubBlocksBackInPlace(gl64_t *data, uint64_t nRows, uint64_t nCols)
 {
     extern __shared__ gl64_t shared[];
 
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    int col = blockIdx.y * blockDim.y + threadIdx.y;
-    if (row >= nRows || col >= nCols)
-        return;
+    uint64_t row = blockIdx.x * TILE_HEIGHT + threadIdx.x;
+    if (row >= nRows) return;
 
-    uint64_t offset_src = getBufferOffset(row, col, nRows, nCols);
-    shared[threadIdx.y * blockDim.x + threadIdx.x] = data[offset_src];
+    uint64_t colStart = blockIdx.y * TILE_WIDTH;
+    uint64_t nCols_local = (nCols - colStart < TILE_WIDTH)
+                           ? (nCols - colStart) : (uint64_t)TILE_WIDTH;
+
+    for (uint64_t c = 0; c < nCols_local; c++) {
+        uint64_t offset_src = getBufferOffset(row, colStart + c, nRows, nCols);
+        shared[c * TILE_HEIGHT + threadIdx.x] = data[offset_src];
+    }
     __syncthreads();
-    uint64_t offset_dst = getBufferOffsetRowMajor(row, col, nRows, nCols);
-    data[offset_dst] = shared[threadIdx.y * blockDim.x + threadIdx.x];
+    for (uint64_t c = 0; c < nCols_local; c++) {
+        uint64_t offset_dst = getBufferOffsetRowMajor(row, colStart + c, nRows, nCols);
+        data[offset_dst] = shared[c * TILE_HEIGHT + threadIdx.x];
+    }
 }
 
 //Assumes src and dst buffers are disjoint
@@ -240,26 +251,29 @@ void NTT_Goldilocks_GPU::computeQ_inplace(Goldilocks::Element *d_tree, uint64_t 
 
     uint64_t N = 1 << n_bits;
     uint64_t NExtended = 1 << n_bits_ext;
-    gl64_t* d_S = d_aux_trace + offset_helper;
     gl64_t *d_q = d_aux_trace + offset_q;
     gl64_t *d_cmQ = d_aux_trace + offset_cmQ;
 
-    // Intt
-    dim3 block(TILE_HEIGHT, TILE_WIDTH);
-    dim3 grid0((NExtended + block.x - 1) / block.x,
-             (qDim + block.y - 1) / block.y);
-    int sharedMemSize = block.x * block.y * sizeof(gl64_t);
-    transposeSubBlocksBackInPlace<<<grid0, block, sharedMemSize, stream>>>(d_q, NExtended, qDim);
+    // Intt — P4-FIX: in-place transpose uses 1D blocks of TILE_HEIGHT
+    dim3 block_ip(TILE_HEIGHT);
+    int sharedMemSize_ip = TILE_HEIGHT * TILE_WIDTH * sizeof(gl64_t);
+    dim3 grid_ip0((NExtended + TILE_HEIGHT - 1) / TILE_HEIGHT,
+                  (qDim + TILE_WIDTH - 1) / TILE_WIDTH);
+    transposeSubBlocksBackInPlace<<<grid_ip0, block_ip, sharedMemSize_ip, stream>>>(d_q, NExtended, qDim);
     ntt_cuda_blocks_par(d_q, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits_ext, n_bits_ext, qDim, true, false, stream, maxLogDomainSize);
+
+    // R4-P3: Pre-zero cmQ buffer — faster than per-thread zero-fill in kernel
+    uint64_t cmQ_size = NExtended * nCols * sizeof(gl64_t);
+    cudaMemsetAsync(d_cmQ, 0, cmQ_size, stream);
 
     dim3 threads(TILE_HEIGHT, 1, 1);
     dim3 blocks((N + threads.x - 1) / threads.x, 1, 1);
-    applyS<<<blocks, threads, 0, stream>>>(d_cmQ, d_q, d_S, shiftIn, N, NExtended, n_bits_ext - n_bits, qDeg, qDim);
+    applyS<<<blocks, threads, 0, stream>>>(d_cmQ, d_q, shiftIn, N, NExtended, n_bits_ext - n_bits, qDeg, qDim);
 
-    dim3 grid1((NExtended + block.x - 1) / block.x,
-             (nCols + block.y - 1) / block.y);
+    dim3 grid_ip1((NExtended + TILE_HEIGHT - 1) / TILE_HEIGHT,
+                  (nCols + TILE_WIDTH - 1) / TILE_WIDTH);
     ntt_cuda_blocks_par(d_cmQ, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits_ext, n_bits_ext, nCols, false, false, stream, maxLogDomainSize);
-    transposeSubBlocksInPlace<<<grid1, block, sharedMemSize, stream>>>(d_cmQ, NExtended, nCols);
+    transposeSubBlocksInPlace<<<grid_ip1, block_ip, sharedMemSize_ip, stream>>>(d_cmQ, NExtended, nCols);
 
     TimerStopCategoryGPU(timer, NTT);
     TimerStartCategoryGPU(timer, MERKLE_TREE);
@@ -301,30 +315,33 @@ void NTT_Goldilocks_GPU::LDE_MerkleTree_GPU(Goldilocks::Element *d_tree, gl64_t 
     uint64_t ext_size = 1 << n_bits_ext;    
     gl64_t *d_dst_ntt_ = &d_dst_ntt[offset_dst_ntt];
     gl64_t *d_src_ntt_ = &d_src_ntt[offset_src_ntt];
-    dim3 block(TILE_HEIGHT, TILE_WIDTH);
+    dim3 block(TILE_BLOCK_HEIGHT, TILE_WIDTH);
     dim3 grid0((size + block.x - 1) / block.x,
              (nCols + block.y - 1) / block.y);
     int sharedMemSize = block.x * block.y * sizeof(gl64_t);
 
 #if 1
     transposeSubBlocksBack_noBR_compact<<<grid0, block, sharedMemSize, stream>>>(d_src_ntt_, n_bits, d_dst_ntt_, n_bits_ext, nCols);
-    ntt_cuda_blocks_par1_noBR_compact(d_dst_ntt_, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits, n_bits_ext, nCols, true, true, stream, maxLogDomainSize); 
+    ntt_cuda_blocks_par1_noBR_compact(d_dst_ntt_, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits, n_bits_ext, nCols, true, true, stream, maxLogDomainSize);
     ntt_cuda_blocks_par2_noBR(d_dst_ntt_, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits_ext, n_bits_ext, nCols, false, false, stream, maxLogDomainSize);
 #endif
 
 #if 0
     transposeSubBlocksBack_noBR<<<grid0, block, sharedMemSize, stream>>>(d_src_ntt_, n_bits, d_dst_ntt_, n_bits_ext, nCols);
-    ntt_cuda_blocks_par1_noBR(d_dst_ntt_, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits, n_bits_ext, nCols, true, true, stream, maxLogDomainSize); 
+    ntt_cuda_blocks_par1_noBR(d_dst_ntt_, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits, n_bits_ext, nCols, true, true, stream, maxLogDomainSize);
     ntt_cuda_blocks_par2_noBR(d_dst_ntt_, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits_ext, n_bits_ext, nCols, false, false, stream, maxLogDomainSize);
 #endif
 #if 0
     transposeSubBlocksBack<<<grid0, block, sharedMemSize, stream>>>(d_src_ntt_, n_bits, d_dst_ntt_, n_bits_ext, nCols);
-    ntt_cuda_blocks_par(d_dst_ntt_, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits, n_bits_ext, nCols, true, true, stream, maxLogDomainSize); 
+    ntt_cuda_blocks_par(d_dst_ntt_, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits, n_bits_ext, nCols, true, true, stream, maxLogDomainSize);
     ntt_cuda_blocks_par(d_dst_ntt_, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits_ext, n_bits_ext, nCols, false, false, stream, maxLogDomainSize);
 #endif
-    dim3 grid1((ext_size + block.x - 1) / block.x,
-             (nCols + block.y - 1) / block.y);
-    transposeSubBlocksInPlace<<<grid1, block, sharedMemSize, stream>>>(d_dst_ntt_, ext_size, nCols);
+    // P4-FIX: in-place transpose uses 1D blocks of TILE_HEIGHT
+    dim3 block_ip(TILE_HEIGHT);
+    int sharedMemSize_ip = TILE_HEIGHT * TILE_WIDTH * sizeof(gl64_t);
+    dim3 grid1((ext_size + TILE_HEIGHT - 1) / TILE_HEIGHT,
+               (nCols + TILE_WIDTH - 1) / TILE_WIDTH);
+    transposeSubBlocksInPlace<<<grid1, block_ip, sharedMemSize_ip, stream>>>(d_dst_ntt_, ext_size, nCols);
     TimerStopCategoryGPU(timer, NTT);
     TimerStartCategoryGPU(timer, MERKLE_TREE);
     switch (arity)
@@ -362,13 +379,14 @@ void NTT_Goldilocks_GPU::INTT_inplace(gl64_t *dst, u_int64_t n_bits, u_int64_t n
 
     uint64_t N = 1 << n_bits;
 
-    dim3 block_0(TILE_HEIGHT, TILE_WIDTH);
-    dim3 grid_0((N + block_0.x - 1) / block_0.x,
-             (nCols + block_0.y - 1) / block_0.y);
-    int sharedMemSize_0 = block_0.x * block_0.y * sizeof(gl64_t);
-    transposeSubBlocksBackInPlace<<<grid_0, block_0, sharedMemSize_0, stream>>>(dst, N, nCols);
+    // P4-FIX: in-place transpose uses 1D blocks of TILE_HEIGHT
+    dim3 block_ip(TILE_HEIGHT);
+    dim3 grid_ip((N + TILE_HEIGHT - 1) / TILE_HEIGHT,
+                 (nCols + TILE_WIDTH - 1) / TILE_WIDTH);
+    int sharedMemSize_ip = TILE_HEIGHT * TILE_WIDTH * sizeof(gl64_t);
+    transposeSubBlocksBackInPlace<<<grid_ip, block_ip, sharedMemSize_ip, stream>>>(dst, N, nCols);
     ntt_cuda_blocks_par(dst, d_r, d_fwd_twiddle_factors, d_inv_twiddle_factors, n_bits, n_bits, nCols, true, false, stream, maxLogDomainSize);
-    transposeSubBlocksInPlace<<<grid_0, block_0, sharedMemSize_0, stream>>>(dst, N, nCols);
+    transposeSubBlocksInPlace<<<grid_ip, block_ip, sharedMemSize_ip, stream>>>(dst, N, nCols);
 }
 
 // Static member definitions
@@ -701,7 +719,7 @@ __global__ void br_ntt_8_steps(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint
     }   
 }
 
-__global__ void br_ntt_batch_steps_blocks_par(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize)
+__global__ void br_ntt_batch_steps_blocks_par(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize)
 {
     __shared__ gl64_t tile[BATCH_HEIGHT * BATCH_WIDTH];
 
@@ -775,7 +793,7 @@ __global__ void br_ntt_batch_steps_blocks_par(gl64_t *data, gl64_t *twiddles, gl
     } 
 }
 
-__global__ void br_ntt_batch_steps_blocks_par_noBR(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor)
+__global__ void br_ntt_batch_steps_blocks_par_noBR(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor)
 {
     __shared__ gl64_t tile[BATCH_HEIGHT * BATCH_WIDTH];
 
@@ -849,7 +867,7 @@ __global__ void br_ntt_batch_steps_blocks_par_noBR(gl64_t *data, gl64_t *twiddle
     } 
 }
 
-__global__ void br_ntt_batch_steps_blocks_par_dif( gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize)
+__global__ void br_ntt_batch_steps_blocks_par_dif(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize)
 {
     __shared__ gl64_t tile[BATCH_HEIGHT * BATCH_WIDTH];
 
@@ -936,7 +954,7 @@ __global__ void br_ntt_batch_steps_blocks_par_dif( gl64_t *data, gl64_t *twiddle
     }
 }
 
-__global__ void br_ntt_batch_steps_blocks_par_dif_noBR( gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor)
+__global__ void br_ntt_batch_steps_blocks_par_dif_noBR(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor)
 {
     __shared__ gl64_t tile[BATCH_HEIGHT * BATCH_WIDTH];
 
@@ -1025,7 +1043,7 @@ __global__ void br_ntt_batch_steps_blocks_par_dif_noBR( gl64_t *data, gl64_t *tw
     }
 }
 
-__global__ void br_ntt_batch_steps_blocks_par_dif_noBR_compact( gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor)
+__global__ void br_ntt_batch_steps_blocks_par_dif_noBR_compact(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize, uint32_t blowupFactor)
 {
     __shared__ gl64_t tile[BATCH_HEIGHT * BATCH_WIDTH];
 
@@ -1121,7 +1139,7 @@ __global__ void br_ntt_batch_steps_blocks_par_dif_noBR_compact( gl64_t *data, gl
 }
 
 
-__global__ void br_ntt_batch_steps_blocks_par2(gl64_t *data, gl64_t *twiddles, gl64_t* d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize)
+__global__ void br_ntt_batch_steps_blocks_par2(gl64_t * GPU_RESTRICT data, gl64_t * GPU_RESTRICT twiddles, gl64_t * GPU_RESTRICT d_r, uint32_t domain_size_in, uint32_t log_domain_size_in, uint32_t domain_size_out, uint32_t nCols, uint32_t base_step, bool suffle, bool inverse, bool extend, uint64_t maxLogDomainSize)
 {
     __shared__ gl64_t tile[BATCH_HEIGHT * BATCH_WIDTH];
 

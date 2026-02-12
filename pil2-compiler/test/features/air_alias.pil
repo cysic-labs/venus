@@ -1,0 +1,15 @@
+airtemplate MyAir(int N = 2**16) {
+    const int n2 = N * 2;
+}
+
+airgroup MyGroup {
+    MyAir();
+    MyAir() alias MySecondAir;
+    MyAir() alias "My3thAir";
+    string name = "4th";
+    MyAir() alias `My${name}Air`;
+}
+
+airgroup MyGroup2 {
+    MyAir() alias MySecondSecondAir;
+}

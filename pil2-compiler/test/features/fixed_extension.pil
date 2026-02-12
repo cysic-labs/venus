@@ -1,0 +1,140 @@
+const int EXT_OP = 6;
+const int BINARY_EXTENSION_TABLE_ID = 124;
+
+const int P2_6 = 2**6;
+const int P2_7 = 2**7;
+const int P2_8 = 2**8;
+const int P2_9 = 2**9;
+const int P2_10 = 2**10;
+const int P2_11 = 2**11;
+const int P2_12 = 2**12;
+const int P2_13 = 2**13;
+const int P2_14 = 2**14;
+const int P2_15 = 2**15;
+const int P2_16 = 2**16;
+const int P2_17 = 2**17;
+const int P2_18 = 2**18;
+const int P2_19 = 2**19;
+
+const int P2_63 = 2**63;
+const int P2_64 = 2**64;
+
+const int P2_7_MASK = 2**7 - 1;
+const int P2_32_MASK = 2**32 - 1;
+const int P2_63_MASK = 2**63 - 1;
+
+airtemplate BinaryExtensionTable(const int N = 2**19) {
+    
+    col witness multiplicity;
+
+    if (N < 2**19) {
+        error("N must be at least 2^19");
+    }
+
+    const int bits = 64;
+    const int bytes = bits / 8;
+
+    #pragma memory print
+    #pragma memory m1 start
+    #pragma timer t1 start
+
+    col fixed A = [0..255]...;                              // Input A    (8 bits)
+
+    col fixed B = [[0:P2_8..63:P2_8]:3*bytes,
+                   0:(P2_8*4*bytes)]...;                    // Input B    (6 bits)
+
+    col fixed OFFSET = [[0:P2_14..(bytes-1):P2_14]:3,       // Offset     (3 bits)
+                        [0:P2_8..(bytes-1):P2_8]:4]...;
+
+    const int OP[N] = [13:P2_17..15:P2_17,                       // OP         (3 bits)
+                       36:P2_11..39:P2_11]...;
+
+    #pragma timer t1 end
+    #pragma memory print
+
+    #pragma fixed_dump A dump_ext_A.bin byte 
+    #pragma fixed_dump B dump_ext_B.bin byte 
+    #pragma fixed_dump OFFSET dump_ext_OFFSET.bin byte 
+    #pragma fixed_dump OP dump_ext_OP.bin byte 
+
+    #pragma timer t2 start
+
+    #pragma fixed_size dword
+    col fixed C0;                                           // Output C0  (32 bits)
+
+    #pragma fixed_size dword 
+    col fixed C1;                                           // Output C1  (32 bits)
+
+    #pragma transpile
+    for (int i = 0; i < N; i++) {
+        int [op, offset, a, b] = [OP[i], OFFSET[i], A[i], B[i]];
+        int _out = 0;
+        switch (op) {
+            case 0x0d: // SLL,SLL_W
+                _out = a << b;
+                _out = _out << 8*offset;
+
+            case 0x0e: // SRL,SRL_W
+                _out = a << 8*offset;
+                _out = _out >> b;
+
+            case 0x0f: // SRA,SRA_W
+                // Compute two's complement
+                _out = a & 0x80 ? a - 0x100 : a;
+
+                // Compute the shift
+                _out = _out << 8*offset;
+                _out = _out >> b;
+
+                // Convert back to two's complement
+                _out = _out < 0 ? ((_out & P2_63_MASK) + P2_63) : _out;
+
+            case 0x24: // SE_B
+                if (offset == 0) {
+                    _out = a & P2_7 ? (P2_7 | (a & P2_7_MASK)) : (a & P2_7_MASK);
+                } else {
+                    _out = a & P2_7 ? 0xFF00 << (8*(offset - 1)) : 0;
+                }
+
+            case 0x25: // SE_H
+                if (offset == 0) {
+                    _out = a
+                } else if (offset == 1) {
+                    _out = a & P2_7 ? (P2_7 | (a & P2_7_MASK)) : (a & P2_7_MASK);
+                    _out = _out << 8;
+                } else {
+                    _out = a & P2_7 ? 0xFF0000 << (8*(offset - 2)) : 0;
+                }
+
+            case 0x26: // SE_W
+                if (offset < 3) {
+                    _out = a << (8*offset);
+                } else if (offset == 3) {
+                    _out = a & P2_7 ? (P2_7 | (a & P2_7_MASK)) : (a & P2_7_MASK);
+                    _out = _out << 24;
+                } else {
+                    _out = a & P2_7 ? 0xFF00000000 << (8*(offset - 4)) : 0;
+                }
+
+            case 0x27: // EXT
+                _out = (a & 0x80) ? 0xFF : 0x00;
+                _out = _out << 8*offset;
+
+            default:
+                error(`Invalid operation ${op}`);
+        }
+
+        C0[i] = _out & P2_32_MASK;
+        C1[i] = (_out >> 32) & P2_32_MASK;
+    }
+    #pragma timer t2 end
+    #pragma memory print
+    #pragma memory m1 end
+
+    #pragma fixed_dump C0 dump_ext_C0.bin byte 
+    #pragma fixed_dump C1 dump_ext_C1.bin byte 
+}
+
+airgroup Binary {
+    BinaryExtensionTable();
+}

@@ -1,0 +1,7 @@
+airtemplate NegativeRange (const int N = 2**9) {
+    col fixed RANGE = [-300..10]...;
+}
+
+airgroup NegativeRange {
+    NegativeRange();
+}

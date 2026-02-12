@@ -1,0 +1,134 @@
+airtemplate CompareAlone(int N = 2**13) {
+    col witness a,b,c;
+
+    
+    println("expr:");
+
+    expr a1 = a;
+    expr b1 = b;
+    expr c1 = c;
+    expr a2 = a;
+    expr b2 = b;
+    expr c2 = c;
+
+    if (a1 == a2) {
+        println("a1==a2");
+    } else {
+        println("a1!=a2");
+    }
+
+    if (a1 == c2) {
+        println("a1?=c2");
+    } else {
+        println("a1!=c2");
+    }
+    println("const expr:");
+
+    const expr const_a1 = a;
+    const expr const_b1 = b;
+    const expr const_c1 = c;
+    const expr const_a2 = a;
+    const expr const_b2 = b;
+    const expr const_c2 = c;
+
+    if (const_a1 == const_a2) {
+        println("const_a1 == const_a2");
+    } else {
+        println("const_a1 != const_a2");
+    }
+
+    if (const_a1 == const_c2) {
+        println("const_a1 == const_c2");
+
+    } else {
+        println("const_a1 != const_c2");
+    }
+
+    if (const_a1 == a2) {
+        println("const_a1 == a2");
+    } else {
+        println("const_a1 != a2");
+    }
+
+    if (const_a1 == c2) {
+        println("const_a1 == c2");
+
+    } else {
+        println("const_a1 != c2");
+    }
+
+    if (const_a1 == a) {
+        println("const_a1 == a");
+    } else {
+        println("const_a1 != a");
+    }
+
+    if (const_a1 == c) {
+        println("const_a1 == c");
+
+    } else {
+        println("const_a1 != c");
+    }
+
+    connection_init(1, [a,b,c]);
+    println("BEGIN test WITHOUT return");
+    find_col_index(1, a);
+    println("END test WITHOUT return");
+    println("BEGIN test WITH return");
+    int res = find_col_index(1, a);
+    println("END test WITH return");
+    println("===> find_col_index(1, a)");
+    res = find_col_index(1, b);
+    println("===> find_col_index(1, b)", res);
+    res = find_col_index(1, c);
+    println("===> find_col_index(1, c)", res);
+}
+
+function connection_init(int opid, expr cols[]) {
+    const int cols_count = length(cols);
+
+    container air.std.connect alias conn {
+        int opids_count = 0;
+        int opids[10];
+    }
+
+    container air.std.connect.`id${opid}` alias connid {
+        int closed;
+        int cols_num = 0;
+        expr map_cols[10];
+    }
+
+    if (connid.cols_num == 0) {
+        connid.closed = 0;
+        connid.cols_num = cols_count;
+        conn.opids[conn.opids_count] = opid;
+        conn.opids_count = conn.opids_count + 1;
+    } else {
+        error(`Init of connect #${opid} has already been called`);
+    }
+
+    for (int i = 0; i < cols_count; i = i + 1) {
+        // Create a mapping of indexes to set a specific order of the columns the first time it is called
+        connid.map_cols[i] = cols[i];
+    }
+}
+
+function find_col_index(int opid, expr column): int {
+    println("CALL", opid,column);
+    use air.std.connect.`id${opid}`;
+
+    for (int i = 0; i < cols_num; i = i + 1) {
+        println("HEY",i,map_cols[i], column);
+        if (map_cols[i] == column) {
+            println("FOUND", i);
+            return i;
+            println("FOUND2", i);
+        }
+        println("LOOP", i);
+    }
+
+    error(`Column ${column} has not been found in connect #${opid}`);
+}
+airgroup CompareAlone {
+    CompareAlone();
+}

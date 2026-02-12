@@ -5,6 +5,8 @@
 #include "starks_api.hpp"
 #include "starks_api_internal.hpp"
 #include <cstring>
+#include <cstdlib>
+#include <sstream>
 #include <thread>
 
 #ifdef __USE_CUDA__
@@ -31,6 +33,363 @@ void reserveStream(DeviceCommitBuffers* d_buffers, uint32_t streamId);
 void closeStreamTimer(TimerGPU &timer, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, bool isProve);
 void get_proof(DeviceCommitBuffers *d_buffers, uint64_t streamId);
 void get_commit_root(DeviceCommitBuffers *d_buffers, uint64_t streamId);
+
+bool parse_env_bool(const char *value) {
+    if (value == nullptr || *value == '\0') return false;
+    if (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "FALSE") == 0 ||
+        strcmp(value, "off") == 0 || strcmp(value, "OFF") == 0 || strcmp(value, "no") == 0 ||
+        strcmp(value, "NO") == 0) {
+        return false;
+    }
+    return true;
+}
+
+bool is_cuda_graph_enabled() {
+    static const bool enabled = []() {
+#if defined(OPT_LEVEL) && OPT_LEVEL >= 1
+        // OPT_LEVEL >= 1: CUDA Graph always enabled (part of optimization bundle)
+        zklog.info("CUDA Graph mode enabled (OPT_LEVEL >= 1)");
+        return true;
+#else
+        // OPT_LEVEL < 1: preserve original behavior — enabled by default, env var override
+        const char *env_value = std::getenv("ZISK_CUDA_GRAPH");
+        const bool enabled_value = (env_value == nullptr) ? true : parse_env_bool(env_value);
+        if (enabled_value) {
+            zklog.info("CUDA Graph mode enabled");
+        } else {
+            zklog.info("CUDA Graph mode disabled by ZISK_CUDA_GRAPH");
+        }
+        return enabled_value;
+#endif
+    }();
+    return enabled;
+}
+
+uint32_t get_cuda_graph_capture_min_reuse() {
+    static const uint32_t min_reuse = []() {
+        uint32_t min_reuse_value = 3;
+        const char *env_value = std::getenv("ZISK_CUDA_GRAPH_MIN_REUSE");
+        if (env_value != nullptr && *env_value != '\0') {
+            long parsed = strtol(env_value, nullptr, 10);
+            if (parsed > 0 && parsed <= 128) {
+                min_reuse_value = static_cast<uint32_t>(parsed);
+            }
+        }
+        if (is_cuda_graph_enabled()) {
+            zklog.info("CUDA Graph capture min reuse set to " + std::to_string(min_reuse_value));
+        }
+        return min_reuse_value;
+    }();
+    return min_reuse;
+}
+
+bool should_log_cuda_graph_capture(uint64_t capture_count) {
+    return capture_count <= 8 || (capture_count % 64) == 0;
+}
+
+bool is_cuda_graph_verbose() {
+    static const bool verbose = parse_env_bool(std::getenv("ZISK_CUDA_GRAPH_VERBOSE"));
+    return verbose;
+}
+
+std::string build_cuda_graph_signature(
+    const SetupCtx *setupCtx,
+    const AirInstanceInfo *air_instance_info,
+    uint64_t airgroupId,
+    uint64_t airId,
+    const std::string &proofType,
+    gl64_t *d_aux_trace,
+    gl64_t *d_const_pols,
+    gl64_t *d_const_tree,
+    bool skipRecalculation,
+    bool recursive,
+    bool reuse_constants
+) {
+    std::ostringstream signature;
+    const StarkInfo &stark_info = setupCtx->starkInfo;
+    signature << proofType << "|" << airgroupId << "|" << airId << "|"
+              << stark_info.starkStruct.nBits << "|" << stark_info.starkStruct.nBitsExt << "|"
+              << stark_info.nStages << "|" << stark_info.starkStruct.nQueries << "|"
+              << (stark_info.starkStruct.hashCommits ? 1 : 0) << "|"
+              << (skipRecalculation ? 1 : 0) << "|" << (recursive ? 1 : 0) << "|"
+              << (reuse_constants ? 1 : 0) << "|"
+              << reinterpret_cast<uintptr_t>(setupCtx) << "|"
+              << reinterpret_cast<uintptr_t>(air_instance_info) << "|"
+              << reinterpret_cast<uintptr_t>(d_aux_trace) << "|"
+              << reinterpret_cast<uintptr_t>(d_const_pols) << "|"
+              << reinterpret_cast<uintptr_t>(d_const_tree);
+    return signature.str();
+}
+
+void invalidate_cuda_graph(StreamData &stream_data) {
+    if (stream_data.cuda_graph_ready || stream_data.cuda_graph != nullptr || stream_data.cuda_graph_exec != nullptr) {
+        stream_data.clear_cuda_graph();
+    }
+}
+
+void launch_proof_with_optional_cuda_graph(
+    SetupCtx &setupCtx,
+    gl64_t *d_aux_trace,
+    gl64_t *d_const_pols,
+    gl64_t *d_const_tree,
+    char *constTreePath,
+    uint32_t stream_id,
+    uint64_t instance_id,
+    DeviceCommitBuffers *d_buffers,
+    AirInstanceInfo *air_instance_info,
+    uint64_t airgroupId,
+    uint64_t airId,
+    const std::string &proofType,
+    bool skipRecalculation,
+    TimerGPU &timer,
+    cudaStream_t stream,
+    bool recursive,
+    bool reuse_constants
+) {
+    StreamData &stream_data = d_buffers->streamsData[stream_id];
+    if (!is_cuda_graph_enabled() || !stream_data.cuda_graph_enabled) {
+        genProof_gpu(
+            setupCtx,
+            d_aux_trace,
+            d_const_pols,
+            d_const_tree,
+            constTreePath,
+            stream_id,
+            instance_id,
+            d_buffers,
+            air_instance_info,
+            skipRecalculation,
+            timer,
+            stream,
+            recursive,
+            reuse_constants
+        );
+        return;
+    }
+
+    const std::string signature = build_cuda_graph_signature(
+        &setupCtx,
+        air_instance_info,
+        airgroupId,
+        airId,
+        proofType,
+        d_aux_trace,
+        d_const_pols,
+        d_const_tree,
+        skipRecalculation,
+        recursive,
+        reuse_constants
+    );
+
+    if (stream_data.cuda_graph_ready && stream_data.cuda_graph_signature == signature) {
+        cudaError_t launch_err = cudaGraphLaunch(stream_data.cuda_graph_exec, stream);
+        if (launch_err != cudaSuccess) {
+            zklog.warning(
+                "CUDA Graph launch failed on stream " + std::to_string(stream_id) +
+                ", falling back to direct launches: " + std::string(cudaGetErrorString(launch_err))
+            );
+            invalidate_cuda_graph(stream_data);
+            stream_data.cuda_graph_enabled = false;
+            genProof_gpu(
+                setupCtx,
+                d_aux_trace,
+                d_const_pols,
+                d_const_tree,
+                constTreePath,
+                stream_id,
+                instance_id,
+                d_buffers,
+                air_instance_info,
+                skipRecalculation,
+                timer,
+                stream,
+                recursive,
+                reuse_constants
+            );
+            return;
+        }
+
+        stream_data.cuda_graph_replay_count++;
+        return;
+    }
+
+    // Different proof signature means stream-side state has changed.
+    // Drop any previous graph before deciding whether to recapture.
+    invalidate_cuda_graph(stream_data);
+
+    uint32_t &seen_count = stream_data.cuda_graph_seen_signatures[signature];
+    seen_count++;
+    const uint32_t min_reuse = get_cuda_graph_capture_min_reuse();
+    if (seen_count < min_reuse) {
+        stream_data.cuda_graph_skip_capture_count++;
+        genProof_gpu(
+            setupCtx,
+            d_aux_trace,
+            d_const_pols,
+            d_const_tree,
+            constTreePath,
+            stream_id,
+            instance_id,
+            d_buffers,
+            air_instance_info,
+            skipRecalculation,
+            timer,
+            stream,
+            recursive,
+            reuse_constants
+        );
+        return;
+    }
+
+    if (!stream_data.cuda_graph_ready || stream_data.cuda_graph_signature != signature) {
+        invalidate_cuda_graph(stream_data);
+
+        cudaError_t begin_err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal);
+        if (begin_err != cudaSuccess) {
+            zklog.warning(
+                "CUDA Graph disabled for stream " + std::to_string(stream_id) +
+                ": cudaStreamBeginCapture failed: " + std::string(cudaGetErrorString(begin_err))
+            );
+            stream_data.cuda_graph_enabled = false;
+            genProof_gpu(
+                setupCtx,
+                d_aux_trace,
+                d_const_pols,
+                d_const_tree,
+                constTreePath,
+                stream_id,
+                instance_id,
+                d_buffers,
+                air_instance_info,
+                skipRecalculation,
+                timer,
+                stream,
+                recursive,
+                reuse_constants
+            );
+            return;
+        }
+
+        TimerGPU::set_capture_active(true);
+        genProof_gpu(
+            setupCtx,
+            d_aux_trace,
+            d_const_pols,
+            d_const_tree,
+            constTreePath,
+            stream_id,
+            instance_id,
+            d_buffers,
+            air_instance_info,
+            skipRecalculation,
+            timer,
+            stream,
+            recursive,
+            reuse_constants
+        );
+        TimerGPU::set_capture_active(false);
+
+        cudaGraph_t graph = nullptr;
+        cudaError_t end_err = cudaStreamEndCapture(stream, &graph);
+        if (end_err != cudaSuccess || graph == nullptr) {
+            if (graph != nullptr) cudaGraphDestroy(graph);
+            zklog.warning(
+                "CUDA Graph disabled for stream " + std::to_string(stream_id) +
+                ": cudaStreamEndCapture failed: " + std::string(cudaGetErrorString(end_err))
+            );
+            stream_data.cuda_graph_enabled = false;
+            genProof_gpu(
+                setupCtx,
+                d_aux_trace,
+                d_const_pols,
+                d_const_tree,
+                constTreePath,
+                stream_id,
+                instance_id,
+                d_buffers,
+                air_instance_info,
+                skipRecalculation,
+                timer,
+                stream,
+                recursive,
+                reuse_constants
+            );
+            return;
+        }
+
+        cudaGraphExec_t graph_exec = nullptr;
+        cudaError_t instantiate_err = cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0);
+        if (instantiate_err != cudaSuccess || graph_exec == nullptr) {
+            cudaGraphDestroy(graph);
+            zklog.warning(
+                "CUDA Graph disabled for stream " + std::to_string(stream_id) +
+                ": cudaGraphInstantiate failed: " + std::string(cudaGetErrorString(instantiate_err))
+            );
+            stream_data.cuda_graph_enabled = false;
+            genProof_gpu(
+                setupCtx,
+                d_aux_trace,
+                d_const_pols,
+                d_const_tree,
+                constTreePath,
+                stream_id,
+                instance_id,
+                d_buffers,
+                air_instance_info,
+                skipRecalculation,
+                timer,
+                stream,
+                recursive,
+                reuse_constants
+            );
+            return;
+        }
+
+        stream_data.cuda_graph = graph;
+        stream_data.cuda_graph_exec = graph_exec;
+        stream_data.cuda_graph_signature = signature;
+        stream_data.cuda_graph_ready = true;
+        stream_data.cuda_graph_capture_count++;
+        if (is_cuda_graph_verbose() && should_log_cuda_graph_capture(stream_data.cuda_graph_capture_count)) {
+            zklog.info(
+                "Captured CUDA Graph for stream " + std::to_string(stream_id) +
+                " (" + proofType + ", " + std::to_string(airgroupId) + ":" + std::to_string(airId) +
+                "), capture_count=" + std::to_string(stream_data.cuda_graph_capture_count) +
+                ", replay_count=" + std::to_string(stream_data.cuda_graph_replay_count) +
+                ", skipped=" + std::to_string(stream_data.cuda_graph_skip_capture_count)
+            );
+        }
+    }
+
+    cudaError_t launch_err = cudaGraphLaunch(stream_data.cuda_graph_exec, stream);
+    if (launch_err != cudaSuccess) {
+        zklog.warning(
+            "CUDA Graph launch failed on stream " + std::to_string(stream_id) +
+            ", falling back to direct launches: " + std::string(cudaGetErrorString(launch_err))
+        );
+        invalidate_cuda_graph(stream_data);
+        stream_data.cuda_graph_enabled = false;
+        genProof_gpu(
+            setupCtx,
+            d_aux_trace,
+            d_const_pols,
+            d_const_tree,
+            constTreePath,
+            stream_id,
+            instance_id,
+            d_buffers,
+            air_instance_info,
+            skipRecalculation,
+            timer,
+            stream,
+            recursive,
+            reuse_constants
+        );
+        return;
+    }
+
+    stream_data.cuda_graph_replay_count++;
+}
 
 
 void get_instances_ready(void *d_buffers_, int64_t* instances_ready) {
@@ -478,7 +837,25 @@ uint64_t gen_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64
     }
 
 
-    genProof_gpu(*setupCtx, d_aux_trace, d_const_pols, d_const_tree, constTreePath, streamId, instanceId, d_buffers, air_instance_info, skipRecalculation, timer, stream, false, reuse_constants);
+    launch_proof_with_optional_cuda_graph(
+        *setupCtx,
+        d_aux_trace,
+        d_const_pols,
+        d_const_tree,
+        constTreePath,
+        streamId,
+        instanceId,
+        d_buffers,
+        air_instance_info,
+        airgroupId,
+        airId,
+        proofType,
+        skipRecalculation,
+        timer,
+        stream,
+        false,
+        reuse_constants
+    );
     cudaEventRecord(d_buffers->streamsData[streamId].end_event, stream);
     d_buffers->streamsData[streamId].status = 2;
     return streamId;
@@ -610,7 +987,25 @@ uint64_t gen_recursive_proof(void *pSetupCtx_, char *globalInfoFile, uint64_t ai
         }
     }
 
-    genProof_gpu(*setupCtx, d_aux_trace, d_const_pols, d_const_tree, constTreePath, streamId, instanceId, d_buffers, air_instance_info, false, timer, stream, true, reuse_constants);
+    launch_proof_with_optional_cuda_graph(
+        *setupCtx,
+        d_aux_trace,
+        d_const_pols,
+        d_const_tree,
+        constTreePath,
+        streamId,
+        instanceId,
+        d_buffers,
+        air_instance_info,
+        airgroupId,
+        airId,
+        string(proofType),
+        false,
+        timer,
+        stream,
+        true,
+        reuse_constants
+    );
     cudaEventRecord(d_buffers->streamsData[streamId].end_event, stream);
     d_buffers->streamsData[streamId].status = 2;
     return streamId;
