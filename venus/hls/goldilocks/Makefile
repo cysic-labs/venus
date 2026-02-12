@@ -1,27 +1,22 @@
-# Makefile for Goldilocks HLS Field Arithmetic
+# Goldilocks HLS Field Arithmetic - Top-Level Makefile
+#
+# Prerequisites: module load amd/2025.2
 #
 # Targets:
-#   csim     - Compile and run C simulation testbench (g++ with Vitis ap_int.h)
+#   csim     - Run C-simulation testbench via vitis-run
+#   csynth   - Run C-synthesis via v++
 #   clean    - Remove build artifacts
-#
-# Prerequisites:
-#   module load amd/2025.2  (sets XILINX_VITIS for ap_int.h include)
-#   Or set VITIS_INCLUDE manually
 
-VITIS_INCLUDE ?= /mnt/nas0/software/Xilinx/2025.2/Vitis/include
+.PHONY: csim csynth cosim clean
 
-CXX       = g++
-CXXFLAGS  = -O2 -std=c++14 -Wall -I$(VITIS_INCLUDE)
-TB_SRC    = test/tb_gl64.cpp
-TB_BIN    = test/tb_gl64
+csim:
+	$(MAKE) -C test csim
 
-.PHONY: csim clean
+csynth:
+	$(MAKE) -C test csynth
 
-csim: $(TB_BIN)
-	./$(TB_BIN)
-
-$(TB_BIN): $(TB_SRC) gl64_t.hpp gl64_cubic.hpp gl64_constants.hpp
-	$(CXX) $(CXXFLAGS) -I. -o $@ $<
+cosim:
+	$(MAKE) -C test cosim
 
 clean:
-	rm -f $(TB_BIN) test/*.o
+	$(MAKE) -C test clean

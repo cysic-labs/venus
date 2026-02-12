@@ -75,8 +75,8 @@ void gl64_test_kernel(
         for (unsigned int i = 0; i < count; i++) {
             #pragma HLS PIPELINE II=1
             unsigned int base = i * 3;
-            gl64_3_t x(gl64_t(a[base]), gl64_t(a[base+1]), gl64_t(a[base+2]));
-            gl64_3_t y(gl64_t(b[base]), gl64_t(b[base+1]), gl64_t(b[base+2]));
+            gl64_3_t x{gl64_t(a[base]), gl64_t(a[base+1]), gl64_t(a[base+2])};
+            gl64_3_t y{gl64_t(b[base]), gl64_t(b[base+1]), gl64_t(b[base+2])};
             gl64_3_t r = x * y;
             result[base]   = r.v[0].val;
             result[base+1] = r.v[1].val;
@@ -87,7 +87,7 @@ void gl64_test_kernel(
     case 5: // Cubic extension inverse (only uses 'a' input)
         for (unsigned int i = 0; i < count; i++) {
             unsigned int base = i * 3;
-            gl64_3_t x(gl64_t(a[base]), gl64_t(a[base+1]), gl64_t(a[base+2]));
+            gl64_3_t x{gl64_t(a[base]), gl64_t(a[base+1]), gl64_t(a[base+2])};
             gl64_3_t r = x.inv();
             result[base]   = r.v[0].val;
             result[base+1] = r.v[1].val;
