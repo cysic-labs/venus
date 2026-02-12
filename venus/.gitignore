@@ -7,10 +7,15 @@ _x_*/
 *.jou
 *.aps
 
-# Compiled test binaries
-test/tb_gl64
-test/tb_ntt
-test/tb_poseidon2
+# Compiled test binaries (anywhere under venus)
+**/tb_gl64
+**/tb_ntt
+**/tb_poseidon2
+**/tb_merkle
+**/tb_expressions
+**/tb_fri
+**/tb_transcript
+**/tb_proof
 
 # Vitis/Vivado project files
 *.xo
@@ -18,3 +23,6 @@ test/tb_poseidon2
 *.ltx
 *.wdb
 *.wcfg
+
+# Venus build output
+_build/
