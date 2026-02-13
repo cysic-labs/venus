@@ -12,11 +12,11 @@ This repository is a deeply integrated monorepo consolidating multiple projects 
 
 | Component | Origin | Description |
 |---|---|---|
-| Root (ZisK core) | [0xPolygonHermez/zisk](https://github.com/0xPolygonHermez/zisk) | zkVM core: state machines, emulator, executor, PIL definitions, CLI tools |
+| **`venus/`** | **Cysic Labs** | **FPGA/ASIC acceleration backend (Cysic original work)** |
+| `zisk` | [0xPolygonHermez/zisk](https://github.com/0xPolygonHermez/zisk) | zkVM core: state machines, emulator, executor, PIL definitions, CLI tools |
 | `pil2-proofman/` | [0xPolygonHermez/pil2-proofman](https://github.com/0xPolygonHermez/pil2-proofman) | Rust proving backend with GPU (CUDA) acceleration |
 | `pil2-compiler/` | [0xPolygonHermez/pil2-compiler](https://github.com/0xPolygonHermez/pil2-compiler) | PIL (Polynomial Identity Language) compiler |
 | `pil2-proofman-js/` | [0xPolygonHermez/pil2-proofman-js](https://github.com/0xPolygonHermez/pil2-proofman-js) | JavaScript-based proving key generation and setup |
-| **`venus/`** | **Cysic Labs** | **FPGA/ASIC acceleration backend (Cysic original work)** |
 
 We chose this monorepo consolidation because we believe a clean repository with minimal external dependencies facilitates rapid development iteration.
 
