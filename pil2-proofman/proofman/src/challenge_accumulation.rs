@@ -24,6 +24,16 @@ fn _print_challenges<F: PrimeField64>(pctx: &ProofCtx<F>, roots_contributions: &
     }
 }
 
+fn stage_debug_enabled() -> bool {
+    match std::env::var("ZISK_VENUS_STAGE_DEBUG") {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "off" | "no")
+        }
+        Err(_) => false,
+    }
+}
+
 pub fn calculate_internal_contributions<F>(
     pctx: &ProofCtx<F>,
     roots_contributions: &[[F; 4]],
@@ -71,6 +81,31 @@ where
             }
         }
     });
+
+    if stage_debug_enabled() {
+        for instance_id in my_instances.iter() {
+            let (airgroup_id, air_id) = pctx.dctx_get_instance_info(*instance_id).unwrap_or((usize::MAX, usize::MAX));
+            let air_name = pctx
+                .global_info
+                .airs
+                .get(airgroup_id)
+                .and_then(|air_group| air_group.get(air_id))
+                .map(|air| air.name.as_str())
+                .unwrap_or("unknown");
+            let root = roots_contributions[*instance_id];
+            tracing::info!(
+                "READY_ROOT instance={} airgroup={} air={} name={} root=[{:#018x},{:#018x},{:#018x},{:#018x}]",
+                instance_id,
+                airgroup_id,
+                air_id,
+                air_name,
+                root[0].as_canonical_u64(),
+                root[1].as_canonical_u64(),
+                root[2].as_canonical_u64(),
+                root[3].as_canonical_u64()
+            );
+        }
+    }
 
     let partial_contribution = add_contributions(pctx, &values);
 

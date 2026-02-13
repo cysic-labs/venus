@@ -3,9 +3,9 @@ use bytemuck::cast_slice;
 use libloading::{Library, Symbol};
 use fields::{ExtensionField, Transcript, PrimeField64, GoldilocksQuinticExtension, Poseidon16};
 use proofman_common::{
-    calculate_fixed_tree, configured_num_threads, initialize_logger, load_const_pols, skip_prover_instance, CurveType,
-    DebugInfo, MemoryHandler, MpiCtx, PackedInfo, ParamsGPU, Proof, ProofCtx, ProofOptions, ProofType, SetupCtx,
-    SetupsVadcop, VerboseMode, MAX_INSTANCES, format_bytes, PreLoadedConst,
+    calculate_fixed_tree, configured_num_threads, initialize_logger, load_const_pols, skip_prover_instance,
+    CurveType, DebugInfo, MemoryHandler, MpiCtx, PackedInfo, ParamsGPU, Proof, ProofCtx, ProofOptions, ProofType,
+    SetupCtx, SetupsVadcop, VerboseMode, MAX_INSTANCES, format_bytes, PreLoadedConst,
 };
 use colored::Colorize;
 use proofman_hints::aggregate_airgroupvals;
@@ -66,6 +66,7 @@ use crate::{AggProofs};
 use crate::aggregate_worker_proofs;
 
 use std::ffi::c_void;
+use std::ffi::OsString;
 
 use proofman_util::{
     create_buffer_fast, timer_start_info, timer_stop_and_log_info, timer_start_debug, timer_stop_and_log_debug,
@@ -73,6 +74,196 @@ use proofman_util::{
 };
 
 use serde::Serialize;
+
+fn normalize_backend_env(value: &str) -> String {
+    value.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
+}
+
+fn env_value_is_false(value: &str) -> bool {
+    matches!(normalize_backend_env(value).as_str(), "" | "0" | "false" | "off" | "no")
+}
+
+fn is_venus_cpu_backend_enabled() -> bool {
+    let backend = std::env::var("ZISK_PROVER_BACKEND").unwrap_or_default();
+    let backend_norm = normalize_backend_env(&backend);
+    if backend_norm != "venus" && backend_norm != "fpga" {
+        return false;
+    }
+
+    if let Ok(cpu_mode) = std::env::var("ZISK_VENUS_CPU") {
+        if !env_value_is_false(&cpu_mode) {
+            return true;
+        }
+    }
+
+    if let Ok(mode) = std::env::var("ZISK_VENUS_MODE") {
+        let mode_norm = normalize_backend_env(&mode);
+        if mode_norm == "cpu"
+            || mode_norm == "sw"
+            || mode_norm == "software"
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn venus_unpack_trace_words(
+    src: &[u64],
+    dst: &mut [u64],
+    n_rows: usize,
+    n_cols: usize,
+    words_per_row: usize,
+    unpack_info: &[u64],
+) -> ProofmanResult<()> {
+    if unpack_info.len() != n_cols {
+        return Err(ProofmanError::InvalidParameters(format!(
+            "Packed trace unpack_info length mismatch: got {}, expected {}",
+            unpack_info.len(),
+            n_cols
+        )));
+    }
+    if src.len() != n_rows.saturating_mul(words_per_row) {
+        return Err(ProofmanError::InvalidParameters(format!(
+            "Packed trace source length mismatch: got {}, expected {}",
+            src.len(),
+            n_rows.saturating_mul(words_per_row)
+        )));
+    }
+    if dst.len() != n_rows.saturating_mul(n_cols) {
+        return Err(ProofmanError::InvalidParameters(format!(
+            "Packed trace destination length mismatch: got {}, expected {}",
+            dst.len(),
+            n_rows.saturating_mul(n_cols)
+        )));
+    }
+
+    for row in 0..n_rows {
+        let packed_row = &src[row * words_per_row..(row + 1) * words_per_row];
+        let unpacked_row = &mut dst[row * n_cols..(row + 1) * n_cols];
+
+        let mut word_idx = 0usize;
+        let mut bit_offset = 0u64;
+        let mut word = packed_row[0];
+
+        for (col, &nbits) in unpack_info.iter().enumerate() {
+            let bits_left = 64u64 - bit_offset;
+            let val = if nbits <= bits_left {
+                let mask = if nbits == 64 { u64::MAX } else { (1u64 << nbits) - 1 };
+                let value = (word >> bit_offset) & mask;
+                bit_offset += nbits;
+                if bit_offset == 64 && word_idx + 1 < words_per_row {
+                    word_idx += 1;
+                    word = packed_row[word_idx];
+                    bit_offset = 0;
+                }
+                value
+            } else {
+                let low = word >> bit_offset;
+                word_idx += 1;
+                word = packed_row[word_idx];
+                let high_bits = nbits - bits_left;
+                let high_mask = if high_bits == 64 { u64::MAX } else { (1u64 << high_bits) - 1 };
+                let high = word & high_mask;
+                bit_offset = high_bits;
+                (high << bits_left) | low
+            };
+            unpacked_row[col] = val;
+        }
+    }
+
+    Ok(())
+}
+
+fn venus_stage_debug_enabled() -> bool {
+    match std::env::var("ZISK_VENUS_STAGE_DEBUG") {
+        Ok(value) => !env_value_is_false(&value),
+        Err(_) => false,
+    }
+}
+
+fn venus_trace_fingerprint(words: &[u64]) -> (u64, u64, u64) {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash_head = FNV_OFFSET;
+    let mut hash_stride = FNV_OFFSET;
+    let mut hash_tail = FNV_OFFSET;
+
+    let head_len = words.len().min(2048);
+    for &word in &words[..head_len] {
+        hash_head ^= word;
+        hash_head = hash_head.wrapping_mul(FNV_PRIME);
+    }
+
+    let stride = (words.len() / 2048).max(1);
+    let mut idx = 0usize;
+    while idx < words.len() {
+        hash_stride ^= words[idx];
+        hash_stride = hash_stride.wrapping_mul(FNV_PRIME);
+        idx += stride;
+    }
+
+    let tail_start = words.len().saturating_sub(2048);
+    for &word in &words[tail_start..] {
+        hash_tail ^= word;
+        hash_tail = hash_tail.wrapping_mul(FNV_PRIME);
+    }
+
+    (hash_head, hash_stride, hash_tail)
+}
+
+fn venus_log_trace_fingerprint(
+    instance_id: usize,
+    airgroup_id: usize,
+    air_id: usize,
+    air_instance_name: &str,
+    label: &str,
+    words: &[u64],
+) {
+    let (hash_head, hash_stride, hash_tail) = venus_trace_fingerprint(words);
+    tracing::info!(
+        "TRACE_FP instance={} airgroup={} air={} name={} label={} words={} hash_head={:#018x} hash_stride={:#018x} hash_tail={:#018x}",
+        instance_id,
+        airgroup_id,
+        air_id,
+        air_instance_name,
+        label,
+        words.len(),
+        hash_head,
+        hash_stride,
+        hash_tail
+    );
+}
+
+struct ScopedEnvVar {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl ScopedEnvVar {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnvVar {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous_value) => unsafe {
+                std::env::set_var(self.key, previous_value);
+            },
+            None => unsafe {
+                std::env::remove_var(self.key);
+            },
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct CsvInfo {
@@ -1050,14 +1241,16 @@ where
         let n_streams = ((n_streams_per_gpu + n_recursive_streams_per_gpu) * n_proof_threads) as usize;
         let n_streams_non_recursive = (n_streams_per_gpu * n_proof_threads) as usize;
 
-        let (aux_trace, const_pols, const_tree) = if cfg!(feature = "gpu") {
-            (Arc::new(Vec::new()), Arc::new(Vec::new()), Arc::new(Vec::new()))
-        } else {
+        let use_host_side_prover_buffers = cfg!(not(feature = "gpu")) || is_venus_cpu_backend_enabled();
+
+        let (aux_trace, const_pols, const_tree) = if use_host_side_prover_buffers {
             (
                 Arc::new(create_buffer_fast(sctx.max_prover_buffer_size.max(setups_vadcop.max_prover_buffer_size))),
                 Arc::new(create_buffer_fast(sctx.max_const_size.max(setups_vadcop.max_const_size))),
                 Arc::new(create_buffer_fast(sctx.max_const_tree_size.max(setups_vadcop.max_const_tree_size))),
             )
+        } else {
+            (Arc::new(Vec::new()), Arc::new(Vec::new()), Arc::new(Vec::new()))
         };
 
         let max_num_threads = configured_num_threads(mpi_ctx.node_n_processes as usize);
@@ -1700,6 +1893,7 @@ where
                 &self.aux_trace,
                 &self.const_pols,
                 &self.const_tree,
+                &self.packed_info,
                 &self.d_buffers,
                 Some(stream_id),
                 options.save_proofs,
@@ -1743,6 +1937,7 @@ where
             let const_tree_clone = self.const_tree.clone();
             let prover_buffer_recursive = self.prover_buffer_recursive.clone();
             let proofs_clone = self.proofs.clone();
+            let packed_info_clone = self.packed_info.clone();
             let compressor_proofs_clone = self.compressor_proofs.clone();
             let recursive1_proofs_clone = self.recursive1_proofs.clone();
             let recursive2_proofs_ongoing_clone = self.recursive2_proofs_ongoing.clone();
@@ -1778,6 +1973,7 @@ where
                                 &aux_trace_clone,
                                 &const_pols_clone,
                                 &const_tree_clone,
+                                &packed_info_clone,
                                 &d_buffers_clone,
                                 None,
                                 options.save_proofs,
@@ -3073,7 +3269,7 @@ where
         let max_size_buffer = (free_memory_gpu / 8.0).floor() as u64 - total_const_area - total_const_area_aggregation;
         let max_prover_buffer_size = sctx.max_prover_buffer_size.max(setups_vadcop.max_prover_buffer_size);
 
-        let n_streams_per_gpu = match cfg!(feature = "gpu") {
+        let mut n_streams_per_gpu = match cfg!(feature = "gpu") {
             true => {
                 let max_number_proofs_per_gpu =
                     gpu_params.max_number_streams.min(max_size_buffer as usize / max_prover_buffer_size);
@@ -3115,6 +3311,14 @@ where
                 }
                 n_recursive_streams_per_gpu += 1;
             }
+        }
+
+        if cfg!(feature = "gpu") && is_venus_cpu_backend_enabled() {
+            // Venus CPU backend uses host-side software proving code; keep execution single-stream
+            // to avoid races in backend-local caches that are not stream-indexed.
+            n_streams_per_gpu = 1;
+            n_recursive_streams_per_gpu = 0;
+            tracing::info!("Venus CPU backend detected: forcing single-stream proof scheduling");
         }
 
         if cfg!(feature = "gpu") {
@@ -3172,6 +3376,7 @@ where
         aux_trace: &[F],
         const_pols: &[F],
         const_tree: &[F],
+        packed_info: &HashMap<(usize, usize), PackedInfo>,
         d_buffers: &DeviceBuffer,
         stream_id_: Option<usize>,
         save_proof: bool,
@@ -3186,13 +3391,117 @@ where
 
         let mut steps_params = pctx.get_air_instance_params(instance_id, true);
 
-        if cfg!(not(feature = "gpu")) {
+        if cfg!(not(feature = "gpu")) || is_venus_cpu_backend_enabled() {
             steps_params.aux_trace = aux_trace.as_ptr() as *mut u8;
             steps_params.p_const_pols = const_pols.as_ptr() as *mut u8;
             steps_params.p_const_tree = const_tree.as_ptr() as *mut u8;
         } else if !setup.preallocate {
             steps_params.p_const_pols = std::ptr::null_mut();
             steps_params.p_const_tree = std::ptr::null_mut();
+        }
+
+        let n_bits = setup.stark_info.stark_struct.n_bits as u32;
+        let n_rows = 1usize.checked_shl(n_bits).ok_or_else(|| {
+            ProofmanError::InvalidParameters(format!(
+                "Invalid n_bits={} for proof trace",
+                setup.stark_info.stark_struct.n_bits
+            ))
+        })?;
+        let n_cols = setup.stark_info.map_sections_n["cm1"] as usize;
+        let packed_words_per_row = packed_info.get(&(airgroup_id, air_id)).and_then(|info| {
+            if info.is_packed && info.num_packed_words > 0 {
+                Some(info.num_packed_words as usize)
+            } else {
+                None
+            }
+        });
+        let raw_trace_len = match packed_words_per_row {
+            Some(words_per_row) => n_rows.checked_mul(words_per_row).ok_or_else(|| {
+                ProofmanError::InvalidParameters(format!(
+                    "Packed trace length overflow: rows={} words_per_row={}",
+                    n_rows, words_per_row
+                ))
+            })?,
+            None => n_rows.checked_mul(n_cols).ok_or_else(|| {
+                ProofmanError::InvalidParameters(format!(
+                    "Row-major trace length overflow: rows={} cols={}",
+                    n_rows, n_cols
+                ))
+            })?,
+        };
+
+        let stage_debug = venus_stage_debug_enabled();
+        if stage_debug && std::mem::size_of::<F>() == std::mem::size_of::<u64>() {
+            let raw_words = unsafe { std::slice::from_raw_parts(steps_params.trace as *const u64, raw_trace_len) };
+            venus_log_trace_fingerprint(
+                instance_id,
+                airgroup_id,
+                air_id,
+                air_instance_name,
+                if packed_words_per_row.is_some() { "trace_raw_packed" } else { "trace_raw_rowmajor" },
+                raw_words,
+            );
+        }
+
+        let mut venus_unpacked_trace: Option<Vec<F>> = None;
+        if cfg!(feature = "gpu") && is_venus_cpu_backend_enabled() {
+            if let Some(info) = packed_info.get(&(airgroup_id, air_id)) {
+                if info.is_packed && info.num_packed_words > 0 {
+                    let words_per_row = info.num_packed_words as usize;
+                    let packed_len = n_rows.checked_mul(words_per_row).ok_or_else(|| {
+                        ProofmanError::InvalidParameters(format!(
+                            "Packed trace length overflow: rows={} words_per_row={}",
+                            n_rows, words_per_row
+                        ))
+                    })?;
+                    let unpacked_len = n_rows.checked_mul(n_cols).ok_or_else(|| {
+                        ProofmanError::InvalidParameters(format!(
+                            "Unpacked trace length overflow: rows={} cols={}",
+                            n_rows, n_cols
+                        ))
+                    })?;
+
+                    if std::mem::size_of::<F>() != std::mem::size_of::<u64>() {
+                        return Err(ProofmanError::InvalidParameters(format!(
+                            "Unsupported field element size {} for Venus packed trace unpack",
+                            std::mem::size_of::<F>()
+                        )));
+                    }
+
+                    let src_words = unsafe { std::slice::from_raw_parts(steps_params.trace as *const u64, packed_len) };
+                    let mut unpacked_words = vec![0u64; unpacked_len];
+                    venus_unpack_trace_words(
+                        src_words,
+                        &mut unpacked_words,
+                        n_rows,
+                        n_cols,
+                        words_per_row,
+                        &info.unpack_info,
+                    )?;
+
+                    let mut unpacked_trace = vec![F::ZERO; unpacked_len];
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            unpacked_words.as_ptr(),
+                            unpacked_trace.as_mut_ptr() as *mut u64,
+                            unpacked_len,
+                        );
+                    }
+                    if stage_debug {
+                        venus_log_trace_fingerprint(
+                            instance_id,
+                            airgroup_id,
+                            air_id,
+                            air_instance_name,
+                            "trace_unpacked_rowmajor",
+                            &unpacked_words,
+                        );
+                    }
+
+                    steps_params.trace = unpacked_trace.as_ptr() as *mut u8;
+                    venus_unpacked_trace = Some(unpacked_trace);
+                }
+            }
         }
 
         let p_steps_params: *mut u8 = (&steps_params).into();
@@ -3215,6 +3524,12 @@ where
         let proof = vec![0; setup.proof_size as usize];
         *proofs[instance_id].write().unwrap() =
             Some(Proof::new(ProofType::Basic, airgroup_id, air_id, Some(instance_id), proof));
+
+        let _venus_preunpacked_guard = if venus_unpacked_trace.is_some() {
+            Some(ScopedEnvVar::set("ZISK_VENUS_TRACE_PREUNPACKED", "1"))
+        } else {
+            None
+        };
 
         gen_proof_c(
             p_setup,
@@ -3501,6 +3816,24 @@ where
             d_buffers.get_ptr(),
             (&setup.p_setup).into(),
         );
+
+        if venus_stage_debug_enabled() && std::mem::size_of::<F>() == std::mem::size_of::<u64>() {
+            let root_words = unsafe {
+                std::slice::from_raw_parts(roots_contributions[instance_id].as_ptr() as *const u64, n_field_elements)
+            };
+            let air_name = &pctx.global_info.airs[airgroup_id][air_id].name;
+            tracing::info!(
+                "COMMIT_ROOT instance={} airgroup={} air={} name={} root=[{:#018x},{:#018x},{:#018x},{:#018x}]",
+                instance_id,
+                airgroup_id,
+                air_id,
+                air_name,
+                root_words[0],
+                root_words[1],
+                root_words[2],
+                root_words[3]
+            );
+        }
 
         let n_airvalues = setup
             .stark_info

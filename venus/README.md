@@ -67,12 +67,27 @@ make prove-venus
 make verify
 ```
 
-`make prove-venus` sets `ZISK_PROVER_BACKEND=venus` and routes proving through
-the venus-compatible backend path while keeping cryptographic behavior equivalent
-to the reference prover.
+`make prove-venus` sets `ZISK_PROVER_BACKEND=venus ZISK_VENUS_MODE=csim`.
+The runtime executes a Venus HLS C-simulation preflight (`venus/hls/proof`)
+and then runs proving through the stable GPU-compatible runtime path,
+producing verifier-accepted proofs.
+
+Optional runtime modes:
+
+- `ZISK_VENUS_MODE=csim` (default for `make prove-venus`): run CSIM preflight + GPU-compatible proving runtime.
+- `ZISK_VENUS_MODE=cpu` or `ZISK_VENUS_CPU=1`: software emulation proving path (experimental).
+- `ZISK_VENUS_MODE=gpu`: skip CSIM preflight and use GPU-compatible proving runtime.
 
 ## Cryptographic Equivalence
 
-The FPGA implementation produces proofs that pass the existing ZisK verifier.
-Field arithmetic is bit-exact with the CPU/GPU reference. Hash outputs, Merkle
-roots, and FRI responses are identical for the same inputs.
+Current verifier-valid path:
+
+- `make prove-venus` runs Venus HLS CSIM preflight first and then executes the
+  existing GPU proving runtime.
+- The resulting proof passes the unmodified ZisK verifier (`make verify`).
+
+Current limitation:
+
+- A pure Venus software proving path (`ZISK_VENUS_MODE=cpu` /
+  `ZISK_VENUS_CPU=1`) is still experimental and currently fails in recursive
+  witness generation on this workload.

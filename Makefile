@@ -118,7 +118,7 @@ prove: check-key
 
 prove-venus: check-key
 	@echo "==> Running prove with Venus backend..."
-	ZISK_PROVER_BACKEND=venus $(CARGO_ZISK) prove \
+	ZISK_PROVER_BACKEND=venus ZISK_VENUS_MODE=csim $(CARGO_ZISK) prove \
 		-w $(WITNESS_LIB) \
 		-k $(PROVING_KEY) \
 		-e $(ELF) \
@@ -187,7 +187,7 @@ help:
 	@echo "  rom-setup       - Run ROM setup for the guest ELF"
 	@echo "  compile-key     - Compile proving key (check-setup)"
 	@echo "  prove           - Prove the sample block"
-	@echo "  prove-venus     - Prove with Venus runtime backend (ZISK_PROVER_BACKEND=venus)"
+	@echo "  prove-venus     - Prove with Venus CSIM backend (ZISK_PROVER_BACKEND=venus, ZISK_VENUS_MODE=csim)"
 	@echo "  verify          - Verify the generated proof"
 	@echo "  venus-csim      - Run Venus FPGA HLS C-simulation"
 	@echo "  venus-synth     - Run Venus FPGA HLS synthesis (TARGET=vu47p|vh1782)"

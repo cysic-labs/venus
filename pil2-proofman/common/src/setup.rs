@@ -21,6 +21,37 @@ use crate::ProofType;
 use crate::StarkInfo;
 use crate::ProofmanResult;
 
+fn normalize_backend_env(value: &str) -> String {
+    value.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
+}
+
+fn env_value_is_false(value: &str) -> bool {
+    matches!(normalize_backend_env(value).as_str(), "" | "0" | "false" | "off" | "no")
+}
+
+fn is_venus_cpu_backend_enabled() -> bool {
+    let backend = std::env::var("ZISK_PROVER_BACKEND").unwrap_or_default();
+    let backend_norm = normalize_backend_env(&backend);
+    if backend_norm != "venus" && backend_norm != "fpga" {
+        return false;
+    }
+
+    if let Ok(cpu_mode) = std::env::var("ZISK_VENUS_CPU") {
+        if !env_value_is_false(&cpu_mode) {
+            return true;
+        }
+    }
+
+    if let Ok(mode) = std::env::var("ZISK_VENUS_MODE") {
+        let mode_norm = normalize_backend_env(&mode);
+        if mode_norm == "cpu" || mode_norm == "sw" || mode_norm == "software" {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub type GetSizeWitnessFunc = unsafe extern "C" fn() -> u64;
 
 pub type GetCircomCircuitFunc = unsafe extern "C" fn(dat_file: *const c_char) -> *mut c_void;
@@ -119,6 +150,7 @@ impl<F: PrimeField64> Setup<F> {
         };
 
         let gpu = cfg!(feature = "gpu");
+        let use_gpu_const_files = gpu && !is_venus_cpu_backend_enabled();
 
         let stark_info_path = match setup_type {
             ProofType::Recursive1 => {
@@ -135,13 +167,25 @@ impl<F: PrimeField64> Setup<F> {
             }
             _ => setup_path.display().to_string() + ".bin",
         };
-        let const_pols_path = match !gpu {
-            true => setup_path.display().to_string() + ".const",
-            false => setup_path.display().to_string() + ".const_gpu",
+        let const_pols_path_cpu = setup_path.display().to_string() + ".const";
+        let const_pols_path_gpu = setup_path.display().to_string() + ".const_gpu";
+        let const_pols_tree_path_cpu = setup_path.display().to_string() + ".consttree";
+        let const_pols_tree_path_gpu = setup_path.display().to_string() + ".consttree_gpu";
+
+        let const_pols_path = if use_gpu_const_files {
+            const_pols_path_gpu
+        } else if Path::new(&const_pols_path_cpu).exists() {
+            const_pols_path_cpu
+        } else {
+            const_pols_path_gpu
         };
-        let const_pols_tree_path = match !gpu {
-            true => setup_path.display().to_string() + ".consttree",
-            false => setup_path.display().to_string() + ".consttree_gpu",
+
+        let const_pols_tree_path = if use_gpu_const_files {
+            const_pols_tree_path_gpu
+        } else if Path::new(&const_pols_tree_path_cpu).exists() {
+            const_pols_tree_path_cpu
+        } else {
+            const_pols_tree_path_gpu
         };
 
         let (
@@ -247,7 +291,7 @@ impl<F: PrimeField64> Setup<F> {
                 let const_pols: Vec<F> = create_buffer_fast(const_pols_size);
                 let const_pols_tree: Vec<F> = create_buffer_fast(const_tree_size);
                 let mut const_pols_size_packed = 0;
-                if gpu {
+                if const_pols_path.ends_with(".const_gpu") {
                     let words_per_row: u64 = if Path::new(&const_pols_path).exists() {
                         let bytes = fs::read(&const_pols_path).expect("Failed to read const_pols file");
                         if bytes.len() >= 8 {

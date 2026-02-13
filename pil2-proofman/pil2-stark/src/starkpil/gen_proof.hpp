@@ -1,4 +1,20 @@
 #include "starks.hpp"
+#include <cstdlib>
+#include <cstring>
+
+inline bool parse_env_bool_local(const char *value) {
+    if (value == nullptr || *value == '\0') return false;
+    if (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "FALSE") == 0 ||
+        strcmp(value, "off") == 0 || strcmp(value, "OFF") == 0 || strcmp(value, "no") == 0 ||
+        strcmp(value, "NO") == 0) {
+        return false;
+    }
+    return true;
+}
+
+inline bool disable_cpu_fft_helpers() {
+    return parse_env_bool_local(std::getenv("ZISK_CPU_DISABLE_FFT_HELPERS"));
+}
 
 void calculateWitnessSTD(SetupCtx& setupCtx, StepsParams& params, ExpressionsCtx &expressionsCtx, bool prod) {
     std::string name = prod ? "gprod_col" : "gsum_col";
@@ -45,6 +61,7 @@ void calculateWitnessSTD(SetupCtx& setupCtx, StepsParams& params, ExpressionsCtx
 
 void genProof(SetupCtx& setupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, StepsParams& params, Goldilocks::Element *globalChallenge, uint64_t *proofBuffer, std::string proofFile, bool recursive = false) {
     TimerStart(STARK_PROOF);
+    const bool disable_helpers = disable_cpu_fft_helpers();
     NTT_Goldilocks ntt(1 << setupCtx.starkInfo.starkStruct.nBits);
     NTT_Goldilocks nttExtended(1 << setupCtx.starkInfo.starkStruct.nBitsExt);
 
@@ -92,6 +109,8 @@ void genProof(SetupCtx& setupCtx, uint64_t airgroupId, uint64_t airId, uint64_t 
     if(recursive) {
         starks.commitStage(1, params.trace, params.aux_trace, proof, ntt);
         starks.addTranscript(transcript, &proof.proof.roots[0][0], HASH_SIZE);
+    } else if(disable_helpers) {
+        starks.commitStage(1, params.trace, params.aux_trace, proof, ntt);
     } else {
         starks.commitStage(1, params.trace, params.aux_trace, proof, ntt, &params.aux_trace[setupCtx.starkInfo.mapOffsets[std::make_pair("buff_helper_fft_1", false)]]);
     }
@@ -115,6 +134,8 @@ void genProof(SetupCtx& setupCtx, uint64_t airgroupId, uint64_t airId, uint64_t 
 
     TimerStart(STARK_COMMIT_STAGE_2);
     if (recursive) {
+        starks.commitStage(2, nullptr, params.aux_trace, proof, ntt);
+    } else if (disable_helpers) {
         starks.commitStage(2, nullptr, params.aux_trace, proof, ntt);
     } else {
         starks.commitStage(2, nullptr, params.aux_trace, proof, ntt, &params.aux_trace[setupCtx.starkInfo.mapOffsets[std::make_pair("buff_helper_fft_2", false)]]);
@@ -148,6 +169,8 @@ void genProof(SetupCtx& setupCtx, uint64_t airgroupId, uint64_t airId, uint64_t 
 
     TimerStart(STARK_COMMIT_QUOTIENT_POLYNOMIAL);
     if (recursive) {
+        starks.commitStage(setupCtx.starkInfo.nStages + 1, nullptr, params.aux_trace, proof, nttExtended);
+    } else if (disable_helpers) {
         starks.commitStage(setupCtx.starkInfo.nStages + 1, nullptr, params.aux_trace, proof, nttExtended);
     } else {
         starks.commitStage(setupCtx.starkInfo.nStages + 1, nullptr, params.aux_trace, proof, nttExtended, &params.aux_trace[setupCtx.starkInfo.mapOffsets[std::make_pair("buff_helper_fft_3", false)]]);

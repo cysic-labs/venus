@@ -13,6 +13,7 @@
 #include "fixed_cols.hpp"
 #include "final_snark_proof.hpp"
 #include "starks_api_internal.hpp"
+#include "../../../../venus/host/venus_runtime.hpp"
 #ifdef __USE_MPI_RMA__
 #include "mpi.h"
 #endif
@@ -760,7 +761,6 @@ uint64_t gen_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_
     StepsParams *params = (StepsParams *)params_;
     uint64_t N = (1 << setupCtx->starkInfo.starkStruct.nBits);
     uint64_t nCols = setupCtx->starkInfo.mapSectionsN["cm1"];
-    uint64_t offsetCm1 = setupCtx->starkInfo.mapOffsets[std::make_pair("cm1", false)];
     if (d_buffers->airgroupId != airgroupId || d_buffers->airId != airId || d_buffers->proofType != "basic") {
         uint64_t sizeConstPols = N * (setupCtx->starkInfo.nConstants) * sizeof(Goldilocks::Element);
         uint64_t sizeConstTree = get_const_tree_size((void *)&setupCtx->starkInfo) * sizeof(Goldilocks::Element);
@@ -772,12 +772,23 @@ uint64_t gen_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_
     d_buffers->airId = airId;
     d_buffers->proofType = "basic";
 
+    StepsParams params_cpu = *params;
+    std::vector<Goldilocks::Element> unpacked_trace;
     PackedInfoCPU *packed_info = d_buffers->getPackedInfo(airgroupId, airId);
-    if (packed_info != nullptr && packed_info->is_packed) {
-        d_buffers->unpack_cpu((uint64_t *)params->trace, (uint64_t*)&params->aux_trace[offsetCm1], N, nCols, packed_info->num_packed_words, packed_info->unpack_info);
-        memcpy(params->trace, &params->aux_trace[offsetCm1], N * nCols * sizeof(Goldilocks::Element));
+    if (packed_info != nullptr && packed_info->is_packed && !venus_trace_preunpacked()) {
+        unpacked_trace.resize(N * nCols);
+        d_buffers->unpack_cpu(
+            (uint64_t *)params->trace,
+            (uint64_t *)unpacked_trace.data(),
+            N,
+            nCols,
+            packed_info->num_packed_words,
+            packed_info->unpack_info);
+        params_cpu.trace = unpacked_trace.data();
+    } else {
+        params_cpu.trace = params->trace;
     }
-    genProof(*(SetupCtx *)pSetupCtx, airgroupId, airId, instanceId, *(StepsParams *)params, (Goldilocks::Element *)globalChallenge, proofBuffer, string(proofFile));
+    genProof(*(SetupCtx *)pSetupCtx, airgroupId, airId, instanceId, params_cpu, (Goldilocks::Element *)globalChallenge, proofBuffer, string(proofFile));
     
     return 0;
 }
@@ -1053,4 +1064,3 @@ uint64_t goldilocks_inv_ffi(const uint64_t *in1) {
 void register_proof_done_callback(ProofDoneCallback cb) {
     proof_done_callback = cb;
 }
-

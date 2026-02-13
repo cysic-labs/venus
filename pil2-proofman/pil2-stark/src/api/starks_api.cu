@@ -6,6 +6,7 @@
 #include "starks_api_internal.hpp"
 #include "const_pols.hpp"
 #include <cstring>
+#include <cstdint>
 #include <cstdlib>
 #include <sstream>
 #include <thread>
@@ -103,6 +104,36 @@ bool should_log_cuda_graph_capture(uint64_t capture_count) {
 bool is_cuda_graph_verbose() {
     static const bool verbose = parse_env_bool(std::getenv("ZISK_CUDA_GRAPH_VERBOSE"));
     return verbose;
+}
+
+bool venus_ends_with(const char *value, const char *suffix) {
+    if (value == nullptr || suffix == nullptr) return false;
+    size_t value_len = strlen(value);
+    size_t suffix_len = strlen(suffix);
+    if (suffix_len > value_len) return false;
+    return strcmp(value + value_len - suffix_len, suffix) == 0;
+}
+
+void venus_load_or_build_const_tree(
+    SetupCtx *setupCtx,
+    Goldilocks::Element *constPols,
+    Goldilocks::Element *constTree,
+    const char *constTreePath,
+    uint64_t sizeConstTree)
+{
+    if (constTreePath != nullptr && venus_ends_with(constTreePath, ".consttree_gpu")) {
+        static std::once_flag warn_once;
+        std::call_once(warn_once, []() {
+            zklog.warning(
+                "Venus CPU backend detected GPU-formatted const tree files. "
+                "Rebuilding CPU const tree from const polynomials for correctness");
+        });
+        ConstTree const_tree_builder;
+        const_tree_builder.calculateConstTreeGL(setupCtx->starkInfo, constPols, constTree);
+        return;
+    }
+
+    loadFileParallel(constTree, constTreePath, sizeConstTree);
 }
 
 std::string build_cuda_graph_signature(
@@ -421,6 +452,13 @@ void get_instances_ready(void *d_buffers_, int64_t* instances_ready) {
 
 void *gen_device_buffers(void *maxSizes_, uint32_t node_rank, uint32_t node_size, uint32_t arity)
 {
+    if (get_prover_backend() == ProverBackend::VENUS && venus_uses_csim()) {
+        if (!venus_prepare_runtime()) {
+            zklog.error("Venus backend runtime initialization failed");
+            exit(1);
+        }
+    }
+
     if (use_venus_backend()) {
         MaxSizes *maxSizes = (MaxSizes *)maxSizes_;
         VenusDeviceBuffers *venus_buffers = new VenusDeviceBuffers();
@@ -824,51 +862,42 @@ void load_device_const_pols(uint64_t airgroupId, uint64_t airId, uint64_t initia
 
 uint64_t gen_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *params_, void *globalChallenge, uint64_t* proofBuffer, char *proofFile, void *d_buffers_, bool skipRecalculation, uint64_t streamId_, char *constPolsPath,  char *constTreePath) {
     if (use_venus_backend()) {
-        (void)skipRecalculation;
-        (void)streamId_;
-
         SetupCtx *setupCtx = (SetupCtx *)pSetupCtx_;
         StepsParams *params = (StepsParams *)params_;
-        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
-
-        StepsParams local_params = *params;
-
+        DeviceCommitBuffersCPU *d_buffers = (DeviceCommitBuffersCPU *)d_buffers_;
         uint64_t N = (1ULL << setupCtx->starkInfo.starkStruct.nBits);
         uint64_t nCols = setupCtx->starkInfo.mapSectionsN["cm1"];
-        uint64_t offsetCm1 = setupCtx->starkInfo.mapOffsets[std::make_pair("cm1", false)];
-
-        std::vector<Goldilocks::Element> aux_trace_owned;
-        if (local_params.aux_trace == nullptr) {
-            aux_trace_owned.resize(setupCtx->starkInfo.mapTotalN);
-            local_params.aux_trace = aux_trace_owned.data();
+        if (d_buffers->airgroupId != airgroupId || d_buffers->airId != airId || d_buffers->proofType != "basic") {
+            uint64_t sizeConstPols = N * (setupCtx->starkInfo.nConstants) * sizeof(Goldilocks::Element);
+            uint64_t sizeConstTree = get_const_tree_size((void *)&setupCtx->starkInfo) * sizeof(Goldilocks::Element);
+            loadFileParallel(params->pConstPolsAddress, constPolsPath, sizeConstPols);
+            venus_load_or_build_const_tree(
+                setupCtx,
+                params->pConstPolsAddress,
+                params->pConstPolsExtendedTreeAddress,
+                constTreePath,
+                sizeConstTree);
         }
 
-        std::vector<Goldilocks::Element> const_pols_owned;
-        if (local_params.pConstPolsAddress == nullptr) {
-            uint64_t const_size = N * setupCtx->starkInfo.nConstants;
-            const_pols_owned.resize(const_size);
-            venus_load_const_pols(d_buffers, const_pols_owned.data(), constPolsPath, N, setupCtx->starkInfo.nConstants);
-            local_params.pConstPolsAddress = const_pols_owned.data();
-        }
+        d_buffers->airgroupId = airgroupId;
+        d_buffers->airId = airId;
+        d_buffers->proofType = "basic";
 
-        std::vector<Goldilocks::Element> const_tree_owned;
-        if (local_params.pConstPolsExtendedTreeAddress == nullptr) {
-            uint64_t const_tree_size = get_const_tree_size((void *)&setupCtx->starkInfo);
-            const_tree_owned.resize(const_tree_size);
-            loadFileParallel(const_tree_owned.data(), constTreePath, const_tree_size * sizeof(Goldilocks::Element));
-            local_params.pConstPolsExtendedTreeAddress = const_tree_owned.data();
-        }
-
+        StepsParams params_cpu = *params;
+        std::vector<Goldilocks::Element> unpacked_trace;
         PackedInfoCPU *packed_info = d_buffers->getPackedInfo(airgroupId, airId);
-        if (packed_info != nullptr && packed_info->is_packed) {
+        if (packed_info != nullptr && packed_info->is_packed && !venus_trace_preunpacked()) {
+            unpacked_trace.resize(N * nCols);
             d_buffers->unpack_cpu(
-                (const uint64_t *)local_params.trace,
-                (uint64_t *)&local_params.aux_trace[offsetCm1],
+                (uint64_t *)params->trace,
+                (uint64_t *)unpacked_trace.data(),
                 N,
                 nCols,
                 packed_info->num_packed_words,
                 packed_info->unpack_info);
-            local_params.trace = &local_params.aux_trace[offsetCm1];
+            params_cpu.trace = unpacked_trace.data();
+        } else {
+            params_cpu.trace = params->trace;
         }
 
         genProof(
@@ -876,7 +905,7 @@ uint64_t gen_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64
             airgroupId,
             airId,
             instanceId,
-            local_params,
+            params_cpu,
             (Goldilocks::Element *)globalChallenge,
             proofBuffer,
             std::string(proofFile));
@@ -1084,60 +1113,52 @@ void get_stream_id_proof(void *d_buffers_, uint64_t streamId) {
 uint64_t gen_recursive_proof(void *pSetupCtx_, char *globalInfoFile, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *trace, void *aux_trace, void *pConstPols, void *pConstTree, void *pPublicInputs, uint64_t* proofBuffer, char *proof_file, bool vadcop, void *d_buffers_, char *constPolsPath, char *constTreePath, char *proofType, bool force_recursive_stream)
 {
     if (use_venus_backend()) {
-        (void)globalInfoFile;
+        json globalInfo;
+        file2json(globalInfoFile, globalInfo);
+        (void)globalInfo;
         (void)vadcop;
         (void)force_recursive_stream;
 
         SetupCtx *setupCtx = (SetupCtx *)pSetupCtx_;
-        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
-        uint64_t N = (1ULL << setupCtx->starkInfo.starkStruct.nBits);
-
-        std::vector<Goldilocks::Element> aux_trace_owned;
-        Goldilocks::Element *aux_trace_ptr = (Goldilocks::Element *)aux_trace;
-        if (aux_trace_ptr == nullptr) {
-            aux_trace_owned.resize(setupCtx->starkInfo.mapTotalN);
-            aux_trace_ptr = aux_trace_owned.data();
+        DeviceCommitBuffersCPU *d_buffers = (DeviceCommitBuffersCPU *)d_buffers_;
+        std::string proof_type = std::string(proofType);
+        if (d_buffers->airgroupId != airgroupId || d_buffers->airId != airId || d_buffers->proofType != proof_type) {
+            uint64_t N = (1ULL << setupCtx->starkInfo.starkStruct.nBits);
+            uint64_t sizeConstPols = N * (setupCtx->starkInfo.nConstants) * sizeof(Goldilocks::Element);
+            uint64_t sizeConstTree = get_const_tree_size((void *)&setupCtx->starkInfo) * sizeof(Goldilocks::Element);
+            loadFileParallel(pConstPols, constPolsPath, sizeConstPols);
+            venus_load_or_build_const_tree(
+                setupCtx,
+                (Goldilocks::Element *)pConstPols,
+                (Goldilocks::Element *)pConstTree,
+                constTreePath,
+                sizeConstTree);
         }
 
-        std::vector<Goldilocks::Element> const_pols_owned;
-        Goldilocks::Element *const_pols_ptr = (Goldilocks::Element *)pConstPols;
-        if (const_pols_ptr == nullptr) {
-            uint64_t const_size = N * setupCtx->starkInfo.nConstants;
-            const_pols_owned.resize(const_size);
-            venus_load_const_pols(d_buffers, const_pols_owned.data(), constPolsPath, N, setupCtx->starkInfo.nConstants);
-            const_pols_ptr = const_pols_owned.data();
-        }
+        d_buffers->airgroupId = airgroupId;
+        d_buffers->airId = airId;
+        d_buffers->proofType = proof_type;
 
-        std::vector<Goldilocks::Element> const_tree_owned;
-        Goldilocks::Element *const_tree_ptr = (Goldilocks::Element *)pConstTree;
-        if (const_tree_ptr == nullptr) {
-            uint64_t const_tree_size = get_const_tree_size((void *)&setupCtx->starkInfo);
-            const_tree_owned.resize(const_tree_size);
-            loadFileParallel(const_tree_owned.data(), constTreePath, const_tree_size * sizeof(Goldilocks::Element));
-            const_tree_ptr = const_tree_owned.data();
-        }
-
-        std::vector<Goldilocks::Element> evals(setupCtx->starkInfo.evMap.size() * FIELD_EXTENSION, Goldilocks::zero());
-        std::vector<Goldilocks::Element> challenges(setupCtx->starkInfo.challengesMap.size() * FIELD_EXTENSION, Goldilocks::zero());
-        Goldilocks::Element airgroupValues[FIELD_EXTENSION] = {Goldilocks::zero(), Goldilocks::zero(), Goldilocks::zero()};
+        Goldilocks::Element evals[setupCtx->starkInfo.evMap.size() * FIELD_EXTENSION];
+        Goldilocks::Element challenges[setupCtx->starkInfo.challengesMap.size() * FIELD_EXTENSION];
+        Goldilocks::Element airgroupValues[FIELD_EXTENSION];
 
         StepsParams params = {
             .trace = (Goldilocks::Element *)trace,
-            .aux_trace = aux_trace_ptr,
+            .aux_trace = (Goldilocks::Element *)aux_trace,
             .publicInputs = (Goldilocks::Element *)pPublicInputs,
             .proofValues = nullptr,
-            .challenges = challenges.data(),
+            .challenges = challenges,
             .airgroupValues = airgroupValues,
-            .airValues = nullptr,
-            .evals = evals.data(),
+            .evals = evals,
             .xDivXSub = nullptr,
-            .pConstPolsAddress = const_pols_ptr,
-            .pConstPolsExtendedTreeAddress = const_tree_ptr,
+            .pConstPolsAddress = (Goldilocks::Element *)pConstPols,
+            .pConstPolsExtendedTreeAddress = (Goldilocks::Element *)pConstTree,
             .pCustomCommitsFixed = nullptr,
         };
 
         genProof(*setupCtx, airgroupId, airId, instanceId, params, nullptr, proofBuffer, std::string(proof_file), true);
-        venus_notify_proof_done(instanceId, proofType);
+        venus_notify_proof_done(instanceId, proof_type.c_str());
         return 0;
     }
 
@@ -1221,37 +1242,40 @@ uint64_t gen_recursive_proof(void *pSetupCtx_, char *globalInfoFile, uint64_t ai
 
 uint64_t commit_witness(uint64_t arity, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, void *root, void *trace, void *auxTrace, void *d_buffers_, void *pSetupCtx_) {
     if (use_venus_backend()) {
-        VenusDeviceBuffers *d_buffers = (VenusDeviceBuffers *)d_buffers_;
+        DeviceCommitBuffersCPU *d_buffers = (DeviceCommitBuffersCPU *)d_buffers_;
         Goldilocks::Element *rootGL = (Goldilocks::Element *)root;
+        Goldilocks::Element *auxTraceGL = (Goldilocks::Element *)auxTrace;
         uint64_t N = 1ULL << nBits;
         uint64_t NExtended = 1ULL << nBitsExt;
 
         SetupCtx *setupCtx = (SetupCtx *)pSetupCtx_;
         MerkleTreeGL mt(arity, setupCtx->starkInfo.starkStruct.lastLevelVerification, true, NExtended, nCols);
 
-        std::vector<Goldilocks::Element> trace_buffer(N * nCols);
-        std::vector<Goldilocks::Element> tree_buffer(NExtended * nCols + mt.numNodes, Goldilocks::zero());
-
         PackedInfoCPU *packed_info = d_buffers->getPackedInfo(airgroupId, airId);
         if (packed_info != nullptr && packed_info->is_packed) {
             d_buffers->unpack_cpu(
-                (const uint64_t *)trace,
-                (uint64_t *)trace_buffer.data(),
+                (uint64_t *)trace,
+                (uint64_t *)&auxTraceGL[0],
                 N,
                 nCols,
                 packed_info->num_packed_words,
                 packed_info->unpack_info);
         } else {
-            memcpy(trace_buffer.data(), trace, N * nCols * sizeof(Goldilocks::Element));
+            memcpy(auxTraceGL, trace, N * nCols * sizeof(Goldilocks::Element));
         }
 
         NTT_Goldilocks ntt(N);
-        mt.setSource(tree_buffer.data());
-        mt.setNodes(&tree_buffer[NExtended * nCols]);
-        ntt.extendPol(mt.source, trace_buffer.data(), NExtended, N, nCols);
+        // Use a dedicated temporary buffer for extension FFT workspace.
+        // Reusing the tail of auxTrace can overlap with Merkle nodes and corrupt memory.
+        std::vector<Goldilocks::Element> ntt_tmp;
+        ntt_tmp.resize(NExtended * nCols);
+        ntt.extendPol(&auxTraceGL[0], &auxTraceGL[0], NExtended, N, nCols, ntt_tmp.data());
+        mt.setSource(&auxTraceGL[0]);
+        mt.setNodes(&auxTraceGL[NExtended * nCols]);
         mt.merkelize();
         mt.getRoot(rootGL);
-        (void)auxTrace;
+
+        venus_notify_proof_done(instanceId, "basic");
         return 0;
     }
 

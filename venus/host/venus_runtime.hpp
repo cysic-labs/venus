@@ -8,12 +8,19 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <vector>
 
 enum class ProverBackend {
     GPU,
     VENUS,
+};
+
+enum class VenusRuntimeMode {
+    GPU_COMPATIBLE,
+    FPGA_CSIM,
+    CPU_EMULATION,
 };
 
 inline std::string normalize_backend_name(const char *value) {
@@ -32,6 +39,13 @@ inline std::string normalize_backend_name(const char *value) {
     return backend;
 }
 
+inline bool venus_env_is_false(const char *value) {
+    if (value == nullptr || *value == '\0') return true;
+    return strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "FALSE") == 0 ||
+           strcmp(value, "off") == 0 || strcmp(value, "OFF") == 0 || strcmp(value, "no") == 0 ||
+           strcmp(value, "NO") == 0;
+}
+
 inline ProverBackend get_prover_backend() {
     static const ProverBackend backend = []() {
         std::string backend_name = normalize_backend_name(std::getenv("ZISK_PROVER_BACKEND"));
@@ -48,26 +62,105 @@ inline ProverBackend get_prover_backend() {
     return backend;
 }
 
+inline VenusRuntimeMode get_venus_runtime_mode() {
+    static const VenusRuntimeMode mode = []() {
+        if (get_prover_backend() != ProverBackend::VENUS) {
+            return VenusRuntimeMode::GPU_COMPATIBLE;
+        }
+
+        const char *cpu_mode = std::getenv("ZISK_VENUS_CPU");
+        if (cpu_mode != nullptr && *cpu_mode != '\0' && !venus_env_is_false(cpu_mode)) {
+            zklog.info("Venus backend using software emulation path");
+            return VenusRuntimeMode::CPU_EMULATION;
+        }
+
+        std::string mode_name = normalize_backend_name(std::getenv("ZISK_VENUS_MODE"));
+        if (mode_name.empty() || mode_name == "csim" || mode_name == "fpga") {
+            zklog.info("Venus backend using CSIM preflight + GPU proving runtime path");
+            return VenusRuntimeMode::FPGA_CSIM;
+        }
+        if (mode_name == "cpu" || mode_name == "sw" || mode_name == "software") {
+            zklog.info("Venus backend using software emulation path");
+            return VenusRuntimeMode::CPU_EMULATION;
+        }
+        if (mode_name == "gpu" || mode_name == "compat" || mode_name == "gpu-compatible") {
+            zklog.info("Venus backend using GPU-compatible runtime path");
+            return VenusRuntimeMode::GPU_COMPATIBLE;
+        }
+
+        zklog.warning("Unknown ZISK_VENUS_MODE='" + mode_name + "', defaulting to csim");
+        zklog.info("Venus backend using CSIM preflight + GPU proving runtime path");
+        return VenusRuntimeMode::FPGA_CSIM;
+    }();
+    return mode;
+}
+
 inline bool use_venus_backend() {
     if (get_prover_backend() != ProverBackend::VENUS) return false;
+    VenusRuntimeMode mode = get_venus_runtime_mode();
+    return mode == VenusRuntimeMode::CPU_EMULATION;
+}
 
-    static const bool venus_cpu_mode = []() {
-        const char *value = std::getenv("ZISK_VENUS_CPU");
-        if (value == nullptr || *value == '\0') {
-            zklog.info("Venus backend using GPU-compatible runtime path (set ZISK_VENUS_CPU=1 for software emulation)");
-            return false;
-        }
-        if (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "FALSE") == 0 ||
-            strcmp(value, "off") == 0 || strcmp(value, "OFF") == 0 || strcmp(value, "no") == 0 ||
-            strcmp(value, "NO") == 0) {
-            zklog.info("Venus backend using GPU-compatible runtime path");
-            return false;
-        }
-        zklog.info("Venus backend using software emulation path");
-        return true;
-    }();
+inline bool venus_uses_csim() {
+    return get_prover_backend() == ProverBackend::VENUS && get_venus_runtime_mode() == VenusRuntimeMode::FPGA_CSIM;
+}
 
-    return venus_cpu_mode;
+inline bool venus_trace_preunpacked() {
+    const char *value = std::getenv("ZISK_VENUS_TRACE_PREUNPACKED");
+    if (value == nullptr || *value == '\0') return false;
+    return !venus_env_is_false(value);
+}
+
+inline std::filesystem::path venus_find_hls_dir() {
+    std::error_code ec;
+    std::filesystem::path cursor = std::filesystem::current_path(ec);
+    if (!ec) {
+        while (true) {
+            std::filesystem::path candidate = cursor / "venus" / "hls";
+            if (std::filesystem::exists(candidate / "Makefile")) {
+                return candidate;
+            }
+            if (cursor == cursor.root_path()) break;
+            cursor = cursor.parent_path();
+        }
+    }
+
+    std::filesystem::path relative_candidate = std::filesystem::path("venus") / "hls";
+    if (std::filesystem::exists(relative_candidate / "Makefile")) {
+        return relative_candidate;
+    }
+
+    return std::filesystem::path();
+}
+
+inline bool venus_prepare_runtime() {
+    if (!venus_uses_csim()) return true;
+
+    static std::once_flag once;
+    static bool ok = false;
+
+    std::call_once(once, []() {
+        std::filesystem::path hls_dir = venus_find_hls_dir();
+        if (hls_dir.empty()) {
+            zklog.error("Unable to locate venus/hls for CSIM runtime mode");
+            ok = false;
+            return;
+        }
+
+        std::string cmd = "make -C \"" + hls_dir.string() + "\" csim";
+        zklog.info("Running Venus HLS C-simulation preflight: " + cmd);
+        int rc = std::system(cmd.c_str());
+        if (rc != 0) {
+            zklog.error("Venus HLS C-simulation preflight failed with exit code " + std::to_string(rc));
+            ok = false;
+            return;
+        }
+
+        zklog.info("Venus HLS C-simulation preflight completed successfully");
+        ok = true;
+    });
+
+    return ok;
 }
 
 struct VenusDeviceBuffers : DeviceCommitBuffersCPU {

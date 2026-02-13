@@ -10,8 +10,8 @@ use std::fs::File;
 use std::io::Write;
 
 use proofman_common::{
-    load_const_pols, load_const_pols_tree, CurveType, MpiCtx, Proof, ProofCtx, ProofType, ProofmanResult,
-    ProofmanError, Setup, SetupsVadcop, GetSizeWitnessFunc,
+    load_const_pols, CurveType, MpiCtx, Proof, ProofCtx, ProofType, ProofmanResult, ProofmanError, Setup,
+    SetupsVadcop, GetSizeWitnessFunc,
 };
 
 use std::os::raw::{c_void, c_char};
@@ -30,6 +30,37 @@ pub type GetWitnessFinalFunc =
     unsafe extern "C" fn(zkin: *mut c_void, dat_file: *const c_char, witness: *mut c_void, n_mutexes: u64) -> i64;
 
 pub const N_RECURSIVE_PROOFS_PER_AGGREGATION: usize = 3;
+
+fn normalize_backend_env(value: &str) -> String {
+    value.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase()
+}
+
+fn env_value_is_false(value: &str) -> bool {
+    matches!(normalize_backend_env(value).as_str(), "" | "0" | "false" | "off" | "no")
+}
+
+fn is_venus_cpu_backend_enabled() -> bool {
+    let backend = std::env::var("ZISK_PROVER_BACKEND").unwrap_or_default();
+    let backend_norm = normalize_backend_env(&backend);
+    if backend_norm != "venus" && backend_norm != "fpga" {
+        return false;
+    }
+
+    if let Ok(cpu_mode) = std::env::var("ZISK_VENUS_CPU") {
+        if !env_value_is_false(&cpu_mode) {
+            return true;
+        }
+    }
+
+    if let Ok(mode) = std::env::var("ZISK_VENUS_MODE") {
+        let mode_norm = normalize_backend_env(&mode);
+        if mode_norm == "cpu" || mode_norm == "sw" || mode_norm == "software" {
+            return true;
+        }
+    }
+
+    false
+}
 
 #[derive(Debug)]
 pub struct MaxSizes {
@@ -344,7 +375,7 @@ pub fn generate_recursive_proof<F: PrimeField64>(
         );
     }
 
-    let (const_pols_ptr, const_tree_ptr) = if cfg!(feature = "gpu") {
+    let (const_pols_ptr, const_tree_ptr) = if cfg!(feature = "gpu") && !is_venus_cpu_backend_enabled() {
         (std::ptr::null_mut(), std::ptr::null_mut())
     } else {
         (const_pols.as_ptr() as *mut u8, const_tree.as_ptr() as *mut u8)
@@ -651,7 +682,6 @@ pub fn generate_recursivef_proof<F: PrimeField64>(
     let trace: Vec<F> = vec![F::ZERO; setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize];
 
     load_const_pols(setup, const_pols);
-    load_const_pols_tree(setup, const_tree);
 
     let setup_vadcop_final = setups.setup_vadcop_final.as_ref().unwrap();
     let vadcop_proof: &[u64] = &proof[1 + setup_vadcop_final.stark_info.n_publics as usize..];

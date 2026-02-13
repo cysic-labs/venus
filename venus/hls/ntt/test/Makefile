@@ -28,24 +28,24 @@ GL_HDRS   := $(HDR_DIR)/../goldilocks/gl64_t.hpp \
 SRCS      := ntt_test_kernel.cpp $(NTT_HDRS) $(GL_HDRS)
 TB_SRC    := tb_ntt.cpp
 
-.PHONY: csim csynth cosim package clean
+.PHONY: csim csynth cosim package clean cfg
 
-$(CFG): $(CFG_BASE)
+cfg: $(CFG_BASE)
 	@sed 's/^part=.*/part=$(PART)/' $(CFG_BASE) > $(CFG)
 
 
 # C-Simulation: validate functional correctness
-csim: $(SRCS) $(TB_SRC) $(CFG)
+csim: $(SRCS) $(TB_SRC) cfg
 	@echo "=== Running C-Simulation via vitis-run ==="
 	$(VITIS_RUN) --mode hls --csim --config $(CFG) --work_dir $(WORK_DIR)
 
 # C-Synthesis: generate RTL and resource/timing reports
-csynth: $(SRCS) $(CFG)
+csynth: $(SRCS) cfg
 	@echo "=== Running C-Synthesis via v++ ==="
 	$(VPP) --compile --mode hls --config $(CFG) --work_dir $(WORK_DIR)
 
 # Co-Simulation: verify RTL matches C model
-cosim: $(SRCS) $(TB_SRC) $(CFG)
+cosim: $(SRCS) $(TB_SRC) cfg
 	@echo "=== Running Co-Simulation via vitis-run ==="
 	$(VITIS_RUN) --mode hls --cosim --config $(CFG) --work_dir $(WORK_DIR)
 

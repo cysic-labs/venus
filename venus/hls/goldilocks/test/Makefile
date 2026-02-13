@@ -23,24 +23,24 @@ PART      ?= xcvu47p-fsvh2892-3-e
 SRCS      := gl64_test_kernel.cpp $(HDR_DIR)/gl64_t.hpp $(HDR_DIR)/gl64_cubic.hpp $(HDR_DIR)/gl64_constants.hpp
 TB_SRC    := tb_gl64.cpp
 
-.PHONY: csim csynth cosim package clean
+.PHONY: csim csynth cosim package clean cfg
 
-$(CFG): $(CFG_BASE)
+cfg: $(CFG_BASE)
 	@sed 's/^part=.*/part=$(PART)/' $(CFG_BASE) > $(CFG)
 
 
 # C-Simulation: validate functional correctness
-csim: $(SRCS) $(TB_SRC) $(CFG)
+csim: $(SRCS) $(TB_SRC) cfg
 	@echo "=== Running C-Simulation via vitis-run ==="
 	$(VITIS_RUN) --mode hls --csim --config $(CFG) --work_dir $(WORK_DIR)
 
 # C-Synthesis: generate RTL and resource/timing reports
-csynth: $(SRCS) $(CFG)
+csynth: $(SRCS) cfg
 	@echo "=== Running C-Synthesis via v++ ==="
 	$(VPP) --compile --mode hls --config $(CFG) --work_dir $(WORK_DIR)
 
 # Co-Simulation: verify RTL matches C model
-cosim: $(SRCS) $(TB_SRC) $(CFG)
+cosim: $(SRCS) $(TB_SRC) cfg
 	@echo "=== Running Co-Simulation via vitis-run ==="
 	$(VITIS_RUN) --mode hls --cosim --config $(CFG) --work_dir $(WORK_DIR)
 
