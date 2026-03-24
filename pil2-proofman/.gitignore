@@ -1,0 +1,12 @@
+target
+tmp
+build*/
+*.pilout
+run.sh
+vendor
+.cargo
+MyLogFile.log
+.vscode/settings.json
+.vscode/c_cpp_properties.json
+pil2-stark/lib-gpu/*
+!.vscode/settings.json

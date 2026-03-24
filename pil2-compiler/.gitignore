@@ -1,0 +1,10 @@
+node_modules
+.vscode
+build
+cache-*.json
+tmp
+*.stats
+*.pilout
+dump_*.bin
+*.pilout
+*.pilout.gz

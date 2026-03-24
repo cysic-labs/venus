@@ -1,0 +1,21 @@
+[package]
+name = "proofman-verifier"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+build = "build.rs"
+
+[dependencies]
+fields.workspace = true
+proofman-util.workspace = true
+tracing.workspace = true
+bytemuck.workspace = true
+rayon.workspace = true
+
+[features]
+default = ["verify"]
+verify = ["fields/verify"]

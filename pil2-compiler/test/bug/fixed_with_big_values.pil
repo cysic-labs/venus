@@ -1,0 +1,17 @@
+airtemplate BigValueTable(int N=2**22) {
+    const int K = 104;
+    const int K2 = 508;
+
+    col fixed K2K;
+
+    int value = 2**32;
+    #pragma transpile
+    for (int i = 0; i < N; i++) {
+        value = value + K * K2;
+        K2K[i] = value;
+    }
+}
+
+airgroup BigValueGroup {
+    BigValueTable(); 
+}

@@ -1,0 +1,181 @@
+#ifndef ARITH_HPP
+#define ARITH_HPP
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Identifiers of the functions supported by free call
+#define FCALL_ID_INVERSE_FP_EC 1
+#define FCALL_ID_INVERSE_FN_EC 2
+#define FCALL_ID_SQRT_FP_EC_PARITY 3
+#define FCALL_ID_MSB_POS_256 4
+#define FCALL_ID_BN254_FP_INV 6
+#define FCALL_ID_BN254_FP2_INV 7
+#define FCALL_ID_BN254_TWIST_ADD_LINE_COEFFS 8
+#define FCALL_ID_BN254_TWIST_DBL_LINE_COEFFS 9
+#define FCALL_BLS12_381_FP_INV_ID 10
+#define FCALL_BLS12_381_FP_SQRT_ID 11
+#define FCALL_BLS12_381_FP2_INV_ID 12
+#define FCALL_BLS12_381_TWIST_ADD_LINE_COEFFS_ID 13
+#define FCALL_BLS12_381_TWIST_DBL_LINE_COEFFS_ID 14
+#define FCALL_MSB_POS_384_ID 15
+#define FCALL_BIGINT256_DIV_ID 16
+#define FCALL_BIG_INT_DIV_ID 17
+#define FCALL_BIN_DECOMP_ID 18
+#define FCALL_BLS12_381_FP2_SQRT_ID 19
+#define FCALL_SECP256K1_ECDSA_VERIFY_ID 20
+#define FCALL_SECP256R1_ECDSA_VERIFY_ID 21
+
+#define FCALL_PARAMS_MAX_SIZE 386
+#define FCALL_RESULT_MAX_SIZE 8193
+
+// Fcall context
+struct FcallContext
+{
+    uint64_t function_id; // identifies what function to call
+    uint64_t params_max_size; // max length of input parameters array
+    uint64_t params_size; // input parameters array valid data size
+    uint64_t params[FCALL_PARAMS_MAX_SIZE]; // input parameters array
+    uint64_t result_max_size; // max length of output result array
+    uint64_t result_size; // output result array valid data size (written by fcall)
+    uint64_t result[FCALL_RESULT_MAX_SIZE]; // output result array (written by fcall)
+};
+
+// Fcall function; calls the corresponding function based on function identifier
+int Fcall (
+    struct FcallContext * ctx  // fcall context
+);
+
+// Functions supported by fcall, in fcall context format
+int InverseFpEcCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int InverseFnEcCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int SqrtFpEcParityCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int MsbPos256Ctx (
+    struct FcallContext * ctx  // fcall context
+);
+int BN254FpInvCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BN254ComplexInvCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BN254TwistAddLineCoeffsCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BN254TwistDblLineCoeffsCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BLS12_381FpInvCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BLS12_381FpSqrtCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BLS12_381ComplexInvCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BLS12_381TwistAddLineCoeffsCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BLS12_381TwistDblLineCoeffsCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int MsbPos384Ctx (
+    struct FcallContext * ctx  // fcall context
+);
+int BigInt256DivCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BigIntDivCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BinDecompCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int BLS12_381Fp2SqrtCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int Secp256k1EcdsaVerifyCtx (
+    struct FcallContext * ctx  // fcall context
+);
+int Secp256r1EcdsaVerifyCtx (
+    struct FcallContext * ctx  // fcall context
+);
+
+// Functions supported by fcall, in u64 array format
+int InverseFpEc (
+    const uint64_t * a, // 4 x 64 bits
+          uint64_t * r  // 4 x 64 bits
+);
+int InverseFnEc (
+    const uint64_t * a, // 4 x 64 bits
+          uint64_t * r  // 4 x 64 bits
+);
+int SqrtFpEcParity (
+    const uint64_t * a,  // 4 x 64 bits
+    const uint64_t   parity,
+          uint64_t * r  // 4 x 64 bits
+);
+int MsbPos256 (
+    const uint64_t * a, // 8 x 64 bits
+          uint64_t * r  // 2 x 64 bits
+);
+int BN254FpInv (
+    const uint64_t * a, // 4 x 64 bits
+          uint64_t * r  // 4 x 64 bits
+);
+int BN254ComplexInv (
+    const uint64_t * a, // 8 x 64 bits
+          uint64_t * r  // 8 x 64 bits
+);
+int BN254TwistAddLineCoeffs (
+    const uint64_t * a, // 32 x 64 bits
+          uint64_t * r  // 16 x 64 bits
+);
+int BN254TwistDblLineCoeffs (
+    const uint64_t * a, // 16 x 64 bits
+          uint64_t * r  // 16 x 64 bits
+);
+int BLS12_381FpInv (
+    const uint64_t * a, // 6 x 64 bits
+          uint64_t * r  // 6 x 64 bits
+);
+int BLS12_381FpSqrt (
+    const uint64_t * a, // 6 x 64 bits
+          uint64_t * r  // 6 x 64 bits
+);
+int BLS12_381ComplexInv (
+    const uint64_t * a, // 12 x 64 bits
+          uint64_t * r  // 12 x 64 bits
+);
+int BLS12_381TwistAddLineCoeffs (
+    const uint64_t * a, // 48 x 64 bits
+          uint64_t * r  // 24 x 64 bits
+);
+int BLS12_381TwistDblLineCoeffs (
+    const uint64_t * a, // 24 x 64 bits
+          uint64_t * r  // 24 x 64 bits
+);
+int MsbPos384 (
+    const uint64_t * a, // 12 x 64 bits
+          uint64_t * r  // 2 x 64 bits
+);
+int BigInt256Div (
+    const uint64_t * a, // 8 x 64 bits
+          uint64_t * r  // 8 x 64 bits
+);
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
+#endif

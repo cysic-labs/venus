@@ -1,0 +1,26 @@
+airtemplate Expressions(int N = 2**16) {
+
+    col witness byteIn;
+
+    byteIn * (byteIn - 1) === 0;
+
+    int proof._value = 8*8;
+    on final proof partyEnd();
+}
+
+public in_value;
+
+in_value === 4;
+
+function partyEnd() {
+    println("Party End");
+    @my_party_end { value1: proof._value, value2: 10 }    
+}
+
+@myfirst_global_constraint { pepe: 16 }
+
+airgroup Expressions {
+    Expressions();
+}
+
+println("End-Of-Pil");

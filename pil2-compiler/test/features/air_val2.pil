@@ -1,0 +1,28 @@
+airtemplate TestA(int N = 2**18) {
+    airval stage(1) test;
+    airgroupval aggregate(sum) stage(2) default(4) pepa;
+    airgroupval aggregate(prod) stage(3) default(3) pepe[2];
+    // println("TestA");    
+    col witness k;
+    k === 2;
+}
+
+airtemplate TestB(int N = 2**18, const int use_air_group = 0) {
+    if (use_air_group) {
+        println("use_air_group", use_air_group);
+        airgroupval aggregate(sum) default(8) pepe;
+    }
+    println("TestB");    
+    col witness k;
+    k === 2;
+}
+
+airgroup Test {
+    TestA();
+    TestB();
+}
+
+airgroup Test2 {
+    TestB() alias Test2B1;
+    TestB(use_air_group: 1) alias Test2B2;
+}

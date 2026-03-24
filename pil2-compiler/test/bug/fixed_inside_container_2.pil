@@ -1,0 +1,32 @@
+const int GEN[12] = [100000000, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110]; 
+
+function callme() {
+    if (!defined(air.std.connect)) {
+        container air.std.connect {
+            col fixed ID = [1, GEN[BITS]..*..];
+        }
+        println(`${AIR_ID}`);
+        println(`BITS = ${BITS} ${GEN[BITS]}`);
+        const int values[2] = [air.std.connect.ID[0],
+                               air.std.connect.ID[1]];
+        println(`ID = ${values[0]} ${values[1]}`);
+    }
+}
+
+
+airtemplate FixedInside(int N = 2**10) {
+    on final air callme();
+}
+
+airtemplate FixedInside2(int N = 2**11) {
+    on final air callme();
+}
+
+airgroup Fixed1 {
+    FixedInside();
+//    FixedInside2();
+}
+airgroup Fixed2 {
+//    FixedInside(2**11);
+    FixedInside2();
+}

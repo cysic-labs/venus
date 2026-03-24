@@ -1,0 +1,28 @@
+public module;
+challenge stage(1) std_alpha;
+challenge stage(2) std_beta;
+challenge stage(1) std_gamma;
+
+proofval stage(1) value1;
+proofval stage(2) value2;
+
+private function checkProofValues()
+{
+    module * value1 - value2 === 0;
+    std_alpha - std_alpha === 0;
+    std_alpha - std_beta * std_gamma === 0;
+}
+
+on final proof checkProofValues();
+
+
+airtemplate A(const int N = 2**8) {
+    col witness a;
+
+    a * (1 - value1) * (1 - value2) === 0;
+    std_alpha - std_beta + std_gamma === 0;
+}
+
+airgroup A {
+    A();
+}

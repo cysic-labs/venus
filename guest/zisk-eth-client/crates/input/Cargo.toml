@@ -1,0 +1,25 @@
+[package]
+name = "input"
+description = ""
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+guest-reth.workspace = true
+
+async-trait.workspace = true
+anyhow.workspace = true
+bincode.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_with.workspace = true
+
+alloy-genesis.workspace = true
+alloy-provider = { workspace = true, features = ["debug-api"] }
+alloy-rpc-types-eth.workspace = true
+alloy-rpc-types-debug.workspace = true
+
+reth-chainspec.workspace = true
+
+stateless-reth.workspace = true

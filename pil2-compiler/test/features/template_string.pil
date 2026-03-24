@@ -1,0 +1,22 @@
+const int A = 100;
+const int B = 200;
+const int C = 300;
+
+airtemplate TemplateString(int N = 2**16) {
+    const int _A = 150;
+    col witness wA;
+    col witness wB;
+    const expr J = wA + 2 * wB;
+    const expr K = 2 * J - A;
+
+    println(_A);
+    println(`_A=${_A}`);
+    println(`A=${A}`);
+    println(`A=${A}`,`B=${B}`,`C=${C}`);
+    println(`J=${J}`);
+    println(`K=${K}`);
+}
+
+airgroup TemplateString {
+    TemplateString();
+}

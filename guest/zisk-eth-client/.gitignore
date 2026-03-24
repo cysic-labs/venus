@@ -1,0 +1,13 @@
+build
+target
+tmp
+/inputs
+*.log
+*zkevm-benchmark*
+zkevm-fixtures*
+fixtures
+reth-inputs*
+metrics
+hint_log
+hints
+tmp_scripts

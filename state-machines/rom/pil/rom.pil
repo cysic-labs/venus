@@ -1,0 +1,26 @@
+require "std_lookup.pil"
+require "opids.pil"
+
+public rom_root[4];
+
+airtemplate Rom(const int N = 2**21, const int rom_bus_id = ROM_BUS_ID) {
+    commit stage(0) public(rom_root) rom;
+
+    col rom line;
+    col rom a_offset_imm0;
+    col rom a_imm1;
+    col rom b_offset_imm0;
+    col rom b_imm1;
+    col rom ind_width;
+    col rom op;
+    col rom store_offset;
+    col rom jmp_offset1;
+    col rom jmp_offset2;
+    col rom flags;
+
+
+    col witness multiplicity;
+
+    lookup_proves(rom_bus_id, [line, a_offset_imm0, a_imm1, b_offset_imm0, b_imm1, ind_width,
+                                op, store_offset, jmp_offset1, jmp_offset2, flags], mul: multiplicity);
+}

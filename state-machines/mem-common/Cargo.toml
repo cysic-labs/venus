@@ -1,0 +1,35 @@
+[package]
+name = "mem-common"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+[[bin]]
+name = "mem_debug_cli"
+path = "src/mem_debug_cli.rs"
+
+[dependencies]
+zisk-core = { workspace = true }
+zisk-common = { workspace = true }
+zisk-pil = { workspace = true }
+
+proofman-common = { workspace = true }
+proofman-macros = { workspace = true }
+proofman-util = { workspace = true }
+fields = { workspace=true }
+tracing = { workspace = true }
+rayon = { workspace = true }
+num-bigint = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+static_assertions = { workspace = true }
+num-traits = "0.2"
+
+[features]
+default = []
+debug_mem = []
+debug_mem_align = []
+save_mem_bus_data = []
+mem_align_stats = []

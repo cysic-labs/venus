@@ -1,0 +1,33 @@
+assert_eq(AIRGROUP_ID, -1);
+
+airtemplate A(int N = 2**8, int agid = 0, int aid = 0) {
+    assert_eq(AIRGROUP_ID, agid);
+    assert_eq(AIR_ID, aid);
+}
+
+assert_eq(AIRGROUP_ID, -1);
+assert_eq(AIR_ID, -1);
+
+airgroup A1 {
+    assert_eq(AIRGROUP_ID, 0);
+    assert_eq(AIR_ID, -1);
+    A(agid: 0);
+    assert_eq(AIR_ID, -1);
+    assert_eq(AIRGROUP_ID, 0);
+}
+
+assert_eq(AIRGROUP_ID, -1);
+assert_eq(AIR_ID, -1);
+
+
+airgroup A2 {
+    assert_eq(AIRGROUP_ID, 1);
+    assert_eq(AIR_ID, -1);
+    A(agid: 1) alias AonA2;
+    assert_eq(AIRGROUP_ID, 1);
+    assert_eq(AIR_ID, -1);
+}
+
+assert_eq(AIR_ID, -1);
+assert_eq(AIRGROUP_ID, -1);
+

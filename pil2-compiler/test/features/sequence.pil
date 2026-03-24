@@ -1,0 +1,209 @@
+airtemplate Expressions(int N = 2**7) {
+
+    string expand = "";
+
+    #pragma fixed_tmp
+    col fixed BASIC = [1:1,2:2,3:3,4:4,5:5];
+    col fixed BASIC2 = [1:1,2:2,3:3,4:4,5:5]...;
+    {
+        int row = 0;
+        int value = 1;
+        while (row < N) {
+            for (int times = 0; times < value; ++times) {
+                if (row < 15) assert_eq(BASIC[row], value);
+                assert_eq(defined(BASIC[row]), row < 15 ? 1:0);
+                assert_eq(BASIC2[row], value);
+                ++row;
+                if (row == N) break;
+            }
+            ++value;
+            if (value == 6) value = 1;
+        }
+    }
+
+    col fixed BYTE_C4096 = [0:3..13:3]...;
+    {
+        int row = 0;
+        int value = 0;
+        while (row < N) {
+            for (int times = 0; times < 3; ++times) {
+                assert_eq(BYTE_C4096[row], value);
+                ++row;
+                if (row == N) break;
+            }
+            ++value;
+            if (value == 14) value = 0;
+        }
+    }
+
+
+    col fixed ODDS = [23,15,13..+..9]...;
+    {
+        const int values[5] = [23,15,13,11,9];
+        for (int row = 0; row < N; ++row) {
+            assert_eq(ODDS[row], values[row % 5]);
+            ++row;
+        }
+    }
+
+
+    col fixed X1 = [13,39..*..3159]...;
+    col fixed X2 = [[13,39,117,351,1053,3159]:21,[13,39..*..]];
+    {
+        const int values[6] = [13,39,117,351,1053,3159];
+        for (int row = 0; row < N; ++row) {
+            assert_eq(X1[row], values[row % 6]);
+            assert_eq(X2[row], values[row % 6], `X2[${row}](${X2[row]}) != ${values[row % 6]}`);
+        }
+    }
+
+    col fixed X3 = [13,39..*..(13*3**31)]...;
+    {
+        const int value = 13;
+        const int lvalue = 8029754151691311; // 13*3**31
+        for (int row = 0; row < N; ++row) {
+            assert_eq(X3[row], value, `X3[${row}](${X3[row]}) != ${value}`);
+            if (value == lvalue) value = 13;
+            else value = value * 3;
+        }
+    }
+
+    col fixed FACTOR = [1,2..*..512]...;
+    {
+        const int value = 1;
+        const int lvalue = 512;
+        for (int row = 0; row < N; ++row) {
+            assert_eq(FACTOR[row], value, `FACTOR[${row}](${FACTOR[row]}) != ${value}`);
+            if (value == lvalue) value = 1;
+            else value = value * 2;
+        }
+    }
+
+    col fixed ODDS_F = [1,3..+..];
+    {
+        for (int row = 0; row < N; ++row) {
+            assert_eq(ODDS_F[row], 1 + 2*row, `ODDS_F[${row}](${ODDS_F[row]}) != ${1 + (row * 2)}`);
+        }
+    }
+
+    col fixed FACTOR_F = [1,2..*..];
+    {
+        int value = 1;
+        for (int row = 0; row < N; ++row) {
+            assert_eq(FACTOR_F[row], value, `FACTOR_F[${row}](${FACTOR_F[row]}) != ${value}`);
+            value = fe(value * 2);
+        }
+    }
+
+    col fixed ODDS_R = [1:10,3:10..+..13:10]...;
+    {
+        int value = 1;
+        for (int row = 0; row < N; row += 10) {
+            for (int times = 0; times < 10; ++times) {
+                if (row + times == N) break;
+                assert_eq(ODDS_R[row + times], value, `ODDS_R[${row + times}](${ODDS_R[row + times]}) != ${value}`);
+            }
+            value = value + 2;
+            if (value > 13) value = 1;
+        }
+    }
+
+    col fixed FACTOR_R = [1:2,2:2..*..16:2]...;
+    {
+        int value;
+        for (int row = 0; row < N; ++row) {
+            value = 1 << ((row >> 1) % 5);
+            assert_eq(FACTOR_R[row], value, `FACTOR_R[${row}](${FACTOR_R[row]}) != ${value}`);
+        }
+    }
+    // TODO: warning when sequence is too long
+    col fixed FACTOR_R2 = [1:10,2:10..*..512:10]...;
+    {
+        int value = 1;
+        for (int row = 0; row < N; row += 10) {
+            for (int times = 0; times < 10; ++times) {
+                if (row + times == N) break;
+                assert_eq(FACTOR_R2[row + times], value, `FACTOR_R2[${row + times}](${FACTOR_R2[row + times]}) != ${value}`);
+            }
+            value = value * 2;
+            if (value > 512) value = 1;
+        }
+    }
+
+    col fixed ODDS_RF = [1:10,3:10..+..];
+    {
+        int value = 1;
+        for (int row = 0; row < N; row += 10) {
+            for (int times = 0; times < 10; ++times) {
+                if (row + times == N) break;
+                assert_eq(ODDS_RF[row + times], value, `ODDS_RF[${row + times}](${ODDS_RF[row + times]}) != ${value}`);
+            }
+            value = value + 2;
+        }
+    }
+
+    // col fixed FACTOR_RF = [1:10,2:10..*..];
+    col fixed FACTOR_RF = [1:4,2:4..*..];
+    {
+        int value;
+        for (int row = 0; row < N; ++row) {
+            value = 1 << (row >> 2);
+            assert_eq(FACTOR_RF[row], value, `FACTOR_RF[${row}](${FACTOR_RF[row]}) != ${value}`);
+        }
+    }
+
+    col fixed R_FACTOR_R = [16:2,8:2..*..1:2]...;
+    {
+        int value;
+        for (int row = 0; row < N; ++row) {
+            value = 0x10 >> ((row >> 1) % 5);
+            assert_eq(R_FACTOR_R[row], value, `R_FACTOR_R[${row}](${R_FACTOR_R[row]}) != ${value}`);
+        }
+    }
+
+    // col fixed R_FACTOR_R1 = [16:2,8:2..*..]...; ERROR
+    col fixed R_FACTOR_R1 = [16,8..*..1]:16...;
+    {
+        int value;
+        for (int row = 0; row < N; ++row) {
+            value = 0x10 >> (row % 5);
+            assert_eq(R_FACTOR_R1[row], value, `R_FACTOR_R1[${row}](${R_FACTOR_R1[row]}) != ${value}`);
+        }
+    }
+
+    col fixed R_FACTOR_R2 = [16:2,8:2..*..1:2]:10...;
+    {
+        int value;
+        for (int row = 0; row < N; ++row) {
+            value = 0x10 >> ((row >> 1) % 5);
+            assert_eq(R_FACTOR_R2[row], value, `R_FACTOR_R2[${row}](${R_FACTOR_R2[row]}) != ${value}`);
+        }
+    }
+    // (invalid) col fixed R_FACTOR_RF = [8192:10,4096:10..*..];
+
+    const int GEN[33] = [
+        1,18446744069414584320,281474976710656,18446744069397807105,17293822564807737345,70368744161280,
+        549755813888,17870292113338400769,13797081185216407910,1803076106186727246,11353340290879379826,
+        455906449640507599,17492915097719143606,1532612707718625687,16207902636198568418,17776499369601055404,
+        6115771955107415310,12380578893860276750,9306717745644682924,18146160046829613826,3511170319078647661,
+        17654865857378133588,5416168637041100469,16905767614792059275,9713644485405565297,5456943929260765144,
+        17096174751763063430,1213594585890690845,6414415596519834757,16116352524544190054,9123114210336311365,
+        4614640910117430873,1753635133440165772
+    ];
+
+    col fixed ID = [1,GEN[BITS]..*..]; // {1,g,g²,...,gᴺ⁻¹} --> multiplicative group of order 2**BITS = N
+    // for (int row = 0; row < N; ++row) {
+    //     println(`#${row} ${ID[row]}`);
+    // }
+    {
+        int value = 1;
+        for (int row = 0; row < N; ++row) {
+            assert_eq(ID[row], value, `ID[${row}](${ID[row]}) != ${value}`);
+            value = fe(value * GEN[BITS]);
+        }
+    }
+}
+
+airgroup Expressions {
+    Expressions();
+}

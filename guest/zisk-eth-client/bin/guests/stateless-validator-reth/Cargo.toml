@@ -1,0 +1,47 @@
+[workspace.package]
+
+[package]
+name = "zec-reth"
+description = "ZisK Ethereum Client Stateless Validator Reth"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[dependencies]
+guest-reth = { path = "../../../crates/guest-reth" }
+
+ziskos = { path = "../../../../../ziskos/entrypoint" }
+
+# alloy
+alloy-consensus = { version = "1.7.3", default-features = false }
+alloy-primitives = { version = "1.5.6", features = ["native-keccak"] } # Needed for ZisK-accelerated keccak
+
+# revm
+revm = { version = "34.0.0", default-features = false }
+
+# Needed for deterministic Hashmap sort
+alloy-evm = { git = "https://github.com/0xPolygonHermez/zisk-patch-alloy-evm.git", branch = "zisk-hints/v0.27.3" }
+# alloy-evm = { path = "../../../zisk-patch-alloy-evm/crates/evm" }
+
+[patch."https://github.com/paradigmxyz/reth.git"]
+# Needed for deterministic Hashmap sort
+reth-trie-common = { git = "https://github.com/0xPolygonHermez/zisk-patch-reth.git", branch = "zisk-hints/v1.11.0" }
+# reth-trie-common = { path = "../../../zisk-patch-reth/crates/trie/common" }
+
+[patch."https://github.com/eth-act/zkvm-ethereum-mpt.git"]
+# Needed for deterministic Hashmap sort
+zeth-mpt-state = { git = "https://github.com/0xPolygonHermez/zisk-patch-zkvm-ethereum-mpt.git", branch = "zisk-hints/v0.5.0" }
+# zeth-mpt-state = { path = "../../../zisk-patch-zkvm-ethereum-mpt/crates/zeth-mpt-state" }
+
+[patch."https://github.com/paradigmxyz/stateless.git"]
+# Needed for function visibility
+stateless = { git = "https://github.com/0xPolygonHermez/zisk-patch-stateless.git", branch = "zisk/68cd8e73" }
+# stateless = { path = "../zisk-patch-stateless/crates/stateless" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(zisk_hints)'] }

@@ -1,0 +1,18 @@
+
+function idx_pos(const int idx): int[] {
+    assert(0 <= idx && idx < 1600);
+    const int result[3];
+    result[0] = (idx / 64) % 5;
+    result[1] = (idx / 320) % 5;
+    result[2] = idx % 64;
+    return result;
+}
+
+airtemplate ArrayIntReturn(const int N = 2**8) {
+    const int values[3] = idx_pos(198);
+    println(values);
+}
+
+airgroup ArrayIntReturn {
+    ArrayIntReturn();
+}

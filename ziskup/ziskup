@@ -1,0 +1,459 @@
+#!/usr/bin/env bash
+
+# Reference: https://github.com/foundry-rs/foundry/blob/master/foundryup/foundryup
+
+set -eo pipefail
+
+BASE_DIR=${XDG_CONFIG_HOME:-${HOME}}
+ZISK_DIR=${ZISK_DIR:-"${BASE_DIR}/.zisk"}
+ZISK_BIN_DIR="${ZISK_DIR}/bin"
+CARGO_ZISK="${ZISK_BIN_DIR}/cargo-zisk"
+BINS=(cargo-zisk ziskemu)
+BUCKET_URL="https://storage.googleapis.com/zisk-setup"
+
+mkdir -p "${ZISK_BIN_DIR}"
+
+main() {
+  need_cmd curl
+
+  # Check if this is a setup_snark command
+  if [[ "$1" == "setup_snark" ]]; then
+    setup_snark_command
+    exit 0
+  fi
+
+  while [[ -n $1 ]]; do
+    case $1 in
+    --)
+      shift
+      break
+      ;;
+    -v | --version)
+      shift
+      ZISK_VERSION=$1
+      ;;
+    --arch)
+      shift
+      ZISKUP_ARCH=$1
+      ;;
+    --platform)
+      shift
+      ZISKUP_PLATFORM=$1
+      ;;
+    --provingkey)
+      SETUP_KEY="proving"
+      ;;
+    --verifykey)
+      SETUP_KEY="verify"
+      ;;
+    --nokey)
+      SETUP_KEY="none"
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      err "unknown option: $1"
+      echo
+      usage
+      exit 1
+      ;;
+    esac
+    shift
+  done
+
+  uname_s=$(uname -s)
+  PLATFORM=$(tolower "${ZISKUP_PLATFORM:-${uname_s}}")
+
+  # DISCLAIMER:
+  # macOS (Darwin) is explicitly unsupported and will trigger an error.
+  case "${PLATFORM}" in
+    linux) ;;
+    darwin | mac*) ;;
+    *)
+      err "unsupported platform ${PLATFORM}"
+      exit 1
+      ;;
+  esac
+
+  # Print the banner after successfully parsing args
+  banner
+
+  # Check if the user provided a version
+  if [[ -z "${ZISK_VERSION}" ]]; then
+    ZISK_VERSION="latest"
+  else
+    ZISK_VERSION="v${ZISK_VERSION}"
+  fi
+
+  ZISKUP_REPO="0xPolygonHermez/zisk"
+  EXT="tar.gz"
+
+  step "Installing ZisK ${ZISK_VERSION} version..."
+
+  uname_m=$(uname -m)
+  ARCHITECTURE=$(tolower "${ZISKUP_ARCH:-${uname_m}}")
+  if [ "${ARCHITECTURE}" = "x86_64" ]; then
+    # Redirect stderr to /dev/null to avoid printing errors if non Rosetta.
+    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ]; then
+      ARCHITECTURE="arm64" # Rosetta.
+    else
+      ARCHITECTURE="amd64" # Intel.
+    fi
+  elif [ "${ARCHITECTURE}" = "arm64" ] || [ "${ARCHITECTURE}" = "aarch64" ]; then
+    ARCHITECTURE="arm64" # Arm.
+  else
+    ARCHITECTURE="amd64" # Amd.
+  fi
+
+  # If we are running in a GitHub action, we install the proving key by default
+  if [[ -n "${GH_RUNNER}" ]]; then
+    warn "Running from GitHub action, installing proving key"
+    SETUP_KEY="proving"
+  fi
+
+  # Ask user about key installation if SETUP_KEY is not set
+  if [[ -z "${SETUP_KEY}" ]]; then
+    step "Setup installation options:"
+    say "1) Install proving key (default - just press enter)"
+    say "2) Install proving key (no constant tree files)"
+    say "3) Install verify key"
+    say "4) None"
+
+    # Read user input with default option set to 1
+    read -p ">" user_choice < /dev/tty
+    user_choice=${user_choice:-1}
+
+    case "${user_choice}" in
+        1)
+          SETUP_KEY="proving"
+          ;;
+        2)
+          SETUP_KEY="proving-no-consttree"
+          ;;
+        3)
+          SETUP_KEY="verify"
+          ;;
+        4)
+          SETUP_KEY="none"
+          ;;
+        *)
+          err "invalid option, aborting installation"
+          exit 1
+          ;;
+    esac
+  fi
+
+  # Compute the URL of the release tarball in the zisk repository
+  if [ "${ZISK_VERSION}" = "latest" ]; then
+    RELEASE_URL="https://github.com/${ZISKUP_REPO}/releases/latest/download/"
+  else
+    RELEASE_URL="https://github.com/${ZISKUP_REPO}/releases/download/${ZISK_VERSION}/"
+  fi
+
+  BIN_ARCHIVE_URL="${RELEASE_URL}cargo_zisk_${PLATFORM}_${ARCHITECTURE}.${EXT}"
+
+  # Download and extract the binaries archive
+  if [ "${PLATFORM}" = "linux" ] || [ "${PLATFORM}" = "darwin" ]; then
+    tmp="$(mktemp -d)/cargo_zisk.tar.gz"
+
+    step "Downloading ZisK ${ZISK_VERSION} version..."
+    ensure download "${BIN_ARCHIVE_URL}" "${tmp}"
+
+    step "Installing ZisK ${ZISK_VERSION} version..."
+    if [ "${PLATFORM}" = "linux" ]; then
+      ensure tar --overwrite -xzf "${tmp}" -C "${ZISK_DIR}"
+    else
+      ensure tar -xzf "${tmp}" -C "${ZISK_DIR}"
+    fi
+
+    rm -f "${tmp}"
+  fi
+
+  # Print installed version message
+  ZISK_VERSION=$(echo "$(ensure "${CARGO_ZISK}" --version)" | awk '{print $2}')
+  say "Installed ZisK version ${ZISK_VERSION}"
+
+  for bin in "${BINS[@]}"; do
+    bin_path="$ZISK_BIN_DIR/$bin"
+
+    # Check if the default path of the binary is not in ZISK_BIN_DIR
+    which_path="$(command -v "${bin}" || true)"
+    if [ -n "$which_path" ] && [ "${which_path}" != "${bin_path}" ]; then
+      warn ""
+      cat 1>&2 <<EOF
+There are multiple binaries with the name '${bin}' present in your 'PATH'.
+This may be the result of installing '${bin}' using another method,
+like Cargo or other package managers.
+You may need to run 'rm ${which_path}' or move '${ZISK_BIN_DIR}'
+in your 'PATH' to allow the newly installed version to take precedence!
+
+EOF
+    fi
+  done
+
+  step "Installing ZisK Rust toolchain..."
+  ensure "${CARGO_ZISK}" sdk install-toolchain
+
+  # Install the proving/verify key setup
+  IFS='.' read -r major minor patch <<< "${ZISK_VERSION}"
+  SETUP_VERSION="${major}.${minor}.0"
+  case "${SETUP_KEY}" in
+    proving)
+      install_setup "proving" 1
+      ;;
+    proving-no-consttree)
+      install_setup "proving" 0
+      ;;
+    verify)
+      install_setup "verify" 0
+      ;;
+    none)
+      # Do nothing
+      ;;
+    *)
+      err "invalid key option, aborting installation"
+      exit 1
+      ;;
+  esac
+
+  # Determine the profile file and preferred shell based on the current shell
+  case "${SHELL}" in
+    */zsh)
+      PROFILE=${ZDOTDIR:-${HOME}}/.zshenv
+      PREF_SHELL="zsh"
+      ;;
+    */bash)
+      PROFILE=${HOME}/.bashrc
+      PREF_SHELL="bash"
+      ;;
+    */fish)
+      PROFILE=${HOME}/.config/fish/config.fish
+      PREF_SHELL="fish"
+      ;;
+    */ash)
+      PROFILE=${HOME}/.profile
+      PREF_SHELL="ash"
+      ;;
+    *)
+      warn "could not detect shell, manually add ${ZISK_BIN_DIR} to your PATH"
+      exit 1
+      ;;
+  esac
+
+  # Only add ziskup if it isn't already in PATH.
+  if [[ ":${PATH}:" != *":${ZISK_BIN_DIR}:"* ]]; then
+      # Add the ziskup directory to the path and ensure the old PATH variables remain.
+      echo "Adding ZisK to your PATH..."
+      echo >>"${PROFILE}" && echo "export PATH=\"\$PATH:${ZISK_BIN_DIR}\"" >>"${PROFILE}"
+  fi
+
+  step "Done! ZisK version ${ZISK_VERSION} has been installed."
+  say "Your preferred shell '${PREF_SHELL}' was detected and ZisK has been added to your PATH. To start using the ZisK CLI tools, run 'source ${PROFILE}' or open a new terminal session."
+  echo
+}
+
+usage() {
+  cat 1>&2 <<EOF
+The installer for the ZisK.
+
+Update or revert to a specific ZisK version with ease.
+
+USAGE:
+    ziskup <OPTIONS>
+
+OPTIONS:
+    -h, --help      Print help information
+    -v, --version   Install a specific version
+    --arch          Install a specific architecture (supports amd64 and arm64)
+    --platform      Install a specific platform (supports linux and darwin)
+    --provingkey    Install the proving key
+    --verifykey     Install the verify key
+    --nokey         No proving/verify key installation
+
+COMMANDS:
+    setup_snark     Install SNARK proving key (provingKeySnark)
+EOF
+}
+
+say() {
+  printf "%s\n" "$1"
+}
+
+step() {
+  echo
+  printf "\033[0;32m%s\033[0m\n" "$1"
+}
+
+warn() {
+  printf "\033[0;33mWarning: %s\033[0m\n" "$1"
+}
+
+err() {
+  printf "\033[0;31mError: %s\033[0m\n" "$1" >&2
+}
+
+tolower() {
+  echo "$1" | awk '{print tolower($0)}'
+}
+
+need_cmd() {
+  if ! check_cmd "$1"; then
+    err "need '$1' (command not found)"
+  fi
+}
+
+check_cmd() {
+  command -v "$1" &>/dev/null
+}
+
+# Run a command that should never fail. If the command fails execution
+# will immediately terminate with an error showing the failing command.
+ensure() {
+  if ! "$@"; then
+    err "command failed: $*";
+    exit 1
+  fi
+}
+
+# Run a command that should never fail and suppress the output. If the command fails execution
+# will immediately terminate with an error showing the failing command.
+ensure_silent() {
+  if ! "$@" >/dev/null 2>&1; then
+    err "command failed: $*"
+    exit 1
+  fi
+}
+
+# Downloads $1 into $2
+download() {
+  say $1
+  if check_cmd curl; then
+    curl -H "Accept: application/octet-stream" -L -#o "$2" "$1"
+  else
+    wget --header="Accept: application/octet-stream" --show-progress -qO "$2" "$1"
+  fi
+}
+
+# Install the proving or verify key
+install_setup() {
+    local KEY_TYPE=$1  # proving or verify
+    local CONST_TREE=$2
+    local KEY_FILE="zisk-${KEY_TYPE}key-${SETUP_VERSION}.tar.gz"
+
+    step "Downloading ${KEY_TYPE} key version ${SETUP_VERSION}..."
+    ensure download "${BUCKET_URL}/${KEY_FILE}" "${KEY_FILE}"
+    ensure download "${BUCKET_URL}/${KEY_FILE}.md5" "${KEY_FILE}.md5"
+
+    # Verify the md5 checksum
+    ensure md5sum -c "${KEY_FILE}.md5"
+
+    # Delete old provingKey, verifyKey and cache folders
+    rm -rf "${HOME}/.zisk/provingKey"
+    rm -rf "${HOME}/.zisk/verifyKey"
+    rm -rf "${HOME}/.zisk/cache"
+
+    # Extract the key
+    step "Installing ${KEY_TYPE} key version ${SETUP_VERSION}..."
+    if [ "${PLATFORM}" = "linux" ]; then
+      ensure tar --overwrite -xf "${KEY_FILE}" -C "${HOME}/.zisk"
+    else
+      ensure tar -xf "${KEY_FILE}" -C "${HOME}/.zisk"
+    fi
+
+    rm -f "${KEY_FILE}"
+    rm -f "${KEY_FILE}.md5"
+    say "Installed ${KEY_TYPE} key version ${SETUP_VERSION}"
+
+    # Generate constant tree files for proving key
+    if [[ "${KEY_TYPE}" == "proving" && "${CONST_TREE}" -eq 1 ]]; then
+      step "Generating constant tree files. This may take a while..."
+      ensure_silent "${CARGO_ZISK}" check-setup -a
+      say "Constant tree files generated successfully."
+    fi
+}
+
+# Install the SNARK proving key
+install_setup_snark() {
+    local KEY_FILE="zisk-provingkey-plonk-inputs-${SETUP_VERSION}.tar.gz"
+
+    step "Downloading SNARK proving key version ${SETUP_VERSION}. This may take a while..."
+    ensure download "${BUCKET_URL}/${KEY_FILE}" "${KEY_FILE}"
+    ensure download "${BUCKET_URL}/${KEY_FILE}.md5" "${KEY_FILE}.md5"
+
+    # Verify the md5 checksum
+    ensure md5sum -c "${KEY_FILE}.md5"
+
+    # Delete old provingKey, verifyKey and cache folders
+    rm -rf "${HOME}/.zisk/provingKeySnark"
+
+    # Extract the key
+    step "Installing SNARK proving key version ${SETUP_VERSION}..."
+    if [ "${PLATFORM}" = "linux" ]; then
+      ensure tar --overwrite -xf "${KEY_FILE}" -C "${HOME}/.zisk"
+    else
+      ensure tar -xf "${KEY_FILE}" -C "${HOME}/.zisk"
+    fi
+
+    rm -f "${KEY_FILE}"
+    rm -f "${KEY_FILE}.md5"
+    say "Installed SNARK proving key version ${SETUP_VERSION}"
+}
+
+# Setup SNARK command handler
+setup_snark_command() {
+  # Print banner
+  banner
+
+  # Detect platform
+  uname_s=$(uname -s)
+  PLATFORM=$(tolower "${uname_s}")
+
+  case "${PLATFORM}" in
+    linux) ;;
+    darwin | mac*) ;;
+    *)
+      err "unsupported platform ${PLATFORM}"
+      exit 1
+      ;;
+  esac
+
+  # Determine version from cargo-zisk
+  if [[ ! -f "${CARGO_ZISK}" ]]; then
+    err "cargo-zisk not found. Please install ZisK first with 'ziskup'"
+    exit 1
+  fi
+  
+  ZISK_VERSION=$("${CARGO_ZISK}" --version | awk '{print $2}')
+
+  # Parse version to get setup version
+  IFS='.' read -r major minor patch <<< "${ZISK_VERSION}"
+  SETUP_VERSION="${major}.${minor}.0"
+
+  step "Installing SNARK proving key for ZisK version ${ZISK_VERSION}..."
+
+  # Install the SNARK proving key
+  install_setup_snark
+
+  step "Done! SNARK proving key installation completed."
+  echo
+}
+
+# Banner Function for ZisK
+banner() {
+  printf "
+########################################################################################
+ ______     _  __
+|__  (_)___| |/ /
+  / /| / __| ' /
+ / /_| \__ \ . \
+/____|_|___/_|\_\
+
+Ziskup - The ZisK Installer
+
+########################################################################################
+"
+}
+
+main "$@"

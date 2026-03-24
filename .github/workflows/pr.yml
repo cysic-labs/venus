@@ -1,0 +1,194 @@
+name: Test ZisK
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+      - "pre-develop-[0-9]+.[0-9]+.[0-9]+"
+    paths-ignore:
+      - 'book/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-tests:
+    name: Cargo tests
+    runs-on: ubuntu-latest
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          sudo ./install_deps.sh
+
+      - name: Run cargo check
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --all-targets # --all-features
+
+      - name: Run cargo test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --workspace --release --features no_lib_link
+        env:
+          RUSTFLAGS: -Copt-level=3 -Cdebug-assertions -Coverflow-checks=y -Cdebuginfo=0 -C target-cpu=native
+          RUST_BACKTRACE: 1
+
+  test-x86_64:
+    name: Test on Ubuntu x86_64
+    runs-on: self-hosted
+    timeout-minutes: 180
+    container:
+      image: ubuntu:22.04
+      options:
+        --shm-size=48g
+        -v /home/gha/cache-setup:/github/home/output:rw
+    defaults:
+      run:
+        shell: bash
+    env:
+      ZISK_GHA: "1"
+      ZISK_REPO_DIR: ${{ github.workspace }}
+      ZISK_TESTVECTORS_BRANCH: "main"
+      DISTRIBUTED_PROCESSES: "2"
+      DISTRIBUTED_THREADS: "64"
+      PROVE_FLAGS: "-a -y"
+      TERM: xterm
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./install_deps.sh
+
+      - name: Build ZisK
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./build_zisk.sh
+
+      - name: Build setup
+        env:
+          USE_CACHE_SETUP: "1"
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./build_setup.sh
+
+      - name: Test sha_hasher
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./test_sha_hasher.sh
+
+      - name: Test ELF diagnostic
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./test_diagnostic.sh
+
+      - name: Verify Constraints Ethereum block
+        env:
+          DISABLE_PROVE: "1"
+          BLOCK_INPUTS: "mainnet_24626900_221_16_zec_reth.bin"
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./test_eth_block.sh
+
+      - name: Prove Ethereum block
+        env:
+          DISABLE_ROM_SETUP: "1"
+          BLOCK_INPUTS_DISTRIBUTED: "mainnet_24628607_66_7_zec_reth.bin"
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./test_eth_block.sh
+
+  test-macos:
+    name: Test on macOS
+    runs-on: macos-14
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      ZISK_GHA: "1"
+      ZISK_REPO_DIR: ${{ github.workspace }}
+      TERM: xterm
+    steps:
+      - name: Check Rust version
+        run: rustc --version
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./install_deps.sh
+
+      - name: Build ZisK
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./build_zisk.sh
+
+      - name: Test sha_hasher
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./test_sha_hasher.sh
+
+  lint:
+    name: Format & Clippy on ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: Ubuntu x86_64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            platform: macOS
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          components: rustfmt, clippy
+
+      - name: Install dependencies
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./install_deps.sh
+
+      - name: Run cargo fmt
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+        env:
+          CARGO_INCREMENTAL: 1
+
+      - name: Run cargo clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-targets -- -D warnings
+          # args: --all-features --all-targets -- -D warnings -A incomplete-features
+        env:
+          CARGO_INCREMENTAL: 1

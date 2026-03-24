@@ -1,0 +1,33 @@
+[package]
+name = "guest-reth"
+description = ""
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bincode.workspace = true
+serde.workspace = true
+serde_with.workspace = true
+rayon.workspace = true
+k256.workspace = true
+tiny-keccak.workspace = true
+
+alloy-consensus = { workspace = true, default-features = false, features = ["crypto-backend", "k256"] }
+alloy-genesis.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-debug.workspace = true
+
+revm.workspace = true
+
+reth-chainspec.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-primitives-traits.workspace = true
+reth-evm-ethereum.workspace = true
+
+zeth-mpt-state.workspace = true
+
+stateless-reth.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("zisk"))', 'cfg(zisk_hints)', 'cfg(zisk_hints_debug)'] }

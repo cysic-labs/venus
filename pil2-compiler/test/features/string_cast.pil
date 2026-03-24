@@ -1,0 +1,31 @@
+
+airtemplate Htc (int N = 2**8) {
+    col witness a,b;
+
+    expr cols[3];
+    cols[0] = a * b + 2;
+    cols[1] = 3 * a + b;
+    cols[2] = 2 * b + 5;
+
+    expr f = 2*a + b;
+    println(f);
+    f === 0;
+
+    for (int i = 0; i < length(cols); i++) {
+        string col_name = string(cols[i]);
+        @gprod_member{name: col_name, reference: cols[i]};
+    }
+
+    @hint1 { myname: string(f)}
+    @hint1 { myname: string(f)}
+    string text = string(f);
+    println(text);
+
+    text = string(100000000000000000000000000000000000);
+    println(text);
+}
+
+
+airgroup Htc2 {
+    Htc();
+}

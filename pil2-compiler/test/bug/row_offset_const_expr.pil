@@ -1,0 +1,100 @@
+airtemplate A (int N = 2**8) {
+    col witness a,b;
+
+    const expr x = a + 'b + 1;
+
+    assert_eq(string(x), "A.a + 'A.b + 1");
+    assert_eq(string(x'), "A.a' + A.b + 1");
+    assert_eq(string('x), "'A.a + 2'A.b + 1");
+    assert_eq(string(x'2), "A.a'2 + A.b' + 1");
+    assert_eq(string(2'x), "2'A.a + 3'A.b + 1");
+
+    expr y  = b + b'2;
+
+    assert_eq(string(y), "A.b + A.b'2");
+    assert_eq(string(y'), "A.b' + A.b'3");
+    assert_eq(string('y),  "'A.b + A.b'");
+    assert_eq(string(y'2 + y'2), "A.b'2 + A.b'4 + A.b'2 + A.b'4");
+    assert_eq(string(2'y + 3'y), "2'A.b + A.b + 3'A.b + 'A.b");
+
+    const expr z = a;
+
+    assert_eq(string(z), "A.a");
+    assert_eq(string(z'), "A.a'");
+    assert_eq(string('z), "'A.a");
+    assert_eq(string(z'2), "A.a'2");
+    assert_eq(string(2'z), "2'A.a");
+
+    const expr w = a';
+
+    assert_eq(string(w), "A.a'");
+    assert_eq(string(w'), "A.a'2");
+    assert_eq(string('w), "A.a");
+    assert_eq(string(w'2), "A.a'3");
+    assert_eq(string(2'w), "'A.a");
+
+    assert_eq(string(a), "A.a");
+    assert_eq(string(a'), "A.a'");
+    assert_eq(string('a), "'A.a");
+    assert_eq(string(a'2), "A.a'2");
+    assert_eq(string(2'a), "2'A.a");
+
+    assert_eq(string(a+b'), "A.a + A.b'");
+    assert_eq(string(a'+b), "A.a' + A.b");
+    assert_eq(string(a+'b), "A.a + 'A.b");
+    assert_eq(string('a+'b), "'A.a + 'A.b");
+    assert_eq(string('a+b'), "'A.a + A.b'");
+
+    assert_eq(string(a+b'3+2'b), "A.a + A.b'3 + 2'A.b");
+
+
+
+    int i = 0;
+    int j = 3;
+    int j2 = -2;
+    const expr k = (0)'a + b'(3)+b'(-2);
+    k === 0;
+
+    const expr k2 = (i)'a + b'(j)+b'(j2);
+    k2 === 0;
+
+    assert_eq(string(k), "A.a + A.b'3 + 2'A.b");
+    assert_eq(string(k2), "A.a + A.b'3 + 2'A.b");
+
+
+    assert_eq(string((i)'a + b'(j)+b'(j2)), "A.a + A.b'3 + 2'A.b");
+
+    x === 0;
+    x' === 0;
+    'x === 0;
+    x'2 === 0;
+    2'x === 0;
+
+    y === 0;
+    y' === 0;
+    'y === 0;
+    y'2 + y'2 === 0;
+    2'y + 3'y === 0;
+
+    z === 0;
+    z' === 0;
+    'z === 0;
+    z'2 === 0;
+    2'z === 0;
+
+    w === 0;
+    w' === 0;
+    'w === 0;
+    w'2 === 0;
+    2'w === 0;
+
+    a === 0;
+    a' === 0;
+    'a === 0;
+    a'2 === 0;
+    2'a === 0;
+}
+
+airgroup A1 {
+    A();
+}

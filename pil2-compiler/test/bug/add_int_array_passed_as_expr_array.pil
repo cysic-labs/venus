@@ -1,0 +1,24 @@
+function sum_values(const expr values[]):expr {
+    expr res = 0;
+    for (int i = 0; i < length(values); ++i) {
+        res += values[i];
+    }
+    return res;
+}
+
+
+airtemplate AddIntArrayPassedAsExprArray(const int N=2**8) {
+    const expr v_exprs[2];
+    v_exprs[0] = 0;
+    v_exprs[1] = 0;
+    expr total = sum_values(v_exprs);
+    println(total);
+
+    const int i_exprs[2] = [0,0];
+    total += sum_values(i_exprs); 
+    println(total);
+}
+
+airgroup AddIntArrayPassedAsExprArray {
+    AddIntArrayPassedAsExprArray();    
+}

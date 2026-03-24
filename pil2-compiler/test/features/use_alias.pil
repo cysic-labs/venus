@@ -1,0 +1,49 @@
+airtemplate TestUseAlias(int N = 2**6) {
+    test_define_containers();
+    test_use_containers();
+}
+
+function test_define_containers() {
+    int opid = 10;
+    container air.myfirstcon {
+        int L = 30;        
+        col witness l;
+    }
+    container air.myfirstcon.`id${opid}` {
+        int L = 1030;
+        col witness l2;
+        int L2 = 20;
+    }
+}
+
+function test_use_containers() {
+    int opid = 10;
+    int L2 = 23;
+
+    assert_eq(L2, 23);
+
+    use air.myfirstcon.`id${opid}` alias K;
+
+    assert_eq(L2, 23);
+    assert_eq(air.myfirstcon.`id${opid}`.L2, 20);
+    assert_eq(K.L2, 20);
+    assert_eq(air.myfirstcon.id10.L2, 20);
+
+    assert_eq(defined(L), 0);
+    assert_eq(K.L, 1030);
+    assert_eq(air.myfirstcon.`id${opid}`.L, 1030);
+    assert_eq(air.myfirstcon.id10.L, 1030);
+    assert_eq(K.L, 1030);
+    assert_eq(air.myfirstcon.L, 30);
+    assert_eq(defined(l2), 0);
+    assert_eq(string(K.l2), "TestUseAlias.l2");
+
+    {
+        use air.myfirstcon;
+        assert_eq(L, 30);
+    }
+}
+
+airgroup TestUseAlias {
+    TestUseAlias();
+}

@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    outputs:
+      tag_name: ${{ steps.release_info.outputs.tag_name }}
+      release_name: ${{ steps.release_info.outputs.release_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set test flag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "IS_TEST=true" >> $GITHUB_ENV
+          else
+            echo "IS_TEST=false" >> $GITHUB_ENV
+          fi
+
+      # If it's a test release, tag with the release date. Else, use the tag name as is.
+      - name: Compute release name and tag
+        id: release_info
+        run: |
+          echo "IS_TEST=$IS_TEST"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+
+          if [[ $IS_TEST == "true" ]]; then
+            echo "IS_TEST"
+            echo "tag_name=test-${GITHUB_SHA}"
+            echo "release_name=Test ($(date '+%Y-%m-%d'))"
+            echo "tag_name=test-${GITHUB_SHA}" >> $GITHUB_OUTPUT
+            echo "release_name=Test ($(date '+%Y-%m-%d'))" >> $GITHUB_OUTPUT
+          else
+            echo "tag_name=${GITHUB_REF_NAME}"
+            echo "release_name=${GITHUB_REF_NAME}"
+            echo "tag_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "release_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+  release:
+    name: Build ${{ matrix.target }} (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            svm_target_platform: linux-amd64
+            platform: linux
+            arch: amd64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            svm_target_platform: macosx-aarch64
+            platform: darwin
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rust toolchain
+        id: rustc-toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: default
+          override: true
+          target: ${{ matrix.target }}
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE/tools/test-env"
+          ./install_deps.sh
+
+      - name: Setup macOS env vars
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          echo "PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig" >> $GITHUB_ENV
+          echo "SDKROOT=$(xcrun -sdk macosx --show-sdk-path)" >> $GITHUB_ENV
+          echo "MACOSX_DEPLOYMENT_TARGET=$(xcrun -sdk macosx --show-sdk-platform-version)" >> $GITHUB_ENV
+          echo "LIBFFI_LIB_DIR=/opt/homebrew/opt/libffi/lib" >> $GITHUB_ENV
+          echo "LIBFFI_INCLUDE_DIR=/opt/homebrew/opt/libffi/include" >> $GITHUB_ENV
+
+      - name: Build binaries
+        shell: bash
+        run: |
+            cargo build --release --target "${{ matrix.target }}"
+
+      - name: Archive binaries
+        id: artifacts
+        env:
+          PLATFORM_NAME: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: |
+          mkdir -p zisk-dist/bin
+
+          LIB_EXT=$([[ "${PLATFORM_NAME}" == "darwin" ]] && echo "dylib" || echo "so")
+
+          cp ./target/${TARGET}/release/cargo-zisk                 zisk-dist/bin/
+          cp ./target/${TARGET}/release/ziskemu                    zisk-dist/bin/
+          cp ./target/${TARGET}/release/riscv2zisk                 zisk-dist/bin/
+          cp ./target/${TARGET}/release/zisk-coordinator           zisk-dist/bin/
+          cp ./target/${TARGET}/release/zisk-worker                zisk-dist/bin/
+          cp ./ziskup/ziskup                                       zisk-dist/bin/
+          cp ./target/${TARGET}/release/libziskclib.a              zisk-dist/bin/
+
+          if [[ "${PLATFORM_NAME}" == "linux" ]]; then
+            mkdir -p zisk-dist/zisk/emulator-asm/src
+            cp -r ./emulator-asm/src                               zisk-dist/zisk/emulator-asm
+            cp -r ./lib-c/                                         zisk-dist/zisk
+            cp ./emulator-asm/Makefile                             zisk-dist/zisk/emulator-asm
+          fi
+
+          ARCHIVE_FILE="cargo_zisk_${PLATFORM_NAME}_${ARCH}.tar.gz"
+          tar -czvf "$ARCHIVE_FILE" -C zisk-dist .
+
+          echo "file_name=$ARCHIVE_FILE" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          name: ${{ needs.prepare.outputs.release_name }}
+          tag_name: ${{ needs.prepare.outputs.tag_name }}
+          draft: true
+          make_latest: "false"
+          files: |
+            ${{ steps.artifacts.outputs.file_name }}

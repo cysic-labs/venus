@@ -1,0 +1,24 @@
+[package]
+name = "mem-planner-cpp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+keywords.workspace = true
+repository.workspace = true
+categories.workspace = true
+
+build = "build.rs"
+
+[dependencies]
+zisk-common = { workspace = true }
+mem-common = { workspace = true }
+zisk-pil = { workspace = true }
+
+proofman-common = { workspace = true }
+proofman-util = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+save_mem_bus_data = []
+save_mem_plans = []

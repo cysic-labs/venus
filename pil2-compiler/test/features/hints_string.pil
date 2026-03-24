@@ -1,0 +1,21 @@
+airtemplate Hints(int N = 2**16) {
+
+    col witness stage(2) gsum;
+    col witness stage(3) gsum2;
+    const string svalue = "h3ct0r";
+
+    @my_hint_with_string {value: "stringa"}
+    @my_hint_with_string2 {value: svalue}
+    @my_hint_with_string3 {value: `bug detected by ${svalue}`}
+    @my_hint1 {gsum: gsum2 + 2}
+    @my_hint3 {gsum: gsum}
+    string values[3];
+    values[0] = string(3);
+    values[1] = "three";
+    values[2] = "_3_";
+    @my_strings {values: values};
+}
+
+airgroup Hints {
+    Hints(2**10);
+}

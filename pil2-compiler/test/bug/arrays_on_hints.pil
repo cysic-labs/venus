@@ -1,0 +1,10 @@
+airtemplate MyTemplate (int N = 2 ** 8) {
+    col witness a,b,c,d;
+
+    expr cols[5] = [a + b, b - a, 2 * c, d, 5];
+    @myhint { cols: cols }
+}
+
+airgroup MyGroup {
+    MyTemplate();
+}

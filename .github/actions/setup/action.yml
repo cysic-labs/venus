@@ -1,0 +1,52 @@
+name: Test setup
+inputs:
+  pull_token:
+    description: "Token to use for private repo access"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Set up git private repo access
+      shell: bash
+      run: |
+        git config --global url."https://${{ inputs.pull_token }}@github.com/".insteadOf ssh://git@github.com
+        git config --global url."https://${{ inputs.pull_token }}@github.com".insteadOf https://github.com
+
+    - name: Install Go 1.22
+      uses: actions/setup-go@v5
+      with:
+        go-version: "1.22"
+        cache-dependency-path: "**/go.sum"
+
+    - name: Install protobuf-compiler
+      shell: bash
+      run: sudo apt-get install -y protobuf-compiler
+
+    - name: Install libraries
+      shell: bash
+      run: sudo apt-get install -y clang openmpi-bin openmpi-common libopenmpi-dev  nlohmann-json3-dev build-essential libbenchmark-dev libomp-dev libgmp-dev  nasm libsodium-dev cmake
+
+    - name: Print go version
+      shell: bash
+      run: go version
+
+    - name: Setup GCC
+      uses: Dup4/actions-setup-gcc@v1
+      with:
+        version: latest
+        cc: false
+
+    - name: rust-cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+          ~/.rustup/
+        key: ${{ runner.os }}-cargo-target-${{ hashFiles('Cargo.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-target-${{ hashFiles('Cargo.toml') }}
+          ${{ runner.os }}-cargo-target

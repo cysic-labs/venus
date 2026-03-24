@@ -1,0 +1,18 @@
+col witness w0,w1,  w2,w3;
+expr _a = 2 * w2;
+expr _b = 3 * w3;
+
+assert_eq(string(_a), "2 * w2");
+assert_eq(string(_b), "3 * w3");
+
+int sel = 0;
+expr _res = sel ? _a : 0 - _b;
+assert_eq(string(_res), "0 - 3 * w3");
+
+sel = 1;
+_res = _res + (sel ? _a : 0 - _b);
+assert_eq(string(_res), "0 - 3 * w3 + 2 * w2");
+
+sel = 0;
+_res = sel ? _a : - _b; 
+assert_eq(string(_res), "-(3 * w3)");

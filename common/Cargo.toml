@@ -1,0 +1,45 @@
+[package]
+name = "zisk-common"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+build = "build.rs"
+
+[dependencies]
+zisk-core = { workspace = true }
+
+proofman-common = { workspace = true }
+proofman-util = { workspace = true }
+proofman = { workspace = true }
+fields = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+libc = "0.2"
+
+# QUIC networking
+tokio = { workspace = true }
+quinn = "0.11"
+rustls = { version = "0.23", features = ["ring"] }
+rcgen = "0.14"
+
+bincode = { workspace = true }
+
+# Distributed mode (mpi) is only supported on Linux x86_64
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+mpi = { workspace = true }
+
+[features]
+default = []
+disable_distributed = []
+stats = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(distributed)'] }

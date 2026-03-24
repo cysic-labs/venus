@@ -1,0 +1,38 @@
+airtemplate A(int N=2**10) {
+    col witness a0;
+    col witness a[12];
+    expr b[12];
+    b = diag(a[0], a);
+    for (int i = 0; i < 12; i++) {
+        b[i] === 0;
+    }
+    b = diag(a[0], b);
+    for (int i = 0; i < 12; i++) {
+        b[i] === 0;
+    }
+}
+
+function diag(expr a0, expr a[]): expr[] {
+    const expr sum_partial = a0 + a[1] + a[2] + a[3]+ a[4] + a[5] + a[6] + a[7] + a[8] + a[9] + a[10] + a[11];
+    const expr result[12] =
+    [
+        a0*0xc3b6c08e23ba9300 + sum_partial,
+        a[1]*0xd84b5de94a324fb6 + sum_partial,
+        a[2]*0x0d0c371c5b35b84f + sum_partial,
+        a[3]*0x7964f570e7188037 + sum_partial,
+        a[4]*0x5daf18bbd996604b + sum_partial,
+        a[5]*0x6743bc47b9595257 + sum_partial,
+        a[6]*0x5528b9362c59bb70 + sum_partial,
+        a[7]*0xac45e25b7127b68b + sum_partial,
+        a[8]*0xa2077d7dfbb606b5 + sum_partial,
+        a[9]*0xf3faac6faee378ae + sum_partial,
+        a[10]*0x0c6388b51545e883 + sum_partial,
+        a[11]*0xd27dbb6944917b60 + sum_partial
+    ];
+    return result;
+}
+
+
+airgroup AG {
+    A(2**20);
+}

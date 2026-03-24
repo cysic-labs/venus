@@ -1,0 +1,22 @@
+public input1;
+
+airtemplate Hints(int N = 2**16) {
+
+    col witness stage(2) gsum;
+    col witness stage(3) gsum2;
+
+    int value = 12;
+    @my_hint_with_int {value: 10}
+    @my_hint_with_int2 {value: value}
+    @my_hint_with_array_int {values: [3,6,9,12]}
+    int values[5] = [5,10,15,20,25];
+    @my_hint_with_array_int2 {values: values}
+
+    gsum + gsum2 === N;
+}
+
+input1 === 3;
+
+airgroup Hints {
+    Hints(2**10);
+}

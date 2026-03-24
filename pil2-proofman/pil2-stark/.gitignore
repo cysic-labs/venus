@@ -1,0 +1,7 @@
+build
+runtime/*
+!runtime/README.md
+MyLogFile.log
+lib/libstarks.a
+!external/blst/build/
+!external/blst/build/**

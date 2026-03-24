@@ -1,0 +1,63 @@
+[package]
+name = "cargo-zisk"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+[[bin]]
+name = "cargo-zisk"
+path = "src/bin/cargo-zisk.rs"
+
+[build-dependencies]
+vergen-git2.workspace = true
+
+[dependencies]
+zisk-common = { workspace = true }
+zisk-build = { workspace = true }
+executor = { workspace = true }
+rom-setup = { workspace = true }
+zisk-core = { workspace = true }
+zisk-pil = { workspace = true }
+asm-runner = { workspace = true }
+
+colored = { workspace = true }
+fields = { workspace = true }
+proofman = { workspace = true }
+proofman-common = { workspace = true }
+proofman-util = { workspace = true }
+sysinfo = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+zisk-sdk = { workspace = true }
+
+clap = { workspace = true }
+dirs = "6"
+rand = "0.9"
+target-lexicon = "0.13"
+reqwest = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+indicatif = "0.17.8"
+futures = { workspace = true }
+yansi = "1.0.1"
+
+# Distributed mode (mpi) is only supported on Linux x86_64
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+mpi = { workspace = true }
+
+[features]
+default = []
+disable_distributed = ["zisk-sdk/disable_distributed"]
+diagnostic = ["zisk-sdk/diagnostic"]
+custom_rust_llvm = []
+gpu = ["zisk-sdk/gpu"]
+packed = ["zisk-sdk/packed"]
+stats = []
+verify = ["fields/verify"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(distributed)'] }

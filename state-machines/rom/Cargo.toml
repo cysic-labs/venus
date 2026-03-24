@@ -1,0 +1,28 @@
+[package]
+name = "sm-rom"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+[dependencies]
+zisk-core = { workspace = true }
+zisk-common = { workspace = true }
+zisk-pil = { workspace = true }
+asm-runner = { workspace = true }
+
+fields = { workspace=true }
+proofman-common = { workspace = true }
+proofman-macros = { workspace = true }
+proofman-util = { workspace = true }
+
+tracing = { workspace = true }
+rayon = { workspace = true }
+itertools = { workspace = true }
+
+[features]
+default = []
+gpu = ["packed"]
+packed = []

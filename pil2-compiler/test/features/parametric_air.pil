@@ -1,0 +1,63 @@
+
+airtemplate PSA(int N = 2**11, int chunks = 16, int loops = 3) {
+    container proof.ps alias pepa {
+        int k = 100;
+    }
+    col witness w;
+    me(chunks * 10);
+    w === loops;
+    int values[12][20];
+    pepa.k = pepa.k + 1;
+    println("PBA", N, chunks, loops, pepa.k);
+    on final airgroup finalPSA();
+    on final air finalAirPSA();
+}
+
+airtemplate PSB(int N = 2**11, int chunks = 16, int loops = 3) {
+    container proof.ps alias pepa {
+        int k = 200;
+    }
+    col witness w;
+    me(chunks * 2);
+    w === chunks;
+    int values[12][20];
+    pepa.k = pepa.k + 1;
+    println("PBA", N, chunks, loops, pepa.k);
+    on final airgroup finalPSB();
+    on final air finalAirPSB();
+}
+
+function finalAirPSA() {
+    println("finalAirPSA");
+}
+function finalAirPSB() {
+    println("finalAirPSB");
+}
+function finalPSA() {
+    println("finalPSA");
+}
+function finalPSB() {
+    println("finalPSB");
+}
+function me(int k) {
+    container subproof.k alias pepe {
+        int counter = k;
+    }
+    pepe.counter = pepe.counter + 1;
+    println("ME.PEPE", pepe.counter);
+}
+
+
+airgroup PSA {
+    PSA();
+    PSA(2**10, loops: 2**8);
+    PSA(loops: 2**16);
+    PSA(N:1 , chunks: 2, loops: 3);
+}
+
+airgroup PSB {
+    PSB();
+    PSB(2**10, loops: 2**8);
+    PSB(loops: 2**16);
+    PSB(N:1 , chunks: 2, loops: 3);
+}

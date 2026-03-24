@@ -1,0 +1,37 @@
+airtemplate Log2(const int N = 2**4) {
+    int a = 0;
+    println(log2(a));
+
+    a = 1;
+    println(log2(a));
+
+    a = -1;
+    println(log2(a));
+
+    a = 2;
+    println(log2(a));
+
+    a = -2;
+    println(log2(a));
+
+    a = 10;
+    println(log2(a));
+
+    a = -10;
+    println(log2(a));
+
+    a = 2**4;
+    println(log2(a));
+
+    a = -2**4;
+    println(log2(a));
+
+    a = 9;
+    println(log2(a));
+
+    a = -9;
+    println(log2(a));
+}
+airgroup Log2 {
+    Log2();
+}

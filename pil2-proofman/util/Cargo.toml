@@ -1,0 +1,15 @@
+[package]
+name = "proofman-util"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+[dependencies]
+colored.workspace = true
+sysinfo.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+bincode.workspace = true

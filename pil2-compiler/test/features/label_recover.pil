@@ -1,0 +1,44 @@
+airtemplate Test(const int N = 2**22) {
+    col witness b;
+    col witness a[4];
+
+    // Using functions
+    pack(a) === 0;
+    pack(array_primes(a)) === 0;
+    add_one(b) === 0;
+    add_one('b) === 0;
+
+    // Using expressions
+    expr a_packed = 0;
+    expr a_prime_packed = 0;
+    for (int j = 0; j < length(a); j++) {
+        a_packed += a[j] * 2**j;
+        a_prime_packed += 'a[j] * 2**j;
+    }
+    a_packed === 0;
+    a_prime_packed === 0;
+
+    function array_primes(expr expressions[], int row_offset = -1): expr[] {
+        int count = length(expressions);
+        expr results[count];
+        for (int i = 0; i < count; i++) {
+            results[i] = expressions[i]'(row_offset);
+        }
+        return results;
+    }
+    function pack(const expr a[]): expr {        
+        expr packed = 0;
+        for (int j = 0; j < length(a); j++) {
+            packed += a[j] * 2**j;
+        }
+        return packed;
+    }
+    function add_one(const expr b): expr {        
+        expr result = b + 1;
+        return result;
+    }
+}
+
+airgroup Test {
+    Test();
+}

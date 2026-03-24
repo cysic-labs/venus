@@ -1,0 +1,23 @@
+airtemplate DefineContainer(int N = 2**6) {
+    const int opid = 10;
+    println(defined(air.myfirstcon.id10));
+    println(defined(air.myfirstcon.`id${opid}`));
+    println(defined(air.myfirstcon.id10.L2));
+    println(defined(air.myfirstcon.`id${opid}`.L2));
+    callme();
+    println(defined(air.myfirstcon.id10));
+    println(defined(air.myfirstcon.`id${opid}`));
+    println(defined(air.myfirstcon.id10.L2));
+    println(defined(air.myfirstcon.`id${opid}`.L2));
+}
+
+function callme() {
+    int opid = 10;
+    container air.myfirstcon.`id${opid}` {
+        int L2;
+    }
+}
+
+airgroup DefineContainer {
+    DefineContainer();
+}

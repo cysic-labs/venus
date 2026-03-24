@@ -1,0 +1,16 @@
+airtemplate Dim(int N = 2**23) {
+    const expr a;
+    const expr b[10];
+    const expr c[12][38];
+    println(length(a));
+    println(dim(a));
+    println(length(b));
+    println(dim(b));
+    println(length(c));
+    println(dim(c));
+    println(length(c[0]));
+}
+
+airgroup Dim {
+    Dim(2**10);
+}

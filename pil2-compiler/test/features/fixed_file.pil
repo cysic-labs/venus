@@ -1,0 +1,22 @@
+airtemplate AirTable(int N = 2**17) {
+    #pragma output_fixed_file "fixed_file_externals.bin"
+    col fixed A = [0..255]...;
+    col fixed B = [0:256..255:256]...;
+    #pragma fixed_load fixed_file_externals.bin 3
+    col fixed C;
+    col fixed D;
+    #pragma fixed_load fixed_file_externals.bin 0
+    col fixed E;
+    col witness W;
+    expr b = A' + B'512 * 2 + W;
+    #pragma transpile
+    for (int index = 0; index < N; ++index) {
+        D[index] = A[index] + B[index] + C[index];
+    }
+    println(evaluate(10, b));
+}
+
+airgroup AirTables {
+    AirTable();
+    AirTable() alias AirTable2;
+}
