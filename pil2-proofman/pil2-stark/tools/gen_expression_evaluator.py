@@ -21,9 +21,9 @@ def read_dump(path):
     with open(path, 'rb') as f:
         data = f.read()
     off = 0
-    # 9-field header: nOps, nArgs, nTemp1, nTemp3, destDim, bufferCommitSize, nStages, nCustoms, nOpenings
-    nOps, nArgs, nTemp1, nTemp3, destDim, bufferCommitSize, nStages, nCustoms, nOpenings = struct.unpack_from('<9I', data, off)
-    off += 36
+    # 10-field header: nOps, nArgs, nTemp1, nTemp3, destDim, bufferCommitSize, nStages, nCustoms, nOpenings, expId
+    nOps, nArgs, nTemp1, nTemp3, destDim, bufferCommitSize, nStages, nCustoms, nOpenings, expId = struct.unpack_from('<10I', data, off)
+    off += 40
     ops = list(struct.unpack_from(f'<{nOps}B', data, off))
     off += nOps
     args_raw = list(struct.unpack_from(f'<{nArgs}H', data, off))
@@ -41,7 +41,7 @@ def read_dump(path):
     return {
         'nOps': nOps, 'nArgs': nArgs, 'nTemp1': nTemp1, 'nTemp3': nTemp3,
         'destDim': destDim, 'bufferCommitSize': bufferCommitSize,
-        'nStages': nStages, 'nCustoms': nCustoms, 'nOpenings': nOpenings,
+        'expId': expId, 'nStages': nStages, 'nCustoms': nCustoms, 'nOpenings': nOpenings,
         'ops': ops, 'args': args_raw, 'numbers': numbers, 'nNumbers': nNumbers,
         'strides': strides
     }
@@ -181,7 +181,7 @@ def generate_evaluator(dump, out_path):
     L.append(f'#define GENERATED_EVAL_NTEMP3_{fp} {nTemp3}')
     L.append('')
     L.append('template<bool IsCyclic>')
-    L.append(f'__device__ __noinline__ void {func_name}(')
+    L.append(f'__device__ __forceinline__ void {func_name}(')
     L.append('    const StepsParams* __restrict__ dParams,')
     L.append('    const DeviceArguments* __restrict__ dArgs,')
     L.append('    const ExpsArguments* __restrict__ dExpsArgs,')
@@ -327,6 +327,81 @@ def generate_evaluator(dump, out_path):
     return True
 
 
+def generate_standalone_kernel(expId, func_name, out_path):
+    """Generate a standalone __global__ kernel .cu file for an expression."""
+    lines = []
+    lines.append(f'// Standalone generated kernel for expression {expId}')
+    lines.append('// Compiled in its own CU for optimal register allocation')
+    lines.append('#include "expressions_gpu.cuh"')
+    lines.append('#include "cuda_utils.cuh"')
+    lines.append('#include "cuda_utils.hpp"')
+    lines.append('#include "gl64_tooling.cuh"')
+    lines.append('#include "goldilocks_cubic_extension.cuh"')
+    lines.append('')
+    lines.append('extern __shared__ Goldilocks::Element scratchpad[];')
+    lines.append('')
+    lines.append('// Local storePolynomial__')
+    lines.append('__device__ __noinline__ static void storePolynomial__(ExpsArguments *d_expsArgs, Goldilocks::Element *destVals, uint64_t row)')
+    lines.append('{')
+    lines.append('    #pragma unroll')
+    lines.append('    for (uint32_t i = 0; i < d_expsArgs->dest_dim; i++) {')
+    lines.append('        if (!d_expsArgs->dest_expr) {')
+    lines.append('            uint64_t col = d_expsArgs->dest_stagePos + i;')
+    lines.append('            uint64_t nRows = d_expsArgs->dest_domainSize;')
+    lines.append('            uint64_t nCols = d_expsArgs->dest_stageCols;')
+    lines.append('            uint64_t idx = getBufferOffset(row + threadIdx.x, col, nRows, nCols);')
+    lines.append('            d_expsArgs->dest_gpu[idx] = destVals[i * blockDim.x + threadIdx.x];')
+    lines.append('        } else {')
+    lines.append('            d_expsArgs->dest_gpu[(row + threadIdx.x) * d_expsArgs->dest_dim + i] = destVals[i * blockDim.x + threadIdx.x];')
+    lines.append('        }')
+    lines.append('    }')
+    lines.append('}')
+    lines.append('')
+    lines.append(f'#include "gen_eval_{expId}.cuh"')
+    lines.append('')
+    lines.append(f'__global__ void computeExpression_gen_{expId}_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)')
+    lines.append('{')
+    lines.append('    int chunk_idx = blockIdx.x;')
+    lines.append('    uint64_t nchunks = d_expsArgs->domainSize / blockDim.x;')
+    lines.append('    uint32_t bufferCommitsSize = d_deviceArgs->bufferCommitSize;')
+    lines.append('    Goldilocks::Element **expressions_params = (Goldilocks::Element **)scratchpad;')
+    lines.append('    Goldilocks::Element *smem_after_ptrs = scratchpad + 32;')
+    lines.append('    uint64_t tmpTotal = d_expsArgs->maxTemp1Size + d_expsArgs->maxTemp3Size;')
+    lines.append('    bool useTmpSmem = tmpTotal > 0 && tmpTotal <= 5120;')
+    lines.append('    if (threadIdx.x == 0) {')
+    lines.append('        if (useTmpSmem) {')
+    lines.append('            expressions_params[bufferCommitsSize + 0] = smem_after_ptrs;')
+    lines.append('            expressions_params[bufferCommitsSize + 1] = smem_after_ptrs + d_expsArgs->maxTemp1Size;')
+    lines.append('        } else {')
+    lines.append('            expressions_params[bufferCommitsSize + 0] = (&d_params->aux_trace[d_expsArgs->offsetTmp1 + blockIdx.x * d_expsArgs->maxTemp1Size]);')
+    lines.append('            expressions_params[bufferCommitsSize + 1] = (&d_params->aux_trace[d_expsArgs->offsetTmp3 + blockIdx.x * d_expsArgs->maxTemp3Size]);')
+    lines.append('        }')
+    lines.append('        expressions_params[bufferCommitsSize + 2] = d_params->publicInputs;')
+    lines.append('        expressions_params[bufferCommitsSize + 3] = d_deviceArgs->numbers;')
+    lines.append('        expressions_params[bufferCommitsSize + 4] = d_params->airValues;')
+    lines.append('        expressions_params[bufferCommitsSize + 5] = d_params->proofValues;')
+    lines.append('        expressions_params[bufferCommitsSize + 6] = d_params->airgroupValues;')
+    lines.append('        expressions_params[bufferCommitsSize + 7] = d_params->challenges;')
+    lines.append('        expressions_params[bufferCommitsSize + 8] = d_params->evals;')
+    lines.append('    }')
+    lines.append('    __syncthreads();')
+    lines.append('    uint64_t k_min_chunk = d_expsArgs->k_min / blockDim.x;')
+    lines.append('    uint64_t k_max_chunk = d_expsArgs->k_max / blockDim.x;')
+    lines.append('    while (chunk_idx < nchunks) {')
+    lines.append('        uint64_t i = chunk_idx * blockDim.x;')
+    lines.append('        if (chunk_idx < k_min_chunk || chunk_idx >= k_max_chunk) {')
+    lines.append(f'            {func_name}<true>(d_params, d_deviceArgs, d_expsArgs, expressions_params, bufferCommitsSize, i);')
+    lines.append('        } else {')
+    lines.append(f'            {func_name}<false>(d_params, d_deviceArgs, d_expsArgs, expressions_params, bufferCommitsSize, i);')
+    lines.append('        }')
+    lines.append('        chunk_idx += gridDim.x;')
+    lines.append('    }')
+    lines.append('}')
+
+    with open(out_path, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+
+
 def generate_all(dump_dir, out_dir):
     """Generate evaluators for all dumps and a dispatch header."""
     import hashlib
@@ -383,7 +458,35 @@ def generate_all(dump_dir, out_dir):
         f.write('    return false;\n')
         f.write('}\n')
 
-    print(f"Generated {len(entries)} evaluators + dispatch header -> {dispatch_path}")
+    # Generate standalone kernel .cu files
+    for fp, nOps, nTemp1, nTemp3, destDim, fname in entries:
+        expId_str = fname.replace('gen_eval_', '').replace('.cuh', '')
+        kernel_path = os.path.join(out_dir, f'gen_kernel_{expId_str}.cu')
+        generate_standalone_kernel(expId_str, f'eval_expr_{fp}', kernel_path)
+        print(f"  Standalone kernel: gen_kernel_{expId_str}.cu")
+
+    # Generate host-side dispatch header (declarations only)
+    host_dispatch_path = os.path.join(out_dir, 'generated_kernels.cuh')
+    with open(host_dispatch_path, 'w') as f:
+        f.write('// Auto-generated kernel declarations for host-side dispatch\n')
+        f.write('// Each kernel is compiled in its own .cu file for optimal register allocation\n\n')
+        for fp, nOps, nTemp1, nTemp3, destDim, fname in entries:
+            expId_str = fname.replace('gen_eval_', '').replace('.cuh', '')
+            f.write(f'// expId={expId_str} nOps={nOps} nTemp1={nTemp1} nTemp3={nTemp3}\n')
+            f.write(f'__global__ void computeExpression_gen_{expId_str}_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);\n\n')
+        # Dispatch function for host code
+        f.write('// Host-side dispatch by expId\n')
+        f.write('inline bool dispatchGeneratedKernel(uint64_t expId, dim3 nBlocks, dim3 nThreads, size_t sharedMem, cudaStream_t stream,\n')
+        f.write('    StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams) {\n')
+        f.write('    switch (expId) {\n')
+        for fp, nOps, nTemp1, nTemp3, destDim, fname in entries:
+            expId_str = fname.replace('gen_eval_', '').replace('.cuh', '')
+            f.write(f'    case {expId_str}: computeExpression_gen_{expId_str}_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;\n')
+        f.write('    default: return false;\n')
+        f.write('    }\n')
+        f.write('}\n')
+
+    print(f"Generated {len(entries)} evaluators + {len(entries)} standalone kernels + host dispatch -> {out_dir}")
     return True
 
 

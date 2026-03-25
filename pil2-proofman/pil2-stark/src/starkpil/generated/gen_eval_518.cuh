@@ -7,7 +7,7 @@
 #define GENERATED_EVAL_NTEMP3_5c75a2d5 5
 
 template<bool IsCyclic>
-__device__ __noinline__ void eval_expr_5c75a2d5(
+__device__ __forceinline__ void eval_expr_5c75a2d5(
     const StepsParams* __restrict__ dParams,
     const DeviceArguments* __restrict__ dArgs,
     const ExpsArguments* __restrict__ dExpsArgs,

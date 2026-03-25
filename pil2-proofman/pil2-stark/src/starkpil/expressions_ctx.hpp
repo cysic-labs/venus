@@ -22,6 +22,7 @@ struct DestParamsGPU
     uint64_t argsOffset;
     uint32_t nTemp1;
     uint32_t nTemp3;
+    uint64_t expId;
 };
 
 

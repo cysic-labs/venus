@@ -161,6 +161,7 @@ void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, 
         h_dest_params[j].argsOffset = parserParams.argsOffset;
         h_dest_params[j].nTemp1 = parserParams.nTemp1;
         h_dest_params[j].nTemp3 = parserParams.nTemp3;
+        h_dest_params[j].expId = dest.params[j].expId;
     }
 
     memcpy(pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
@@ -213,9 +214,9 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
                         uint32_t nStages = setupCtx.starkInfo.nStages;
                         uint32_t nCustoms = setupCtx.starkInfo.customCommits.size();
                         uint32_t nOpenings = setupCtx.starkInfo.openingPoints.size();
-                        uint32_t header[9] = {pp.nOps, pp.nArgs, pp.nTemp1, pp.nTemp3, pp.destDim,
-                                              (uint32_t)bufferCommitSize, nStages, nCustoms, nOpenings};
-                        fwrite(header, sizeof(uint32_t), 9, df);
+                        uint32_t header[10] = {pp.nOps, pp.nArgs, pp.nTemp1, pp.nTemp3, pp.destDim,
+                                              (uint32_t)bufferCommitSize, nStages, nCustoms, nOpenings, (uint32_t)expId};
+                        fwrite(header, sizeof(uint32_t), 10, df);
                         fwrite(ops, sizeof(uint8_t), pp.nOps, df);
                         fwrite(args, sizeof(uint16_t), pp.nArgs, df);
                         // Write stride values (host-side, from the extended domain since Q is always extended)
@@ -292,6 +293,7 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
         h_dest_params[j].argsOffset = parserParams.argsOffset;
         h_dest_params[j].nTemp1 = parserParams.nTemp1;
         h_dest_params[j].nTemp3 = parserParams.nTemp3;
+        h_dest_params[j].expId = dest.params[j].expId;
     }
 
     memcpy(pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
@@ -313,14 +315,12 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
     bool useTmpInShared = tmpMem <= 40960 && tmpMem > 0;
     size_t sharedMem = useTmpInShared ? (ptrMem + tmpMem) : ptrMem;
 
-    // Dispatch to generated standalone kernel when available, else interpreter
-    ParserParams &qpp = setupCtx.expressionsBin.expressionsInfo[dest.params[0].expId];
-    bool useGenerated = (qpp.nOps == 307 && qpp.nTemp1 == 2 && qpp.nTemp3 == 5);
+    // Dispatch to generated standalone kernel by expId, fallback to interpreter
+    uint64_t qExpId = dest.params[0].expId;
 
     TimerStartCategoryGPU(timer, EXPRESSIONS);
-    if (useGenerated) {
-        computeExpression_gen_479_<<<nBlocks_, nThreads_, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams);
-    } else {
+    if (!dispatchGeneratedKernel(qExpId, nBlocks_, nThreads_, sharedMem, stream,
+            d_params, d_deviceArgs, d_expsArgs, d_destParams)) {
         computeExpression_<<<nBlocks_, nThreads_, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams);
     }
     CHECKCUDAERR(cudaGetLastError());

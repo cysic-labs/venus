@@ -40,8 +40,8 @@ struct DeviceArguments
 __global__  void computeExpressions_(StepsParams *h_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams, bool constraints);
 __global__  void computeExpression_(StepsParams *h_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
-// Generated standalone kernels (compiled in separate CUs)
-__global__  void computeExpression_gen_479_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+// Generated standalone kernels - host dispatch by expId
+#include "generated/generated_kernels.cuh"
 
 class ExpressionsGPU : public ExpressionsCtx
 {
