@@ -173,7 +173,10 @@ void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, 
     dim3 nThreads_ = nthreads_;
     
     assert(bufferCommitSize  + 9  < 32);
-    size_t sharedMem = 32 * sizeof(Goldilocks::Element);
+    size_t ptrMem = 32 * sizeof(Goldilocks::Element);
+    size_t tmpMem = (h_expsArgs.maxTemp1Size + h_expsArgs.maxTemp3Size) * sizeof(Goldilocks::Element);
+    bool useTmpInShared = tmpMem <= 40960 && tmpMem > 0;
+    size_t sharedMem = useTmpInShared ? (ptrMem + tmpMem) : ptrMem;
 
     TimerStartCategoryGPU(timer, EXPRESSIONS);
     computeExpressions_<<<nBlocks_, nThreads_, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams, constraints);
@@ -618,10 +621,20 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
     uint32_t bufferCommitsSize = d_deviceArgs->bufferCommitSize;
     Goldilocks::Element **expressions_params = (Goldilocks::Element **)scratchpad;
 
+    // Use temp buffers in dynamic shared memory if launch allocated space for them
+    Goldilocks::Element *smem_after_ptrs_s = scratchpad + 32;
+    uint64_t tmpTotal_s = d_expsArgs->maxTemp1Size + d_expsArgs->maxTemp3Size;
+    bool useTmpSmem_s = tmpTotal_s > 0 && tmpTotal_s <= 5120;
+
     if (threadIdx.x == 0)
     {
-        expressions_params[bufferCommitsSize + 0] = (&d_params->aux_trace[d_expsArgs->offsetTmp1 + blockIdx.x * d_expsArgs->maxTemp1Size]);
-        expressions_params[bufferCommitsSize + 1] = (&d_params->aux_trace[d_expsArgs->offsetTmp3 + blockIdx.x * d_expsArgs->maxTemp3Size]);
+        if (useTmpSmem_s) {
+            expressions_params[bufferCommitsSize + 0] = smem_after_ptrs_s;
+            expressions_params[bufferCommitsSize + 1] = smem_after_ptrs_s + d_expsArgs->maxTemp1Size;
+        } else {
+            expressions_params[bufferCommitsSize + 0] = (&d_params->aux_trace[d_expsArgs->offsetTmp1 + blockIdx.x * d_expsArgs->maxTemp1Size]);
+            expressions_params[bufferCommitsSize + 1] = (&d_params->aux_trace[d_expsArgs->offsetTmp3 + blockIdx.x * d_expsArgs->maxTemp3Size]);
+        }
         expressions_params[bufferCommitsSize + 2] = d_params->publicInputs;
         expressions_params[bufferCommitsSize + 3] = constraints ? d_deviceArgs->numbersConstraints : d_deviceArgs->numbers;
         expressions_params[bufferCommitsSize + 4] = d_params->airValues;
