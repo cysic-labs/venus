@@ -27,7 +27,7 @@ class CudaGraphCache {
     uint64_t pending_key_ = 0;
     bool capturing_ = false;
 
-    static constexpr uint32_t CAPTURE_THRESHOLD = 2;
+    static constexpr uint32_t CAPTURE_THRESHOLD = 1000;
 
     static void clearCudaError() {
         cudaGetLastError();

@@ -689,6 +689,60 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
 }
 
 
+template<bool IsCyclic>
+__device__ __forceinline__ void computeExpression_chunk_(
+    StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs,
+    DestParamsGPU *d_destParams, Goldilocks::Element **expressions_params,
+    uint32_t bufferCommitsSize, uint64_t i)
+{
+    uint8_t *ops = &d_deviceArgs->ops[d_destParams[0].opsOffset];
+    uint16_t *args = &d_deviceArgs->args[d_destParams[0].argsOffset];
+    gl64_t *a0, *a1, *a2, *b0, *b1, *b2;
+    gl64_t *res;
+
+    uint64_t i_args = 0;
+    uint64_t nOps = d_destParams[0].nOps;
+    for (uint64_t kk = 0; kk < nOps; ++kk)
+    {
+        switch (ops[kk])
+        {
+        case 0:
+        {
+            load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 2], args[i_args + 3], args[i_args + 4], i, 1, IsCyclic, a0, a1, a2);
+            load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 5], args[i_args + 6], args[i_args + 7], i, 1, IsCyclic, b0, b1, b2);
+            res = (gl64_t*)&expressions_params[bufferCommitsSize][args[i_args + 1] * blockDim.x];
+            op_gpu_p2(args[i_args], res, a0, b0);
+            i_args += 8;
+            break;
+        }
+        case 1:
+        {
+            load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 2], args[i_args + 3], args[i_args + 4], i, 3, IsCyclic, a0, a1, a2);
+            load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 5], args[i_args + 6], args[i_args + 7], i, 1, IsCyclic, b0, b1, b2);
+            res = (gl64_t*)&expressions_params[bufferCommitsSize + 1][args[i_args + 1] * blockDim.x];
+            op_31_gpu_p2(args[i_args], res, a0, a1, a2, b0);
+            i_args += 8;
+            break;
+        }
+        case 2:
+        {
+            load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 2], args[i_args + 3], args[i_args + 4], i, 3, IsCyclic, a0, a1, a2);
+            load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 5], args[i_args + 6], args[i_args + 7], i, 3, IsCyclic, b0, b1, b2);
+            res = (gl64_t*)&expressions_params[bufferCommitsSize + 1][args[i_args + 1] * blockDim.x];
+            op_33_gpu_p2(args[i_args], res, a0, a1, a2, b0, b1, b2);
+            i_args += 8;
+            break;
+        }
+        default:
+        {
+            printf(" Wrong operation! %d \n", ops[kk]);
+        }
+        }
+    }
+
+    storePolynomial__(d_expsArgs, (Goldilocks::Element *)res, i);
+}
+
 __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)
 {
 
@@ -712,65 +766,17 @@ __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_de
     }
     __syncthreads();
 
+    uint64_t k_min_chunk = d_expsArgs->k_min / blockDim.x;
+    uint64_t k_max_chunk = d_expsArgs->k_max / blockDim.x;
+
     while (chunk_idx < nchunks)
     {
         uint64_t i = chunk_idx * blockDim.x;
-        bool isCyclic = i < d_expsArgs->k_min || i >= d_expsArgs->k_max;
-        uint8_t *ops = &d_deviceArgs->ops[d_destParams[0].opsOffset];
-        uint16_t *args = &d_deviceArgs->args[d_destParams[0].argsOffset];
-        gl64_t *a0, *a1, *a2, *b0, *b1, *b2;
-        gl64_t *res;
-
-        uint64_t i_args = 0;
-        uint64_t nOps = d_destParams[0].nOps;
-        for (uint64_t kk = 0; kk < nOps; ++kk)
-
-        {
-
-            switch (ops[kk])
-            {
-            case 0:
-            {
-                // OPERATION WITH DEST: dim1 - SRC0: dim1 - SRC1: dim1
-                load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 2], args[i_args + 3], args[i_args + 4], i, 1, isCyclic, a0, a1, a2);
-                load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 5], args[i_args + 6], args[i_args + 7], i, 1, isCyclic, b0, b1, b2);
-                res = (gl64_t*)&expressions_params[bufferCommitsSize][args[i_args + 1] * blockDim.x];
-                op_gpu_p2(args[i_args], res, a0, b0);
-                i_args += 8;
-                break;
-            }
-            case 1:
-            {
-                // OPERATION WITH DEST: dim3 - SRC0: dim3 - SRC1: dim1
-                load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 2], args[i_args + 3], args[i_args + 4], i, 3, isCyclic, a0, a1, a2);
-                load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 5], args[i_args + 6], args[i_args + 7], i, 1, isCyclic, b0, b1, b2);
-                res = (gl64_t*)&expressions_params[bufferCommitsSize + 1][args[i_args + 1] * blockDim.x];
-                op_31_gpu_p2(args[i_args], res, a0, a1, a2, b0);
-                i_args += 8;
-                break;
-            }
-            case 2:
-            {
-                // OPERATION WITH DEST: dim3 - SRC0: dim3 - SRC1: dim3
-                load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 2], args[i_args + 3], args[i_args + 4], i, 3, isCyclic, a0, a1, a2);
-                load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 5], args[i_args + 6], args[i_args + 7], i, 3, isCyclic, b0, b1, b2);
-                res = (gl64_t*)&expressions_params[bufferCommitsSize + 1][args[i_args + 1] * blockDim.x];
-                op_33_gpu_p2(args[i_args], res, a0, a1, a2, b0, b1, b2);
-                i_args += 8;
-                break;
-            }
-            default:
-            {
-                printf(" Wrong operation! %d \n", ops[kk]);
-            }
-            }
+        if (chunk_idx < k_min_chunk || chunk_idx >= k_max_chunk) {
+            computeExpression_chunk_<true>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i);
+        } else {
+            computeExpression_chunk_<false>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i);
         }
-        if (i_args !=  d_destParams[0].nArgs){
-            printf(" %lu consumed args - %lu expected args \n", i_args, d_destParams[0].nArgs);
-        }
-    
-
-        storePolynomial__(d_expsArgs, (Goldilocks::Element *)res, i);        
 
         chunk_idx += gridDim.x;
     }
