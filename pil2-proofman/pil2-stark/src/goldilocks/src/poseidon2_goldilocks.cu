@@ -129,11 +129,10 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::merkletreeCoalesced(uint32_t arity,
 }
 
 
-//repassar assumtions que faig, sponge width es 16
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
 __global__ void hash_gpu_16(uint64_t* data, int N)
 {
- 
+    // Stage Poseidon2 constants into shared memory
     for(int i=threadIdx.x; i <150; i+= blockDim.x){
         scratchpad[16*blockDim.x + i] = GPU_C_16[i];
     }
@@ -142,28 +141,36 @@ __global__ void hash_gpu_16(uint64_t* data, int N)
     }
     gl64_t* C = scratchpad + 16*blockDim.x;
     gl64_t* D = scratchpad + 16*blockDim.x + 150;
-
     __syncthreads();
-    uint64_t* blockData = data + (blockIdx.x * blockDim.x) * 16;
 
-    //coalesced read of hasshes which are "romajor" sthore in scratchpad in colmajor
+    uint32_t globalNodeBase = blockIdx.x * blockDim.x;
+    uint64_t* blockData = data + globalNodeBase * 16;
+
+    // Coalesced read from row-major input into column-major scratchpad
+    // Zero-fill for out-of-bounds nodes in last block
     for(uint32_t i=0; i<16; i++){
         uint32_t offset = i * blockDim.x + threadIdx.x;
-        uint32_t row = offset >> 4;
-        uint32_t col = offset & 0xF;
-        scratchpad[col * blockDim.x + row] = gl64_t(blockData[offset]);        
+        uint32_t row = offset >> 4;     // node index within block
+        uint32_t col = offset & 0xF;    // element index within node
+        uint32_t globalNode = globalNodeBase + row;
+        scratchpad[col * blockDim.x + row] = (globalNode < (uint32_t)N) ? gl64_t(blockData[offset]) : gl64_t(uint64_t(0));
     }
     __syncthreads();
-    //poseidon2_hash<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>();
+
     poseidon2_hash_with_constants<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>((gl64_t*) C,(gl64_t*) D);
-    uint64_t* outData = data + 16 * N + (blockIdx.x * blockDim.x) * 4;
-    //coalesced write of hashes that are in "colummajor" in scratchpad and write them in rowmajor in d_tree
+
+    // Coalesced write from column-major scratchpad to row-major output
+    // Only write valid nodes (bounds check for last block)
+    uint64_t* outData = data + 16 * N + globalNodeBase * 4;
     __syncthreads();
     for(uint32_t i=0; i<4; i++){
         uint32_t offset = i * blockDim.x + threadIdx.x;
-        uint32_t row = offset >> 2;
-        uint32_t col = offset & 0x3;
-        outData[(row << 2) + col] = scratchpad[col * blockDim.x + row];
+        uint32_t row = offset >> 2;     // node index within block
+        uint32_t col = offset & 0x3;    // capacity element index
+        uint32_t globalNode = globalNodeBase + row;
+        if (globalNode < (uint32_t)N) {
+            outData[(row << 2) + col] = scratchpad[col * blockDim.x + row];
+        }
     }
 }
 
@@ -209,13 +216,9 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::merkletreeCoalescedBlocks(uint32_t 
         else
         {
             actual_tpb = TPB;
-            actual_blks = nextN / TPB + 1;
+            actual_blks = (nextN + TPB - 1) / TPB;
         }
-        if(actual_tpb == TPB && SPONGE_WIDTH == 16 && nextN >=128 && 0){
-            hash_gpu_16<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS> <<<actual_blks, actual_tpb, actual_tpb * SPONGE_WIDTH * sizeof(gl64_t)+ (150+16) * sizeof(gl64_t), stream>>>(d_tree + nextIndex, nextN);  
-        }else{
-            hash_gpu_3<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, 0, stream>>>(nextN, nextIndex, pending + extraZeros, d_tree);
-        }
+        hash_gpu_3<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, 0, stream>>>(nextN, nextIndex, pending + extraZeros, d_tree);
         nextIndex += (pending + extraZeros) * CAPACITY;
         pending = (pending + (arity - 1)) / arity;
         nextN = (pending + (arity - 1)) / arity;
