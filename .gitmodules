@@ -1,0 +1,3 @@
+[submodule "venus-acc"]
+	path = venus-acc
+	url = git@github.com:cysic-labs/venus-acc.git
