@@ -20,15 +20,15 @@ This repository is a deeply integrated monorepo consolidating multiple projects 
 
 We chose this monorepo consolidation because we believe a clean repository with minimal external dependencies facilitates rapid development iteration.
 
-**Attribution**: All code outside the `venus-acc/` directory was developed by and should be credited to the [0xPolygonHermez](https://github.com/0xPolygonHermez) team and the ZisK project. Cysic has contributed a small number of bug fixes and cudaGraph-based optimizations under `pil2-proofman/`.
+**Attribution**: The code outside `venus-acc/` originates from the [0xPolygonHermez](https://github.com/0xPolygonHermez) team and the ZisK project. Cysic has contributed GPU backend optimizations under `pil2-proofman/` (cudaGraph integration, expression kernel tuning, shared-memory optimization, etc.) and the complete hardware acceleration backend under `venus-acc/`.
 
 ## What Cysic Contributes
 
-On top of the ZisK foundation, Cysic has implemented the following optimizations targeting the zero-knowledge proof system backend:
+Cysic specializes in hardware acceleration for zero-knowledge proof systems, with expertise spanning GPU, FPGA, and ASIC backends. On top of the ZisK foundation, Cysic has contributed:
 
-1. **Marginal GPU Backend Performance Improvement (~7-10%)** -- Introduced cudaGraph construction APIs to reduce GPU kernel launch overhead. Preliminary benchmarks on RTX 5090 show a 7-10% improvement over the ZisK 0.15.0 baseline.
+1. **GPU Backend Performance Improvement** -- Optimizations to the existing CUDA proving backend under `pil2-proofman/`, including cudaGraph integration, expression evaluation kernel tuning, and shared-memory optimizations for intermediate buffers. Preliminary benchmarks on RTX 5090 show measurable improvement over the ZisK baseline.
 
-2. **Complete FPGA Acceleration Backend** -- A full proving system backend implementation targeting FPGA acceleration, with HLS-based kernels (Goldilocks field arithmetic, NTT, Poseidon2, Merkle tree, FRI, expressions evaluation) targeting AMD UltraScale+ and Versal devices with HBM.
+2. **Complete FPGA Acceleration Backend** (`venus-acc/`) -- A full proving system backend implementation targeting FPGA acceleration, with HLS-based kernels (Goldilocks field arithmetic, NTT, Poseidon2, Merkle tree, FRI, expressions evaluation) targeting AMD UltraScale+ and Versal devices with HBM.
 
 3. **Preliminary ASIC-Oriented zkVM Acceleration Chip** -- An initial implementation of a custom silicon design for zkVM proof acceleration.
 
