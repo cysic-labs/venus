@@ -258,10 +258,15 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
     dim3 nThreads_ = nthreads_;
     
     assert(bufferCommitSize  + 9  < 32);
-    size_t sharedMem = 32 * sizeof(Goldilocks::Element);
+    // Include temp buffers in dynamic shared memory if they fit in 40KB budget
+    size_t ptrMem = 32 * sizeof(Goldilocks::Element);
+    size_t tmpMem = (h_expsArgs.maxTemp1Size + h_expsArgs.maxTemp3Size) * sizeof(Goldilocks::Element);
+    bool useTmpInShared = tmpMem <= 40960 && tmpMem > 0;
+    size_t sharedMem = useTmpInShared ? (ptrMem + tmpMem) : ptrMem;
 
     TimerStartCategoryGPU(timer, EXPRESSIONS);
     computeExpression_<<<nBlocks_, nThreads_, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams);
+    CHECKCUDAERR(cudaGetLastError());
     TimerStopCategoryGPU(timer, EXPRESSIONS);
 }
 
@@ -782,10 +787,20 @@ __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_de
     uint64_t nOps = d_destParams[0].nOps;
     uint64_t nArgs = d_destParams[0].nArgs;
 
+    // Use temp buffers in dynamic shared memory if launch allocated space for them
+    Goldilocks::Element *smem_after_ptrs = scratchpad + 32;
+    uint64_t tmpTotal = d_expsArgs->maxTemp1Size + d_expsArgs->maxTemp3Size;
+    bool useTmpSmem = tmpTotal > 0 && tmpTotal <= 5120;
+
     if (threadIdx.x == 0)
     {
-        expressions_params[bufferCommitsSize + 0] = (&d_params->aux_trace[d_expsArgs->offsetTmp1 + blockIdx.x * d_expsArgs->maxTemp1Size]);
-        expressions_params[bufferCommitsSize + 1] = (&d_params->aux_trace[d_expsArgs->offsetTmp3 + blockIdx.x * d_expsArgs->maxTemp3Size]);
+        if (useTmpSmem) {
+            expressions_params[bufferCommitsSize + 0] = smem_after_ptrs;
+            expressions_params[bufferCommitsSize + 1] = smem_after_ptrs + d_expsArgs->maxTemp1Size;
+        } else {
+            expressions_params[bufferCommitsSize + 0] = (&d_params->aux_trace[d_expsArgs->offsetTmp1 + blockIdx.x * d_expsArgs->maxTemp1Size]);
+            expressions_params[bufferCommitsSize + 1] = (&d_params->aux_trace[d_expsArgs->offsetTmp3 + blockIdx.x * d_expsArgs->maxTemp3Size]);
+        }
         expressions_params[bufferCommitsSize + 2] = d_params->publicInputs;
         expressions_params[bufferCommitsSize + 3] = d_deviceArgs->numbers;
         expressions_params[bufferCommitsSize + 4] = d_params->airValues;
