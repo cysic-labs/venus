@@ -54,7 +54,6 @@ public:
 
     void put(Goldilocks::Element *input, uint64_t size, cudaStream_t stream);
     void put2(Goldilocks::Element *input1, uint64_t size1, Goldilocks::Element *input2, uint64_t size2, cudaStream_t stream);
-    void putSegments(Goldilocks::Element **inputs, uint64_t *sizes, uint32_t count, cudaStream_t stream);
     void getField(uint64_t *output, cudaStream_t stream);
     void getState(Goldilocks::Element* output, cudaStream_t stream);
     void getState(Goldilocks::Element* output, uint64_t nOutputs, cudaStream_t stream);

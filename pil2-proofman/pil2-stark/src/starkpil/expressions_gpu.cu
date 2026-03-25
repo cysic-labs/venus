@@ -626,7 +626,7 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
         expressions_params[bufferCommitsSize + 8] = d_params->evals;
     }
     __syncthreads();
-    Goldilocks::Element *destVals = &(d_params->aux_trace[d_expsArgs->offsetDestVals + blockIdx.x * d_expsArgs->dest_nParams * blockDim.x * FIELD_EXTENSION]);
+    Goldilocks::Element *destVals = &(d_params->aux_trace[d_expsArgs->offsetDestVals + blockIdx.x * d_expsArgs->dest_nParams * blockDim.x * FIELD_EXTENSION]); 
 
     while (chunk_idx < nchunks)
     {
@@ -714,9 +714,10 @@ template<bool IsCyclic>
 __device__ __forceinline__ void computeExpression_chunk_(
     StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs,
     DestParamsGPU *d_destParams, Goldilocks::Element **expressions_params,
-    uint32_t bufferCommitsSize, uint64_t i,
-    const uint8_t * __restrict__ ops, const uint16_t * __restrict__ args)
+    uint32_t bufferCommitsSize, uint64_t i)
 {
+    uint8_t *ops = &d_deviceArgs->ops[d_destParams[0].opsOffset];
+    uint16_t *args = &d_deviceArgs->args[d_destParams[0].argsOffset];
     gl64_t *a0, *a1, *a2, *b0, *b1, *b2;
     gl64_t *res;
 
@@ -775,15 +776,6 @@ __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_de
     uint32_t bufferCommitsSize = d_deviceArgs->bufferCommitSize;
     Goldilocks::Element **expressions_params = (Goldilocks::Element **)scratchpad;
 
-    // Static shared memory for ops/args staging (avoids resizing extern __shared__)
-    // 256 bytes for ops (supports up to 256 operations per expression)
-    // 4096 bytes for args (supports up to 2048 uint16_t args = 256 ops * 8 args each)
-    __shared__ uint8_t ops_staged[256];
-    __shared__ uint16_t args_staged[2048];
-
-    uint64_t nOps = d_destParams[0].nOps;
-    uint64_t nArgs = d_destParams[0].nArgs;
-
     if (threadIdx.x == 0)
     {
         expressions_params[bufferCommitsSize + 0] = (&d_params->aux_trace[d_expsArgs->offsetTmp1 + blockIdx.x * d_expsArgs->maxTemp1Size]);
@@ -796,17 +788,7 @@ __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_de
         expressions_params[bufferCommitsSize + 7] = d_params->challenges;
         expressions_params[bufferCommitsSize + 8] = d_params->evals;
     }
-
-    // Cooperatively stage ops and args into shared memory
-    const uint8_t *g_ops = &d_deviceArgs->ops[d_destParams[0].opsOffset];
-    const uint16_t *g_args = &d_deviceArgs->args[d_destParams[0].argsOffset];
-    for (uint32_t t = threadIdx.x; t < nOps && t < 256; t += blockDim.x) ops_staged[t] = g_ops[t];
-    for (uint32_t t = threadIdx.x; t < nArgs && t < 2048; t += blockDim.x) args_staged[t] = g_args[t];
     __syncthreads();
-
-    // Use staged arrays if expression fits, otherwise fall back to global
-    const uint8_t *active_ops = (nOps <= 256) ? ops_staged : g_ops;
-    const uint16_t *active_args = (nArgs <= 2048) ? args_staged : g_args;
 
     uint64_t k_min_chunk = d_expsArgs->k_min / blockDim.x;
     uint64_t k_max_chunk = d_expsArgs->k_max / blockDim.x;
@@ -815,9 +797,9 @@ __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_de
     {
         uint64_t i = chunk_idx * blockDim.x;
         if (chunk_idx < k_min_chunk || chunk_idx >= k_max_chunk) {
-            computeExpression_chunk_<true>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i, active_ops, active_args);
+            computeExpression_chunk_<true>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i);
         } else {
-            computeExpression_chunk_<false>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i, active_ops, active_args);
+            computeExpression_chunk_<false>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i);
         }
 
         chunk_idx += gridDim.x;

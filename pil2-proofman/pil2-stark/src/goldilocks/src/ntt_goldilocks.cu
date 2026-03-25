@@ -823,10 +823,10 @@ __global__ void br_ntt_batch_steps_blocks_par(gl64_t *data, gl64_t *twiddles, gl
             uint32_t group_pos = i & (group_size - 1);               // i%(group_size)  
             uint32_t index1 = (group << (loc_step + 1)) + group_pos; // 2*group*group_size + group_pos
             uint32_t index2 = index1 + group_size;
-            uint32_t gs = base_step + loc_step;
-            uint64_t twiddle_stride = (1 << maxLogDomainSize) >> (gs + 1);
             gl64_t factor;
             {
+                //global_step
+                uint32_t gs = base_step + loc_step;
                 //global_group_size
                 uint32_t ggs = 1 << gs;
                 //batched butterfly index
@@ -834,7 +834,7 @@ __global__ void br_ntt_batch_steps_blocks_par(gl64_t *data, gl64_t *twiddles, gl
                 //global_group_pos
                 uint32_t gbi = (((bbi & high_mask)<< base_step) + (bbi >> remaining_high_bits)); //undo the batching
                 uint32_t ggp = gbi & (ggs - 1);
-                factor = twiddles[ggp * twiddle_stride];
+                factor = twiddles[ggp*((1 << maxLogDomainSize) >> (gs + 1))];
             }
             if (ncols_block == BATCH_WIDTH) {
                 #pragma unroll

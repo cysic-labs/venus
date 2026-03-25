@@ -151,27 +151,6 @@ __global__ void _addBN128_GL(Goldilocks::Element* input, uint64_t size, Poseidon
     }
 }
 
-__global__ void _addBN128_GL2(Goldilocks::Element* input1, uint64_t size1,
-                              Goldilocks::Element* input2, uint64_t size2,
-                              PoseidonBN128GPU::FrElement* state,
-                              PoseidonBN128GPU::FrElement* pending, PoseidonBN128GPU::FrElement* out,
-                              uint* pending_cursor, uint* out_cursor, uint* out3_cursor, uint64_t arity)
-{
-    DECLARE_SHARED_FR_ARRAYS();
-    for (uint64_t i = 0; i < size1; i++) {
-        PoseidonBN128GPU::FrElement fr_val;
-        goldilocks_to_fr(fr_val, input1[i]);
-        __syncthreads();
-        _add1BN128(state, pending, out, pending_cursor, out_cursor, out3_cursor, arity, fr_val, shared_state, tmp);
-    }
-    for (uint64_t i = 0; i < size2; i++) {
-        PoseidonBN128GPU::FrElement fr_val;
-        goldilocks_to_fr(fr_val, input2[i]);
-        __syncthreads();
-        _add1BN128(state, pending, out, pending_cursor, out_cursor, out3_cursor, arity, fr_val, shared_state, tmp);
-    }
-}
-
 // Kernel for adding Fr elements - uses 32 threads
 __global__ void _addBN128_Fr(PoseidonBN128GPU::FrElement* input, uint64_t size, PoseidonBN128GPU::FrElement* state, 
                              PoseidonBN128GPU::FrElement* pending, PoseidonBN128GPU::FrElement* out, 
@@ -486,11 +465,6 @@ void TranscriptBN128_GPU::put(Goldilocks::Element *input, uint64_t size, cudaStr
     if(timer != nullptr) TimerStartCategoryGPU((*timer), TRANSCRIPT_PUT);
     _addBN128_GL<<<1, 32, 0, stream>>>(input, size, state, pending, out, pending_cursor, out_cursor, out3_cursor, arity);
     if(timer != nullptr) TimerStopCategoryGPU((*timer), TRANSCRIPT_PUT);
-}
-
-void TranscriptBN128_GPU::put2GL(Goldilocks::Element *input1, uint64_t size1, Goldilocks::Element *input2, uint64_t size2, cudaStream_t stream)
-{
-    _addBN128_GL2<<<1, 32, 0, stream>>>(input1, size1, input2, size2, state, pending, out, pending_cursor, out_cursor, out3_cursor, arity);
 }
 
 void TranscriptBN128_GPU::put(PoseidonBN128GPU::FrElement *input, uint64_t size, cudaStream_t stream, TimerGPU *timer)

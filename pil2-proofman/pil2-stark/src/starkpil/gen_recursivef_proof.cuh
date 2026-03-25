@@ -306,7 +306,8 @@ void *genRecursiveProofBN128_gpu(SetupCtx& setupCtx, uint64_t airgroupId, uint64
     TimerStartCategoryGPU(timer, FRI);
 
     d_transcript_helper.reset(stream);
-    d_transcript_helper.put2GL(h_params.challenges, FIELD_EXTENSION, d_nonce, 1, stream);
+    d_transcript_helper.put(h_params.challenges, FIELD_EXTENSION, stream);
+    d_transcript_helper.put(d_nonce, 1, stream);
     d_transcript_helper.getPermutations(friQueries_gpu, setupCtx.starkInfo.starkStruct.nQueries, setupCtx.starkInfo.starkStruct.steps[0].nBits, stream);
 
     proveQueries_bn128_gpu(setupCtx, d_queries_buff, friQueries_gpu, setupCtx.starkInfo.starkStruct.nQueries, starks.treesGL, nTrees, (gl64_t*)d_aux_trace, setupCtx.starkInfo.nStages, stream);

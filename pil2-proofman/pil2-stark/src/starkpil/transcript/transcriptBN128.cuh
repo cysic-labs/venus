@@ -54,7 +54,6 @@ public:
 
     void put(Goldilocks::Element *input, uint64_t size, cudaStream_t stream, TimerGPU *timer=nullptr);
     void put(PoseidonBN128GPU::FrElement *input, uint64_t size, cudaStream_t stream, TimerGPU *timer=nullptr);
-    void put2GL(Goldilocks::Element *input1, uint64_t size1, Goldilocks::Element *input2, uint64_t size2, cudaStream_t stream);
     void getField(uint64_t *output, cudaStream_t stream);
     void getState(PoseidonBN128GPU::FrElement* output, cudaStream_t stream);
     void getPermutations(uint64_t *res, uint64_t n, uint64_t nBits, cudaStream_t stream);
