@@ -8,6 +8,9 @@
 #include "starks_gpu.cuh"
 #include "hints.cuh"
 #include "gpu_timer.cuh"
+#ifdef USE_CUDA_GRAPH
+#include "cuda_graph_cache.cuh"
+#endif
 #include <iomanip>
 
 // TOTO list: //rick
@@ -80,6 +83,19 @@ void calculateWitnessSTD_gpu(SetupCtx& setupCtx, StepsParams& h_params, StepsPar
 void genProof_gpu(SetupCtx& setupCtx, gl64_t *d_aux_trace, gl64_t *d_const_pols, gl64_t *d_const_tree, char *constTreePath, uint32_t stream_id, uint64_t instance_id, DeviceCommitBuffers *d_buffers, AirInstanceInfo *air_instance_info, bool skipRecalculation, TimerGPU &timer, cudaStream_t stream, bool recursive = false, bool reuse_constants = false) {
     TimerStartGPU(timer, STARK_GPU_PROOF);
     TimerStartGPU(timer, STARK_STEP_0);
+
+#ifdef USE_CUDA_GRAPH
+    {
+        static bool printed = false;
+        if (!printed) {
+            fprintf(stderr, "[cudaGraph] enabled (stream capture mode)\n");
+            printed = true;
+        }
+        static CudaGraphCache caches[16];
+        cudagraph::current() = &caches[stream_id % 16];
+    }
+    cudaGetLastError(); // clear any stale error from previous genProof_gpu call
+#endif
 
     uint64_t countId = 0;
 
@@ -328,6 +344,24 @@ void genProof_gpu(SetupCtx& setupCtx, gl64_t *d_aux_trace, gl64_t *d_const_pols,
     for (uint64_t step = 0; step < setupCtx.starkInfo.starkStruct.steps.size(); step++)
     {
         uint64_t currentBits = setupCtx.starkInfo.starkStruct.steps[step].nBits;
+
+#ifdef USE_CUDA_GRAPH
+        {
+            CudaGraphCache *graphCache = cudagraph::current();
+            if (graphCache) {
+                uint64_t prevBits = step > 0 ? setupCtx.starkInfo.starkStruct.steps[step - 1].nBits : 0;
+                uint64_t nextBits = step < setupCtx.starkInfo.starkStruct.steps.size() - 1 ? setupCtx.starkInfo.starkStruct.steps[step + 1].nBits : 0;
+                uint64_t arity = setupCtx.starkInfo.starkStruct.merkleTreeArity;
+                uint64_t ctxId = (uint64_t)(uintptr_t)&setupCtx;
+                uint64_t key = CudaGraphCache::makeKey(0x465249ULL ^ ctxId, step, nBitsExt, currentBits, prevBits, nextBits, arity);
+                if (graphCache->tryLaunch(key, stream)) {
+                    continue;
+                }
+                graphCache->beginCapture(key, stream);
+            }
+        }
+#endif
+
         if (step > 0) {
             uint64_t prevBits = setupCtx.starkInfo.starkStruct.steps[step - 1].nBits;
             fold_inplace(step, friPol_offset, offset_helper, d_challenge, nBitsExt, prevBits, currentBits, d_aux_trace, timer, stream);
@@ -346,7 +380,14 @@ void genProof_gpu(SetupCtx& setupCtx, gl64_t *d_aux_trace, gl64_t *d_const_pols,
             }
         }
         d_transcript->getField((uint64_t *)d_challenge, stream);
-    }   
+
+#ifdef USE_CUDA_GRAPH
+        {
+            CudaGraphCache *graphCache = cudagraph::current();
+            if (graphCache) graphCache->endCaptureAndLaunch(stream);
+        }
+#endif
+    }
 
     TimerStartCategoryGPU(timer, GRINDING);
     Goldilocks::Element *d_input_hash_nonce = (Goldilocks::Element *)d_aux_trace + offsetInputHashNonce;

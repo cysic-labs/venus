@@ -1,5 +1,8 @@
 #include "starks.hpp"
 #include "starks_gpu.cuh"
+#ifdef USE_CUDA_GRAPH
+#include "cuda_graph_cache.cuh"
+#endif
 #include "goldilocks_base_field.hpp"
 #include "goldilocks_cubic_extension.hpp"
 #include "goldilocks_cubic_extension.cuh"
@@ -212,7 +215,6 @@ void commitStage_inplace(uint64_t step, SetupCtx &setupCtx, MerkleTreeGL **trees
 {
     if (step <= setupCtx.starkInfo.nStages)
     {
-    
         extendAndMerkelize_inplace(step, setupCtx, treesGL, d_trace, d_aux_trace, d_transcript, skipRecalculation, timer, stream);
     }
     else
@@ -236,6 +238,36 @@ void extendAndMerkelize_inplace(uint64_t step, SetupCtx& setupCtx, MerkleTreeGL*
     treesGL[step - 1]->setSource(dstGL + offset_dst);
     Goldilocks::Element *pNodes = dstGL + setupCtx.starkInfo.mapOffsets[make_pair("mt" + to_string(step), true)];
     treesGL[step - 1]->setNodes(pNodes);
+
+#ifdef USE_CUDA_GRAPH
+    CudaGraphCache *graphCache = cudagraph::current();
+    if (graphCache && !skipRecalculation && nCols > 0) {
+        uint64_t nBits = setupCtx.starkInfo.starkStruct.nBits;
+        uint64_t nBitsExt = setupCtx.starkInfo.starkStruct.nBitsExt;
+        uint64_t arity = setupCtx.starkInfo.starkStruct.merkleTreeArity;
+        uint64_t ctxId = (uint64_t)(uintptr_t)&setupCtx;
+        uint64_t key = CudaGraphCache::makeKey(0x4C4445ULL ^ ctxId, nBits, nBitsExt, nCols, arity, step);
+        if (graphCache->tryLaunch(key, stream)) {
+            if (d_transcript != nullptr) {
+                uint64_t tree_size = treesGL[step - 1]->getNumNodes(NExtended);
+                d_transcript->put(&pNodes[tree_size - HASH_SIZE], HASH_SIZE, stream);
+            }
+            return;
+        }
+        graphCache->beginCapture(key, stream);
+
+        NTT_Goldilocks_GPU ntt;
+        ntt.LDE_MerkleTree_GPU(pNodes, dst, offset_dst, src, offset_src, nBits, nBitsExt, nCols, arity, timer, stream);
+
+        graphCache->endCaptureAndLaunch(stream);
+
+        if (d_transcript != nullptr) {
+            uint64_t tree_size = treesGL[step - 1]->getNumNodes(NExtended);
+            d_transcript->put(&pNodes[tree_size - HASH_SIZE], HASH_SIZE, stream);
+        }
+        return;
+    }
+#endif
 
     if(!skipRecalculation) {
         NTT_Goldilocks_GPU ntt;
@@ -279,7 +311,7 @@ void computeQ_MerkleTree_inplace(uint64_t step, SetupCtx &setupCtx, MerkleTreeGL
     uint64_t qDim = setupCtx.starkInfo.qDim;
 
     Goldilocks::Element shiftIn = Goldilocks::exp(Goldilocks::inv(Goldilocks::shift()), N);
-     
+
     Goldilocks::Element* d_aux_traceGL = (Goldilocks::Element*) d_aux_trace;
 
     treesGL[step - 1]->setSource(d_aux_traceGL + offset_cmQ);
@@ -290,6 +322,36 @@ void computeQ_MerkleTree_inplace(uint64_t step, SetupCtx &setupCtx, MerkleTreeGL
     {
         uint64_t offset_helper = setupCtx.starkInfo.mapOffsets[std::make_pair("extra_helper_fft", false)];
         NTT_Goldilocks_GPU nttExtended;
+
+#ifdef USE_CUDA_GRAPH
+        {
+            CudaGraphCache *graphCache = cudagraph::current();
+            if (graphCache) {
+                uint64_t nBits = setupCtx.starkInfo.starkStruct.nBits;
+                uint64_t nBitsExt = setupCtx.starkInfo.starkStruct.nBitsExt;
+                uint64_t arity = setupCtx.starkInfo.starkStruct.merkleTreeArity;
+                uint64_t ctxId = (uint64_t)(uintptr_t)&setupCtx;
+                uint64_t key = CudaGraphCache::makeKey(0x514D5400ULL ^ ctxId, nBits, nBitsExt, nCols, (qDeg << 32) | qDim, arity);
+                if (graphCache->tryLaunch(key, stream)) {
+                    uint64_t tree_size = treesGL[step - 1]->getNumNodes(NExtended);
+                    if (d_transcript != nullptr) {
+                        d_transcript->put(&pNodes[tree_size - HASH_SIZE], HASH_SIZE, stream);
+                    }
+                    return;
+                }
+                graphCache->beginCapture(key, stream);
+                nttExtended.computeQ_MerkleTree_inplace(pNodes, offset_cmQ, offset_q, qDeg, qDim, shiftIn, nBits, nBitsExt, nCols, arity, d_aux_trace, offset_helper, timer, stream);
+                graphCache->endCaptureAndLaunch(stream);
+
+                uint64_t tree_size = treesGL[step - 1]->getNumNodes(NExtended);
+                if (d_transcript != nullptr) {
+                    d_transcript->put(&pNodes[tree_size - HASH_SIZE], HASH_SIZE, stream);
+                }
+                return;
+            }
+        }
+#endif
+
         nttExtended.computeQ_MerkleTree_inplace(pNodes, offset_cmQ, offset_q, qDeg, qDim, shiftIn, setupCtx.starkInfo.starkStruct.nBits, setupCtx.starkInfo.starkStruct.nBitsExt, nCols, setupCtx.starkInfo.starkStruct.merkleTreeArity, d_aux_trace, offset_helper, timer, stream);
         uint64_t tree_size = treesGL[step - 1]->getNumNodes(NExtended);
         if(d_transcript != nullptr) {
