@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Generate optimized CUDA expression evaluator from bytecode dump.
+Generate optimized CUDA expression evaluators from bytecode dumps.
 
-Reads the binary dump created by the expression instrumentation and generates
-a .cu file with register-resident intermediates and no interpreter overhead.
+Reads binary dumps produced by VENUS_DUMP_EXPRS and generates straight-line
+CUDA device functions with register-resident temporaries. The generated code
+exactly mirrors the interpreter semantics in expressions_gpu.cu load__().
 
-Usage: python3 gen_expression_evaluator.py /tmp/expr_dump_*.bin -o generated_eval.cuh
+Usage:
+  VENUS_DUMP_EXPRS=1 make prove   # produces /tmp/expr_dump_*.bin
+  python3 tools/gen_expression_evaluator.py  # generates .cuh files
 """
 
 import struct
@@ -18,118 +21,125 @@ def read_dump(path):
     with open(path, 'rb') as f:
         data = f.read()
     off = 0
-    nOps, nArgs, nTemp1, nTemp3, destDim, bufferCommitSize = struct.unpack_from('<6I', data, off)
-    off += 24
+    # 9-field header: nOps, nArgs, nTemp1, nTemp3, destDim, bufferCommitSize, nStages, nCustoms, nOpenings
+    nOps, nArgs, nTemp1, nTemp3, destDim, bufferCommitSize, nStages, nCustoms, nOpenings = struct.unpack_from('<9I', data, off)
+    off += 36
     ops = list(struct.unpack_from(f'<{nOps}B', data, off))
     off += nOps
-    args = list(struct.unpack_from(f'<{nArgs}H', data, off))
+    args_raw = list(struct.unpack_from(f'<{nArgs}H', data, off))
     off += nArgs * 2
+    # Read stride values
+    strides = {}
+    if nOpenings > 0 and off + nOpenings * 8 <= len(data):
+        strides_raw = struct.unpack_from(f'<{nOpenings}q', data, off)
+        off += nOpenings * 8
+        for i, s in enumerate(strides_raw):
+            strides[i] = s
     nNumbers, = struct.unpack_from('<I', data, off)
     off += 4
     numbers = list(struct.unpack_from(f'<{nNumbers}Q', data, off))
     return {
         'nOps': nOps, 'nArgs': nArgs, 'nTemp1': nTemp1, 'nTemp3': nTemp3,
         'destDim': destDim, 'bufferCommitSize': bufferCommitSize,
-        'ops': ops, 'args': args, 'numbers': numbers, 'nNumbers': nNumbers
+        'nStages': nStages, 'nCustoms': nCustoms, 'nOpenings': nOpenings,
+        'ops': ops, 'args': args_raw, 'numbers': numbers, 'nNumbers': nNumbers,
+        'strides': strides
     }
 
 
-def gen_load(src_type, src_arg, src_offset, dim, base, var_prefix):
-    """Generate CUDA code to load a source operand. Returns (code_lines, var_names).
-    All variables are declared in the OUTER scope (no curly-brace blocks)."""
+def gen_load(src_type, src_arg, src_offset, dim, dump, var_prefix):
+    """Generate CUDA matching load__() semantics exactly.
+    Q expressions always have domainExtended=true.
+    pack256 requires stride==0 for the specific operand."""
     lines = []
+    base = dump['bufferCommitSize']
+    nStages = dump['nStages']
+    strides = dump['strides']
+    stride_val = strides.get(src_offset, 0)
+    use_pack256_for_this = (stride_val == 0)  # per-operand stride check
 
-    # Temp buffers: direct register access
-    if src_type == base:  # tmp1
+    # Temp buffers (base+0 = tmp1, base+1 = tmp3)
+    if src_type == base:
         return lines, [f'tmp1_{src_arg}', None, None]
-    if src_type == base + 1:  # tmp3
+    if src_type == base + 1:
         if dim == 1:
-            return lines, [f'tmp3_{src_arg}_0', None, None]
-        return lines, [f'tmp3_{src_arg}_0', f'tmp3_{src_arg}_1', f'tmp3_{src_arg}_2']
+            return lines, [f'tmp3_{src_arg}', None, None]
+        return lines, [f'tmp3_{src_arg}', f'tmp3_{src_arg + 1}', f'tmp3_{src_arg + 2}']
 
-    # Broadcast constants (same for all threads)
+    # Constants/broadcasts (base+2 and above)
     if src_type >= base + 2:
         if dim == 1:
             v = f'{var_prefix}'
             lines.append(f'gl64_t {v} = *(gl64_t*)&expressions_params[{src_type}][{src_arg}];')
             return lines, [v, None, None]
-        else:
-            v0, v1, v2 = f'{var_prefix}_0', f'{var_prefix}_1', f'{var_prefix}_2'
-            lines.append(f'gl64_t {v0} = *(gl64_t*)&expressions_params[{src_type}][{src_arg}];')
-            lines.append(f'gl64_t {v1} = *(gl64_t*)&expressions_params[{src_type}][{src_arg}+1];')
-            lines.append(f'gl64_t {v2} = *(gl64_t*)&expressions_params[{src_type}][{src_arg}+2];')
-            return lines, [v0, v1, v2]
+        v0, v1, v2 = f'{var_prefix}_0', f'{var_prefix}_1', f'{var_prefix}_2'
+        lines.append(f'gl64_t {v0} = *(gl64_t*)&expressions_params[{src_type}][{src_arg}];')
+        lines.append(f'gl64_t {v1} = *(gl64_t*)&expressions_params[{src_type}][{src_arg}+1];')
+        lines.append(f'gl64_t {v2} = *(gl64_t*)&expressions_params[{src_type}][{src_arg}+2];')
+        return lines, [v0, v1, v2]
 
-    # zi (zerofier inverse)
+    # zi (type == nStages + 2, hardcoded as type 4 in GPU bytecode)
     if src_type == 4:
         v = f'{var_prefix}'
         lines.append(f'gl64_t {v} = *(gl64_t*)&dParams->aux_trace[dArgs->zi_offset + ({src_arg} - 1) * domainSize + row + threadIdx.x];')
         return lines, [v, None, None]
 
+    # Custom commits (types nStages+4 to base-1)
+    if src_type >= nStages + 4 and src_type < base:
+        idx = src_type - (nStages + 4)
+        offset_expr = f'dExpsArgs->mapOffsetsCustomExps[{idx}]'
+        ncols_expr = f'dArgs->mapSectionsNCustomFixed[{idx}]'
+        if dim == 1:
+            v = f'{var_prefix}'
+            lines.append(f'gl64_t {v} = *(gl64_t*)&dParams->pCustomCommitsFixed[{offset_expr} + getBufferOffset(logicalRow_{src_offset}, {src_arg}, domainSize, {ncols_expr})];')
+            return lines, [v, None, None]
+        v0, v1, v2 = f'{var_prefix}_0', f'{var_prefix}_1', f'{var_prefix}_2'
+        for d in range(3):
+            lines.append(f'gl64_t {var_prefix}_{d} = *(gl64_t*)&dParams->pCustomCommitsFixed[{offset_expr} + getBufferOffset(logicalRow_{src_offset}, {src_arg}+{d}, domainSize, {ncols_expr})];')
+        return lines, [v0, v1, v2]
+
     # constPols (type 0)
     if src_type == 0:
-        ncols = 'dArgs->mapSectionsN[0]'
-        baseptr = 'dExpsArgs->domainExtended ? dParams->pConstPolsExtendedTreeAddress : dParams->pConstPolsAddress'
+        ncols = 'nCols_0'
+        # Q is always domainExtended=true
+        baseptr = 'dParams->pConstPolsExtendedTreeAddress'
+        pack_cond = f'usePack256_{src_offset}' if use_pack256_for_this else 'false'
         if dim == 1:
             v = f'{var_prefix}'
-            lines.append(f'gl64_t {v} = *(gl64_t*)&({baseptr})[usePack256 ? getBufferOffset_pack256(chunkBase, {src_arg}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}, domainSize, {ncols})];')
+            lines.append(f'gl64_t {v} = *(gl64_t*)&{baseptr}[{pack_cond} ? getBufferOffset_pack256(chunkBase, {src_arg}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}, domainSize, {ncols})];')
             return lines, [v, None, None]
+        v0, v1, v2 = f'{var_prefix}_0', f'{var_prefix}_1', f'{var_prefix}_2'
+        for d in range(3):
+            lines.append(f'gl64_t {var_prefix}_{d} = *(gl64_t*)&{baseptr}[{pack_cond} ? getBufferOffset_pack256(chunkBase, {src_arg}+{d}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}+{d}, domainSize, {ncols})];')
+        return lines, [v0, v1, v2]
+
+    # Trace/aux_trace (types 1-3)
+    # For Q expressions, domainExtended=true always, so type 1 goes through aux_trace
+    if src_type >= 1 and src_type <= 3:
+        offset_expr = f'dExpsArgs->mapOffsetsExps[{src_type}]'
+        ncols = f'nCols_{src_type}'
+        pack_cond = f'usePack256_{src_offset}' if use_pack256_for_this else 'false'
+
+        if dim == 1:
+            v = f'{var_prefix}'
+            lines.append(f'gl64_t {v} = *(gl64_t*)&dParams->aux_trace[{offset_expr} + ({pack_cond} ? getBufferOffset_pack256(chunkBase, {src_arg}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}, domainSize, {ncols}))];')
+            return lines, [v, None, None]
+
+        v0, v1, v2 = f'{var_prefix}_0', f'{var_prefix}_1', f'{var_prefix}_2'
+        # Same-tile fast path when col % 4 <= 1
+        if isinstance(src_arg, int) and (src_arg & 3) <= 1:
+            lines.append(f'uint64_t {var_prefix}_pos = {offset_expr} + ({pack_cond} ? getBufferOffset_pack256(chunkBase, {src_arg}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}, domainSize, {ncols}));')
+            lines.append(f'gl64_t {v0} = *(gl64_t*)&dParams->aux_trace[{var_prefix}_pos];')
+            lines.append(f'gl64_t {v1} = *(gl64_t*)&dParams->aux_trace[{var_prefix}_pos + TILE_HEIGHT];')
+            lines.append(f'gl64_t {v2} = *(gl64_t*)&dParams->aux_trace[{var_prefix}_pos + 2*TILE_HEIGHT];')
         else:
-            v0, v1, v2 = f'{var_prefix}_0', f'{var_prefix}_1', f'{var_prefix}_2'
             for d in range(3):
-                lines.append(f'gl64_t {var_prefix}_{d} = *(gl64_t*)&({baseptr})[usePack256 ? getBufferOffset_pack256(chunkBase, {src_arg}+{d}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}+{d}, domainSize, {ncols})];')
-            return lines, [v0, v1, v2]
+                lines.append(f'gl64_t {var_prefix}_{d} = *(gl64_t*)&dParams->aux_trace[{offset_expr} + ({pack_cond} ? getBufferOffset_pack256(chunkBase, {src_arg}+{d}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}+{d}, domainSize, {ncols}))];')
+        return lines, [v0, v1, v2]
 
-    # trace stage 1 (type 1)
-    if src_type == 1:
-        ncols = 'dArgs->mapSectionsN[1]'
-        if dim == 1:
-            v = f'{var_prefix}'
-            lines.append(f'gl64_t {v} = *(gl64_t*)&dParams->trace[usePack256 ? getBufferOffset_pack256(chunkBase, {src_arg}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}, domainSize, {ncols})];')
-            return lines, [v, None, None]
-        else:
-            v0, v1, v2 = f'{var_prefix}_0', f'{var_prefix}_1', f'{var_prefix}_2'
-            for d in range(3):
-                lines.append(f'gl64_t {var_prefix}_{d} = *(gl64_t*)&dParams->trace[usePack256 ? getBufferOffset_pack256(chunkBase, {src_arg}+{d}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}+{d}, domainSize, {ncols})];')
-            return lines, [v0, v1, v2]
-
-    # aux_trace stages 2-3 (types 2-3)
-    if src_type >= 2 and src_type <= 3:
-        ncols = f'dArgs->mapSectionsN[{src_type}]'
-        if dim == 1:
-            v = f'{var_prefix}'
-            lines.append(f'gl64_t {v} = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[{src_type}] + (usePack256 ? getBufferOffset_pack256(chunkBase, {src_arg}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}, domainSize, {ncols}))];')
-            return lines, [v, None, None]
-        else:
-            v0, v1, v2 = f'{var_prefix}_0', f'{var_prefix}_1', f'{var_prefix}_2'
-            # Use same-tile fast path when col % 4 <= 1
-            if isinstance(src_arg, int) and (src_arg & 3) <= 1:
-                lines.append(f'uint64_t {var_prefix}_pos = dExpsArgs->mapOffsetsExps[{src_type}] + (usePack256 ? getBufferOffset_pack256(chunkBase, {src_arg}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}, domainSize, {ncols}));')
-                lines.append(f'gl64_t {v0} = *(gl64_t*)&dParams->aux_trace[{var_prefix}_pos];')
-                lines.append(f'gl64_t {v1} = *(gl64_t*)&dParams->aux_trace[{var_prefix}_pos + TILE_HEIGHT];')
-                lines.append(f'gl64_t {v2} = *(gl64_t*)&dParams->aux_trace[{var_prefix}_pos + 2*TILE_HEIGHT];')
-            else:
-                for d in range(3):
-                    lines.append(f'gl64_t {var_prefix}_{d} = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[{src_type}] + (usePack256 ? getBufferOffset_pack256(chunkBase, {src_arg}+{d}, domainSize, {ncols}) : getBufferOffset(logicalRow_{src_offset}, {src_arg}+{d}, domainSize, {ncols}))];')
-            return lines, [v0, v1, v2]
-
-    # Custom commits (type 5+, where base = bufferCommitSize)
-    if src_type >= 5 and src_type < base:
-        nstages = base - 3  # bufferCommitSize = 1 + nStages + 3 + nCustoms, nStages is 2 typically
-        idx = src_type - (nstages + 1)  # approximate custom commit index
-        if dim == 1:
-            v = f'{var_prefix}'
-            lines.append(f'gl64_t {v} = *(gl64_t*)&dParams->pCustomCommitsFixed[dExpsArgs->mapOffsetsCustomExps[{idx}] + getBufferOffset(logicalRow_{src_offset}, {src_arg}, domainSize, dArgs->mapSectionsNCustomFixed[{idx}])];')
-            return lines, [v, None, None]
-        else:
-            v0, v1, v2 = f'{var_prefix}_0', f'{var_prefix}_1', f'{var_prefix}_2'
-            for d in range(3):
-                lines.append(f'gl64_t {var_prefix}_{d} = *(gl64_t*)&dParams->pCustomCommitsFixed[dExpsArgs->mapOffsetsCustomExps[{idx}] + getBufferOffset(logicalRow_{src_offset}, {src_arg}+{d}, domainSize, dArgs->mapSectionsNCustomFixed[{idx}])];')
-            return lines, [v0, v1, v2]
-
-    # Fallback
+    # Unknown type
     v = f'{var_prefix}'
-    lines.append(f'gl64_t {v} = gl64_t(uint64_t(0)); // unknown type {src_type}')
+    lines.append(f'gl64_t {v} = gl64_t(uint64_t(0)); // unknown src type {src_type}')
     return lines, [v, None, None]
 
 
@@ -137,58 +147,93 @@ def generate_evaluator(dump, out_path):
     nOps = dump['nOps']
     nTemp1 = dump['nTemp1']
     nTemp3 = dump['nTemp3']
-    destDim = dump['destDim']
     base = dump['bufferCommitSize']
     ops = dump['ops']
     args = dump['args']
+    strides = dump['strides']
 
-    # Collect unique stride offsets used
+    # Collect unique stride offsets and stage types used
     stride_offsets = set()
+    stage_types_used = set()
     for i in range(nOps):
         a = args[i*8:(i+1)*8]
         stride_offsets.add(a[4])
         stride_offsets.add(a[7])
+        for st in [a[2], a[5]]:
+            if st >= 0 and st <= 3:
+                stage_types_used.add(st)
 
-    lines = []
-    lines.append('// Auto-generated expression evaluator')
-    lines.append('// Register-resident temporaries eliminate shared memory overhead')
-    lines.append('')
-    lines.append('template<bool IsCyclic>')
-    lines.append('__device__ __forceinline__ void eval_expression_generated_(')
-    lines.append('    const StepsParams* __restrict__ dParams,')
-    lines.append('    const DeviceArguments* __restrict__ dArgs,')
-    lines.append('    const ExpsArguments* __restrict__ dExpsArgs,')
-    lines.append('    Goldilocks::Element **expressions_params,')
-    lines.append(f'    uint32_t bufferCommitsSize, uint64_t row)')
-    lines.append('{')
-    lines.append('    const uint64_t domainSize = dExpsArgs->domainSize;')
-    lines.append('    const uint64_t r = row + threadIdx.x;')
-    lines.append('    const bool usePack256 = !IsCyclic && blockDim.x == TILE_HEIGHT;')
-    lines.append('    const uint64_t chunkBase = row;')
-    lines.append('')
+    L = []
+    L.append('// Auto-generated expression evaluator - matches load__() semantics exactly')
+    L.append('// Q expressions: domainExtended=true always, type 1 goes through aux_trace')
+    L.append('')
+    # Use fingerprint based on nOps+nTemp1+nTemp3+first 16 args for unique name
+    import hashlib
+    fp_data = struct.pack('<IIII', nOps, nTemp1, nTemp3, dump['destDim'])
+    fp_data += bytes(ops[:min(16, len(ops))])
+    fp_data += struct.pack(f'<{min(32, len(args))}H', *args[:min(32, len(args))])
+    fp = hashlib.md5(fp_data).hexdigest()[:8]
+    func_name = f'eval_expr_{fp}'
+
+    L.append(f'// Fingerprint: {fp}  nOps={nOps} nTemp1={nTemp1} nTemp3={nTemp3}')
+    L.append(f'#define GENERATED_EVAL_NOPS_{fp} {nOps}')
+    L.append(f'#define GENERATED_EVAL_NTEMP1_{fp} {nTemp1}')
+    L.append(f'#define GENERATED_EVAL_NTEMP3_{fp} {nTemp3}')
+    L.append('')
+    L.append('template<bool IsCyclic>')
+    L.append(f'__device__ __forceinline__ void {func_name}(')
+    L.append('    const StepsParams* __restrict__ dParams,')
+    L.append('    const DeviceArguments* __restrict__ dArgs,')
+    L.append('    const ExpsArguments* __restrict__ dExpsArgs,')
+    L.append('    Goldilocks::Element **expressions_params,')
+    L.append(f'    uint32_t bufferCommitsSize, uint64_t row)')
+    L.append('{')
+    L.append('    const uint64_t domainSize = dExpsArgs->domainSize;')
+    L.append('    const uint64_t r = row + threadIdx.x;')
+    L.append('    const uint64_t chunkBase = row;')
+    L.append('')
 
     # Declare logical rows for each stride offset
     for so in sorted(stride_offsets):
-        lines.append(f'    uint64_t logicalRow_{so};')
-    lines.append('    if constexpr (IsCyclic) {')
+        sv = strides.get(so, 0)
+        L.append(f'    // stride[{so}] = {sv}')
+        L.append(f'    const int64_t stride_{so} = dExpsArgs->nextStridesExps[{so}];')
+        L.append(f'    uint64_t logicalRow_{so};')
+    L.append('    if constexpr (IsCyclic) {')
     for so in sorted(stride_offsets):
-        lines.append(f'        logicalRow_{so} = (r + dExpsArgs->nextStridesExps[{so}]) % domainSize;')
-    lines.append('    } else {')
+        L.append(f'        logicalRow_{so} = (r + stride_{so}) % domainSize;')
+    L.append('    } else {')
     for so in sorted(stride_offsets):
-        lines.append(f'        logicalRow_{so} = r + dExpsArgs->nextStridesExps[{so}];')
-    lines.append('    }')
+        L.append(f'        logicalRow_{so} = r + stride_{so};')
+    L.append('    }')
+    L.append('')
+
+    # Per-operand pack256 eligibility (stride==0 AND !IsCyclic AND blockDim==TILE_HEIGHT)
+    for so in sorted(stride_offsets):
+        sv = strides.get(so, 0)
+        if sv == 0:
+            L.append(f'    const bool usePack256_{so} = !IsCyclic && blockDim.x == TILE_HEIGHT;')
+        else:
+            L.append(f'    const bool usePack256_{so} = false; // stride={sv} != 0')
+
+    # Cache nCols for used stage types
+    L.append('')
+    for st in sorted(stage_types_used):
+        L.append(f'    const uint64_t nCols_{st} = dArgs->mapSectionsN[{st}];')
 
     # Register-resident temporaries
-    lines.append('')
-    lines.append('    // Register-resident temporaries')
-    for t in range(nTemp1):
-        lines.append(f'    gl64_t tmp1_{t} = gl64_t(uint64_t(0));')
-    for t in range(nTemp3):
-        lines.append(f'    gl64_t tmp3_{t}_0 = gl64_t(uint64_t(0)), tmp3_{t}_1 = gl64_t(uint64_t(0)), tmp3_{t}_2 = gl64_t(uint64_t(0));')
+    # tmp1 has nTemp1 slots; tmp3 has nTemp3*FIELD_EXTENSION slots
+    # dest_idx is a RAW buffer index, not a tuple index
+    nTmp1Slots = nTemp1
+    nTmp3Slots = nTemp3 * 3  # FIELD_EXTENSION = 3
+    L.append('')
+    L.append(f'    // Register-resident temporaries: {nTmp1Slots} tmp1 + {nTmp3Slots} tmp3 slots')
+    for t in range(nTmp1Slots):
+        L.append(f'    gl64_t tmp1_{t} = gl64_t(uint64_t(0));')
+    for t in range(nTmp3Slots):
+        L.append(f'    gl64_t tmp3_{t} = gl64_t(uint64_t(0));')
 
-    lines.append('')
-    lines.append('    // Straight-line evaluation')
-
+    L.append('')
     last_dest_type = None
     last_dest_idx = None
 
@@ -199,101 +244,155 @@ def generate_evaluator(dump, out_path):
         src0_type, src0_arg, src0_offset = a[2], a[3], a[4]
         src1_type, src1_arg, src1_offset = a[5], a[6], a[7]
         op_type = ops[i]
-
-        arith_names = {0: 'add', 1: 'sub', 2: 'mul', 3: 'sub_swap'}
         dim0 = 1 if op_type == 0 else 3
         dim1 = 1 if op_type <= 1 else 3
+        arith_names = {0: 'add', 1: 'sub', 2: 'mul', 3: 'sub_swap'}
 
         if op_type == 0:
             dest_var = f'tmp1_{dest_idx}'
             last_dest_type = 'tmp1'
+            last_dest_idx = dest_idx
         else:
+            # dim3 ops use 3 consecutive raw slots: dest_idx, dest_idx+1, dest_idx+2
             dest_var = f'tmp3_{dest_idx}'
             last_dest_type = 'tmp3'
-        last_dest_idx = dest_idx
+            last_dest_idx = dest_idx
 
-        lines.append(f'    // Op {i}: {["dim1x1","dim3x1","dim3x3"][op_type]} {arith_names[arith_op]}')
+        L.append(f'    // Op {i}: {["dim1x1","dim3x1","dim3x3"][op_type]} {arith_names[arith_op]}')
 
-        # Generate source loads (all in outer scope, no curly-brace blocks)
-        src0_lines, src0_vars = gen_load(src0_type, src0_arg, src0_offset, dim0, base, f's0_{i}')
-        src1_lines, src1_vars = gen_load(src1_type, src1_arg, src1_offset, dim1, base, f's1_{i}')
-
+        src0_lines, src0_vars = gen_load(src0_type, src0_arg, src0_offset, dim0, dump, f's0_{i}')
+        src1_lines, src1_vars = gen_load(src1_type, src1_arg, src1_offset, dim1, dump, f's1_{i}')
         for l in src0_lines:
-            lines.append(f'    {l}')
+            L.append(f'    {l}')
         for l in src1_lines:
-            lines.append(f'    {l}')
+            L.append(f'    {l}')
 
-        # Generate arithmetic
-        if op_type == 0:  # dim1x1
+        if op_type == 0:
             av, bv = src0_vars[0], src1_vars[0]
-            if arith_op == 0:   lines.append(f'    {dest_var} = {av} + {bv};')
-            elif arith_op == 1: lines.append(f'    {dest_var} = {av} - {bv};')
-            elif arith_op == 2: lines.append(f'    {dest_var} = {av} * {bv};')
-            elif arith_op == 3: lines.append(f'    {dest_var} = {bv} - {av};')
-
-        elif op_type == 1:  # dim3x1
+            if arith_op == 0:   L.append(f'    {dest_var} = {av} + {bv};')
+            elif arith_op == 1: L.append(f'    {dest_var} = {av} - {bv};')
+            elif arith_op == 2: L.append(f'    {dest_var} = {av} * {bv};')
+            elif arith_op == 3: L.append(f'    {dest_var} = {bv} - {av};')
+        elif op_type == 1:
             a0, a1, a2 = src0_vars
             b0 = src1_vars[0]
-            d0, d1, d2 = f'{dest_var}_0', f'{dest_var}_1', f'{dest_var}_2'
-            if arith_op == 0:
-                lines.append(f'    {d0} = {a0} + {b0}; {d1} = {a1}; {d2} = {a2};')
-            elif arith_op == 1:
-                lines.append(f'    {d0} = {a0} - {b0}; {d1} = {a1}; {d2} = {a2};')
-            elif arith_op == 2:
-                lines.append(f'    {d0} = {a0} * {b0}; {d1} = {a1} * {b0}; {d2} = {a2} * {b0};')
-            elif arith_op == 3:
-                lines.append(f'    {d0} = {b0} - {a0}; {d1} = -({a1}); {d2} = -({a2});')
-
-        elif op_type == 2:  # dim3x3
+            d0 = f'tmp3_{dest_idx}'
+            d1 = f'tmp3_{dest_idx + 1}'
+            d2 = f'tmp3_{dest_idx + 2}'
+            if arith_op == 0:   L.append(f'    {d0} = {a0} + {b0}; {d1} = {a1}; {d2} = {a2};')
+            elif arith_op == 1: L.append(f'    {d0} = {a0} - {b0}; {d1} = {a1}; {d2} = {a2};')
+            elif arith_op == 2: L.append(f'    {d0} = {a0} * {b0}; {d1} = {a1} * {b0}; {d2} = {a2} * {b0};')
+            elif arith_op == 3: L.append(f'    {d0} = {b0} - {a0}; {d1} = -({a1}); {d2} = -({a2});')
+        elif op_type == 2:
             a0, a1, a2 = src0_vars
             b0, b1, b2 = src1_vars
-            d0, d1, d2 = f'{dest_var}_0', f'{dest_var}_1', f'{dest_var}_2'
-            if arith_op == 0:
-                lines.append(f'    {d0} = {a0} + {b0}; {d1} = {a1} + {b1}; {d2} = {a2} + {b2};')
-            elif arith_op == 1:
-                lines.append(f'    {d0} = {a0} - {b0}; {d1} = {a1} - {b1}; {d2} = {a2} - {b2};')
+            d0 = f'tmp3_{dest_idx}'
+            d1 = f'tmp3_{dest_idx + 1}'
+            d2 = f'tmp3_{dest_idx + 2}'
+            if arith_op == 0:   L.append(f'    {d0} = {a0} + {b0}; {d1} = {a1} + {b1}; {d2} = {a2} + {b2};')
+            elif arith_op == 1: L.append(f'    {d0} = {a0} - {b0}; {d1} = {a1} - {b1}; {d2} = {a2} - {b2};')
             elif arith_op == 2:
-                lines.append(f'    {d0} = ({a0} + {a1}) * ({b0} + {b1});')
-                lines.append(f'    gl64_t B_{i} = ({a0} + {a2}) * ({b0} + {b2});')
-                lines.append(f'    gl64_t C_{i} = ({a1} + {a2}) * ({b1} + {b2});')
-                lines.append(f'    gl64_t D_{i} = {a0} * {b0};')
-                lines.append(f'    gl64_t E_{i} = {a1} * {b1};')
-                lines.append(f'    gl64_t F_{i} = {a2} * {b2};')
-                lines.append(f'    gl64_t G_{i} = D_{i} - E_{i};')
-                lines.append(f'    gl64_t A_{i} = {d0};')  # d0 holds (a0+a1)*(b0+b1)
-                lines.append(f'    {d0} = (C_{i} + G_{i}) - F_{i};')
-                lines.append(f'    {d1} = ((((A_{i} + C_{i}) - E_{i}) - E_{i}) - D_{i});')
-                lines.append(f'    {d2} = B_{i} - G_{i};')
+                # Karatsuba-like cubic extension multiply
+                # ALL intermediates computed BEFORE any dest writes (src/dest may alias)
+                L.append(f'    gl64_t kA{i} = ({a0} + {a1}) * ({b0} + {b1});')
+                L.append(f'    gl64_t kB{i} = ({a0} + {a2}) * ({b0} + {b2});')
+                L.append(f'    gl64_t kC{i} = ({a1} + {a2}) * ({b1} + {b2});')
+                L.append(f'    gl64_t kD{i} = {a0} * {b0};')
+                L.append(f'    gl64_t kE{i} = {a1} * {b1};')
+                L.append(f'    gl64_t kF{i} = {a2} * {b2};')
+                L.append(f'    gl64_t kG{i} = kD{i} - kE{i};')
+                L.append(f'    {d0} = (kC{i} + kG{i}) - kF{i};')
+                L.append(f'    {d1} = ((((kA{i} + kC{i}) - kE{i}) - kE{i}) - kD{i});')
+                L.append(f'    {d2} = kB{i} - kG{i};')
             elif arith_op == 3:
-                lines.append(f'    {d0} = {b0} - {a0}; {d1} = {b1} - {a1}; {d2} = {b2} - {a2};')
+                L.append(f'    {d0} = {b0} - {a0}; {d1} = {b1} - {a1}; {d2} = {b2} - {a2};')
 
-    # Write result to the location storePolynomial__ expects
-    lines.append('')
-    lines.append('    // Write final result to shared memory for storePolynomial__')
+    # Write result to shared memory and call storePolynomial__ directly
+    L.append('')
+    L.append('    // Write final result to shared memory and store to output')
     if last_dest_type == 'tmp3':
-        lines.append(f'    expressions_params[bufferCommitsSize + 1][{last_dest_idx} * blockDim.x * 3 + threadIdx.x] = (Goldilocks::Element)tmp3_{last_dest_idx}_0;')
-        lines.append(f'    expressions_params[bufferCommitsSize + 1][{last_dest_idx} * blockDim.x * 3 + blockDim.x + threadIdx.x] = (Goldilocks::Element)tmp3_{last_dest_idx}_1;')
-        lines.append(f'    expressions_params[bufferCommitsSize + 1][{last_dest_idx} * blockDim.x * 3 + 2*blockDim.x + threadIdx.x] = (Goldilocks::Element)tmp3_{last_dest_idx}_2;')
+        L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx} * blockDim.x + threadIdx.x] = tmp3_{last_dest_idx};')
+        L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx + 1} * blockDim.x + threadIdx.x] = tmp3_{last_dest_idx + 1};')
+        L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx + 2} * blockDim.x + threadIdx.x] = tmp3_{last_dest_idx + 2};')
+        L.append(f'    storePolynomial__((ExpsArguments*)dExpsArgs, (Goldilocks::Element*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx} * blockDim.x], row);')
     elif last_dest_type == 'tmp1':
-        lines.append(f'    expressions_params[bufferCommitsSize][{last_dest_idx} * blockDim.x + threadIdx.x] = (Goldilocks::Element)tmp1_{last_dest_idx};')
-    lines.append('}')
+        L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize][{last_dest_idx} * blockDim.x + threadIdx.x] = tmp1_{last_dest_idx};')
+        L.append(f'    storePolynomial__((ExpsArguments*)dExpsArgs, (Goldilocks::Element*)&expressions_params[bufferCommitsSize][{last_dest_idx} * blockDim.x], row);')
+    L.append('}')
 
     with open(out_path, 'w') as f:
-        f.write('\n'.join(lines))
-        f.write('\n')
+        f.write('\n'.join(L) + '\n')
 
-    print(f"Generated evaluator: {nOps} ops, {nTemp1} tmp1 + {nTemp3} tmp3 regs -> {out_path}")
+    print(f"Generated: {nOps} ops, {nTemp1} tmp1 + {nTemp3} tmp3 regs -> {out_path}")
+    return True
+
+
+def generate_all(dump_dir, out_dir):
+    """Generate evaluators for all dumps and a dispatch header."""
+    import hashlib
+    dump_files = sorted(glob.glob(os.path.join(dump_dir, 'expr_dump_*.bin')))
+    if not dump_files:
+        print(f"No dump files in {dump_dir}. Run: VENUS_DUMP_EXPRS=1 make prove")
+        return False
+
+    os.makedirs(out_dir, exist_ok=True)
+    entries = []  # (fingerprint, nOps, nTemp1, nTemp3, destDim, filename)
+
+    for path in dump_files:
+        dump = read_dump(path)
+        # Only generate for register-feasible expressions with reasonable size
+        if dump['nTemp1'] > 30 or dump['nOps'] > 500:
+            print(f"Skipped {path}: nTemp1={dump['nTemp1']} too large for registers")
+            continue
+        expId = os.path.basename(path).replace('expr_dump_', '').replace('.bin', '')
+        fname = f'gen_eval_{expId}.cuh'
+        out_path = os.path.join(out_dir, fname)
+        generate_evaluator(dump, out_path)
+
+        # Compute same fingerprint as the generator
+        nOps, nTemp1, nTemp3 = dump['nOps'], dump['nTemp1'], dump['nTemp3']
+        ops, args = dump['ops'], dump['args']
+        fp_data = struct.pack('<IIII', nOps, nTemp1, nTemp3, dump['destDim'])
+        fp_data += bytes(ops[:min(16, len(ops))])
+        fp_data += struct.pack(f'<{min(32, len(args))}H', *args[:min(32, len(args))])
+        fp = hashlib.md5(fp_data).hexdigest()[:8]
+        entries.append((fp, nOps, nTemp1, nTemp3, dump['destDim'], fname))
+
+    # Generate dispatch header
+    dispatch_path = os.path.join(out_dir, 'generated_dispatch.cuh')
+    with open(dispatch_path, 'w') as f:
+        f.write('// Auto-generated dispatch header for expression evaluators\n')
+        f.write('// Include all generated evaluator files\n\n')
+        for _, _, _, _, _, fname in entries:
+            f.write(f'#include "{fname}"\n')
+        f.write('\n// Dispatch function: tries generated evaluator, returns false if no match\n')
+        f.write('template<bool IsCyclic>\n')
+        f.write('__device__ __forceinline__ bool dispatch_generated_eval(\n')
+        f.write('    const StepsParams* __restrict__ dParams,\n')
+        f.write('    const DeviceArguments* __restrict__ dArgs,\n')
+        f.write('    const ExpsArguments* __restrict__ dExpsArgs,\n')
+        f.write('    Goldilocks::Element **expressions_params,\n')
+        f.write('    uint32_t bufferCommitsSize, uint64_t row,\n')
+        f.write('    uint32_t nOps, uint32_t nTemp1, uint32_t nTemp3)\n')
+        f.write('{\n')
+        for fp, nOps, nTemp1, nTemp3, _, _ in entries:
+            f.write(f'    if (nOps == {nOps} && nTemp1 == {nTemp1} && nTemp3 == {nTemp3}) {{\n')
+            f.write(f'        eval_expr_{fp}<IsCyclic>(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, row);\n')
+            f.write(f'        return true;\n')
+            f.write(f'    }}\n')
+        f.write('    return false;\n')
+        f.write('}\n')
+
+    print(f"Generated {len(entries)} evaluators + dispatch header -> {dispatch_path}")
     return True
 
 
 if __name__ == '__main__':
-    dump_files = glob.glob('/tmp/expr_dump_*.bin')
-    if not dump_files:
-        print("No dump files found. Run prove with dump instrumentation first.")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dump-dir', default='/tmp', help='Directory with expr_dump_*.bin files')
+    parser.add_argument('--out-dir', default=None, help='Output directory for .cuh files')
+    args = parser.parse_args()
 
-    for path in dump_files:
-        dump = read_dump(path)
-        expId = os.path.basename(path).replace('expr_dump_', '').replace('.bin', '')
-        out = f'/tmp/generated_eval_{expId}.cuh'
-        generate_evaluator(dump, out)
+    out_dir = args.out_dir or '/tmp/generated_evals'
+    generate_all(args.dump_dir, out_dir)

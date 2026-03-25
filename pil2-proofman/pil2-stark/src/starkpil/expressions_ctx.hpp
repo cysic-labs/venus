@@ -17,9 +17,11 @@ struct DestParamsGPU
     opType op; 
     uint64_t value; 
     uint64_t nOps;
-    uint64_t opsOffset; 
+    uint64_t opsOffset;
     uint64_t nArgs;
-    uint64_t argsOffset; 
+    uint64_t argsOffset;
+    uint32_t nTemp1;
+    uint32_t nTemp3;
 };
 
 

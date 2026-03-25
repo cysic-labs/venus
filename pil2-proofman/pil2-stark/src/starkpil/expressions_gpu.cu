@@ -158,7 +158,9 @@ void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, 
         h_dest_params[j].nOps = parserParams.nOps;
         h_dest_params[j].opsOffset = parserParams.opsOffset;
         h_dest_params[j].nArgs = parserParams.nArgs;
-        h_dest_params[j].argsOffset =parserParams.argsOffset;
+        h_dest_params[j].argsOffset = parserParams.argsOffset;
+        h_dest_params[j].nTemp1 = parserParams.nTemp1;
+        h_dest_params[j].nTemp3 = parserParams.nTemp3;
     }
 
     memcpy(pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
@@ -208,10 +210,16 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
                     snprintf(dumpPath, sizeof(dumpPath), "/tmp/expr_dump_%lu.bin", expId);
                     FILE *df = fopen(dumpPath, "wb");
                     if (df) {
-                        uint32_t header[6] = {pp.nOps, pp.nArgs, pp.nTemp1, pp.nTemp3, pp.destDim, (uint32_t)bufferCommitSize};
-                        fwrite(header, sizeof(uint32_t), 6, df);
+                        uint32_t nStages = setupCtx.starkInfo.nStages;
+                        uint32_t nCustoms = setupCtx.starkInfo.customCommits.size();
+                        uint32_t nOpenings = setupCtx.starkInfo.openingPoints.size();
+                        uint32_t header[9] = {pp.nOps, pp.nArgs, pp.nTemp1, pp.nTemp3, pp.destDim,
+                                              (uint32_t)bufferCommitSize, nStages, nCustoms, nOpenings};
+                        fwrite(header, sizeof(uint32_t), 9, df);
                         fwrite(ops, sizeof(uint8_t), pp.nOps, df);
                         fwrite(args, sizeof(uint16_t), pp.nArgs, df);
+                        // Write stride values (host-side, from the extended domain since Q is always extended)
+                        fwrite(nextStridesExtended, sizeof(int64_t), nOpenings, df);
                         uint32_t nNumbers = pa.nNumbers;
                         fwrite(&nNumbers, sizeof(uint32_t), 1, df);
                         fwrite(pa.numbers, sizeof(Goldilocks::Element), nNumbers, df);
@@ -281,7 +289,9 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
         h_dest_params[j].nOps = parserParams.nOps;
         h_dest_params[j].opsOffset = parserParams.opsOffset;
         h_dest_params[j].nArgs = parserParams.nArgs;
-        h_dest_params[j].argsOffset =parserParams.argsOffset;
+        h_dest_params[j].argsOffset = parserParams.argsOffset;
+        h_dest_params[j].nTemp1 = parserParams.nTemp1;
+        h_dest_params[j].nTemp3 = parserParams.nTemp3;
     }
 
     memcpy(pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
@@ -457,6 +467,9 @@ __device__ __noinline__ void storePolynomial__(ExpsArguments *d_expsArgs, Goldil
         }
     }
 }
+
+// Include generated expression evaluators (after storePolynomial__ is defined)
+#include "generated/generated_dispatch.cuh"
 
 __device__ __noinline__ void multiplyPolynomials__(ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams, DeviceArguments *d_deviceArgs, gl64_t *destVals, uint64_t row)
 {
@@ -769,8 +782,20 @@ __device__ __forceinline__ void computeExpression_chunk_(
     StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs,
     DestParamsGPU *d_destParams, Goldilocks::Element **expressions_params,
     uint32_t bufferCommitsSize, uint64_t i,
-    const uint8_t * __restrict__ ops, const uint16_t * __restrict__ args)
+    const uint8_t * __restrict__ ops, const uint16_t * __restrict__ args,
+    bool useGenerated)
 {
+    // Try generated evaluator (register-resident temps, no interpreter overhead)
+    // Each generated evaluator calls storePolynomial__ directly with the correct result pointer
+    if (useGenerated) {
+        if (dispatch_generated_eval<IsCyclic>(d_params, d_deviceArgs, d_expsArgs,
+                expressions_params, bufferCommitsSize, i,
+                d_destParams[0].nOps, d_destParams[0].nTemp1, d_destParams[0].nTemp3)) {
+            return;
+        }
+    }
+
+    // Fallback: bytecode interpreter
     gl64_t *a0, *a1, *a2, *b0, *b1, *b2;
     gl64_t *res;
 
@@ -871,13 +896,17 @@ __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_de
     uint64_t k_min_chunk = d_expsArgs->k_min / blockDim.x;
     uint64_t k_max_chunk = d_expsArgs->k_max / blockDim.x;
 
+    // Generated evaluators: correctness verified but currently regressive (28.4s vs 23s)
+    // due to code size bloat and register pressure. Disabled pending optimization.
+    bool useGenerated = false;
+
     while (chunk_idx < nchunks)
     {
         uint64_t i = chunk_idx * blockDim.x;
         if (chunk_idx < k_min_chunk || chunk_idx >= k_max_chunk) {
-            computeExpression_chunk_<true>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i, active_ops, active_args);
+            computeExpression_chunk_<true>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i, active_ops, active_args, useGenerated);
         } else {
-            computeExpression_chunk_<false>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i, active_ops, active_args);
+            computeExpression_chunk_<false>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i, active_ops, active_args, useGenerated);
         }
 
         chunk_idx += gridDim.x;
