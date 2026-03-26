@@ -38,3 +38,4 @@ state-machines/binary/src/binary_extension_frops_fixed.bin
 reth-inputs/
 /hints
 /benchmark
+pil2-proofman/pil2-stark/lib/
