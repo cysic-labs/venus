@@ -41,26 +41,8 @@ fn main() {
         panic!("`{}` was not found", lib_file.display());
     }
 
-    // Ensure Rust triggers a rebuild if the C++ source code changes.
-    // When the library is pre-built (git-tracked), skip the timestamp-based
-    // recompilation to avoid false positives from git clone timestamp ordering
-    // (and the cross-compiler toolchain may not be available yet).
-    // Still register rerun-if-changed so future real edits trigger a rebuild.
-    let lib_is_git_tracked = Command::new("git")
-        .args(["ls-files", "--error-unmatch", lib_file.to_str().unwrap_or("")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if lib_is_git_tracked {
-        // Register source files for change detection without triggering recompilation
-        for file in find_cpp_files(&c_path) {
-            println!("cargo:rerun-if-changed={}", file.display());
-        }
-    } else {
-        track_cpp_changes(&c_path);
-    }
+    // Ensure Rust triggers a rebuild if the C++ source code changes
+    track_cpp_changes(&c_path);
 
     // Link the static library
     println!("cargo:rustc-link-search=native={}", abs_lib_path.display());
