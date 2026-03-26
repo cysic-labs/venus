@@ -143,6 +143,146 @@ def gen_load(src_type, src_arg, src_offset, dim, dump, var_prefix):
     return lines, [v, None, None]
 
 
+def find_chunk_boundaries(dump, target_chunk_size=1500):
+    """Find optimal chunk boundaries where temp liveness is minimal.
+    Returns list of (start, end) tuples for each chunk."""
+    nOps = dump['nOps']
+    args = dump['args']
+    ops = dump['ops']
+    base = dump['bufferCommitSize']
+    TMP1_TYPE = base
+    TMP3_TYPE = base + 1
+
+    # For each op, track which temps are written and read
+    # Use interval-based liveness: a temp is live from its write to its last read before next write
+    # Compute per-op liveness score (number of live registers)
+    live_score = [0] * nOps
+
+    # Track write->read intervals for each (type, idx) pair
+    # Simple approach: sweep forward, tracking last write position per temp
+    last_write_pos = {}  # (type, idx) -> op index of last write
+    read_after_write = {}  # (type, idx) -> set of op indices where read after last_write
+
+    for i in range(nOps):
+        b = i * 8
+        dest_idx = args[b + 1]
+        op_type = ops[i]
+        dest_type = TMP1_TYPE if op_type == 0 else TMP3_TYPE
+
+        # Record reads BEFORE processing the write (for correct ordering)
+        for s in range(2):
+            st = args[b + 2 + s * 3]
+            sa = args[b + 3 + s * 3]
+            if st == TMP1_TYPE or st == TMP3_TYPE:
+                key = (st, sa)
+                if key in last_write_pos:
+                    if key not in read_after_write:
+                        read_after_write[key] = set()
+                    read_after_write[key].add(i)
+
+        # Record write
+        key = (dest_type, dest_idx)
+        last_write_pos[key] = i
+        read_after_write.pop(key, None)  # Reset reads for new definition
+
+        # For dim3 writes, also record the +1 and +2 slots
+        if op_type >= 1:
+            for offset in [1, 2]:
+                key2 = (dest_type, dest_idx + offset)
+                last_write_pos[key2] = i
+                read_after_write.pop(key2, None)
+
+    # Now compute liveness at each boundary point (between ops i and i+1)
+    # A temp is live at boundary i if: written at w <= i, and read at some r > i
+    # Rebuild with a simpler sweep
+    for i in range(nOps):
+        live1 = 0
+        live3 = 0
+        # This is O(nOps * nTemps) which is too slow for 72K ops with 453 temps
+        # Use a different approach: event-based liveness
+        pass
+
+    # Simpler approach: just look for points where all recent ops only use tmp1_0 and tmp3_0..2
+    # and those are freshly written (not carried from before)
+    # Use a heuristic: check every target_chunk_size ops for the nearest low-complexity point
+    boundaries = []
+    pos = 0
+    while pos < nOps:
+        end = min(pos + target_chunk_size, nOps)
+        if end >= nOps:
+            boundaries.append((pos, nOps))
+            break
+        # Search for a good boundary in [end-200, end+200]
+        search_start = max(pos + 1, end - 200)
+        search_end = min(nOps, end + 200)
+        best = end
+        best_score = 999
+
+        for j in range(search_start, search_end):
+            # Check if op j starts a "fresh" sequence (reads no temps from before)
+            b = j * 8
+            s0t, s0a = args[b + 2], args[b + 3]
+            s1t, s1a = args[b + 5], args[b + 6]
+            score = 0
+            if s0t == TMP1_TYPE or s0t == TMP3_TYPE:
+                score += 1
+            if s1t == TMP1_TYPE or s1t == TMP3_TYPE:
+                score += 1
+            if score < best_score:
+                best_score = score
+                best = j
+                if score == 0:
+                    break  # Perfect boundary - no temp reads
+
+        boundaries.append((pos, best))
+        pos = best
+
+    return boundaries
+
+
+def collect_live_temps_at_boundary(dump, boundary_op):
+    """Determine which tmp indices are live at a chunk boundary.
+    A temp is live if it was written before the boundary and read after it."""
+    nOps = dump['nOps']
+    args = dump['args']
+    ops = dump['ops']
+    base = dump['bufferCommitSize']
+    TMP1_TYPE = base
+    TMP3_TYPE = base + 1
+
+    # Track last write before boundary and first read after boundary per temp
+    writes_before = {}  # (type, idx) -> last write op before boundary
+    reads_after = set()  # set of (type, idx) read after boundary
+
+    for i in range(boundary_op):
+        b = i * 8
+        dest_idx = args[b + 1]
+        op_type = ops[i]
+        dest_type = TMP1_TYPE if op_type == 0 else TMP3_TYPE
+        writes_before[(dest_type, dest_idx)] = i
+        if op_type >= 1:
+            writes_before[(dest_type, dest_idx + 1)] = i
+            writes_before[(dest_type, dest_idx + 2)] = i
+
+    for i in range(boundary_op, nOps):
+        b = i * 8
+        for s in range(2):
+            st = args[b + 2 + s * 3]
+            sa = args[b + 3 + s * 3]
+            if (st == TMP1_TYPE or st == TMP3_TYPE) and (st, sa) in writes_before:
+                reads_after.add((st, sa))
+        # Stop tracking after the temp is overwritten
+        dest_idx = args[b + 1]
+        op_type = ops[i]
+        dest_type = TMP1_TYPE if op_type == 0 else TMP3_TYPE
+        writes_before.pop((dest_type, dest_idx), None)
+        if op_type >= 1:
+            writes_before.pop((dest_type, dest_idx + 1), None)
+            writes_before.pop((dest_type, dest_idx + 2), None)
+
+    return reads_after
+
+
 def generate_evaluator(dump, out_path):
     nOps = dump['nOps']
     nTemp1 = dump['nTemp1']
@@ -327,6 +467,265 @@ def generate_evaluator(dump, out_path):
     return True
 
 
+def generate_chunked_evaluator(dump, out_path):
+    """Generate a chunked evaluator for large expressions (>2100 ops).
+    Splits into smaller chunk functions that are called sequentially."""
+    import hashlib
+
+    nOps = dump['nOps']
+    nTemp1 = dump['nTemp1']
+    nTemp3 = dump['nTemp3']
+    base = dump['bufferCommitSize']
+    ops = dump['ops']
+    args = dump['args']
+    strides = dump['strides']
+
+    # Find chunk boundaries - use larger chunks to reduce compilation time
+    # Max live regs is typically 4, so even 7000-op chunks have trivial register pressure
+    target_size = min(7000, nOps)
+    boundaries = find_chunk_boundaries(dump, target_chunk_size=target_size)
+    nChunks = len(boundaries)
+
+    # Collect global info
+    stride_offsets = set()
+    stage_types_used = set()
+    for i in range(nOps):
+        a = args[i*8:(i+1)*8]
+        stride_offsets.add(a[4])
+        stride_offsets.add(a[7])
+        for st in [a[2], a[5]]:
+            if st >= 0 and st <= 3:
+                stage_types_used.add(st)
+
+    # Compute fingerprint
+    fp_data = struct.pack('<IIII', nOps, nTemp1, nTemp3, dump['destDim'])
+    fp_data += bytes(ops[:min(16, len(ops))])
+    fp_data += struct.pack(f'<{min(32, len(args))}H', *args[:min(32, len(args))])
+    fp = hashlib.md5(fp_data).hexdigest()[:8]
+
+    # Find which tmp3 slots are used across the entire expression
+    # (these are the accumulator slots that flow between chunks)
+    all_tmp3_written = set()
+    all_tmp3_read = set()
+    TMP3_TYPE = base + 1
+    for i in range(nOps):
+        b = i * 8
+        op_type = ops[i]
+        if op_type >= 1:
+            all_tmp3_written.add(args[b + 1])
+            all_tmp3_written.add(args[b + 1] + 1)
+            all_tmp3_written.add(args[b + 1] + 2)
+        for s in range(2):
+            if args[b + 2 + s*3] == TMP3_TYPE:
+                all_tmp3_read.add(args[b + 3 + s*3])
+    all_tmp3_slots = sorted(all_tmp3_written | all_tmp3_read)
+    nTmp3Slots = max(all_tmp3_slots) + 1 if all_tmp3_slots else 0
+
+    L = []
+    L.append(f'// Auto-generated CHUNKED expression evaluator for {nOps}-op expression')
+    L.append(f'// Split into {nChunks} chunks for optimal register allocation')
+    L.append(f'// Fingerprint: {fp}  nOps={nOps} nTemp1={nTemp1} nTemp3={nTemp3}')
+    L.append(f'#define GENERATED_EVAL_NOPS_{fp} {nOps}')
+    L.append(f'#define GENERATED_EVAL_NTEMP1_{fp} {nTemp1}')
+    L.append(f'#define GENERATED_EVAL_NTEMP3_{fp} {nTemp3}')
+    L.append('')
+
+    # Generate common setup as a macro or inline section
+    # Each chunk function needs logical rows, pack256 flags, nCols constants
+    # To avoid code duplication, generate a struct with precomputed values
+    L.append('struct ChunkedEvalContext {')
+    for so in sorted(stride_offsets):
+        L.append(f'    uint64_t logicalRow_{so};')
+    for so in sorted(stride_offsets):
+        L.append(f'    bool usePack256_{so};')
+    for st in sorted(stage_types_used):
+        L.append(f'    uint64_t nCols_{st};')
+    L.append('    uint64_t domainSize;')
+    L.append('    uint64_t chunkBase;')
+    L.append('    uint64_t row;')
+    L.append('};')
+    L.append('')
+
+    # Generate each chunk function
+    for chunk_idx, (chunk_start, chunk_end) in enumerate(boundaries):
+        chunk_ops_count = chunk_end - chunk_start
+
+        # Find tmp1 indices used in this chunk
+        chunk_tmp1_used = set()
+        for i in range(chunk_start, chunk_end):
+            b = i * 8
+            if ops[i] == 0:
+                chunk_tmp1_used.add(args[b + 1])
+            if args[b + 2] == base:
+                chunk_tmp1_used.add(args[b + 3])
+            if args[b + 5] == base:
+                chunk_tmp1_used.add(args[b + 6])
+
+        L.append(f'// Chunk {chunk_idx}: ops [{chunk_start}, {chunk_end}) = {chunk_ops_count} ops')
+        L.append(f'__device__ __noinline__ static void chunk_{fp}_{chunk_idx}(')
+        L.append('    const StepsParams* __restrict__ dParams,')
+        L.append('    const DeviceArguments* __restrict__ dArgs,')
+        L.append('    const ExpsArguments* __restrict__ dExpsArgs,')
+        L.append('    Goldilocks::Element **expressions_params,')
+        L.append('    uint32_t bufferCommitsSize,')
+        L.append('    const ChunkedEvalContext& ctx,')
+        # Pass tmp3 accumulator slots
+        for t in sorted(all_tmp3_slots):
+            L.append(f'    gl64_t& tmp3_{t},')
+        # Remove trailing comma from last param
+        L[-1] = L[-1].rstrip(',')
+        L.append(')')
+        L.append('{')
+
+        # Unpack context into local refs for code compatibility
+        L.append('    const uint64_t domainSize = ctx.domainSize;')
+        L.append('    const uint64_t chunkBase = ctx.chunkBase;')
+        L.append('    const uint64_t row = ctx.row;')
+        for so in sorted(stride_offsets):
+            L.append(f'    const uint64_t logicalRow_{so} = ctx.logicalRow_{so};')
+            L.append(f'    const bool usePack256_{so} = ctx.usePack256_{so};')
+        for st in sorted(stage_types_used):
+            L.append(f'    const uint64_t nCols_{st} = ctx.nCols_{st};')
+
+        # Declare local tmp1 variables
+        for t in sorted(chunk_tmp1_used):
+            L.append(f'    gl64_t tmp1_{t} = gl64_t(uint64_t(0));')
+        L.append('')
+
+        # Generate ops for this chunk
+        for i in range(chunk_start, chunk_end):
+            a = args[i*8:(i+1)*8]
+            arith_op = a[0]
+            dest_idx = a[1]
+            src0_type, src0_arg, src0_offset = a[2], a[3], a[4]
+            src1_type, src1_arg, src1_offset = a[5], a[6], a[7]
+            op_type = ops[i]
+            dim0 = 1 if op_type == 0 else 3
+            dim1 = 1 if op_type <= 1 else 3
+
+            if op_type == 0:
+                dest_var = f'tmp1_{dest_idx}'
+            else:
+                dest_var = f'tmp3_{dest_idx}'
+
+            src0_lines, src0_vars = gen_load(src0_type, src0_arg, src0_offset, dim0, dump, f's0_{i}')
+            src1_lines, src1_vars = gen_load(src1_type, src1_arg, src1_offset, dim1, dump, f's1_{i}')
+            for l in src0_lines:
+                L.append(f'    {l}')
+            for l in src1_lines:
+                L.append(f'    {l}')
+
+            if op_type == 0:
+                av, bv = src0_vars[0], src1_vars[0]
+                if arith_op == 0:   L.append(f'    {dest_var} = {av} + {bv};')
+                elif arith_op == 1: L.append(f'    {dest_var} = {av} - {bv};')
+                elif arith_op == 2: L.append(f'    {dest_var} = {av} * {bv};')
+                elif arith_op == 3: L.append(f'    {dest_var} = {bv} - {av};')
+            elif op_type == 1:
+                a0, a1, a2 = src0_vars
+                b0 = src1_vars[0]
+                d0, d1, d2 = f'tmp3_{dest_idx}', f'tmp3_{dest_idx+1}', f'tmp3_{dest_idx+2}'
+                if arith_op == 0:   L.append(f'    {d0} = {a0} + {b0}; {d1} = {a1}; {d2} = {a2};')
+                elif arith_op == 1: L.append(f'    {d0} = {a0} - {b0}; {d1} = {a1}; {d2} = {a2};')
+                elif arith_op == 2: L.append(f'    {d0} = {a0} * {b0}; {d1} = {a1} * {b0}; {d2} = {a2} * {b0};')
+                elif arith_op == 3: L.append(f'    {d0} = {b0} - {a0}; {d1} = -({a1}); {d2} = -({a2});')
+            elif op_type == 2:
+                a0, a1, a2 = src0_vars
+                b0, b1, b2 = src1_vars
+                d0, d1, d2 = f'tmp3_{dest_idx}', f'tmp3_{dest_idx+1}', f'tmp3_{dest_idx+2}'
+                if arith_op == 0:   L.append(f'    {d0} = {a0} + {b0}; {d1} = {a1} + {b1}; {d2} = {a2} + {b2};')
+                elif arith_op == 1: L.append(f'    {d0} = {a0} - {b0}; {d1} = {a1} - {b1}; {d2} = {a2} - {b2};')
+                elif arith_op == 2:
+                    L.append(f'    gl64_t kA{i} = ({a0} + {a1}) * ({b0} + {b1});')
+                    L.append(f'    gl64_t kB{i} = ({a0} + {a2}) * ({b0} + {b2});')
+                    L.append(f'    gl64_t kC{i} = ({a1} + {a2}) * ({b1} + {b2});')
+                    L.append(f'    gl64_t kD{i} = {a0} * {b0};')
+                    L.append(f'    gl64_t kE{i} = {a1} * {b1};')
+                    L.append(f'    gl64_t kF{i} = {a2} * {b2};')
+                    L.append(f'    gl64_t kG{i} = kD{i} - kE{i};')
+                    L.append(f'    {d0} = (kC{i} + kG{i}) - kF{i};')
+                    L.append(f'    {d1} = ((((kA{i} + kC{i}) - kE{i}) - kE{i}) - kD{i});')
+                    L.append(f'    {d2} = kB{i} - kG{i};')
+                elif arith_op == 3:
+                    L.append(f'    {d0} = {b0} - {a0}; {d1} = {b1} - {a1}; {d2} = {b2} - {a2};')
+
+        L.append('}')
+        L.append('')
+
+    # Generate the main wrapper function (same interface as regular evaluators)
+    func_name = f'eval_expr_{fp}'
+    L.append('template<bool IsCyclic>')
+    L.append(f'__device__ __forceinline__ void {func_name}(')
+    L.append('    const StepsParams* __restrict__ dParams,')
+    L.append('    const DeviceArguments* __restrict__ dArgs,')
+    L.append('    const ExpsArguments* __restrict__ dExpsArgs,')
+    L.append('    Goldilocks::Element **expressions_params,')
+    L.append(f'    uint32_t bufferCommitsSize, uint64_t row)')
+    L.append('{')
+    L.append('    const uint64_t domainSize = dExpsArgs->domainSize;')
+    L.append('    const uint64_t r = row + threadIdx.x;')
+    L.append('')
+    L.append('    ChunkedEvalContext ctx;')
+    L.append('    ctx.domainSize = domainSize;')
+    L.append('    ctx.chunkBase = row;')
+    L.append('    ctx.row = row;')
+
+    for so in sorted(stride_offsets):
+        sv = strides.get(so, 0)
+        L.append(f'    const int64_t stride_{so} = dExpsArgs->nextStridesExps[{so}];')
+    L.append('    if constexpr (IsCyclic) {')
+    for so in sorted(stride_offsets):
+        L.append(f'        ctx.logicalRow_{so} = (r + stride_{so}) % domainSize;')
+    L.append('    } else {')
+    for so in sorted(stride_offsets):
+        L.append(f'        ctx.logicalRow_{so} = r + stride_{so};')
+    L.append('    }')
+
+    for so in sorted(stride_offsets):
+        sv = strides.get(so, 0)
+        if sv == 0:
+            L.append(f'    ctx.usePack256_{so} = !IsCyclic && blockDim.x == TILE_HEIGHT;')
+        else:
+            L.append(f'    ctx.usePack256_{so} = false;')
+
+    for st in sorted(stage_types_used):
+        L.append(f'    ctx.nCols_{st} = dArgs->mapSectionsN[{st}];')
+
+    # Initialize tmp3 accumulator slots
+    for t in sorted(all_tmp3_slots):
+        L.append(f'    gl64_t tmp3_{t} = gl64_t(uint64_t(0));')
+
+    # Call each chunk
+    L.append('')
+    for chunk_idx in range(nChunks):
+        args_str = ', '.join([f'tmp3_{t}' for t in sorted(all_tmp3_slots)])
+        L.append(f'    chunk_{fp}_{chunk_idx}(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, ctx, {args_str});')
+
+    # Determine the last dest from the final op
+    last_op_idx = nOps - 1
+    last_op_type = ops[last_op_idx]
+    last_dest_idx = args[last_op_idx * 8 + 1]
+
+    # Write result to shared memory and store to output
+    L.append('')
+    L.append('    // Write final result and store')
+    if last_op_type >= 1:  # dim3 result
+        L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx} * blockDim.x + threadIdx.x] = tmp3_{last_dest_idx};')
+        L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx + 1} * blockDim.x + threadIdx.x] = tmp3_{last_dest_idx + 1};')
+        L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx + 2} * blockDim.x + threadIdx.x] = tmp3_{last_dest_idx + 2};')
+        L.append(f'    storePolynomial__((ExpsArguments*)dExpsArgs, (Goldilocks::Element*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx} * blockDim.x], row);')
+    else:
+        L.append(f'    // ERROR: last op is dim1 which is unexpected for Q expression')
+
+    L.append('}')
+
+    with open(out_path, 'w') as f:
+        f.write('\n'.join(L) + '\n')
+
+    print(f"Generated CHUNKED: {nOps} ops, {nChunks} chunks, {nTemp1} tmp1 + {nTemp3} tmp3 -> {out_path}")
+    return True
+
+
 def generate_standalone_kernel(expId, func_name, out_path):
     """Generate a standalone __global__ kernel .cu file for an expression."""
     lines = []
@@ -415,8 +814,21 @@ def generate_all(dump_dir, out_dir):
 
     for path in dump_files:
         dump = read_dump(path)
-        # Only generate for register-feasible expressions with reasonable size
-        if dump['nTemp1'] > 30 or dump['nOps'] > 2100:
+        # Large expressions use chunked generation
+        if dump['nOps'] > 2100:
+            expId = os.path.basename(path).replace('expr_dump_', '').replace('.bin', '')
+            fname = f'gen_eval_{expId}.cuh'
+            gen_out_path = os.path.join(out_dir, fname)
+            generate_chunked_evaluator(dump, gen_out_path)
+            nOps_d, nTemp1_d, nTemp3_d = dump['nOps'], dump['nTemp1'], dump['nTemp3']
+            ops_d, args_d = dump['ops'], dump['args']
+            fp_data = struct.pack('<IIII', nOps_d, nTemp1_d, nTemp3_d, dump['destDim'])
+            fp_data += bytes(ops_d[:min(16, len(ops_d))])
+            fp_data += struct.pack(f'<{min(32, len(args_d))}H', *args_d[:min(32, len(args_d))])
+            fp = hashlib.md5(fp_data).hexdigest()[:8]
+            entries.append((fp, nOps_d, nTemp1_d, nTemp3_d, dump['destDim'], fname))
+            continue
+        if dump['nTemp1'] > 30:
             print(f"Skipped {path}: nOps={dump['nOps']} nTemp1={dump['nTemp1']} exceeds limits")
             continue
         expId = os.path.basename(path).replace('expr_dump_', '').replace('.bin', '')
