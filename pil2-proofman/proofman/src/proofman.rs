@@ -1745,8 +1745,7 @@ where
                     if cancellation_info_clone.read().unwrap().token.is_cancelled() {
                         break;
                     }
-                    // Use blocking recv instead of polling try_recv to avoid busy-waiting
-                    match contributions_rx_clone.recv() {
+                    match contributions_rx_clone.try_recv() {
                         Ok(instance_id) => {
                             if instance_id == usize::MAX {
                                 break;
@@ -1770,8 +1769,11 @@ where
                                 memory_handler_clone.to_be_released_buffer(instance_id, false);
                             }
                         }
-                        Err(_) => {
-                            // Channel disconnected - exit worker
+                        Err(crossbeam_channel::TryRecvError::Empty) => {
+                            std::thread::sleep(std::time::Duration::from_micros(100));
+                            continue;
+                        }
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
                             break;
                         }
                     }

@@ -49,10 +49,9 @@ where
     values.par_iter_mut().zip(my_instances.par_iter()).for_each(|(values_row, instance_id)| {
         let root_contribution = roots_contributions[*instance_id];
 
-        // Modify the locked data in-place instead of cloning
-        let mut guard = values_contributions[*instance_id].lock().expect("Missing values_contribution");
-        guard[4..8].copy_from_slice(&root_contribution[..4]);
-        let values_to_hash = &*guard;
+        let mut values_to_hash =
+            values_contributions[*instance_id].lock().expect("Missing values_contribution").clone();
+        values_to_hash[4..8].copy_from_slice(&root_contribution[..4]);
 
         let mut hash: Transcript<F, Poseidon16, 16> = Transcript::new();
         hash.put(&values_to_hash);
