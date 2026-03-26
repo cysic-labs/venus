@@ -46,8 +46,14 @@ Date: 2026-03-26
 - Decision: Not recommended
 
 ## Total Improvement
-0% - no retained performance improvements. The fundamental finding is that Keccak-f optimization has very limited ROI because Keccak-f is only 4.7% of GPU proving time.
+0% - no retained performance improvements. The fundamental finding is that Keccak-f optimization has very limited ROI (4.7% of GPU time).
+
+## Final Benchmarks (Round 2, GPU mode)
+- Small block: 24.1s prove + verify pass (baseline ~23s)
+- Large block: 97.2s prove + verify pass (baseline 96.2s)
+- No statistically significant change from baseline
 
 ## Commits
 - f9da7824: Chunked code generation for large CUDA expression evaluators
-- (pending): Generator correctness fixes, imPol infrastructure, optimization summary
+- be030f48: Generator liveness fix, imPol batch infrastructure
+- (pending): Round 2 - proper imPol batching, structural analysis, safety fixes

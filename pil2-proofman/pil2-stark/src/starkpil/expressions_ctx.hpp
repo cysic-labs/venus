@@ -50,7 +50,7 @@ struct ExpsArguments
     uint32_t dest_nParams;
 
     bool dest_expr = false;
-    bool dest_independent = false;  // batch mode: each param stores independently
+    bool dest_independent = false;
 };
 
 
@@ -91,7 +91,7 @@ struct Dest {
     uint64_t stagePos = 0;
     uint64_t stageCols = 0;
     bool expr = false;
-    bool independent = false;  // batch mode: each param stores independently
+    bool independent = false;
     uint64_t dim = 1;
     uint64_t domainSize;
     std::vector<Params> params;

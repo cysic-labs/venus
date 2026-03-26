@@ -90,6 +90,8 @@ ExpressionsGPU::~ExpressionsGPU()
     CHECKCUDAERR(cudaFree(d_deviceArgs));
 }
 
+static constexpr uint64_t MAX_DEST_PARAMS = 8;
+
 void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, uint64_t domainSize, bool domainExtended, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams, Goldilocks::Element *pinned_exps_params, Goldilocks::Element *pinned_exps_args, uint64_t& countId, TimerGPU &timer, cudaStream_t stream, bool constraints)
 {
     ExpsArguments h_expsArgs;
@@ -140,7 +142,7 @@ void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, 
     h_expsArgs.dest_independent = dest.independent;
     h_expsArgs.dest_nParams = dest.params.size();
 
-    assert(dest.params.size() >= 1);
+    assert(dest.params.size() >= 1 && dest.params.size() <= MAX_DEST_PARAMS);
 
     DestParamsGPU* h_dest_params = new DestParamsGPU[h_expsArgs.dest_nParams];
     for (uint64_t j = 0; j < h_expsArgs.dest_nParams; ++j){
@@ -165,8 +167,8 @@ void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, 
         h_dest_params[j].expId = dest.params[j].expId;
     }
 
-    memcpy(pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
-    CHECKCUDAERR(cudaMemcpyAsync(d_destParams, pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_expsArgs.dest_nParams * sizeof(DestParamsGPU), cudaMemcpyHostToDevice, stream));
+    memcpy(pinned_exps_params + countId * MAX_DEST_PARAMS * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
+    CHECKCUDAERR(cudaMemcpyAsync(d_destParams, pinned_exps_params + countId * MAX_DEST_PARAMS * sizeof(DestParamsGPU), h_expsArgs.dest_nParams * sizeof(DestParamsGPU), cudaMemcpyHostToDevice, stream));
     delete[] h_dest_params;
 
     memcpy(pinned_exps_args + countId * sizeof(ExpsArguments), &h_expsArgs, sizeof(ExpsArguments));
@@ -297,8 +299,8 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
         h_dest_params[j].expId = dest.params[j].expId;
     }
 
-    memcpy(pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
-    CHECKCUDAERR(cudaMemcpyAsync(d_destParams, pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_expsArgs.dest_nParams * sizeof(DestParamsGPU), cudaMemcpyHostToDevice, stream));
+    memcpy(pinned_exps_params + countId * MAX_DEST_PARAMS * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
+    CHECKCUDAERR(cudaMemcpyAsync(d_destParams, pinned_exps_params + countId * MAX_DEST_PARAMS * sizeof(DestParamsGPU), h_expsArgs.dest_nParams * sizeof(DestParamsGPU), cudaMemcpyHostToDevice, stream));
     delete[] h_dest_params;
 
     memcpy(pinned_exps_args + countId * sizeof(ExpsArguments), &h_expsArgs, sizeof(ExpsArguments));
@@ -308,7 +310,7 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
     uint32_t nthreads_ = nblocks_ == 1 ? domainSize : nrowsPack;
     dim3 nBlocks_ =  nblocks_;
     dim3 nThreads_ = nthreads_;
-    
+
     assert(bufferCommitSize  + 9  < 32);
     // Include temp buffers in dynamic shared memory if they fit in 40KB budget
     size_t ptrMem = 32 * sizeof(Goldilocks::Element);
@@ -772,22 +774,21 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
             
         }
 
-        if (d_expsArgs->dest_nParams == 2 && !d_expsArgs->dest_independent)
-        {
-            multiplyPolynomials__(d_expsArgs, d_destParams, d_deviceArgs, (gl64_t*) destVals, i);
-        } else if (d_expsArgs->dest_independent) {
-            // Independent batched mode: store each expression result to its own stagePos
+        if (d_expsArgs->dest_independent) {
+            // Batched independent mode: each expression stores to its own column
             for (uint64_t k = 0; k < d_expsArgs->dest_nParams; ++k) {
                 Goldilocks::Element *kVals = &destVals[k * FIELD_EXTENSION * blockDim.x];
-                uint32_t dim = d_destParams[k].dim;
-                uint64_t col = d_destParams[k].stagePos;
+                uint32_t dim_k = d_destParams[k].dim;
+                uint64_t col_k = d_destParams[k].stagePos;
                 uint64_t nRows = d_expsArgs->dest_domainSize;
                 uint64_t nCols = d_expsArgs->dest_stageCols;
-                for (uint32_t d = 0; d < dim; d++) {
-                    uint64_t idx = getBufferOffset(i + threadIdx.x, col + d, nRows, nCols);
+                for (uint32_t d = 0; d < dim_k; d++) {
+                    uint64_t idx = getBufferOffset(i + threadIdx.x, col_k + d, nRows, nCols);
                     d_expsArgs->dest_gpu[idx] = kVals[d * blockDim.x + threadIdx.x];
                 }
             }
+        } else if (d_expsArgs->dest_nParams == 2) {
+            multiplyPolynomials__(d_expsArgs, d_destParams, d_deviceArgs, (gl64_t*) destVals, i);
         } else {
             storePolynomial__(d_expsArgs, destVals, i);
         }

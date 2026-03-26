@@ -405,11 +405,13 @@ struct DeviceRecursiveFBuffers
         CHECKCUDAERR(cudaMallocHost((void**)&pinnedBufferConstTree, pinnedBufferSize));
         // Allocate reusable buffers
         CHECKCUDAERR(cudaMallocHost((void **)&params_pinned, sizeof(StepsParams)));
-        CHECKCUDAERR(cudaMallocHost((void **)&pinned_exps_params, maxExps * 2 * sizeof(DestParamsGPU)));
+        // Max dest params per dispatch: 2 for normal, up to MAX_DEST_PARAMS for batched imPol
+        static constexpr uint64_t MAX_DEST_PARAMS = 8;
+        CHECKCUDAERR(cudaMallocHost((void **)&pinned_exps_params, maxExps * MAX_DEST_PARAMS * sizeof(DestParamsGPU)));
         CHECKCUDAERR(cudaMallocHost((void **)&pinned_exps_args, maxExps * sizeof(ExpsArguments)));
         CHECKCUDAERR(cudaMalloc((void **)&d_params, sizeof(StepsParams)));
         CHECKCUDAERR(cudaMalloc((void **)&d_expsArgs, maxExps * sizeof(ExpsArguments)));
-        CHECKCUDAERR(cudaMalloc((void **)&d_destParams, maxExps * 2 * sizeof(DestParamsGPU)));
+        CHECKCUDAERR(cudaMalloc((void **)&d_destParams, maxExps * MAX_DEST_PARAMS * sizeof(DestParamsGPU)));
     }
     
     ~DeviceRecursiveFBuffers() {
