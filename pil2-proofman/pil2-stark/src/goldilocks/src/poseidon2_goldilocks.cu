@@ -605,3 +605,7 @@ template void Poseidon2GoldilocksGPU<12>::grinding(uint64_t * d_nonce, uint64_t 
 #endif
 
 
+
+template void Poseidon2GoldilocksGPU<8>::merkletreeRowMajor(uint32_t arity, uint64_t *d_tree, uint64_t *d_input, uint64_t num_cols, uint64_t num_rows, cudaStream_t stream);
+template void Poseidon2GoldilocksGPU<12>::merkletreeRowMajor(uint32_t arity, uint64_t *d_tree, uint64_t *d_input, uint64_t num_cols, uint64_t num_rows, cudaStream_t stream);
+template void Poseidon2GoldilocksGPU<16>::merkletreeRowMajor(uint32_t arity, uint64_t *d_tree, uint64_t *d_input, uint64_t num_cols, uint64_t num_rows, cudaStream_t stream);
