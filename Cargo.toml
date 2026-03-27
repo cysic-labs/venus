@@ -50,6 +50,7 @@ members = [
     "sdk",
     "ziskbuild",
 	"definitions",
+    "pil2-stark-setup",
 ]
 
 resolver = "2"
