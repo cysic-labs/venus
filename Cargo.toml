@@ -50,6 +50,7 @@ members = [
     "sdk",
     "ziskbuild",
 	"definitions",
+    "pil2-stark-setup",
 ]
 
 resolver = "2"
@@ -104,6 +105,7 @@ zisk-build = { path = "ziskbuild" }
 precompiles-hints = { path = "precompiles/hints" }
 zisk-verifier = { path = "verifier" }
 zisk-definitions = { path = "definitions" }
+pil2-stark-setup = { path = "pil2-stark-setup" }
 
 # Distributed crates
 zisk-distributed-common = { path = "distributed/crates/common" }

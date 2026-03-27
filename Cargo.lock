@@ -2850,6 +2850,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pil2-stark-setup"
+version = "0.16.1"
+dependencies = [
+ "anyhow",
+ "fields",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
