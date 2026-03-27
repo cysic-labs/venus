@@ -51,6 +51,7 @@ members = [
     "ziskbuild",
 	"definitions",
 	"pil2-stark-setup",
+	"stark-recurser-rust",
 ]
 
 resolver = "2"
