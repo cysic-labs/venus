@@ -27,6 +27,7 @@ pub struct ConstraintInfo {
     pub offset_min: Option<u32>,
     pub offset_max: Option<u32>,
     pub stage: Option<usize>,
+    pub im_pol: bool,
 }
 
 /// A formatted symbol extracted from the protobuf.
@@ -44,6 +45,9 @@ pub struct SymbolInfo {
     pub commit_id: Option<usize>,
     pub lengths: Option<Vec<usize>>,
     pub idx: Option<usize>,
+    pub stage_pos: Option<usize>,
+    pub im_pol: bool,
+    pub exp_id: Option<usize>,
 }
 
 /// A single hint field value (leaf or nested array).
@@ -108,6 +112,11 @@ pub struct SetupResult {
     pub constraints: Vec<ConstraintInfo>,
     pub symbols: Vec<SymbolInfo>,
     pub hints: Vec<HintInfo>,
+
+    /// Number of witness columns in stage 1 that are not intermediate polynomials.
+    pub n_commitments_stage1: usize,
+    /// Intermediate polynomial expression strings: (base_field, extended_field).
+    pub im_pols_info: (Vec<String>, Vec<String>),
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +484,7 @@ pub fn format_constraints(constraints: &[pb::Constraint]) -> Vec<ConstraintInfo>
                     offset_min: None,
                     offset_max: None,
                     stage: None,
+                    im_pol: false,
                 }),
                 constraint::Constraint::LastRow(lr) => Some(ConstraintInfo {
                     boundary: "lastRow".to_string(),
@@ -483,6 +493,7 @@ pub fn format_constraints(constraints: &[pb::Constraint]) -> Vec<ConstraintInfo>
                     offset_min: None,
                     offset_max: None,
                     stage: None,
+                    im_pol: false,
                 }),
                 constraint::Constraint::EveryRow(er) => Some(ConstraintInfo {
                     boundary: "everyRow".to_string(),
@@ -491,6 +502,7 @@ pub fn format_constraints(constraints: &[pb::Constraint]) -> Vec<ConstraintInfo>
                     offset_min: None,
                     offset_max: None,
                     stage: None,
+                    im_pol: false,
                 }),
                 constraint::Constraint::EveryFrame(ef) => Some(ConstraintInfo {
                     boundary: "everyFrame".to_string(),
@@ -499,6 +511,7 @@ pub fn format_constraints(constraints: &[pb::Constraint]) -> Vec<ConstraintInfo>
                     offset_min: Some(ef.offset_min),
                     offset_max: Some(ef.offset_max),
                     stage: None,
+                    im_pol: false,
                 }),
             }
         })
@@ -559,6 +572,9 @@ pub fn format_symbols(
                     commit_id: None,
                     lengths: None,
                     idx: None,
+                    stage_pos: None,
+                    im_pol: false,
+                    exp_id: None,
                 };
                 if stype == SymbolType::CustomCol as i32 {
                     sym.commit_id = s.commit_id.map(|v| v as usize);
@@ -587,6 +603,9 @@ pub fn format_symbols(
                     commit_id: None,
                     lengths: None,
                     idx: None,
+                    stage_pos: None,
+                    im_pol: false,
+                    exp_id: None,
                 });
             } else {
                 generate_multi_array_symbols(
@@ -618,6 +637,9 @@ pub fn format_symbols(
                 commit_id: None,
                 lengths: None,
                 idx: None,
+                stage_pos: None,
+                im_pol: false,
+                exp_id: None,
             });
         } else if stype == SymbolType::PublicValue as i32 {
             if s.dim == 0 {
@@ -634,6 +656,9 @@ pub fn format_symbols(
                     commit_id: None,
                     lengths: None,
                     idx: None,
+                    stage_pos: None,
+                    im_pol: false,
+                    exp_id: None,
                 });
             } else {
                 generate_multi_array_symbols(
@@ -659,6 +684,9 @@ pub fn format_symbols(
                     commit_id: None,
                     lengths: None,
                     idx: None,
+                    stage_pos: None,
+                    im_pol: false,
+                    exp_id: None,
                 };
                 if stage.is_none() || stage == Some(0) {
                     sym.stage = None;
@@ -691,6 +719,9 @@ pub fn format_symbols(
                     commit_id: None,
                     lengths: None,
                     idx: None,
+                    stage_pos: None,
+                    im_pol: false,
+                    exp_id: None,
                 });
             } else {
                 generate_multi_array_symbols(
@@ -756,6 +787,9 @@ fn generate_multi_array_symbols(
             air_id: sym.air_id.map(|v| v as usize),
             airgroup_id: sym.air_group_id.map(|v| v as usize),
             commit_id: None,
+            stage_pos: None,
+            im_pol: false,
+            exp_id: None,
         };
         if sym.commit_id.is_some() {
             symbol.commit_id = sym.commit_id.map(|v| v as usize);
@@ -1101,6 +1135,8 @@ pub fn get_pilout_info(
         constraints,
         symbols: all_symbols,
         hints,
+        n_commitments_stage1: 0,
+        im_pols_info: (Vec::new(), Vec::new()),
     }
 }
 
