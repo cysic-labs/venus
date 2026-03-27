@@ -1,0 +1,1286 @@
+// LALRPOP grammar for PIL2.
+//
+// Uses an external lexer (Token from lexer.rs) so that the complex tokenisation
+// rules (hex numbers, template strings, pragma, etc.) stay outside the grammar.
+
+use crate::parser::ast::*;
+use crate::parser::lexer::{Token, LexError};
+
+grammar;
+
+extern {
+    type Location = usize;
+    type Error = LexError;
+
+    enum Token {
+        // keywords
+        "col"           => Token::Col,
+        "witness"       => Token::Witness,
+        "fixed"         => Token::Fixed,
+        "container"     => Token::Container,
+        "declare"       => Token::Declare,
+        "use"           => Token::Use,
+        "alias"         => Token::Alias,
+        "include"       => Token::Include,
+        "require"       => Token::Require,
+        "in"            => Token::In,
+        "is"            => Token::Is,
+        "publictable"   => Token::PublicTable,
+        "public"        => Token::Public,
+        "constant"      => Token::Constant,
+        "const"         => Token::Const,
+        "proofval"      => Token::ProofValue,
+        "airgroupval"   => Token::AirGroupValue,
+        "airval"        => Token::AirValue,
+        "airgroup"      => Token::AirGroup,
+        "airtemplate"   => Token::AirTemplate,
+        "air"           => Token::Air,
+        "proof"         => Token::Proof,
+        "commit"        => Token::Commit,
+        "package"       => Token::Package,
+        "virtual"       => Token::Virtual,
+        "int"           => Token::Int,
+        "fe"            => Token::Fe,
+        "expr"          => Token::Expr,
+        "string"        => Token::TString,
+        "challenge"     => Token::Challenge,
+        "for"           => Token::For,
+        "while"         => Token::While,
+        "do"            => Token::Do,
+        "break"         => Token::Break,
+        "continue"      => Token::Continue,
+        "if"            => Token::If,
+        "elseif"        => Token::ElseIf,
+        "else"          => Token::Else,
+        "switch"        => Token::Switch,
+        "case"          => Token::Case,
+        "default"       => Token::Default,
+        "when"          => Token::When,
+        "aggregate"     => Token::Aggregate,
+        "stage"         => Token::Stage,
+        "on"            => Token::On,
+        "private"       => Token::Private,
+        "final"         => Token::Final,
+        "function"      => Token::Function,
+        "return"        => Token::Return,
+
+        // literals
+        NUMBER          => Token::Number(<String>),
+        STRING_LIT      => Token::StringLit(<String>),
+        TEMPLATE_LIT    => Token::TemplateLit(<String>),
+
+        // identifiers & special
+        IDENT           => Token::Identifier(<String>),
+        HINT_TOK        => Token::Hint(<String>),
+        POSITIONAL      => Token::PositionalParam(<String>),
+        PRAGMA_TOK      => Token::Pragma(<String>),
+
+        // operators
+        "+"             => Token::Plus,
+        "-"             => Token::Minus,
+        "*"             => Token::Star,
+        "/"             => Token::Slash,
+        "\\"            => Token::Backslash,
+        "%"             => Token::Percent,
+        "**"            => Token::Pow,
+        "++"            => Token::Inc,
+        "--"            => Token::Dec,
+        "+="            => Token::PlusAssign,
+        "-="            => Token::MinusAssign,
+        "*="            => Token::StarAssign,
+        "==="           => Token::TripleEq,
+        "<=="           => Token::ArrowLeft,
+        "=="            => Token::EqEq,
+        "!="            => Token::Ne,
+        "<="            => Token::Le,
+        ">="            => Token::Ge,
+        "<"             => Token::Lt,
+        ">"             => Token::Gt,
+        "<<"            => Token::Shl,
+        ">>"            => Token::Shr,
+        "&&"            => Token::And,
+        "||"            => Token::Or,
+        "&"             => Token::BitAnd,
+        "|"             => Token::BitOr,
+        "^"             => Token::BitXor,
+        "!"             => Token::Not,
+        "="             => Token::Eq,
+
+        // delimiters
+        "("             => Token::LParen,
+        ")"             => Token::RParen,
+        "["             => Token::LBracket,
+        "]"             => Token::RBracket,
+        "{"             => Token::LBrace,
+        "}"             => Token::RBrace,
+        ";"             => Token::Semicolon,
+        ","             => Token::Comma,
+        "."             => Token::Dot,
+        ":"             => Token::Colon,
+        "::"            => Token::ColonColon,
+        "'"             => Token::Apostrophe,
+        "?"             => Token::Question,
+
+        // dots
+        "..."           => Token::DotsFill,
+        ".."            => Token::DotsRange,
+        "..+.."         => Token::DotsArithSeq,
+        "..*.."         => Token::DotsGeomSeq,
+    }
+}
+
+// ===================================================================
+// Top-level
+// ===================================================================
+
+pub Program: Program = {
+    <stmts:StatementList> => Program { statements: stmts },
+    => Program { statements: vec![] },
+};
+
+// ===================================================================
+// Statement lists (semicolons are optional separators)
+// ===================================================================
+
+StatementList: Vec<Statement> = {
+    <mut v:StatementList> <s:Stmt> => { v.push(s); v },
+    <s:Stmt> => vec![s],
+};
+
+// A single statement, optionally terminated by semicolons.
+Stmt: Statement = {
+    <s:StatementInner> SemicolonStar => s,
+};
+
+SemicolonStar: () = {
+    ";" SemicolonStar => (),
+    => (),
+};
+
+// ===================================================================
+// Statements
+// ===================================================================
+
+StatementInner: Statement = {
+    PragmaStmt,
+    IncludeStmt,
+    AirGroupStmt,
+    AirTemplateStmt,
+    FunctionDefStmt,
+    ColDeclStmt,
+    ChallengeDeclStmt,
+    PublicDeclStmt,
+    ProofValueDeclStmt,
+    AirGroupValueDeclStmt,
+    AirValueDeclStmt,
+    VarDeclStmt,
+    ConstraintStmt,
+    WitnessConstraintStmt,
+    IfStmt,
+    ForStmt,
+    WhileStmt,
+    SwitchStmt,
+    ReturnStmt,
+    BreakStmt,
+    ContinueStmt,
+    AssignmentStmt,
+    VirtualExprStmt,
+    BlockStmt,
+    ContainerStmt,
+    UseStmt,
+    PackageStmt,
+    DeferredCallStmt,
+    CommitDeclStmt,
+    HintStmt,
+    WhenStmt,
+    FuncCallAliasStmt,
+    VirtualFuncCallAliasStmt,
+    ExprStmt,
+};
+
+// ===================================================================
+// Pragma
+// ===================================================================
+
+PragmaStmt: Statement = {
+    <p:PRAGMA_TOK> => Statement::Pragma(p),
+};
+
+// ===================================================================
+// Include / Require
+// ===================================================================
+
+IncludeStmt: Statement = {
+    "include" <s:FlexibleString> => Statement::Include(IncludeStmt {
+        kind: IncludeKind::Include, visibility: Visibility::Public, path: s,
+    }),
+    "require" <s:FlexibleString> => Statement::Include(IncludeStmt {
+        kind: IncludeKind::Require, visibility: Visibility::Public, path: s,
+    }),
+    "private" "include" <s:FlexibleString> => Statement::Include(IncludeStmt {
+        kind: IncludeKind::Include, visibility: Visibility::Private, path: s,
+    }),
+    "private" "require" <s:FlexibleString> => Statement::Include(IncludeStmt {
+        kind: IncludeKind::Require, visibility: Visibility::Private, path: s,
+    }),
+    "public" "include" <s:FlexibleString> => Statement::Include(IncludeStmt {
+        kind: IncludeKind::Include, visibility: Visibility::Public, path: s,
+    }),
+    "public" "require" <s:FlexibleString> => Statement::Include(IncludeStmt {
+        kind: IncludeKind::Require, visibility: Visibility::Public, path: s,
+    }),
+};
+
+FlexibleString: StringLiteral = {
+    <s:STRING_LIT> => StringLiteral { value: s, is_template: false },
+    <s:TEMPLATE_LIT> => StringLiteral { value: s, is_template: true },
+};
+
+// ===================================================================
+// Airgroup
+// ===================================================================
+
+AirGroupStmt: Statement = {
+    "airgroup" <name:IDENT> "{" <body:StatementBlock> "}" =>
+        Statement::AirGroupDef(AirGroupDef { name, statements: body }),
+};
+
+// ===================================================================
+// Airtemplate
+// ===================================================================
+
+AirTemplateStmt: Statement = {
+    "airtemplate" <name:IDENT> "(" <args:ArgsList> ")" "{" <body:StatementBlock> "}" =>
+        Statement::AirTemplateDef(AirTemplateDef {
+            name, args, has_args: true, statements: body,
+        }),
+    "airtemplate" <name:IDENT> "{" <body:StatementBlock> "}" =>
+        Statement::AirTemplateDef(AirTemplateDef {
+            name, args: vec![], has_args: false, statements: body,
+        }),
+};
+
+// ===================================================================
+// Function definition
+// ===================================================================
+
+FunctionDefStmt: Statement = {
+    <vis:FuncVisibility> "function" <name:NameReference> "(" <args:ArgsList> ")" "{" <body:StatementBlock> "}" =>
+        Statement::FunctionDef(FunctionDef {
+            name: name, visibility: vis, is_final: None,
+            args, varargs: false, returns: None, body,
+        }),
+    <vis:FuncVisibility> "function" <name:NameReference> "(" <args:ArgsList> "," "..." ")" "{" <body:StatementBlock> "}" =>
+        Statement::FunctionDef(FunctionDef {
+            name: name, visibility: vis, is_final: None,
+            args, varargs: true, returns: None, body,
+        }),
+    <vis:FuncVisibility> "function" <name:NameReference> "(" <args:ArgsList> ")" ":" <ret:ReturnTypeSpec> "{" <body:StatementBlock> "}" =>
+        Statement::FunctionDef(FunctionDef {
+            name: name, visibility: vis, is_final: None,
+            args, varargs: false, returns: Some(ret), body,
+        }),
+    "final" "function" <name:NameReference> "(" <args:ArgsList> ")" "{" <body:StatementBlock> "}" =>
+        Statement::FunctionDef(FunctionDef {
+            name: name, visibility: Visibility::Public, is_final: Some(FinalScope::Air),
+            args, varargs: false, returns: None, body,
+        }),
+    "final" "proof" "function" <name:NameReference> "(" <args:ArgsList> ")" "{" <body:StatementBlock> "}" =>
+        Statement::FunctionDef(FunctionDef {
+            name: name, visibility: Visibility::Public, is_final: Some(FinalScope::Proof),
+            args, varargs: false, returns: None, body,
+        }),
+    "final" "airgroup" "function" <name:NameReference> "(" <args:ArgsList> ")" "{" <body:StatementBlock> "}" =>
+        Statement::FunctionDef(FunctionDef {
+            name: name, visibility: Visibility::Public, is_final: Some(FinalScope::AirGroup),
+            args, varargs: false, returns: None, body,
+        }),
+};
+
+FuncVisibility: Visibility = {
+    "private" => Visibility::Private,
+    "public" => Visibility::Public,
+    => Visibility::Public,
+};
+
+ReturnTypeSpec: Vec<ReturnType> = {
+    <r:SingleReturnType> => vec![r],
+    "[" <list:CommaSep<SingleReturnType>> "]" => list,
+};
+
+SingleReturnType: ReturnType = {
+    <bt:BasicTypeRule> => ReturnType { type_info: bt, dim: 0 },
+    <bt:BasicTypeRule> <ta:TypeArrayDims> => ReturnType { type_info: bt, dim: ta },
+};
+
+TypeArrayDims: u32 = {
+    "[" "]" => 1,
+    <d:TypeArrayDims> "[" "]" => d + 1,
+};
+
+// ===================================================================
+// Function arguments
+// ===================================================================
+
+ArgsList: Vec<FunctionArg> = {
+    <list:CommaSep<FunctionArgRule>> => list,
+    => vec![],
+};
+
+FunctionArgRule: FunctionArg = {
+    <bt:BasicTypeRule> <name:IDENT> => FunctionArg {
+        type_info: bt, name, is_array: false, array_dims: 0, default_value: None,
+    },
+    <bt:BasicTypeRule> <name:IDENT> <d:TypeArrayDims> => FunctionArg {
+        type_info: bt, name, is_array: true, array_dims: d, default_value: None,
+    },
+    <bt:BasicTypeRule> <name:IDENT> "=" <e:Expression> => FunctionArg {
+        type_info: bt, name, is_array: false, array_dims: 0, default_value: Some(e),
+    },
+    <bt:BasicTypeRule> <name:IDENT> <d:TypeArrayDims> "=" <e:Expression> => FunctionArg {
+        type_info: bt, name, is_array: true, array_dims: d, default_value: Some(e),
+    },
+    <bt:BasicTypeRule> <name:IDENT> <d:TypeArrayDims> "=" "[" <el:CommaSep<Expression>> "]" => FunctionArg {
+        type_info: bt, name, is_array: true, array_dims: d,
+        default_value: Some(Expr::ArrayLiteral(el)),
+    },
+    <bt:BasicTypeRule> <name:IDENT> <d:TypeArrayDims> "=" "[" "]" => FunctionArg {
+        type_info: bt, name, is_array: true, array_dims: d,
+        default_value: Some(Expr::ArrayLiteral(vec![])),
+    },
+};
+
+BasicTypeRule: BasicType = {
+    "int" => BasicType { kind: TypeKind::Int, is_const: false },
+    "fe" => BasicType { kind: TypeKind::Fe, is_const: false },
+    "expr" => BasicType { kind: TypeKind::Expr, is_const: false },
+    "string" => BasicType { kind: TypeKind::StringType, is_const: false },
+    "function" => BasicType { kind: TypeKind::Function, is_const: false },
+    "const" "int" => BasicType { kind: TypeKind::Int, is_const: true },
+    "const" "fe" => BasicType { kind: TypeKind::Fe, is_const: true },
+    "const" "expr" => BasicType { kind: TypeKind::Expr, is_const: true },
+    "const" "string" => BasicType { kind: TypeKind::StringType, is_const: true },
+    "col" "witness" => BasicType { kind: TypeKind::Witness, is_const: false },
+    "col" "fixed" => BasicType { kind: TypeKind::Fixed, is_const: false },
+    "challenge" => BasicType { kind: TypeKind::Challenge, is_const: false },
+    "public" => BasicType { kind: TypeKind::Public, is_const: false },
+    "publictable" => BasicType { kind: TypeKind::PublicTable, is_const: false },
+    "proofval" => BasicType { kind: TypeKind::Proof, is_const: false },
+    "airgroup" => BasicType { kind: TypeKind::AirGroup, is_const: false },
+    "air" => BasicType { kind: TypeKind::Air, is_const: false },
+};
+
+// ===================================================================
+// Column declarations
+// ===================================================================
+
+ColDeclStmt: Statement = {
+    "col" "witness" <items:ColDeclList> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Witness, items, features: vec![], init: None,
+        }),
+    "col" "witness" <feats:ColFeatures> <items:ColDeclList> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Witness, items, features: feats, init: None,
+        }),
+    "col" "fixed" <items:ColDeclList> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Fixed, items, features: vec![], init: None,
+        }),
+    "col" "fixed" <feats:ColFeatures> <items:ColDeclList> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Fixed, items, features: feats, init: None,
+        }),
+    "col" "fixed" <item:ColDeclIdent> "=" <e:Expression> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Fixed, items: vec![item], features: vec![],
+            init: Some(ColInit::Expression(e)),
+        }),
+    "col" "fixed" <item:ColDeclIdent> "=" <seq:SequenceDefRule> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Fixed, items: vec![item], features: vec![],
+            init: Some(ColInit::Sequence(seq)),
+        }),
+    "col" "fixed" <feats:ColFeatures> <item:ColDeclIdent> "=" <e:Expression> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Fixed, items: vec![item], features: feats,
+            init: Some(ColInit::Expression(e)),
+        }),
+    "col" "fixed" <feats:ColFeatures> <item:ColDeclIdent> "=" <seq:SequenceDefRule> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Fixed, items: vec![item], features: feats,
+            init: Some(ColInit::Sequence(seq)),
+        }),
+    "col" <commit:IDENT> <items:ColDeclList> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Custom(commit), items, features: vec![], init: None,
+        }),
+    "col" <commit:IDENT> <feats:ColFeatures> <items:ColDeclList> =>
+        Statement::ColDeclaration(ColDeclaration {
+            col_type: ColType::Custom(commit), items, features: feats, init: None,
+        }),
+};
+
+ColFeatures: Vec<ColFeature> = {
+    <mut v:ColFeatures> <name:IDENT> "(" <args:MultiExpressionList> ")" => {
+        v.push(ColFeature { name, args });
+        v
+    },
+    <mut v:ColFeatures> "stage" "(" <args:MultiExpressionList> ")" => {
+        v.push(ColFeature { name: "stage".to_string(), args });
+        v
+    },
+    <mut v:ColFeatures> "virtual" "(" <args:MultiExpressionList> ")" => {
+        v.push(ColFeature { name: "virtual".to_string(), args });
+        v
+    },
+    <name:IDENT> "(" <args:MultiExpressionList> ")" => {
+        vec![ColFeature { name, args }]
+    },
+    "stage" "(" <args:MultiExpressionList> ")" => {
+        vec![ColFeature { name: "stage".to_string(), args }]
+    },
+    "virtual" "(" <args:MultiExpressionList> ")" => {
+        vec![ColFeature { name: "virtual".to_string(), args }]
+    },
+};
+
+ColDeclList: Vec<ColDeclItem> = {
+    <list:CommaSep<ColDeclItemRule>> => list,
+};
+
+ColDeclItemRule: ColDeclItem = {
+    <item:ColDeclIdent> => item,
+    <mut item:ColDeclIdent> <dims:DeclArrayDims> => {
+        item.array_dims = dims;
+        item
+    },
+};
+
+ColDeclIdent: ColDeclItem = {
+    <name:IDENT> => ColDeclItem { name, is_template: false, array_dims: vec![] },
+    <name:TEMPLATE_LIT> => ColDeclItem { name, is_template: true, array_dims: vec![] },
+    "air" "." <name:IDENT> => ColDeclItem {
+        name: format!("air.{}", name), is_template: false, array_dims: vec![],
+    },
+};
+
+DeclArrayDims: Vec<Option<Expr>> = {
+    "[" "]" => vec![None],
+    "[" <e:Expression> "]" => vec![Some(e)],
+    <mut v:DeclArrayDims> "[" "]" => { v.push(None); v },
+    <mut v:DeclArrayDims> "[" <e:Expression> "]" => { v.push(Some(e)); v },
+};
+
+// ===================================================================
+// Challenge declaration
+// ===================================================================
+
+ChallengeDeclStmt: Statement = {
+    "challenge" <items:ColDeclList> =>
+        Statement::ChallengeDeclaration(ChallengeDeclaration { stage: None, items }),
+    "challenge" "stage" "(" <n:NUMBER> ")" <items:ColDeclList> =>
+        Statement::ChallengeDeclaration(ChallengeDeclaration {
+            stage: Some(parse_u64(&n)), items,
+        }),
+};
+
+// ===================================================================
+// Public declaration
+// ===================================================================
+
+PublicDeclStmt: Statement = {
+    "public" <items:ColDeclList> =>
+        Statement::PublicDeclaration(PublicDeclaration { items, init: None }),
+    "public" <item:ColDeclIdent> "=" <e:Expression> =>
+        Statement::PublicDeclaration(PublicDeclaration { items: vec![item], init: Some(e) }),
+};
+
+// ===================================================================
+// Proofval declaration
+// ===================================================================
+
+ProofValueDeclStmt: Statement = {
+    "proofval" <items:ColDeclList> =>
+        Statement::ProofValueDeclaration(ProofValueDeclaration { stage: None, items }),
+    "proofval" "stage" "(" <n:NUMBER> ")" <items:ColDeclList> =>
+        Statement::ProofValueDeclaration(ProofValueDeclaration {
+            stage: Some(parse_u64(&n)), items,
+        }),
+};
+
+// ===================================================================
+// Airgroup value declaration
+// ===================================================================
+
+AirGroupValueDeclStmt: Statement = {
+    "airgroupval" <items:ColDeclList> =>
+        Statement::AirGroupValueDeclaration(AirGroupValueDeclaration {
+            stage: None, default_value: None, aggregate_type: None, items,
+        }),
+    "airgroupval" "stage" "(" <n:NUMBER> ")" <items:ColDeclList> =>
+        Statement::AirGroupValueDeclaration(AirGroupValueDeclaration {
+            stage: Some(parse_u64(&n)), default_value: None, aggregate_type: None, items,
+        }),
+    "airgroupval" "aggregate" "(" <agg:IDENT> ")" <items:ColDeclList> =>
+        Statement::AirGroupValueDeclaration(AirGroupValueDeclaration {
+            stage: None, default_value: None, aggregate_type: Some(agg), items,
+        }),
+    "airgroupval" "default" "(" <e:Expression> ")" <items:ColDeclList> =>
+        Statement::AirGroupValueDeclaration(AirGroupValueDeclaration {
+            stage: None, default_value: Some(e), aggregate_type: None, items,
+        }),
+};
+
+// ===================================================================
+// Airval declaration
+// ===================================================================
+
+AirValueDeclStmt: Statement = {
+    "airval" <items:ColDeclList> =>
+        Statement::AirValueDeclaration(AirValueDeclaration { stage: None, items }),
+    "airval" "stage" "(" <n:NUMBER> ")" <items:ColDeclList> =>
+        Statement::AirValueDeclaration(AirValueDeclaration {
+            stage: Some(parse_u64(&n)), items,
+        }),
+};
+
+// ===================================================================
+// Commit declaration
+// ===================================================================
+
+CommitDeclStmt: Statement = {
+    "commit" "stage" "(" <n:NUMBER> ")" <name:IDENT> =>
+        Statement::CommitDeclaration(CommitDeclaration {
+            stage: Some(parse_u64(&n)), publics: vec![], name,
+        }),
+};
+
+// ===================================================================
+// Variable declarations
+// ===================================================================
+
+VarDeclStmt: Statement = {
+    <vt:VarTypeKw> <items:VarDeclList> =>
+        Statement::VariableDeclaration(VariableDeclaration {
+            is_const: false, vtype: vt, items, init: None,
+        }),
+    "const" <vt:VarTypeKw> <items:VarDeclList> =>
+        Statement::VariableDeclaration(VariableDeclaration {
+            is_const: true, vtype: vt, items, init: None,
+        }),
+    <vt:VarTypeKw> <item:VarDeclItemRule> "=" <e:Expression> =>
+        Statement::VariableDeclaration(VariableDeclaration {
+            is_const: false, vtype: vt, items: vec![item], init: Some(e),
+        }),
+    "const" <vt:VarTypeKw> <item:VarDeclItemRule> "=" <e:Expression> =>
+        Statement::VariableDeclaration(VariableDeclaration {
+            is_const: true, vtype: vt, items: vec![item], init: Some(e),
+        }),
+    <vt:VarTypeKw> <item:VarDeclItemRule> "=" "[" <el:CommaSep<Expression>> "]" =>
+        Statement::VariableDeclaration(VariableDeclaration {
+            is_const: false, vtype: vt, items: vec![item],
+            init: Some(Expr::ArrayLiteral(el)),
+        }),
+    "const" <vt:VarTypeKw> <item:VarDeclItemRule> "=" "[" <el:CommaSep<Expression>> "]" =>
+        Statement::VariableDeclaration(VariableDeclaration {
+            is_const: true, vtype: vt, items: vec![item],
+            init: Some(Expr::ArrayLiteral(el)),
+        }),
+};
+
+VarTypeKw: TypeKind = {
+    "int" => TypeKind::Int,
+    "fe" => TypeKind::Fe,
+    "expr" => TypeKind::Expr,
+    "string" => TypeKind::StringType,
+    "function" => TypeKind::Function,
+};
+
+VarDeclList: Vec<VarDeclItem> = {
+    <list:CommaSep<VarDeclItemRule>> => list,
+};
+
+VarDeclItemRule: VarDeclItem = {
+    <name:NameReference> => VarDeclItem { name, array_dims: vec![] },
+    <name:NameReference> <dims:VarDeclArrayDims> => VarDeclItem { name, array_dims: dims },
+};
+
+VarDeclArrayDims: Vec<Option<Expr>> = {
+    "[" "]" => vec![None],
+    "[" <e:Expression> "]" => vec![Some(e)],
+    <mut v:VarDeclArrayDims> "[" "]" => { v.push(None); v },
+    <mut v:VarDeclArrayDims> "[" <e:Expression> "]" => { v.push(Some(e)); v },
+};
+
+// ===================================================================
+// Assignment
+// ===================================================================
+
+AssignmentStmt: Statement = {
+    <target:NameIdRule> "=" <e:Expression> =>
+        Statement::Assignment(Assignment {
+            target, op: AssignOp::Assign, value: AssignValue::Expr(e),
+        }),
+    <target:NameIdRule> "+=" <e:Expression> =>
+        Statement::Assignment(Assignment {
+            target, op: AssignOp::AddAssign, value: AssignValue::Expr(e),
+        }),
+    <target:NameIdRule> "-=" <e:Expression> =>
+        Statement::Assignment(Assignment {
+            target, op: AssignOp::SubAssign, value: AssignValue::Expr(e),
+        }),
+    <target:NameIdRule> "*=" <e:Expression> =>
+        Statement::Assignment(Assignment {
+            target, op: AssignOp::MulAssign, value: AssignValue::Expr(e),
+        }),
+    <target:NameIdRule> "=" <seq:SequenceDefRule> =>
+        Statement::Assignment(Assignment {
+            target, op: AssignOp::Assign, value: AssignValue::Sequence(seq),
+        }),
+    "++" <target:NameIdRule> =>
+        Statement::Assignment(Assignment {
+            target: target.clone(), op: AssignOp::AddAssign,
+            value: AssignValue::Expr(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal })),
+        }),
+    "--" <target:NameIdRule> =>
+        Statement::Assignment(Assignment {
+            target: target.clone(), op: AssignOp::SubAssign,
+            value: AssignValue::Expr(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal })),
+        }),
+    <target:NameIdRule> "++" =>
+        Statement::Assignment(Assignment {
+            target: target.clone(), op: AssignOp::AddAssign,
+            value: AssignValue::Expr(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal })),
+        }),
+    <target:NameIdRule> "--" =>
+        Statement::Assignment(Assignment {
+            target: target.clone(), op: AssignOp::SubAssign,
+            value: AssignValue::Expr(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal })),
+        }),
+};
+
+// ===================================================================
+// Constraints
+// ===================================================================
+
+ConstraintStmt: Statement = {
+    <left:Expression> "===" <right:Expression> =>
+        Statement::Constraint(Constraint { left, right, is_witness: false }),
+};
+
+WitnessConstraintStmt: Statement = {
+    <left:Expression> "<==" <right:Expression> =>
+        Statement::Constraint(Constraint { left, right, is_witness: true }),
+};
+
+// ===================================================================
+// Control flow
+// ===================================================================
+
+IfStmt: Statement = {
+    "if" "(" <cond:Expression> ")" "{" <then_b:StatementBlock> "}" =>
+        Statement::If(IfStmt {
+            condition: cond, then_body: then_b,
+            elseif_clauses: vec![], else_body: None,
+        }),
+    "if" "(" <cond:Expression> ")" "{" <then_b:StatementBlock> "}" "else" "{" <else_b:StatementBlock> "}" =>
+        Statement::If(IfStmt {
+            condition: cond, then_body: then_b,
+            elseif_clauses: vec![], else_body: Some(else_b),
+        }),
+    "if" "(" <cond:Expression> ")" "{" <then_b:StatementBlock> "}" "else" <elif:IfStmt> => {
+        // Desugar chained `else if` into a single else body containing the nested if
+        Statement::If(IfStmt {
+            condition: cond, then_body: then_b,
+            elseif_clauses: vec![], else_body: Some(vec![elif]),
+        })
+    },
+    // Single-statement if (no braces)
+    "if" "(" <cond:Expression> ")" <s:SingleStmt> =>
+        Statement::If(IfStmt {
+            condition: cond, then_body: vec![s],
+            elseif_clauses: vec![], else_body: None,
+        }),
+};
+
+// Single statement for use as body of if/for/while without braces
+SingleStmt: Statement = {
+    <s:StatementInner> ";" => s,
+};
+
+ForStmt: Statement = {
+    "for" "(" <init:ForInit> ";" <cond:Expression> ";" <incr:ForIncrList> ")" "{" <body:StatementBlock> "}" =>
+        Statement::For(ForStmt {
+            init: Box::new(init), condition: cond, increment: incr, body,
+        }),
+    // single-statement body
+    "for" "(" <init:ForInit> ";" <cond:Expression> ";" <incr:ForIncrList> ")" <s:SingleStmt> =>
+        Statement::For(ForStmt {
+            init: Box::new(init), condition: cond, increment: incr, body: vec![s],
+        }),
+};
+
+ForInit: Statement = {
+    VarDeclStmt,
+    AssignmentStmt,
+    ColDeclStmt,
+};
+
+ForIncrList: Vec<Assignment> = {
+    <list:CommaSep<ForIncrItem>> => list,
+};
+
+ForIncrItem: Assignment = {
+    <target:NameIdRule> "=" <e:Expression> =>
+        Assignment { target, op: AssignOp::Assign, value: AssignValue::Expr(e) },
+    <target:NameIdRule> "+=" <e:Expression> =>
+        Assignment { target, op: AssignOp::AddAssign, value: AssignValue::Expr(e) },
+    <target:NameIdRule> "-=" <e:Expression> =>
+        Assignment { target, op: AssignOp::SubAssign, value: AssignValue::Expr(e) },
+    <target:NameIdRule> "*=" <e:Expression> =>
+        Assignment { target, op: AssignOp::MulAssign, value: AssignValue::Expr(e) },
+    "++" <target:NameIdRule> =>
+        Assignment {
+            target: target.clone(), op: AssignOp::AddAssign,
+            value: AssignValue::Expr(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal })),
+        },
+    "--" <target:NameIdRule> =>
+        Assignment {
+            target: target.clone(), op: AssignOp::SubAssign,
+            value: AssignValue::Expr(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal })),
+        },
+    <target:NameIdRule> "++" =>
+        Assignment {
+            target: target.clone(), op: AssignOp::AddAssign,
+            value: AssignValue::Expr(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal })),
+        },
+    <target:NameIdRule> "--" =>
+        Assignment {
+            target: target.clone(), op: AssignOp::SubAssign,
+            value: AssignValue::Expr(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal })),
+        },
+};
+
+WhileStmt: Statement = {
+    "while" "(" <cond:Expression> ")" "{" <body:StatementBlock> "}" =>
+        Statement::While(WhileStmt { condition: cond, body }),
+};
+
+SwitchStmt: Statement = {
+    "switch" "(" <val:Expression> ")" "{" <cases:CaseList> "}" =>
+        Statement::Switch(SwitchStmt { value: val, cases, default: None }),
+    "switch" "(" <val:Expression> ")" "{" <cases:CaseList> "default" ":" <body:StatementBlock> "}" =>
+        Statement::Switch(SwitchStmt { value: val, cases, default: Some(body) }),
+};
+
+CaseList: Vec<CaseClause> = {
+    <mut v:CaseList> "case" <vals:CaseValues> ":" <body:StatementBlock> => {
+        v.push(CaseClause { values: vals, body });
+        v
+    },
+    "case" <vals:CaseValues> ":" <body:StatementBlock> => {
+        vec![CaseClause { values: vals, body }]
+    },
+};
+
+CaseValues: Vec<CaseValue> = {
+    <list:CommaSep<CaseValueItem>> => list,
+};
+
+CaseValueItem: CaseValue = {
+    <e:Expression> => CaseValue::Single(e),
+    <from:Expression> ".." <to:Expression> => CaseValue::Range(from, to),
+};
+
+ReturnStmt: Statement = {
+    "return" <e:Expression> =>
+        Statement::Return(ReturnStmt { value: Some(e), values: None }),
+    "return" "[" <el:CommaSep<Expression>> "]" =>
+        Statement::Return(ReturnStmt { value: None, values: Some(el) }),
+    "return" =>
+        Statement::Return(ReturnStmt { value: None, values: None }),
+};
+
+BreakStmt: Statement = {
+    "break" => Statement::Break,
+};
+
+ContinueStmt: Statement = {
+    "continue" => Statement::Continue,
+};
+
+// ===================================================================
+// Virtual expression
+// ===================================================================
+
+VirtualExprStmt: Statement = {
+    "virtual" <e:Expression> =>
+        Statement::VirtualExpr(VirtualExprStmt { expr: e, alias: None }),
+    "virtual" <call:FuncCallExpr> "alias" <a:IDENT> =>
+        Statement::VirtualExpr(VirtualExprStmt {
+            expr: Expr::FunctionCall(call), alias: Some(a),
+        }),
+};
+
+// ===================================================================
+// Block statement
+// ===================================================================
+
+BlockStmt: Statement = {
+    "{" <body:StatementBlock> "}" => Statement::Block(body),
+};
+
+// ===================================================================
+// Container
+// ===================================================================
+
+ContainerStmt: Statement = {
+    "container" <name:NameReference> =>
+        Statement::Container(ContainerDef { name, alias: None, body: None }),
+    "container" <name:NameReference> "alias" <a:IDENT> =>
+        Statement::Container(ContainerDef { name, alias: Some(a), body: None }),
+    "container" <name:NameReference> "{" <body:StatementBlock> "}" =>
+        Statement::Container(ContainerDef { name, alias: None, body: Some(body) }),
+};
+
+// ===================================================================
+// Use
+// ===================================================================
+
+UseStmt: Statement = {
+    "use" <name:NameReference> =>
+        Statement::Use(UseDef { name, alias: None }),
+    "use" <name:NameReference> "alias" <a:IDENT> =>
+        Statement::Use(UseDef { name, alias: Some(a) }),
+};
+
+// ===================================================================
+// Package
+// ===================================================================
+
+PackageStmt: Statement = {
+    "package" <name:IDENT> "{" <body:StatementBlock> "}" =>
+        Statement::Package(PackageDef { name, body }),
+};
+
+// ===================================================================
+// Deferred call
+// ===================================================================
+
+DeferredCallStmt: Statement = {
+    "on" "final" <scope:DefinedScope> <func:NameOptionalIndex> "(" <args:MultiExpressionList> ")" =>
+        Statement::DeferredCall(DeferredCall {
+            event: "final".to_string(), priority: None, scope, function: func, args,
+        }),
+    "on" "final" "(" <prio:Expression> ")" <scope:DefinedScope> <func:NameOptionalIndex> "(" <args:MultiExpressionList> ")" =>
+        Statement::DeferredCall(DeferredCall {
+            event: "final".to_string(), priority: Some(prio), scope, function: func, args,
+        }),
+};
+
+DefinedScope: String = {
+    "air" => "air".to_string(),
+    "proof" => "proof".to_string(),
+    "airgroup" => "airgroup".to_string(),
+};
+
+// ===================================================================
+// Hint
+// ===================================================================
+
+HintStmt: Statement = {
+    <name:HINT_TOK> "{" <pairs:HintObjectPairs> "}" =>
+        Statement::Hint(HintStmt { name, data: HintData::Object(pairs) }),
+    <name:HINT_TOK> "[" <items:CommaSep<Expression>> "]" =>
+        Statement::Hint(HintStmt { name, data: HintData::Array(items) }),
+    <name:HINT_TOK> <e:Expression> ";" =>
+        Statement::Hint(HintStmt { name, data: HintData::Expr(e) }),
+};
+
+HintObjectPairs: Vec<(String, Expr)> = {
+    <mut v:HintObjectPairs> "," <k:IDENT> ":" <val:Expression> => { v.push((k, val)); v },
+    <mut v:HintObjectPairs> "," <k:IDENT> => {
+        let e = Expr::Reference(NameId { path: k.clone(), indexes: vec![], row_offset: None });
+        v.push((k, e));
+        v
+    },
+    <k:IDENT> ":" <val:Expression> => vec![(k, val)],
+    <k:IDENT> => {
+        let e = Expr::Reference(NameId { path: k.clone(), indexes: vec![], row_offset: None });
+        vec![(k, e)]
+    },
+};
+
+// ===================================================================
+// When
+// ===================================================================
+
+WhenStmt: Statement = {
+    "when" "(" <cond:Expression> ")" "{" <body:StatementBlock> "}" =>
+        Statement::When(WhenStmt {
+            condition: WhenCondition::Expr(cond), body,
+        }),
+    "when" <b:IDENT> "{" <body:StatementBlock> "}" =>
+        Statement::When(WhenStmt {
+            condition: WhenCondition::Boundary(b), body,
+        }),
+};
+
+// ===================================================================
+// Function call with alias (as a statement)
+// ===================================================================
+
+FuncCallAliasStmt: Statement = {
+    <call:FuncCallExpr> "alias" <a:IDENT> =>
+        Statement::ExprStatement(ExprStmt {
+            expr: Expr::FunctionCall(call), alias: Some(a),
+        }),
+    <call:FuncCallExpr> "alias" <s:FlexibleString> =>
+        Statement::ExprStatement(ExprStmt {
+            expr: Expr::FunctionCall(call), alias: Some(s.value),
+        }),
+};
+
+VirtualFuncCallAliasStmt: Statement = {
+    "virtual" <call:FuncCallExpr> "alias" <a:IDENT> =>
+        Statement::VirtualExpr(VirtualExprStmt {
+            expr: Expr::FunctionCall(call), alias: Some(a),
+        }),
+    "virtual" <call:FuncCallExpr> "alias" <s:FlexibleString> =>
+        Statement::VirtualExpr(VirtualExprStmt {
+            expr: Expr::FunctionCall(call), alias: Some(s.value),
+        }),
+};
+
+// ===================================================================
+// Expression statement
+// ===================================================================
+
+ExprStmt: Statement = {
+    <e:Expression> =>
+        Statement::ExprStatement(ExprStmt { expr: e, alias: None }),
+};
+
+// ===================================================================
+// Statement block (possibly empty)
+// ===================================================================
+
+StatementBlock: Vec<Statement> = {
+    <stmts:StatementList> => stmts,
+    => vec![],
+};
+
+// ===================================================================
+// Expressions -- ordered by precedence (lowest to highest)
+// ===================================================================
+
+Expression: Expr = {
+    TernaryExpr,
+};
+
+TernaryExpr: Expr = {
+    <cond:OrExpr> "?" <then_e:TernaryExpr> ":" <else_e:TernaryExpr> =>
+        Expr::Ternary {
+            condition: Box::new(cond),
+            then_expr: Box::new(then_e),
+            else_expr: Box::new(else_e),
+        },
+    OrExpr,
+};
+
+OrExpr: Expr = {
+    <left:OrExpr> "||" <right:AndExpr> =>
+        Expr::BinaryOp { op: BinOp::Or, left: Box::new(left), right: Box::new(right) },
+    AndExpr,
+};
+
+AndExpr: Expr = {
+    <left:AndExpr> "&&" <right:BitOrExpr> =>
+        Expr::BinaryOp { op: BinOp::And, left: Box::new(left), right: Box::new(right) },
+    BitOrExpr,
+};
+
+BitOrExpr: Expr = {
+    <left:BitOrExpr> "|" <right:BitXorExpr> =>
+        Expr::BinaryOp { op: BinOp::BitOr, left: Box::new(left), right: Box::new(right) },
+    BitXorExpr,
+};
+
+BitXorExpr: Expr = {
+    <left:BitXorExpr> "^" <right:BitAndExpr> =>
+        Expr::BinaryOp { op: BinOp::BitXor, left: Box::new(left), right: Box::new(right) },
+    BitAndExpr,
+};
+
+BitAndExpr: Expr = {
+    <left:BitAndExpr> "&" <right:EqualityExpr> =>
+        Expr::BinaryOp { op: BinOp::BitAnd, left: Box::new(left), right: Box::new(right) },
+    EqualityExpr,
+};
+
+EqualityExpr: Expr = {
+    <left:EqualityExpr> "==" <right:ComparisonExpr> =>
+        Expr::BinaryOp { op: BinOp::Eq, left: Box::new(left), right: Box::new(right) },
+    <left:EqualityExpr> "!=" <right:ComparisonExpr> =>
+        Expr::BinaryOp { op: BinOp::Ne, left: Box::new(left), right: Box::new(right) },
+    ComparisonExpr,
+};
+
+ComparisonExpr: Expr = {
+    <left:ComparisonExpr> "<" <right:ShiftExpr> =>
+        Expr::BinaryOp { op: BinOp::Lt, left: Box::new(left), right: Box::new(right) },
+    <left:ComparisonExpr> ">" <right:ShiftExpr> =>
+        Expr::BinaryOp { op: BinOp::Gt, left: Box::new(left), right: Box::new(right) },
+    <left:ComparisonExpr> "<=" <right:ShiftExpr> =>
+        Expr::BinaryOp { op: BinOp::Le, left: Box::new(left), right: Box::new(right) },
+    <left:ComparisonExpr> ">=" <right:ShiftExpr> =>
+        Expr::BinaryOp { op: BinOp::Ge, left: Box::new(left), right: Box::new(right) },
+    ShiftExpr,
+};
+
+ShiftExpr: Expr = {
+    <left:ShiftExpr> "<<" <right:AddExpr> =>
+        Expr::BinaryOp { op: BinOp::Shl, left: Box::new(left), right: Box::new(right) },
+    <left:ShiftExpr> ">>" <right:AddExpr> =>
+        Expr::BinaryOp { op: BinOp::Shr, left: Box::new(left), right: Box::new(right) },
+    AddExpr,
+};
+
+AddExpr: Expr = {
+    <left:AddExpr> "+" <right:MulExpr> =>
+        Expr::BinaryOp { op: BinOp::Add, left: Box::new(left), right: Box::new(right) },
+    <left:AddExpr> "-" <right:MulExpr> =>
+        Expr::BinaryOp { op: BinOp::Sub, left: Box::new(left), right: Box::new(right) },
+    MulExpr,
+};
+
+MulExpr: Expr = {
+    <left:MulExpr> "*" <right:UnaryExpr> =>
+        Expr::BinaryOp { op: BinOp::Mul, left: Box::new(left), right: Box::new(right) },
+    <left:MulExpr> "/" <right:UnaryExpr> =>
+        Expr::BinaryOp { op: BinOp::Div, left: Box::new(left), right: Box::new(right) },
+    <left:MulExpr> "\\" <right:UnaryExpr> =>
+        Expr::BinaryOp { op: BinOp::IntDiv, left: Box::new(left), right: Box::new(right) },
+    <left:MulExpr> "%" <right:UnaryExpr> =>
+        Expr::BinaryOp { op: BinOp::Mod, left: Box::new(left), right: Box::new(right) },
+    UnaryExpr,
+};
+
+UnaryExpr: Expr = {
+    "-" <e:UnaryExpr> =>
+        Expr::UnaryOp { op: UnaryOp::Neg, operand: Box::new(e) },
+    "+" <e:UnaryExpr> => e,
+    "!" <e:UnaryExpr> =>
+        Expr::UnaryOp { op: UnaryOp::Not, operand: Box::new(e) },
+    PowExpr,
+};
+
+PowExpr: Expr = {
+    <base:PostfixExpr> "**" <exp:UnaryExpr> =>
+        Expr::BinaryOp { op: BinOp::Pow, left: Box::new(base), right: Box::new(exp) },
+    PostfixExpr,
+};
+
+PostfixExpr: Expr = {
+    // Row offset: expr'
+    <e:PostfixExpr> "'" =>
+        Expr::RowOffset {
+            base: Box::new(e),
+            offset: Box::new(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal })),
+        },
+    // Array index: expr[index]
+    <e:PostfixExpr> "[" <idx:Expression> "]" =>
+        Expr::ArrayIndex { base: Box::new(e), index: Box::new(idx) },
+    // Member access: expr.member
+    <e:PostfixExpr> "." <m:IDENT> =>
+        Expr::MemberAccess { base: Box::new(e), member: m },
+    AtomExpr,
+};
+
+AtomExpr: Expr = {
+    // Parenthesized
+    "(" <e:Expression> ")" => e,
+
+    // Number
+    <n:NUMBER> => {
+        let radix = if n.starts_with("0x") || n.starts_with("0X") {
+            NumericRadix::Hex
+        } else if n.starts_with("0b") || n.starts_with("0B") {
+            NumericRadix::Binary
+        } else {
+            NumericRadix::Decimal
+        };
+        Expr::Number(NumericLiteral { value: n, radix })
+    },
+
+    // String
+    <s:STRING_LIT> => Expr::StringLit(StringLiteral { value: s, is_template: false }),
+    <s:TEMPLATE_LIT> => Expr::TemplateString(s),
+
+    // Positional param
+    <p:POSITIONAL> => Expr::PositionalParam(parse_u64(&p)),
+
+    // Function call
+    <call:FuncCallExpr> => Expr::FunctionCall(call),
+
+    // Casting: int(e), fe(e), expr(e), string(e)
+    "int" "(" <e:Expression> ")" => Expr::Cast { cast_type: "int".to_string(), dim: 0, value: Box::new(e) },
+    "fe" "(" <e:Expression> ")" => Expr::Cast { cast_type: "fe".to_string(), dim: 0, value: Box::new(e) },
+    "expr" "(" <e:Expression> ")" => Expr::Cast { cast_type: "expr".to_string(), dim: 0, value: Box::new(e) },
+    "string" "(" <e:Expression> ")" => Expr::Cast { cast_type: "string".to_string(), dim: 0, value: Box::new(e) },
+    "col" "(" <e:Expression> ")" => Expr::Cast { cast_type: "col".to_string(), dim: 0, value: Box::new(e) },
+
+    // Array literal
+    "[" <el:CommaSep<Expression>> "]" => Expr::ArrayLiteral(el),
+
+    // Spread
+    "..." <e:Expression> => Expr::Spread(Box::new(e)),
+
+    // Simple identifier (could be part of dotted name)
+    <name:IDENT> => Expr::Reference(NameId { path: name, indexes: vec![], row_offset: None }),
+
+    // air.name / airgroup.name / proof.name
+    "air" "." <name:IDENT> => Expr::Reference(NameId {
+        path: format!("air.{}", name), indexes: vec![], row_offset: None,
+    }),
+    "airgroup" "." <name:IDENT> => Expr::Reference(NameId {
+        path: format!("airgroup.{}", name), indexes: vec![], row_offset: None,
+    }),
+    "proof" "." <name:IDENT> => Expr::Reference(NameId {
+        path: format!("proof.{}", name), indexes: vec![], row_offset: None,
+    }),
+};
+
+// ===================================================================
+// Function call expression
+// ===================================================================
+
+FuncCallExpr: FunctionCall = {
+    <func:NameOptionalIndex> "(" <args:MultiExpressionList> ")" =>
+        FunctionCall { function: func, args },
+};
+
+// ===================================================================
+// Name references
+// ===================================================================
+
+NameReference: String = {
+    <name:IDENT> => name,
+    <first:IDENT> "." <rest:NameReferenceRight> => format!("{}.{}", first, rest),
+    "air" "." <rest:NameReferenceRight> => format!("air.{}", rest),
+    "airgroup" "." <rest:NameReferenceRight> => format!("airgroup.{}", rest),
+    "proof" "." <rest:NameReferenceRight> => format!("proof.{}", rest),
+};
+
+NameReferenceRight: String = {
+    <name:IDENT> => name,
+    <left:NameReferenceRight> "." <name:IDENT> => format!("{}.{}", left, name),
+};
+
+NameOptionalIndex: NameRef = {
+    <name:NameReference> => NameRef { path: name, indexes: vec![] },
+    <name:NameReference> <idxs:ArrayIndexList> => NameRef { path: name, indexes: idxs },
+};
+
+NameIdRule: NameId = {
+    <nr:NameOptionalIndex> => NameId { path: nr.path, indexes: nr.indexes, row_offset: None },
+    <nr:NameOptionalIndex> "'" => NameId {
+        path: nr.path, indexes: nr.indexes,
+        row_offset: Some(Box::new(Expr::Number(NumericLiteral { value: "1".to_string(), radix: NumericRadix::Decimal }))),
+    },
+    <nr:NameOptionalIndex> "'" <n:NUMBER> => NameId {
+        path: nr.path, indexes: nr.indexes,
+        row_offset: Some(Box::new(Expr::Number(NumericLiteral { value: n, radix: NumericRadix::Decimal }))),
+    },
+    <nr:NameOptionalIndex> "'" "(" <e:Expression> ")" => NameId {
+        path: nr.path, indexes: nr.indexes,
+        row_offset: Some(Box::new(e)),
+    },
+};
+
+ArrayIndexList: Vec<Expr> = {
+    "[" <e:Expression> "]" => vec![e],
+    <mut v:ArrayIndexList> "[" <e:Expression> "]" => { v.push(e); v },
+};
+
+// ===================================================================
+// Multi-expression list (for function call arguments, supports named args)
+// ===================================================================
+
+MultiExpressionList: Vec<CallArg> = {
+    => vec![],
+    <list:CommaSep<MultiExpressionItem>> => list,
+};
+
+MultiExpressionItem: CallArg = {
+    <e:Expression> => CallArg { name: None, value: e },
+    <name:IDENT> ":" <e:Expression> => CallArg { name: Some(name), value: e },
+    <name:IDENT> ":" => CallArg {
+        name: Some(name.clone()),
+        value: Expr::Reference(NameId { path: name, indexes: vec![], row_offset: None }),
+    },
+    <name:IDENT> ":" "[" <el:CommaSep<Expression>> "]" => CallArg {
+        name: Some(name), value: Expr::ArrayLiteral(el),
+    },
+    "[" <el:CommaSep<Expression>> "]" => CallArg {
+        name: None, value: Expr::ArrayLiteral(el),
+    },
+};
+
+// ===================================================================
+// Sequence definition (fixed column initializer syntax)
+// ===================================================================
+
+SequenceDefRule: SequenceDef = {
+    "[" <elems:CommaSep<SequenceElementRule>> "]" =>
+        SequenceDef { elements: elems, is_padded: false },
+    "[" <elems:CommaSep<SequenceElementRule>> "]" "..." =>
+        SequenceDef { elements: elems, is_padded: true },
+    "[" <elems:CommaSep<SequenceElementRule>> "]" ":" <times:Expression> =>
+        SequenceDef {
+            elements: vec![SequenceElement::Repeat {
+                value: Expr::Sequence(SequenceDef { elements: elems, is_padded: false }),
+                times,
+            }],
+            is_padded: false,
+        },
+    "[" <elems:CommaSep<SequenceElementRule>> "]" ":" <times:Expression> "..." =>
+        SequenceDef {
+            elements: vec![SequenceElement::Padding(Box::new(
+                SequenceElement::Repeat {
+                    value: Expr::Sequence(SequenceDef { elements: elems, is_padded: false }),
+                    times,
+                }
+            ))],
+            is_padded: true,
+        },
+};
+
+SequenceElementRule: SequenceElement = {
+    <e:Expression> => SequenceElement::Value(e),
+    <e:Expression> ".." <to:Expression> => SequenceElement::Range { from: e, to },
+    <e:Expression> "..." => SequenceElement::Padding(Box::new(SequenceElement::Value(e))),
+};
+
+// ===================================================================
+// Utility: comma-separated list
+// ===================================================================
+
+CommaSep<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T> => { v.push(e); v },
+};
+
+// ===================================================================
+// Helper function for parsing numbers
+// ===================================================================
+
+fn parse_u64(s: &str) -> u64 {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).unwrap_or(0)
+    } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        u64::from_str_radix(bin, 2).unwrap_or(0)
+    } else {
+        s.parse::<u64>().unwrap_or(0)
+    }
+}
