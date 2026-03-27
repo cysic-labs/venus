@@ -1,22 +1,15 @@
 [package]
 name = "pil2-stark-setup"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "venus-setup"
-path = "src/main.rs"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
 
 [dependencies]
-pilout = { path = "../pil2-proofman/pilout" }
-prost = { workspace = true }
-
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true, features = ["preserve_order"] }
-indexmap = { version = "2", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
-rayon = { workspace = true }
-anyhow = "1"
-rug = "1.24"
+fields = { workspace = true, features = ["verify"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = "0.3"

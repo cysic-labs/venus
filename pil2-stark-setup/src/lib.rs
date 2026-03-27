@@ -1,3 +1,4 @@
+pub mod bctree;
 pub mod bin_file;
 pub mod codegen;
 pub mod constraint_poly;
