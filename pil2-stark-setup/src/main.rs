@@ -1,4 +1,5 @@
 use clap::Parser;
+use pil2_stark_setup::setup_cmd::{self, SetupOptions};
 
 #[derive(Parser)]
 #[command(name = "venus-setup", about = "Proving key setup (replaces pil2-proofman-js)")]
@@ -35,7 +36,14 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("  airout: {}", cli.airout);
     tracing::info!("  build_dir: {}", cli.build_dir);
     tracing::info!("  recursive: {}", cli.recursive);
-    // Full implementation will be added in subsequent tasks
-    tracing::warn!("venus-setup: not yet fully implemented");
-    Ok(())
+
+    let opts = SetupOptions {
+        airout_path: cli.airout,
+        build_dir: cli.build_dir,
+        fixed_dir: cli.fixed_dir,
+        stark_structs_path: cli.stark_structs,
+        recursive: cli.recursive,
+    };
+
+    setup_cmd::run_setup(&opts)
 }

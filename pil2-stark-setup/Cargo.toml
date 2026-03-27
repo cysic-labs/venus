@@ -9,7 +9,13 @@ categories = { workspace = true }
 
 [dependencies]
 fields = { workspace = true, features = ["verify"] }
+pilout = { workspace = true }
+prost = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+indexmap = { version = "2", features = ["serde"] }
+rug = "1"

@@ -48,9 +48,6 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             IndexMap::new()
         };
 
-    // Resolve bctree binary path
-    let bctree_path = resolve_bctree_path()?;
-
     // Resolve binFile binary path
     let binfile_path = resolve_binfile_path()?;
 
@@ -188,33 +185,25 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 &verifier_info_str,
             )?;
 
-            // Run bctree for Merkle tree -> verkey.json / verkey.bin
+            // Compute constant polynomial Merkle tree -> verkey.json / verkey.bin
             let verkey_json_path = files_dir.join(format!("{}.verkey.json", air_name));
             if const_path.exists() {
-                bctree::run_bctree(
-                    &bctree_path,
+                tracing::info!("Computing Constant Tree...");
+                let const_root = bctree::compute_const_tree(
                     const_path.to_str().unwrap_or(""),
                     starkinfo_path.to_str().unwrap_or(""),
                     verkey_json_path.to_str().unwrap_or(""),
                 )?;
 
-                // Read verkey.json and write verkey.bin
-                if verkey_json_path.exists() {
-                    let verkey_data = fs::read_to_string(&verkey_json_path)?;
-                    let verkey_values: Vec<u64> = serde_json::from_str(&verkey_data)?;
-                    let mut verkey_bin = Vec::with_capacity(32);
-                    for &val in verkey_values.iter().take(4) {
-                        verkey_bin.extend_from_slice(&val.to_le_bytes());
-                    }
-                    // Pad to 32 bytes if fewer than 4 values
-                    while verkey_bin.len() < 32 {
-                        verkey_bin.extend_from_slice(&0u64.to_le_bytes());
-                    }
-                    fs::write(
-                        files_dir.join(format!("{}.verkey.bin", air_name)),
-                        &verkey_bin,
-                    )?;
+                // Write verkey.bin from the returned root values
+                let mut verkey_bin = Vec::with_capacity(32);
+                for &val in const_root.iter() {
+                    verkey_bin.extend_from_slice(&val.to_le_bytes());
                 }
+                fs::write(
+                    files_dir.join(format!("{}.verkey.bin", air_name)),
+                    &verkey_bin,
+                )?;
             } else {
                 tracing::warn!(
                     "Skipping bctree: const file not found at {}",
@@ -734,23 +723,6 @@ fn run_binfile(
         );
     }
     Ok(())
-}
-
-/// Resolve the bctree binary path (look for it in common locations).
-fn resolve_bctree_path() -> Result<String> {
-    // Try common paths
-    let candidates = [
-        "bctree",
-        "./bctree",
-        "../pil2-proofman-js/src/setup/build/bctree",
-    ];
-    for path in &candidates {
-        if Path::new(path).exists() {
-            return Ok(path.to_string());
-        }
-    }
-    // Fall back to just "bctree" and let the system PATH resolve it
-    Ok("bctree".to_string())
 }
 
 /// Compute floor(log2(n)) for a nonzero usize.
