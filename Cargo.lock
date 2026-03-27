@@ -2867,6 +2867,7 @@ dependencies = [
  "clap",
  "indexmap",
  "pilout",
+ "prost 0.13.5",
  "rayon",
  "serde",
  "serde_json",
