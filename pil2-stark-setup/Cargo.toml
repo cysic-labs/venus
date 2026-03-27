@@ -19,3 +19,6 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 rug = "1"
+stark-recurser-rust = { path = "../stark-recurser-rust" }
+pil2-compiler-rust = { path = "../pil2-compiler-rust" }
+tempfile = "3"

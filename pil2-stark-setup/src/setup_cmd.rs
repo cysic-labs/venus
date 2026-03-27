@@ -258,8 +258,409 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
     // Generate globalInfo.json and globalConstraints
     write_global_info(&pilout, &pilout_name, &opts.build_dir)?;
 
+    // Recursive setup (if --recursive is set)
+    if opts.recursive {
+        tracing::info!("Starting recursive setup...");
+        run_recursive_setup(&pilout, &pilout_name, opts)?;
+    }
+
     tracing::info!("Setup complete");
     Ok(())
+}
+
+/// Run the recursive setup pipeline after non-recursive AIR setup.
+///
+/// For each airgroup/air:
+///   1. Check whether a compressor is needed
+///   2. If so, run compressor recursive setup
+///   3. Run recursive1
+/// Then for each airgroup:
+///   4. Run recursive2
+/// Then globally:
+///   5. Run final setup
+///   6. Run compressed final setup
+fn run_recursive_setup(
+    pilout: &pb::PilOut,
+    pilout_name: &str,
+    opts: &SetupOptions,
+) -> Result<()> {
+    use crate::compressor_check;
+    use crate::compressed_final;
+    use crate::final_setup;
+    use crate::recursive_setup::{self, RecursiveTemplate, RecursiveSetupConfig};
+    use crate::witness_gen::WitnessTracker;
+
+    let witness_tracker = WitnessTracker::new();
+    let build_dir = &opts.build_dir;
+
+    // Resolve tool paths (these would typically come from CLI args or env)
+    let circom_exec = resolve_circom_exec();
+    let circuits_gl_path = resolve_path_env("CIRCUITS_GL_PATH", "circuits.gl");
+    let recurser_circuits_path =
+        resolve_path_env("RECURSER_CIRCUITS_PATH", "vadcop/helpers/circuits");
+    let std_pil_path = resolve_path_env("STD_PIL_PATH", "pil");
+    let recurser_pil_path = resolve_path_env("RECURSER_PIL_PATH", "circom2pil/pil");
+    let circom_helpers_dir = resolve_path_env("CIRCOM_HELPERS_DIR", "circom");
+
+    // Read globalInfo
+    let proving_key_dir = Path::new(build_dir).join("provingKey");
+    let global_info_path = proving_key_dir.join("pilout.globalInfo.json");
+    let global_info: serde_json::Value = if global_info_path.exists() {
+        serde_json::from_str(&fs::read_to_string(&global_info_path)?)?
+    } else {
+        tracing::warn!("globalInfo.json not found, cannot run recursive setup");
+        return Ok(());
+    };
+
+    let global_constraints_path = proving_key_dir.join("pilout.globalConstraints.json");
+    let global_constraints: serde_json::Value = if global_constraints_path.exists() {
+        serde_json::from_str(&fs::read_to_string(&global_constraints_path)?)?
+    } else {
+        serde_json::json!({"constraints": [], "hints": []})
+    };
+
+    // Per-airgroup, per-air: check compressor and run recursive1
+    let mut recursive1_vkeys: Vec<Vec<Vec<String>>> = Vec::new();
+    let mut recursive1_stark_infos: Vec<serde_json::Value> = Vec::new();
+    let mut recursive1_verifier_infos: Vec<serde_json::Value> = Vec::new();
+
+    for (ag_idx, airgroup) in pilout.air_groups.iter().enumerate() {
+        let airgroup_name = airgroup
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("airgroup_{}", ag_idx));
+
+        let mut ag_vkeys: Vec<Vec<String>> = Vec::new();
+
+        for (air_idx, air) in airgroup.airs.iter().enumerate() {
+            let air_name = air
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("air_{}", air_idx));
+            let num_rows = air.num_rows.unwrap_or(0) as usize;
+            if num_rows == 0 {
+                continue;
+            }
+
+            // Read this air's starkinfo and verifierinfo
+            let files_dir = PathBuf::from(build_dir)
+                .join("provingKey")
+                .join(pilout_name)
+                .join(&airgroup_name)
+                .join("airs")
+                .join(&air_name)
+                .join("air");
+
+            let si_path = files_dir.join(format!("{}.starkinfo.json", air_name));
+            let vi_path = files_dir.join(format!("{}.verifierinfo.json", air_name));
+            let vk_path = files_dir.join(format!("{}.verkey.json", air_name));
+
+            if !si_path.exists() || !vi_path.exists() {
+                tracing::warn!(
+                    "Skipping recursive setup for air '{}': starkinfo/verifierinfo not found",
+                    air_name
+                );
+                continue;
+            }
+
+            let stark_info: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&si_path)?)?;
+            let verifier_info: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&vi_path)?)?;
+
+            let const_root_strings: [String; 4] = if vk_path.exists() {
+                let vk: Vec<serde_json::Value> =
+                    serde_json::from_str(&fs::read_to_string(&vk_path)?)?;
+                [
+                    vk.get(0).and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+                    vk.get(1).and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+                    vk.get(2).and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+                    vk.get(3).and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
+                ]
+            } else {
+                ["0".into(), "0".into(), "0".into(), "0".into()]
+            };
+
+            // Check if compressor is needed
+            let has_compressor = match compressor_check::is_compressor_needed(
+                &const_root_strings,
+                &stark_info,
+                &verifier_info,
+                si_path.to_str().unwrap_or(""),
+                &circom_exec,
+                &circuits_gl_path,
+            ) {
+                Ok(result) => result.needed,
+                Err(e) => {
+                    tracing::warn!(
+                        "Compressor check failed for air '{}': {:#}, assuming not needed",
+                        air_name,
+                        e
+                    );
+                    false
+                }
+            };
+
+            if has_compressor {
+                tracing::info!("Air '{}' needs compressor", air_name);
+
+                // Run compressor setup
+                let compressor_config = RecursiveSetupConfig {
+                    build_dir,
+                    template: RecursiveTemplate::Compressor,
+                    airgroup_name: &airgroup_name,
+                    airgroup_id: ag_idx,
+                    air_id: air_idx,
+                    air_name: &air_name,
+                    global_info: &global_info,
+                    const_root: &const_root_strings,
+                    verification_keys: &[],
+                    stark_info: &stark_info,
+                    verifier_info: &verifier_info,
+                    stark_struct: None,
+                    has_compressor: false,
+                    circom_exec: &circom_exec,
+                    circuits_gl_path: &circuits_gl_path,
+                    recurser_circuits_path: &recurser_circuits_path,
+                    std_pil_path: &std_pil_path,
+                    recurser_pil_path: &recurser_pil_path,
+                    circom_helpers_dir: &circom_helpers_dir,
+                };
+
+                match recursive_setup::gen_recursive_setup(&compressor_config, &witness_tracker) {
+                    Ok(_result) => {
+                        tracing::info!("Compressor setup complete for air '{}'", air_name);
+                    }
+                    Err(e) => {
+                        tracing::error!("Compressor setup failed for air '{}': {:#}", air_name, e);
+                    }
+                }
+            }
+
+            // Run recursive1
+            tracing::info!("Running recursive1 for air '{}'", air_name);
+            let r1_config = RecursiveSetupConfig {
+                build_dir,
+                template: RecursiveTemplate::Recursive1,
+                airgroup_name: &airgroup_name,
+                airgroup_id: ag_idx,
+                air_id: air_idx,
+                air_name: &air_name,
+                global_info: &global_info,
+                const_root: &const_root_strings,
+                verification_keys: &[],
+                stark_info: &stark_info,
+                verifier_info: &verifier_info,
+                stark_struct: None,
+                has_compressor,
+                circom_exec: &circom_exec,
+                circuits_gl_path: &circuits_gl_path,
+                recurser_circuits_path: &recurser_circuits_path,
+                std_pil_path: &std_pil_path,
+                recurser_pil_path: &recurser_pil_path,
+                circom_helpers_dir: &circom_helpers_dir,
+            };
+
+            match recursive_setup::gen_recursive_setup(&r1_config, &witness_tracker) {
+                Ok(result) => {
+                    let vk_str: Vec<String> =
+                        result.const_root.iter().map(|v| v.to_string()).collect();
+                    ag_vkeys.push(vk_str);
+                    tracing::info!("Recursive1 setup complete for air '{}'", air_name);
+                }
+                Err(e) => {
+                    tracing::error!("Recursive1 setup failed for air '{}': {:#}", air_name, e);
+                }
+            }
+        }
+
+        recursive1_vkeys.push(ag_vkeys);
+    }
+
+    // Per-airgroup: run recursive2
+    for (ag_idx, airgroup) in pilout.air_groups.iter().enumerate() {
+        let airgroup_name = airgroup
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("airgroup_{}", ag_idx));
+
+        // Find the first valid air for this airgroup to get starkinfo
+        let first_air = airgroup.airs.first();
+        let air_name = first_air
+            .and_then(|a| a.name.clone())
+            .unwrap_or_else(|| "air_0".to_string());
+
+        // Read recursive1 starkinfo and verifierinfo (from first air's recursive1 directory)
+        let r1_dir = PathBuf::from(build_dir)
+            .join("provingKey")
+            .join(pilout_name)
+            .join(&airgroup_name)
+            .join("airs")
+            .join(&air_name)
+            .join("recursive1");
+
+        let si_path = r1_dir.join("recursive1.starkinfo.json");
+        let vi_path = r1_dir.join("recursive1.verifierinfo.json");
+
+        // Fallback to the air starkinfo if recursive1 doesn't have one
+        let (stark_info, verifier_info) = if si_path.exists() && vi_path.exists() {
+            let si: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&si_path)?)?;
+            let vi: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&vi_path)?)?;
+            (si, vi)
+        } else {
+            let air_dir = PathBuf::from(build_dir)
+                .join("provingKey")
+                .join(pilout_name)
+                .join(&airgroup_name)
+                .join("airs")
+                .join(&air_name)
+                .join("air");
+            let si: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(air_dir.join(format!("{}.starkinfo.json", air_name)))?,
+            )?;
+            let vi: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(air_dir.join(format!("{}.verifierinfo.json", air_name)))?,
+            )?;
+            (si, vi)
+        };
+
+        let const_root_strings: [String; 4] =
+            ["0".into(), "0".into(), "0".into(), "0".into()];
+
+        let vkeys = if ag_idx < recursive1_vkeys.len() {
+            &recursive1_vkeys[ag_idx]
+        } else {
+            &vec![]
+        };
+
+        let vkeys_nested: Vec<Vec<Vec<String>>> = vec![vkeys.clone()];
+
+        tracing::info!("Running recursive2 for airgroup '{}'", airgroup_name);
+        let r2_config = RecursiveSetupConfig {
+            build_dir,
+            template: RecursiveTemplate::Recursive2,
+            airgroup_name: &airgroup_name,
+            airgroup_id: ag_idx,
+            air_id: 0,
+            air_name: &air_name,
+            global_info: &global_info,
+            const_root: &const_root_strings,
+            verification_keys: &vkeys_nested,
+            stark_info: &stark_info,
+            verifier_info: &verifier_info,
+            stark_struct: None,
+            has_compressor: false,
+            circom_exec: &circom_exec,
+            circuits_gl_path: &circuits_gl_path,
+            recurser_circuits_path: &recurser_circuits_path,
+            std_pil_path: &std_pil_path,
+            recurser_pil_path: &recurser_pil_path,
+            circom_helpers_dir: &circom_helpers_dir,
+        };
+
+        match recursive_setup::gen_recursive_setup(&r2_config, &witness_tracker) {
+            Ok(result) => {
+                if let Some(si) = &result.stark_info {
+                    recursive1_stark_infos.push(si.clone());
+                }
+                if let Some(vi) = &result.verifier_info {
+                    recursive1_verifier_infos.push(vi.clone());
+                }
+                tracing::info!("Recursive2 setup complete for airgroup '{}'", airgroup_name);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Recursive2 setup failed for airgroup '{}': {:#}",
+                    airgroup_name,
+                    e
+                );
+            }
+        }
+    }
+
+    // Run final setup
+    tracing::info!("Running final setup...");
+    let final_config = final_setup::FinalSetupConfig {
+        build_dir,
+        global_info: &global_info,
+        global_constraints: &global_constraints,
+        circom_exec: &circom_exec,
+        circuits_gl_path: &circuits_gl_path,
+        recurser_circuits_path: &recurser_circuits_path,
+        std_pil_path: &std_pil_path,
+        recurser_pil_path: &recurser_pil_path,
+        circom_helpers_dir: &circom_helpers_dir,
+    };
+
+    let final_result = match final_setup::gen_final_setup(&final_config, &witness_tracker) {
+        Ok(result) => {
+            tracing::info!("Final setup complete");
+            Some(result)
+        }
+        Err(e) => {
+            tracing::error!("Final setup failed: {:#}", e);
+            None
+        }
+    };
+
+    // Run compressed final setup
+    if let Some(ref fr) = final_result {
+        tracing::info!("Running compressed final setup...");
+        let const_root_str: [String; 4] = [
+            fr.const_root[0].to_string(),
+            fr.const_root[1].to_string(),
+            fr.const_root[2].to_string(),
+            fr.const_root[3].to_string(),
+        ];
+
+        let compressed_config = compressed_final::CompressedFinalConfig {
+            build_dir,
+            name: pilout_name,
+            const_root: &const_root_str,
+            verification_keys: &[],
+            stark_info: &fr.stark_info,
+            verifier_info: &fr.verifier_info,
+            circom_exec: &circom_exec,
+            circuits_gl_path: &circuits_gl_path,
+            recurser_circuits_path: &recurser_circuits_path,
+            std_pil_path: &std_pil_path,
+            recurser_pil_path: &recurser_pil_path,
+            circom_helpers_dir: &circom_helpers_dir,
+        };
+
+        match compressed_final::gen_compressed_final_setup(&compressed_config, &witness_tracker) {
+            Ok(()) => tracing::info!("Compressed final setup complete"),
+            Err(e) => tracing::error!("Compressed final setup failed: {:#}", e),
+        }
+    }
+
+    // Wait for all witness library builds
+    witness_tracker.await_all()?;
+
+    tracing::info!("Recursive setup complete");
+    Ok(())
+}
+
+/// Resolve circom executable path.
+fn resolve_circom_exec() -> String {
+    let candidates = if cfg!(target_os = "macos") {
+        vec!["circom_mac", "circom"]
+    } else {
+        vec!["circom", "./circom"]
+    };
+    for path in &candidates {
+        if Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+    "circom".to_string()
+}
+
+/// Resolve a path from environment variable or fallback.
+fn resolve_path_env(env_var: &str, fallback: &str) -> String {
+    std::env::var(env_var).unwrap_or_else(|_| fallback.to_string())
 }
 
 /// Build the StarkInfoOutput for JSON serialization from internal types.

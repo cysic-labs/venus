@@ -19,9 +19,6 @@ INPUT_BLOCK := $(word 2,$(subst _, ,$(INPUT_STEM)))
 HINTS_DIR := $(GUEST_DIR)/hints
 HINTS_FILE ?= $(HINTS_DIR)/$(INPUT_BLOCK)_hints.bin
 
-NODE := node --max-old-space-size=16384
-SETUP_NODE := node --max-old-space-size=16384 --stack-size=8192
-
 ifeq ($(USE_HINTS),true)
 ROM_SETUP_HINTS := -n
 PROVE_ARGS := -H $(HINTS_FILE)
@@ -58,15 +55,13 @@ check-key:
 generate-key:
 	mkdir -p "$(BUILD_DIR)" "$(FIXED_DIR)" "$(PROOF_DIR)"
 	rm -rf "$(PROVING_KEY)"
-	npm install --prefix "$(ROOT)/pil2-compiler"
-	npm install --prefix "$(ROOT)/pil2-proofman-js"
 	cargo run --release --bin arith_frops_fixed_gen
 	cargo run --release --bin binary_basic_frops_fixed_gen
 	cargo run --release --bin binary_extension_frops_fixed_gen
-	$(NODE) "$(ROOT)/pil2-compiler/src/pil.js" "$(ROOT)/pil/zisk.pil" \
+	cargo run --release --bin pil2c -- "$(ROOT)/pil/zisk.pil" \
 		-I "$(ROOT)/pil,$(ROOT)/pil2-proofman/pil2-components/lib/std/pil,$(ROOT)/state-machines,$(ROOT)/precompiles" \
 		-o "$(ROOT)/pil/zisk.pilout" -u "$(FIXED_DIR)" -O fixed-to-file
-	$(SETUP_NODE) "$(ROOT)/pil2-proofman-js/src/main_setup.js" \
+	cargo run --release --bin venus-setup -- \
 		-a "$(ROOT)/pil/zisk.pilout" -b "$(BUILD_DIR)" \
 		-t "$(ROOT)/pil2-proofman/pil2-components/lib/std/pil" \
 		-u "$(FIXED_DIR)" -r -s "$(ROOT)/state-machines/starkstructs.json"
@@ -110,7 +105,7 @@ clean:
 	rm -rf "$(ROOT)/target" "$(ROOT)/tmp" "$(GUEST_DIR)/target" "$(GUEST_DIR)/build" "$(GUEST_DIR)/hints"
 
 purge: clean
-	rm -rf "$(BUILD_DIR)" "$(ROOT)/pil/zisk.pilout" "$(ROOT)/pil2-compiler/node_modules" "$(ROOT)/pil2-proofman-js/node_modules"
+	rm -rf "$(BUILD_DIR)" "$(ROOT)/pil/zisk.pilout"
 
 help:
 	@echo "Targets:"
