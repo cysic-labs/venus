@@ -4,6 +4,7 @@ pub mod fri_poly;
 pub mod helpers;
 pub mod im_polynomials;
 pub mod json_output;
+pub mod map;
 pub mod pilout_info;
 pub mod prepare_pil;
 pub mod stark_struct;
