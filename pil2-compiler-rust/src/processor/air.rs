@@ -1,0 +1,295 @@
+//! AIR template/instance handling: airgroup and air declarations,
+//! parameterized rows.
+//!
+//! Mirrors the JS `Air`, `AirGroup`, `AirTemplate`, `AirGroups`, and
+//! `AirTemplates` classes.
+
+use std::collections::HashMap;
+
+use crate::parser::ast::{AirTemplateDef, FunctionArg, Statement};
+use super::expression::Value;
+
+/// An Air instance (one concrete instantiation of an air template).
+///
+/// Mirrors JS `Air`.
+#[derive(Debug, Clone)]
+pub struct Air {
+    pub id: u32,
+    pub air_group_id: u32,
+    pub name: String,
+    pub template_name: String,
+    pub rows: u64,
+    pub bits: u32,
+    pub is_virtual: bool,
+    /// Informational counters set after air execution completes.
+    pub info: AirInfo,
+}
+
+/// Summary statistics collected after an air instance completes.
+#[derive(Debug, Clone, Default)]
+pub struct AirInfo {
+    pub witness_cols: Vec<u32>,
+    pub fixed_cols: u32,
+    pub custom_cols: u32,
+    pub constraints: u32,
+    pub max_degree: u32,
+}
+
+impl Air {
+    pub fn new(
+        id: u32,
+        air_group_id: u32,
+        template_name: &str,
+        name: &str,
+        rows: u64,
+        is_virtual: bool,
+    ) -> Self {
+        let bits = if rows == 0 {
+            0
+        } else {
+            let log = (rows as f64).log2().ceil() as u32;
+            if (1u64 << log) == rows { log } else { log }
+        };
+        Self {
+            id,
+            air_group_id,
+            name: name.to_string(),
+            template_name: template_name.to_string(),
+            rows,
+            bits,
+            is_virtual,
+            info: AirInfo::default(),
+        }
+    }
+
+    pub fn set_info(&mut self, info: AirInfo) {
+        self.info = info;
+    }
+}
+
+/// An airgroup: groups one or more airs together.
+///
+/// Mirrors JS `AirGroup`.
+#[derive(Debug, Clone)]
+pub struct AirGroup {
+    pub name: String,
+    id: Option<u32>,
+    pub airs: Vec<Air>,
+    pub ended: bool,
+}
+
+impl AirGroup {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            id: None,
+            airs: Vec::new(),
+            ended: false,
+        }
+    }
+
+    pub fn get_id(&self) -> Option<u32> {
+        self.id
+    }
+
+    pub fn set_id(&mut self, id: u32) {
+        self.id = Some(id);
+    }
+
+    /// Create a new air instance in this airgroup.
+    pub fn create_air(
+        &mut self,
+        air_id: u32,
+        template_name: &str,
+        name: &str,
+        rows: u64,
+        is_virtual: bool,
+    ) -> &Air {
+        let air = Air::new(
+            air_id,
+            self.id.unwrap_or(0),
+            template_name,
+            name,
+            rows,
+            is_virtual,
+        );
+        self.airs.push(air);
+        self.airs.last().unwrap()
+    }
+
+    pub fn end(&mut self) {
+        self.ended = true;
+    }
+}
+
+/// Registry of airgroups by name.
+///
+/// Mirrors JS `AirGroups`.
+#[derive(Debug, Clone, Default)]
+pub struct AirGroups {
+    groups: Vec<AirGroup>,
+    name_map: HashMap<String, usize>,
+}
+
+impl AirGroups {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Define (or retrieve) an airgroup by name.
+    pub fn get_or_create(&mut self, name: &str) -> &mut AirGroup {
+        if let Some(&idx) = self.name_map.get(name) {
+            &mut self.groups[idx]
+        } else {
+            let idx = self.groups.len();
+            self.groups.push(AirGroup::new(name));
+            self.name_map.insert(name.to_string(), idx);
+            &mut self.groups[idx]
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&AirGroup> {
+        self.name_map.get(name).map(|&idx| &self.groups[idx])
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut AirGroup> {
+        if let Some(&idx) = self.name_map.get(name) {
+            Some(&mut self.groups[idx])
+        } else {
+            None
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &AirGroup> {
+        self.groups.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut AirGroup> {
+        self.groups.iter_mut()
+    }
+}
+
+/// An air template definition (the blueprint for creating air instances).
+///
+/// Mirrors JS `AirTemplate`. Stores the AST body and parameter declarations.
+#[derive(Debug, Clone)]
+pub struct AirTemplateInfo {
+    pub name: String,
+    pub args: Vec<FunctionArg>,
+    pub body: Vec<Statement>,
+    /// Methods extracted from the template body.
+    pub methods: Vec<String>,
+    /// Additional blocks appended via `airtemplate Name { ... }`.
+    pub extra_blocks: Vec<Vec<Statement>>,
+    /// Base directory for relative includes within this template.
+    pub base_dir: Option<String>,
+}
+
+impl AirTemplateInfo {
+    pub fn new(name: &str, args: Vec<FunctionArg>, body: Vec<Statement>) -> Self {
+        Self {
+            name: name.to_string(),
+            args,
+            body,
+            methods: Vec::new(),
+            extra_blocks: Vec::new(),
+            base_dir: None,
+        }
+    }
+
+    /// Append an extra block of statements.
+    pub fn add_block(&mut self, statements: Vec<Statement>) {
+        self.extra_blocks.push(statements);
+    }
+
+    /// Get the combined body: main body + all extra blocks.
+    pub fn all_statements(&self) -> Vec<&Statement> {
+        let mut stmts: Vec<&Statement> = self.body.iter().collect();
+        for block in &self.extra_blocks {
+            stmts.extend(block.iter());
+        }
+        stmts
+    }
+}
+
+/// Registry of air templates by name.
+///
+/// Mirrors JS `AirTemplates`.
+#[derive(Debug, Clone, Default)]
+pub struct AirTemplates {
+    templates: HashMap<String, AirTemplateInfo>,
+}
+
+impl AirTemplates {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn define(&mut self, name: &str, info: AirTemplateInfo) -> Result<(), String> {
+        if self.templates.contains_key(name) {
+            return Err(format!(
+                "airtemplate '{}' has been defined previously",
+                name
+            ));
+        }
+        self.templates.insert(name.to_string(), info);
+        Ok(())
+    }
+
+    pub fn get(&self, name: &str) -> Option<&AirTemplateInfo> {
+        self.templates.get(name)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut AirTemplateInfo> {
+        self.templates.get_mut(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_air_bits() {
+        let air = Air::new(0, 0, "tpl", "myair", 1024, false);
+        assert_eq!(air.bits, 10); // 2^10 = 1024
+    }
+
+    #[test]
+    fn test_air_bits_non_power_of_2() {
+        let air = Air::new(0, 0, "tpl", "myair", 1000, false);
+        assert_eq!(air.bits, 10); // ceil(log2(1000)) = 10
+    }
+
+    #[test]
+    fn test_airgroup_create_air() {
+        let mut ag = AirGroup::new("TestGroup");
+        ag.set_id(0);
+        ag.create_air(0, "tpl", "air1", 256, false);
+        ag.create_air(1, "tpl", "air2", 512, false);
+        assert_eq!(ag.airs.len(), 2);
+        assert_eq!(ag.airs[0].name, "air1");
+        assert_eq!(ag.airs[1].bits, 9);
+    }
+
+    #[test]
+    fn test_airgroups_registry() {
+        let mut groups = AirGroups::new();
+        groups.get_or_create("Group1");
+        groups.get_or_create("Group2");
+        assert!(groups.get("Group1").is_some());
+        assert!(groups.get("Group2").is_some());
+        assert!(groups.get("Group3").is_none());
+    }
+
+    #[test]
+    fn test_air_template_define() {
+        let mut templates = AirTemplates::new();
+        let info = AirTemplateInfo::new("Main", vec![], vec![]);
+        assert!(templates.define("Main", info).is_ok());
+        assert!(templates.get("Main").is_some());
+
+        let info2 = AirTemplateInfo::new("Main", vec![], vec![]);
+        assert!(templates.define("Main", info2).is_err());
+    }
+}

@@ -906,3 +906,15 @@ mod tests {
         );
     }
 }
+
+/// Parse a string to u64, supporting decimal, hex (0x), and binary (0b) prefixes.
+/// Used by the LALRPOP grammar actions.
+pub fn parse_u64(s: &str) -> u64 {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).unwrap_or(0)
+    } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        u64::from_str_radix(bin, 2).unwrap_or(0)
+    } else {
+        s.parse::<u64>().unwrap_or(0)
+    }
+}
