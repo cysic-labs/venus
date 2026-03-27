@@ -7,5 +7,9 @@ pub mod json_output;
 pub mod map;
 pub mod pilout_info;
 pub mod prepare_pil;
+<<<<<<< HEAD
+=======
+pub mod security;
+>>>>>>> worktree-agent-a1212fc7
 pub mod stark_struct;
 pub mod types;
