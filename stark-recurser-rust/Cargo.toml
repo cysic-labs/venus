@@ -1,0 +1,16 @@
+[package]
+name = "stark-recurser-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fields = { workspace = true, features = ["verify"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+anyhow = "1"
+byteorder = "1"
+tracing = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

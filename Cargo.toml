@@ -50,6 +50,7 @@ members = [
     "sdk",
     "ziskbuild",
 	"definitions",
+	"stark-recurser-rust",
 ]
 
 resolver = "2"
