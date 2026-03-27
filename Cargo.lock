@@ -2888,6 +2888,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pil2-compiler-rust"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "indexmap",
+ "prost 0.13.5",
+ "prost-build 0.13.5",
+ "regex",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "pil2-stark-setup"
 version = "0.1.0"
 dependencies = [

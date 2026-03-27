@@ -52,6 +52,7 @@ members = [
 	"definitions",
 	"pil2-stark-setup",
 	"stark-recurser-rust",
+	"pil2-compiler-rust",
 ]
 
 resolver = "2"
