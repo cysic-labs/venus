@@ -42,3 +42,6 @@ reth-inputs/
 /hints
 /benchmark
 pil2-proofman/pil2-stark/lib/
+
+# AI Automation flow
+**/superpowers/*
