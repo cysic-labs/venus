@@ -121,4 +121,6 @@ pub struct CodeRef {
     pub opening: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boundary_id: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub airgroup_id: Option<usize>,
 }
