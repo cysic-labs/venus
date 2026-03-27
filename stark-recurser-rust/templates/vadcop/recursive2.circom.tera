@@ -1,0 +1,77 @@
+pragma circom 2.1.0;
+pragma custom_templates;
+
+include "select_vk.circom";
+include "agg_values.circom";
+include "acc_points.circom";
+
+{% for vf in verifierFilenames %}
+include "{{ vf }}";
+{% endfor %}
+
+template Recursive2() {
+    var rootCBasics[{{ airs_in_airgroup_len }}][4];
+
+{% for vk in basicVK %}
+    rootCBasics[{{ loop.index0 }}] = [{{ vk }}];
+{% endfor %}
+
+{{ define_vadcop_inputs_sv_code }}
+
+{% if vadcopInfo_nPublics > 0 %}
+    signal input publics[{{ vadcopInfo_nPublics }}];
+{% endif %}
+
+{% if vadcopInfo_numProofValues > 0 %}
+    signal input proofValues[{{ vadcopInfo_numProofValues }}][3];
+{% endif %}
+
+    signal input globalChallenge[3];
+
+    signal input rootCAgg[4];
+
+{{ define_vadcop_inputs_a_sv_code }}
+{{ define_stark_inputs_a_code }}
+
+{{ define_vadcop_inputs_b_sv_code }}
+{{ define_stark_inputs_b_code }}
+
+{{ define_vadcop_inputs_c_sv_code }}
+{{ define_stark_inputs_c_code }}
+
+{% if aggTypes_len > 0 %}
+    signal aggregationTypes[{{ aggTypes_len }}];
+    for(var i = 0; i < {{ aggTypes_len }}; i++) {
+        aggregationTypes[i] <== a_sv_aggregationTypes[i];
+        a_sv_aggregationTypes[i] === b_sv_aggregationTypes[i];
+        a_sv_aggregationTypes[i] === c_sv_aggregationTypes[i];
+    }
+{% endif %}
+{{ assign_stark_inputs_vA_code }}
+{{ assign_stark_inputs_vB_code }}
+{{ assign_stark_inputs_vC_code }}
+
+{{ assign_vadcop_inputs_vA_code }}
+{{ assign_vadcop_inputs_vB_code }}
+{{ assign_vadcop_inputs_vC_code }}
+
+{% if is_single_air %}
+    vA.rootC <== SelectVerificationKey({{ airs_in_airgroup_len }})(a_sv_circuitType, rootCBasics, rootCAgg);
+    vB.rootC <== SelectVerificationKey({{ airs_in_airgroup_len }})(b_sv_circuitType, rootCBasics, rootCAgg);
+    vC.rootC <== SelectVerificationKey({{ airs_in_airgroup_len }})(c_sv_circuitType, rootCBasics, rootCAgg);
+{% else %}
+    vA.rootC <== SelectVerificationKeyNull({{ airs_in_airgroup_len }})(a_sv_circuitType, rootCBasics, rootCAgg);
+    vB.rootC <== SelectVerificationKeyNull({{ airs_in_airgroup_len }})(b_sv_circuitType, rootCBasics, rootCAgg);
+    vC.rootC <== SelectVerificationKeyNull({{ airs_in_airgroup_len }})(c_sv_circuitType, rootCBasics, rootCAgg);
+{% endif %}
+
+{{ agg_vadcop_inputs_code }}
+
+    for (var i=0; i<4; i++) {
+        vA.publics[{{ starkInfo_nPublics_minus4 }} + i] <== rootCAgg[i];
+        vB.publics[{{ starkInfo_nPublics_minus4 }} + i] <== rootCAgg[i];
+        vC.publics[{{ starkInfo_nPublics_minus4 }} + i] <== rootCAgg[i];
+    }
+}
+
+component main {public [{{ pubNames | join(sep=", ") }}]} = Recursive2();

@@ -1,0 +1,92 @@
+pragma circom 2.1.0;
+pragma custom_templates;
+
+{% for vf in verifierFilenames %}
+include "{{ vf }}";
+{% endfor %}
+include "iszero.circom";
+include "select_vk.circom";
+include "agg_values.circom";
+
+{{ verify_global_challenge_code }}
+
+{{ verify_global_constraints_code }}
+
+template Final() {
+
+{% if vadcopInfo_nPublics > 0 %}
+    signal input publics[{{ vadcopInfo_nPublics }}];
+{% endif %}
+
+{% if vadcopInfo_numProofValues > 0 %}
+    signal input proofValues[{{ vadcopInfo_numProofValues }}][3];
+{% endif %}
+
+    signal input globalChallenge[3];
+
+{% for ag in airgroups %}
+{{ ag.define_vadcop_inputs_code }}
+{{ ag.define_stark_inputs_code }}
+{% endfor %}
+
+{% for ag in airgroups %}
+{{ ag.assign_stark_inputs_code }}
+{{ ag.assign_vadcop_inputs_code }}
+
+    var s{{ ag.idx }}_sv_rootCAgg[4] = [{{ ag.aggVK }}];
+    var s{{ ag.idx }}_sv_rootCBasics[{{ ag.airs_len }}][4];
+
+{% for bvk in ag.basicVKs %}
+    s{{ ag.idx }}_sv_rootCBasics[{{ loop.index0 }}] = [{{ bvk }}];
+{% endfor %}
+
+{% if is_single_air %}
+    sV{{ ag.idx }}.rootC <== SelectVerificationKey({{ ag.airs_len }})(s{{ ag.idx }}_sv_circuitType, s{{ ag.idx }}_sv_rootCBasics, s{{ ag.idx }}_sv_rootCAgg);
+{% else %}
+    sV{{ ag.idx }}.rootC <== SelectVerificationKeyNull({{ ag.airs_len }})(s{{ ag.idx }}_sv_circuitType, s{{ ag.idx }}_sv_rootCBasics, s{{ ag.idx }}_sv_rootCAgg);
+{% endif %}
+
+    for (var i=0; i<4; i++) {
+        sV{{ ag.idx }}.publics[{{ ag.nPublics_minus4 }} + i] <== s{{ ag.idx }}_sv_rootCAgg[i];
+    }
+{% endfor %}
+
+    // Calculate transcript and check that matches with the global challenges
+    component verifyChallenges = VerifyGlobalChallenges();
+{% if vadcopInfo_nPublics > 0 %}
+    verifyChallenges.publics <== publics;
+{% endif %}
+{% if vadcopInfo_proofValuesMap_len > 0 %}
+    verifyChallenges.proofValues <== proofValues;
+{% endif %}
+{% for ag in airgroups %}
+    verifyChallenges.stage1Hash[{{ ag.idx }}] <== s{{ ag.idx }}_sv_stage1Hash;
+{% endfor %}
+    verifyChallenges.globalChallenge <== globalChallenge;
+
+    // Verify global constraints
+    component verifyGlobalConstraints = VerifyGlobalConstraints();
+{% if vadcopInfo_nPublics > 0 %}
+    verifyGlobalConstraints.publics <== publics;
+{% endif %}
+{% if vadcopInfo_proofValuesMap_len > 0 %}
+    verifyGlobalConstraints.proofValues <== proofValues;
+{% endif %}
+    verifyGlobalConstraints.globalChallenge <== globalChallenge;
+{% for ag in airgroups %}
+{% if ag.aggTypes_len > 0 %}
+    verifyGlobalConstraints.s{{ ag.idx }}_airgroupvalues <== s{{ ag.idx }}_sv_airgroupvalues;
+{% endif %}
+{% endfor %}
+
+    signal {binary} isNull[{{ aggTypes_total_len }}];
+    signal nAggregatedProofs[{{ aggTypes_total_len }}];
+{% for ag in airgroups %}
+    isNull[{{ ag.idx }}] <== IsZero()(s{{ ag.idx }}_sv_circuitType);
+    nAggregatedProofs[{{ ag.idx }}] <== s{{ ag.idx }}_sv_aggregatedProofs;
+{% endfor %}
+    _ <== AggregateProofsNull({{ aggTypes_total_len }})(nAggregatedProofs, isNull);
+
+}
+
+component main {{ main_public_clause }}= Final();

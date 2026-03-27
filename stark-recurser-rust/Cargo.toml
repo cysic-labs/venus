@@ -11,6 +11,7 @@ indexmap = { version = "2", features = ["serde"] }
 anyhow = "1"
 byteorder = "1"
 tracing = { workspace = true }
+tera = "1"
 
 [dev-dependencies]
 rand = { workspace = true }

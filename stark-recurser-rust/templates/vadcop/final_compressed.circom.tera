@@ -1,0 +1,16 @@
+pragma circom 2.1.0;
+pragma custom_templates;
+
+{% for vf in verifierFilenames %}
+include "{{ vf }}";
+{% endfor %}
+
+template FinalCompressed() {
+
+{{ define_stark_inputs_code }}
+
+{{ assign_stark_inputs_code }}
+
+}
+
+component main {public [ publics ]}= FinalCompressed();
