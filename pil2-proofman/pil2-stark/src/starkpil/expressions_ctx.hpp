@@ -50,6 +50,7 @@ struct ExpsArguments
     uint32_t dest_nParams;
 
     bool dest_expr = false;
+    bool dest_independent = false;  // When true, each param stores to its own stagePos
 };
 
 
@@ -90,6 +91,7 @@ struct Dest {
     uint64_t stagePos = 0;
     uint64_t stageCols = 0;
     bool expr = false;
+    bool independent = false;
     uint64_t dim = 1;
     uint64_t domainSize;
     std::vector<Params> params;

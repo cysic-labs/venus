@@ -971,19 +971,34 @@ void proveFRIQueries_inplace(SetupCtx& setupCtx, gl64_t *d_queries_buff, uint64_
 void calculateImPolsExpressions(SetupCtx& setupCtx, ExpressionsGPU* expressionsCtx, StepsParams &h_params, StepsParams *d_params, int64_t step, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams, Goldilocks::Element *pinned_exps_params, Goldilocks::Element *pinned_exps_args, uint64_t& countId, TimerGPU &timer, cudaStream_t stream){
 
     uint64_t domainSize = (1 << setupCtx.starkInfo.starkStruct.nBits);
-    std::vector<Dest> dests;
+    Goldilocks::Element* pAddress = step == 1 ? h_params.trace : h_params.aux_trace;
+    uint64_t offset_aux_trace = setupCtx.starkInfo.mapOffsets[std::make_pair("cm" + to_string(step), false)];
+    uint64_t stageCols = setupCtx.starkInfo.mapSectionsN["cm" + to_string(step)];
+
+    // Batch consecutive imPol expressions in pairs (BATCH_SIZE=2, matching the
+    // existing buffer sizing: dest_nParams=2 is the maximum supported by all
+    // allocation layers in gl64_tooling.cuh, stark_info.cpp, and expressions_gpu.cu).
+    Dest batchDest(NULL, domainSize, 0, stageCols, false);
+    batchDest.dest_gpu = (Goldilocks::Element *)(pAddress + offset_aux_trace);
+    batchDest.independent = true;
+
     for(uint64_t i = 0; i < setupCtx.starkInfo.cmPolsMap.size(); i++) {
         if(setupCtx.starkInfo.cmPolsMap[i].imPol && setupCtx.starkInfo.cmPolsMap[i].stage == step) {
-            Goldilocks::Element* pAddress = step == 1 ? h_params.trace : h_params.aux_trace;
-            Dest destStruct(NULL, domainSize, setupCtx.starkInfo.cmPolsMap[i].stagePos, setupCtx.starkInfo.mapSectionsN["cm" + to_string(step)], false);
-            destStruct.addParams(setupCtx.starkInfo.cmPolsMap[i].expId, setupCtx.starkInfo.cmPolsMap[i].dim, false);
-            uint64_t offset_aux_trace = setupCtx.starkInfo.mapOffsets[std::make_pair("cm" + to_string(step), false)];
-            destStruct.dest_gpu = (Goldilocks::Element *)(pAddress + offset_aux_trace);
-            countId++;
-            expressionsCtx->calculateExpressions_gpu(d_params, destStruct, domainSize, false, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
+            batchDest.addParams(setupCtx.starkInfo.cmPolsMap[i].expId, setupCtx.starkInfo.cmPolsMap[i].dim, false);
+            batchDest.params.back().stagePos = setupCtx.starkInfo.cmPolsMap[i].stagePos;
+
+            if (batchDest.params.size() >= 2) {
+                countId++;
+                expressionsCtx->calculateExpressions_gpu(d_params, batchDest, domainSize, false, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
+                batchDest.params.clear();
+            }
         }
     }
-        
+    // Flush remaining (0 or 1 expression)
+    if (!batchDest.params.empty()) {
+        countId++;
+        expressionsCtx->calculateExpressions_gpu(d_params, batchDest, domainSize, false, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
+    }
 }
 
 void calculateExpressionQ(SetupCtx& setupCtx, ExpressionsGPU* expressionsCtx, StepsParams *d_params, Goldilocks::Element* dest_gpu, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams, Goldilocks::Element *pinned_exps_params, Goldilocks::Element *pinned_exps_args, uint64_t& countId, TimerGPU& timer, cudaStream_t stream){
