@@ -12,6 +12,7 @@
 
 use crate::codegen::{build_code, pil_code_gen, CalcEntry, CodeGenCtx, EvMapRef};
 use crate::expression::Expression;
+use crate::fri_poly::{self, ChallengeMapEntry};
 use crate::helpers::{add_info_expressions, add_info_expressions_symbols, EvMapItem};
 use crate::pilout_info::{
     ConstraintInfo, HintFieldValue, HintInfo, SymbolInfo, FIELD_EXTENSION,
@@ -105,6 +106,12 @@ pub struct ExpressionsInfo {
 pub struct PilCodeResult {
     pub expressions_info: ExpressionsInfo,
     pub verifier_info: VerifierInfo,
+    /// The evaluation map built during verifier code generation.
+    pub ev_map: Vec<EvMapRef>,
+    /// The FRI polynomial expression ID (may differ from c_exp_id).
+    pub fri_exp_id: usize,
+    /// Updated challenges map (with FRI challenges appended).
+    pub challenges_map: Vec<ChallengeMapEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,16 +141,17 @@ pub struct CodeGenParams {
 ///
 /// Mirrors JS `generatePilCode(res, symbols, constraints, expressions, hints, debug)`.
 pub fn generate_pil_code(
-    params: &CodeGenParams,
-    symbols: &[SymbolInfo],
+    params: &mut CodeGenParams,
+    symbols: &mut Vec<SymbolInfo>,
     constraints: &[ConstraintInfo],
     expressions: &mut Vec<Expression>,
     hints: &[HintInfo],
     debug: bool,
 ) -> PilCodeResult {
     let mut ev_map_items: Vec<EvMapRef> = Vec::new();
+    let mut challenges_map: Vec<ChallengeMapEntry> = Vec::new();
 
-    // In non-debug mode: generate verifier code and FRI polynomial info
+    // In non-debug mode: generate verifier code, then FRI polynomial
     let q_verifier = if !debug {
         let qv = generate_constraint_polynomial_verifier_code(
             params,
@@ -151,6 +159,27 @@ pub fn generate_pil_code(
             expressions,
             &mut ev_map_items,
         );
+
+        // Generate FRI polynomial (mirrors JS: generateFRIPolynomial(res, symbols, expressions))
+        let ev_map_for_fri: Vec<EvMapItem> = ev_map_items.iter().map(|e| {
+            EvMapItem {
+                entry_type: e.entry_type.clone(),
+                id: e.id,
+                prime: e.prime,
+                commit_id: e.commit_id,
+            }
+        }).collect();
+
+        let fri_result = fri_poly::generate_fri_polynomial(
+            params.n_stages,
+            expressions,
+            symbols,
+            &ev_map_for_fri,
+            &params.opening_points,
+            &mut challenges_map,
+        );
+        params.fri_exp_id = fri_result.fri_exp_id;
+
         add_info_expressions(expressions, params.fri_exp_id);
         qv
     } else {
@@ -196,6 +225,8 @@ pub fn generate_pil_code(
 
     let constraints_code = generate_constraints_debug_code(params, symbols, constraints, expressions);
 
+    let fri_exp_id = params.fri_exp_id;
+
     PilCodeResult {
         expressions_info: ExpressionsInfo {
             hints_info,
@@ -206,6 +237,9 @@ pub fn generate_pil_code(
             q_verifier,
             query_verifier,
         },
+        ev_map: ev_map_items,
+        fri_exp_id,
+        challenges_map,
     }
 }
 
@@ -613,10 +647,11 @@ fn process_single_hint_field(
     match expr.op.as_str() {
         "exp" => {
             let ref_id = expr.id.unwrap_or(0);
+            let dim = expressions.get(ref_id).map_or(expr.dim.max(1), |e| e.dim);
             ProcessedHintField {
                 op: "tmp".to_string(),
                 id: Some(ref_id),
-                dim: Some(expressions[ref_id].dim),
+                dim: Some(dim),
                 pos: pos.to_vec(),
                 stage: None,
                 stage_id: None,

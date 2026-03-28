@@ -1067,14 +1067,13 @@ pub fn get_pilout_info(
             .unwrap_or(0)
     };
 
-    // Filter hints for this air
+    // Filter hints for this air (strict match, same as JS)
     let air_hints: Vec<pb::Hint> = pilout
         .hints
         .iter()
         .filter(|h| {
-            h.air_id.is_none()
-                || (h.air_id == Some(air_id as u32)
-                    && h.air_group_id == Some(airgroup_id as u32))
+            h.air_id == Some(air_id as u32)
+                && h.air_group_id == Some(airgroup_id as u32)
         })
         .cloned()
         .collect();

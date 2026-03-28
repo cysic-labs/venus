@@ -38,7 +38,8 @@ pub struct CodeGenCtx {
     /// calculated[expId][prime] -> CalcEntry
     pub calculated: HashMap<usize, HashMap<i64, CalcEntry>>,
     /// Used by `build_code` to resolve expression refs to temporaries.
-    exp_map: Vec<HashMap<usize, usize>>,
+    /// Keyed by prime (can be negative, e.g. -1) then by expression id.
+    exp_map: HashMap<i64, HashMap<usize, usize>>,
 }
 
 /// An entry in the evaluation map built during verifier code generation.
@@ -73,7 +74,7 @@ impl CodeGenCtx {
             tmp_used: 0,
             code: Vec::new(),
             calculated: HashMap::new(),
-            exp_map: Vec::new(),
+            exp_map: HashMap::new(),
         }
     }
 }
@@ -138,7 +139,7 @@ pub fn pil_code_gen(
         tmp_used: ctx.tmp_used,
         code: Vec::new(),
         calculated: ctx.calculated.clone(),
-        exp_map: Vec::new(),
+        exp_map: HashMap::new(),
     };
 
     let ret_ref = eval_exp(&mut code_ctx, symbols, expressions, e, prime);
@@ -487,18 +488,17 @@ fn fix_eval(r: &mut CodeRef, ctx: &CodeGenCtx, _symbols: &[SymbolInfo]) {
 /// Resolve an expression reference to a temporary id in `build_code`.
 fn fix_expression(r: &mut CodeRef, ctx: &mut CodeGenCtx) {
     let prime = r.prime.unwrap_or(0);
-    let prime_idx = prime as usize;
-
-    // Ensure exp_map has enough entries
-    while ctx.exp_map.len() <= prime_idx {
-        ctx.exp_map.push(HashMap::new());
-    }
-
-    let entry = ctx.exp_map[prime_idx].entry(r.id).or_insert_with(|| {
-        let id = ctx.tmp_used;
-        ctx.tmp_used += 1;
-        id
-    });
+    // Use a HashMap keyed by prime instead of a Vec indexed by usize, since
+    // prime can be negative (e.g. opening point -1).
+    let entry = ctx.exp_map
+        .entry(prime)
+        .or_default()
+        .entry(r.id)
+        .or_insert_with(|| {
+            let id = ctx.tmp_used;
+            ctx.tmp_used += 1;
+            id
+        });
 
     r.ref_type = "tmp".to_string();
     r.id = *entry;

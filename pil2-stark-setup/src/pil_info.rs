@@ -23,6 +23,10 @@ pub struct PilInfoResult {
     pub prover_memory: String,
     /// Intermediate polynomial info: (base_field, extended_field) expression strings.
     pub im_pols_info: (Vec<String>, Vec<String>),
+    /// Constraint polynomial expression ID.
+    pub c_exp_id: usize,
+    /// FRI polynomial expression ID (distinct from c_exp_id).
+    pub fri_exp_id: usize,
 }
 
 /// Main entry point: assemble pil info for a single air.
@@ -47,7 +51,7 @@ pub fn pil_info(
     let mut expressions = result.expressions;
     let mut constraints = result.constraints;
     let mut symbols = result.symbols;
-    let _hints = result.hints;
+    let hints = result.hints;
     let boundaries = result.boundaries;
     let constraint_poly = result.constraint_poly;
 
@@ -115,13 +119,13 @@ pub fn pil_info(
 
     // Build code-gen params
     let n_stages = setup.n_stages;
-    let fri_exp_id = c_exp_id; // FRI expression is the final cExp after imPol additions
-    let params = CodeGenParams {
+    // fri_exp_id will be updated by generate_pil_code after FRI polynomial generation
+    let mut params = CodeGenParams {
         air_id,
         airgroup_id,
         n_stages,
         c_exp_id,
-        fri_exp_id,
+        fri_exp_id: c_exp_id, // placeholder; will be overwritten
         q_deg: q_deg as usize,
         q_dim: q_dim_final,
         opening_points: opening_points.clone(),
@@ -129,9 +133,12 @@ pub fn pil_info(
         custom_commits_count: setup.custom_commits.len(),
     };
 
+    // Store hints back into setup for generate_pil_code
+    setup.hints = hints;
+
     let pil_code = generate_pil_code::generate_pil_code(
-        &params,
-        &setup.symbols,
+        &mut params,
+        &mut setup.symbols,
         &setup.constraints,
         &mut setup.expressions,
         &setup.hints,
@@ -244,6 +251,7 @@ pub fn pil_info(
     println!("------------------------------------------------------------");
 
     let im_pols_info = setup.im_pols_info.clone();
+    let fri_exp_id = pil_code.fri_exp_id;
 
     PilInfoResult {
         setup,
@@ -251,6 +259,8 @@ pub fn pil_info(
         summary,
         prover_memory: prover_memory_str,
         im_pols_info,
+        c_exp_id,
+        fri_exp_id,
     }
 }
 

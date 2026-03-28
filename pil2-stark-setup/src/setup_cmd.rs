@@ -5,7 +5,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
+// IndexMap used in some helper functions below
+#[allow(unused_imports)]
 use indexmap::IndexMap;
 use pilout::pilout as pb;
 use prost::Message;
@@ -18,8 +20,9 @@ use crate::prepare_pil::PrepareOptions;
 use crate::security::{self, FRISecurityParams};
 use crate::stark_struct::{generate_stark_struct, StarkSettings, StarkStruct};
 use crate::types::{
-    BoundaryOutput, EvMapEntry, PolMapEntry, SecurityInfo,
-    StarkInfoOutput, StarkStructOutput, StepOutput,
+    BoundaryOutput, ChallengeMapEntryOutput, EvMapEntry, NameStageEntry,
+    PolMapEntry, PublicMapEntry, SecurityInfo, StarkInfoOutput,
+    StarkStructOutput, StepOutput,
 };
 
 /// Setup options parsed from CLI args.
@@ -127,11 +130,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             let pil_code = &pil_result.pil_code;
 
             // Compute FRI security params
-            let ev_map_len = pil_code
-                .verifier_info
-                .q_verifier
-                .code
-                .len(); // approximate nFunctions
+            let ev_map_len = pil_code.ev_map.len();
             let folding_factors = compute_folding_factors(&stark_struct);
             let opening_points = collect_opening_points(setup_result);
 
@@ -155,11 +154,14 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             let starkinfo_output = build_starkinfo_output(
                 setup_result,
                 &stark_struct,
-                &pil_code,
+                pil_code,
                 &opening_points,
                 &fri_security,
                 ag_idx,
                 air_idx,
+                &air_name,
+                pil_result.c_exp_id,
+                pil_result.fri_exp_id,
             );
 
             // Write starkinfo.json
@@ -634,11 +636,14 @@ fn resolve_path_env(env_var: &str, fallback: &str) -> String {
 pub fn build_starkinfo_output(
     setup: &crate::pilout_info::SetupResult,
     stark_struct: &StarkStruct,
-    _pil_code: &crate::generate_pil_code::PilCodeResult,
+    pil_code: &crate::generate_pil_code::PilCodeResult,
     opening_points: &[i64],
     fri_security: &security::FRIQueryResult,
     airgroup_id: usize,
     air_id: usize,
+    air_name: &str,
+    c_exp_id: usize,
+    fri_exp_id: usize,
 ) -> StarkInfoOutput {
     let steps: Vec<StepOutput> = stark_struct
         .steps
@@ -648,14 +653,20 @@ pub fn build_starkinfo_output(
 
     let stark_struct_out = StarkStructOutput {
         n_bits: stark_struct.n_bits,
-        n_bits_ext: stark_struct.n_bits_ext,
-        n_queries: fri_security.n_queries as usize,
-        pow_bits: fri_security.n_grinding_bits as usize,
         merkle_tree_arity: stark_struct.merkle_tree_arity,
+        transcript_arity: stark_struct.transcript_arity,
         merkle_tree_custom: stark_struct.merkle_tree_custom,
+        last_level_verification: if stark_struct.last_level_verification > 0 {
+            Some(stark_struct.last_level_verification)
+        } else {
+            None
+        },
+        pow_bits: fri_security.n_grinding_bits as usize,
         hash_commits: stark_struct.hash_commits,
+        n_bits_ext: stark_struct.n_bits_ext,
         verification_hash_type: stark_struct.verification_hash_type.clone(),
         steps,
+        n_queries: fri_security.n_queries as usize,
     };
 
     let boundaries: Vec<BoundaryOutput> = {
@@ -683,8 +694,18 @@ pub fn build_starkinfo_output(
         result
     };
 
-    // Build evMap from verifier code
-    let ev_map: Vec<EvMapEntry> = Vec::new();
+    // Build evMap from verifier code context
+    let ev_map: Vec<EvMapEntry> = pil_code
+        .ev_map
+        .iter()
+        .map(|e| EvMapEntry {
+            entry_type: e.entry_type.clone(),
+            id: e.id,
+            prime: e.prime,
+            opening_pos: e.opening_pos,
+            commit_id: e.commit_id,
+        })
+        .collect();
 
     let n_stages = setup.n_stages;
 
@@ -693,14 +714,19 @@ pub fn build_starkinfo_output(
         .cm_pols_map
         .iter()
         .enumerate()
-        .map(|(i, p)| PolMapEntry {
-            stage: p.stage.unwrap_or(0),
-            name: p.name.clone(),
-            dim: p.dim,
-            pols_map_id: i,
-            stage_id: p.stage_id.unwrap_or(0),
-            stage_pos: p.stage_pos.unwrap_or(0),
-            im_pol: if p.im_pol { Some(true) } else { None },
+        .map(|(i, p)| {
+            let entry = PolMapEntry {
+                stage: p.stage.unwrap_or(0),
+                name: p.name.clone(),
+                dim: p.dim,
+                pols_map_id: i,
+                stage_id: p.stage_id.unwrap_or(0),
+                lengths: p.lengths.clone(),
+                stage_pos: Some(p.stage_pos.unwrap_or(0)),
+                im_pol: if p.im_pol { Some(true) } else { None },
+                exp_id: if p.im_pol { p.exp_id } else { None },
+            };
+            entry
         })
         .collect();
 
@@ -714,19 +740,17 @@ pub fn build_starkinfo_output(
             dim: p.dim,
             pols_map_id: i,
             stage_id: p.stage_id.unwrap_or(0),
-            stage_pos: p.stage_pos.unwrap_or(0),
+            lengths: None,
+            stage_pos: None, // constPolsMap entries don't have stagePos in golden
             im_pol: None,
+            exp_id: None,
         })
         .collect();
 
-    let map_sections_n: IndexMap<String, usize> = setup.map_sections_n.clone();
-
-    // Compute mapOffsets
-    let mut map_offsets = IndexMap::new();
-    let mut offset = 0usize;
-    for (key, &val) in &map_sections_n {
-        map_offsets.insert(key.clone(), offset);
-        offset += val;
+    // Build mapSectionsN as a serde_json::Map to preserve order
+    let mut map_sections_n = serde_json::Map::new();
+    for (key, &val) in &setup.map_sections_n {
+        map_sections_n.insert(key.clone(), json!(val));
     }
 
     // Build custom commits JSON
@@ -741,28 +765,132 @@ pub fn build_starkinfo_output(
         })
         .collect();
 
+    // Build custom commits map
+    let custom_commits_map: Vec<serde_json::Value> = Vec::new();
+
+    // Build challengesMap from setup + FRI challenges.
+    // Start from setup.challenges_map (may have default-filled gaps).
+    let mut challenges_map: Vec<ChallengeMapEntryOutput> = setup
+        .challenges_map
+        .iter()
+        .map(|s| ChallengeMapEntryOutput {
+            name: s.name.clone(),
+            stage: s.stage.unwrap_or(0),
+            dim: s.dim,
+            stage_id: s.stage_id.unwrap_or(0),
+        })
+        .collect();
+    // Merge FRI challenges (std_vf1, std_vf2) by index position.
+    // pil_code.challenges_map is indexed by challenge id; overwrite by name.
+    for (i, ch) in pil_code.challenges_map.iter().enumerate() {
+        if ch.name.is_empty() {
+            continue;
+        }
+        let entry = ChallengeMapEntryOutput {
+            name: ch.name.clone(),
+            stage: ch.stage,
+            dim: ch.dim,
+            stage_id: ch.stage_id,
+        };
+        // Ensure the map is long enough
+        while challenges_map.len() <= i {
+            challenges_map.push(ChallengeMapEntryOutput::default());
+        }
+        challenges_map[i] = entry;
+    }
+    // Remove trailing empty entries
+    while challenges_map.last().map_or(false, |e| e.name.is_empty()) {
+        challenges_map.pop();
+    }
+    // Also remove any interior empty entries (they shouldn't exist in golden)
+    challenges_map.retain(|e| !e.name.is_empty());
+
+    // Build publicsMap
+    let publics_map: Vec<PublicMapEntry> = setup
+        .publics_map
+        .iter()
+        .map(|s| PublicMapEntry {
+            name: s.name.clone(),
+            stage: s.stage.unwrap_or(0),
+            lengths: s.lengths.clone(),
+        })
+        .collect();
+
+    // Build proofValuesMap
+    let proof_values_map: Vec<NameStageEntry> = setup
+        .proof_values_map
+        .iter()
+        .map(|s| NameStageEntry {
+            name: s.name.clone(),
+            stage: s.stage.unwrap_or(0),
+            lengths: s.lengths.clone(),
+        })
+        .collect();
+
+    // Build airgroupValuesMap
+    let airgroup_values_map: Vec<NameStageEntry> = setup
+        .airgroup_values_map
+        .iter()
+        .map(|s| NameStageEntry {
+            name: s.name.clone(),
+            stage: s.stage.unwrap_or(0),
+            lengths: s.lengths.clone(),
+        })
+        .collect();
+
+    // Build airValuesMap
+    let air_values_map: Vec<NameStageEntry> = setup
+        .air_values_map
+        .iter()
+        .map(|s| NameStageEntry {
+            name: s.name.clone(),
+            stage: s.stage.unwrap_or(0),
+            lengths: s.lengths.clone(),
+        })
+        .collect();
+
+    // Build airGroupValues
+    let air_group_values: Vec<serde_json::Value> = setup
+        .air_group_values
+        .iter()
+        .map(|v| json!({"aggType": v.agg_type, "stage": v.stage}))
+        .collect();
+
+    // nCommitmentsStage1: in JS this compares stage === "cm1" (number vs string),
+    // which always evaluates to 0. Golden confirms nCommitmentsStage1=0.
+    let n_commitments_stage1 = 0;
+
     let q_stage_key = format!("cm{}", n_stages + 1);
-    let q_cols = *map_sections_n.get(&q_stage_key).unwrap_or(&0);
+    let q_cols = setup.map_sections_n.get(&q_stage_key).copied().unwrap_or(0);
 
     StarkInfoOutput {
-        stark_struct: stark_struct_out,
-        n_stages,
-        n_constants: setup.n_constants,
-        n_publics: setup.n_publics,
-        n_constraints: setup.constraints.len(),
-        opening_points: opening_points.to_vec(),
-        boundaries,
-        ev_map,
+        name: air_name.to_string(),
         cm_pols_map,
         const_pols_map,
+        challenges_map,
+        publics_map,
+        proof_values_map,
+        airgroup_values_map,
+        air_values_map,
         map_sections_n,
-        map_offsets,
-        q_deg: q_cols.max(1),
-        q_dim: crate::pilout_info::FIELD_EXTENSION,
-        c_exp_id: 0,
         air_id,
         airgroup_id,
+        n_constants: setup.n_constants,
+        n_publics: setup.n_publics,
+        air_group_values,
+        n_stages,
         custom_commits: custom_commits_json,
+        custom_commits_map,
+        stark_struct: stark_struct_out,
+        boundaries,
+        opening_points: opening_points.to_vec(),
+        c_exp_id,
+        q_dim: crate::pilout_info::FIELD_EXTENSION,
+        q_deg: q_cols.max(1),
+        n_constraints: setup.constraints.len(),
+        n_commitments_stage1,
+        ev_map,
+        fri_exp_id,
         security: Some(SecurityInfo {
             proximity_gap: fri_security.proximity_gap,
             proximity_parameter: fri_security.proximity_parameter,
@@ -898,11 +1026,12 @@ pub fn build_expressions_info_json(
         })
         .collect();
 
-    json!({
-        "expressionsCode": expressions_code,
-        "constraints": constraints,
-        "hintsInfo": hints_info,
-    })
+    // Build with explicit ordering matching golden: hintsInfo, expressionsCode, constraints
+    let mut result = serde_json::Map::new();
+    result.insert("hintsInfo".to_string(), serde_json::Value::Array(hints_info));
+    result.insert("expressionsCode".to_string(), serde_json::Value::Array(expressions_code));
+    result.insert("constraints".to_string(), serde_json::Value::Array(constraints));
+    serde_json::Value::Object(result)
 }
 
 /// Build the verifierinfo JSON structure.

@@ -272,6 +272,9 @@ pub fn gen_compressed_final_setup(
     let starkinfo_output = crate::setup_cmd::build_starkinfo_output(
         &pil_info_result.setup, &compressed_stark_struct, &pil_info_result.pil_code,
         &opening_points, &fri_security, 0, 0,
+        "compressed_final",
+        pil_info_result.c_exp_id,
+        pil_info_result.fri_exp_id,
     );
     let verifier_info_json = crate::setup_cmd::build_verifier_info_json(&pil_info_result.pil_code.verifier_info);
     let expressions_info_json = crate::setup_cmd::build_expressions_info_json(&pil_info_result.pil_code.expressions_info);

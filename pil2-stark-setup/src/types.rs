@@ -1,29 +1,38 @@
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Matches the starkinfo.json format read by proofman-common StarkInfo.
 /// Fields use camelCase to match JS JSON.stringify output.
+/// Field order matches the golden reference exactly.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StarkInfoOutput {
-    pub stark_struct: StarkStructOutput,
-    pub n_stages: usize,
-    pub n_constants: usize,
-    pub n_publics: usize,
-    pub n_constraints: usize,
-    pub opening_points: Vec<i64>,
-    pub boundaries: Vec<BoundaryOutput>,
-    pub ev_map: Vec<EvMapEntry>,
+    pub name: String,
     pub cm_pols_map: Vec<PolMapEntry>,
     pub const_pols_map: Vec<PolMapEntry>,
-    pub map_sections_n: IndexMap<String, usize>,
-    pub map_offsets: IndexMap<String, usize>,
-    pub q_deg: usize,
-    pub q_dim: usize,
-    pub c_exp_id: usize,
+    pub challenges_map: Vec<ChallengeMapEntryOutput>,
+    pub publics_map: Vec<PublicMapEntry>,
+    pub proof_values_map: Vec<NameStageEntry>,
+    pub airgroup_values_map: Vec<NameStageEntry>,
+    pub air_values_map: Vec<NameStageEntry>,
+    pub map_sections_n: serde_json::Map<String, serde_json::Value>,
     pub air_id: usize,
     pub airgroup_id: usize,
+    pub n_constants: usize,
+    pub n_publics: usize,
+    pub air_group_values: Vec<serde_json::Value>,
+    pub n_stages: usize,
     pub custom_commits: Vec<serde_json::Value>,
+    pub custom_commits_map: Vec<serde_json::Value>,
+    pub stark_struct: StarkStructOutput,
+    pub boundaries: Vec<BoundaryOutput>,
+    pub opening_points: Vec<i64>,
+    pub c_exp_id: usize,
+    pub q_dim: usize,
+    pub q_deg: usize,
+    pub n_constraints: usize,
+    pub n_commitments_stage1: usize,
+    pub ev_map: Vec<EvMapEntry>,
+    pub fri_exp_id: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security: Option<SecurityInfo>,
 }
@@ -32,14 +41,17 @@ pub struct StarkInfoOutput {
 #[serde(rename_all = "camelCase")]
 pub struct StarkStructOutput {
     pub n_bits: usize,
-    pub n_bits_ext: usize,
-    pub n_queries: usize,
-    pub pow_bits: usize,
     pub merkle_tree_arity: usize,
+    pub transcript_arity: usize,
     pub merkle_tree_custom: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_level_verification: Option<usize>,
+    pub pow_bits: usize,
     pub hash_commits: bool,
+    pub n_bits_ext: usize,
     pub verification_hash_type: String,
     pub steps: Vec<StepOutput>,
+    pub n_queries: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +75,7 @@ pub struct EvMapEntry {
     #[serde(rename = "type")]
     pub entry_type: String,
     pub id: usize,
+    pub prime: i64,
     pub opening_pos: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_id: Option<usize>,
@@ -76,10 +89,43 @@ pub struct PolMapEntry {
     pub dim: usize,
     pub pols_map_id: usize,
     pub stage_id: usize,
-    pub stage_pos: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lengths: Option<Vec<usize>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_pos: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "imPol")]
     pub im_pol: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exp_id: Option<usize>,
+}
+
+/// Challenge map entry as in the golden reference.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallengeMapEntryOutput {
+    pub name: String,
+    pub stage: usize,
+    pub dim: usize,
+    pub stage_id: usize,
+}
+
+/// Public/proofvalue/airgroupvalue/airvalue map entry.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PublicMapEntry {
+    pub name: String,
+    pub stage: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lengths: Option<Vec<usize>>,
+}
+
+/// Simple name+stage entry for proofValuesMap, airgroupValuesMap, airValuesMap.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NameStageEntry {
+    pub name: String,
+    pub stage: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lengths: Option<Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
