@@ -210,11 +210,11 @@ fn get_operation(r: &CodeOperation, verify: bool) -> (String, u64, Vec<CodeType>
 
     let mut srcs = r.src.clone();
 
-    // copy operations have only 1 source - no swapping needed
+    // copy operations have only 1 source - use same dim for both lookup keys
     if srcs.len() < 2 {
-        let op_a_key = if !srcs.is_empty() { get_type_key(&srcs[0], verify) } else { String::new() };
-        let src_dim = if !srcs.is_empty() { dim_str(srcs[0].dim) } else { "dim1".to_string() };
-        return (op, 0, srcs, op_a_key, src_dim);
+        let src0_dim = if !srcs.is_empty() { dim_str(srcs[0].dim) } else { "dim1".to_string() };
+        let src1_dim = src0_dim.clone();
+        return (op, 0, srcs, src0_dim, src1_dim);
     }
 
     let op_a_key = get_type_key(&srcs[0], verify);
