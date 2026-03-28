@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use super::expression::Value;
+use super::references::Reference;
 
 /// Configuration for a compilation run.
 #[derive(Debug, Clone, Default)]
@@ -48,8 +49,9 @@ pub struct Scope {
 enum ShadowEntry {
     /// Variable was freshly declared; on pop, remove it.
     New,
-    /// Variable shadowed an existing binding; on pop, restore this.
-    Shadowed(Value),
+    /// Variable shadowed an existing binding; on pop, restore the
+    /// full Reference so that the references table is properly unwound.
+    Shadowed(Reference),
 }
 
 impl Scope {
@@ -91,8 +93,8 @@ impl Scope {
     }
 
     /// Pop the current scope level, returning names that should be unset
-    /// and names with their restore values.
-    pub fn pop(&mut self) -> (Vec<String>, Vec<(String, Value)>) {
+    /// and names with their saved References to restore.
+    pub fn pop(&mut self) -> (Vec<String>, Vec<(String, Reference)>) {
         let mut to_unset = Vec::new();
         let mut to_restore = Vec::new();
 
@@ -100,8 +102,8 @@ impl Scope {
             for (name, entry) in shadow_map.iter() {
                 match entry {
                     ShadowEntry::New => to_unset.push(name.clone()),
-                    ShadowEntry::Shadowed(val) => {
-                        to_restore.push((name.clone(), val.clone()));
+                    ShadowEntry::Shadowed(reference) => {
+                        to_restore.push((name.clone(), reference.clone()));
                     }
                 }
             }
@@ -116,11 +118,11 @@ impl Scope {
     }
 
     /// Record that `name` was declared at the current scope depth.
-    /// If `previous` is Some, it means there was an existing binding
-    /// that needs restoring on scope exit.
-    pub fn declare(&mut self, name: &str, previous: Option<Value>) {
+    /// If `previous` is Some, it means there was an existing Reference
+    /// binding that needs restoring on scope exit.
+    pub fn declare(&mut self, name: &str, previous: Option<Reference>) {
         let entry = match previous {
-            Some(val) => ShadowEntry::Shadowed(val),
+            Some(reference) => ShadowEntry::Shadowed(reference),
             None => ShadowEntry::New,
         };
         if let Some(shadow_map) = self.shadows.get_mut(self.deep as usize) {
@@ -137,7 +139,7 @@ impl Scope {
     }
 
     /// Pop the current instance type, restoring the previous one.
-    pub fn pop_instance_type(&mut self) -> (Vec<String>, Vec<(String, Value)>) {
+    pub fn pop_instance_type(&mut self) -> (Vec<String>, Vec<(String, Reference)>) {
         let result = self.pop();
         if let Some(prev) = self.instance_type_stack.pop() {
             self.instance_type = prev;
@@ -251,14 +253,27 @@ mod tests {
 
     #[test]
     fn test_scope_shadow_restore() {
+        use super::super::references::RefType;
         let mut scope = Scope::new();
         scope.push();
-        scope.declare("x", Some(Value::Int(42)));
+        let old_ref = Reference {
+            name: "x".to_string(),
+            ref_type: RefType::Int,
+            is_const: false,
+            id: 42,
+            scope_id: 0,
+            array_dims: Vec::new(),
+            source_ref: String::new(),
+            is_reference: false,
+            label: "x".to_string(),
+            is_static: false,
+        };
+        scope.declare("x", Some(old_ref));
         let (unset, restore) = scope.pop();
         assert!(unset.is_empty());
         assert_eq!(restore.len(), 1);
         assert_eq!(restore[0].0, "x");
-        assert_eq!(restore[0].1, Value::Int(42));
+        assert_eq!(restore[0].1.id, 42);
     }
 
     #[test]

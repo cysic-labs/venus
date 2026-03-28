@@ -9,12 +9,10 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use crate::processor::air::AirGroups;
-use crate::processor::constraints::{ConstraintEntry, Constraints};
 use crate::processor::expression::{ColRefKind, RuntimeExpr, RuntimeOp, RuntimeUnaryOp, Value};
 use crate::processor::fixed_cols::FixedCols;
 use crate::processor::ids::IdAllocator;
-use crate::processor::references::{RefType, Reference, References};
+use crate::processor::references::{RefType, Reference};
 use crate::processor::Processor;
 
 /// Generated protobuf types from pilout.proto.
@@ -107,11 +105,11 @@ impl<'a> ProtoOutBuilder<'a> {
         // Number of public values.
         let num_public_values = self.processor.publics.len();
 
-        // Build global expressions.
-        let expressions = self.build_global_expressions();
+        // Build global expressions (flattened) and the index mapping.
+        let (expressions, expr_id_map) = self.build_global_expressions();
 
-        // Build global constraints.
-        let constraints = self.build_global_constraints();
+        // Build global constraints using the remapped expression indices.
+        let constraints = self.build_global_constraints(&expr_id_map);
 
         // Build symbols.
         let symbols = self.build_symbols();
@@ -185,23 +183,40 @@ impl<'a> ProtoOutBuilder<'a> {
     }
 
     /// Build global expressions from the processor's global constraints.
-    fn build_global_expressions(&self) -> Vec<pilout_proto::GlobalExpression> {
+    ///
+    /// Expression trees are flattened into a linear array: nested
+    /// sub-expressions are emitted first and referenced by index from
+    /// their parent expression via `GlobalOperand::Expression { idx }`.
+    ///
+    /// Returns (flattened_expressions, mapping) where mapping[i] is the
+    /// flattened index of the original expression store entry i.
+    fn build_global_expressions(
+        &self,
+    ) -> (Vec<pilout_proto::GlobalExpression>, Vec<u32>) {
         let mut result = Vec::new();
+        let mut id_map = Vec::new();
         for expr in self.processor.global_constraints.all_expressions() {
-            if let Some(ge) = self.runtime_expr_to_global_expression(expr) {
-                result.push(ge);
-            }
+            let idx = self.flatten_expr_to_global(expr, &mut result);
+            id_map.push(idx);
         }
-        result
+        (result, id_map)
     }
 
-    /// Build global constraints.
-    fn build_global_constraints(&self) -> Vec<pilout_proto::GlobalConstraint> {
+    /// Build global constraints, remapping expression indices to the
+    /// flattened expression array.
+    fn build_global_constraints(
+        &self,
+        expr_id_map: &[u32],
+    ) -> Vec<pilout_proto::GlobalConstraint> {
         let mut result = Vec::new();
         for entry in self.processor.global_constraints.iter() {
+            let mapped_idx = expr_id_map
+                .get(entry.expr_id as usize)
+                .copied()
+                .unwrap_or(entry.expr_id);
             let gc = pilout_proto::GlobalConstraint {
                 expression_idx: Some(pilout_proto::global_operand::Expression {
-                    idx: entry.expr_id,
+                    idx: mapped_idx,
                 }),
                 debug_line: Some(entry.source_ref.clone()),
             };
@@ -328,15 +343,20 @@ impl<'a> ProtoOutBuilder<'a> {
         })
     }
 
-    /// Convert a RuntimeExpr to a global protobuf expression.
-    fn runtime_expr_to_global_expression(
+    /// Flatten a RuntimeExpr tree into the global expressions array.
+    ///
+    /// Returns the index of the newly appended expression within `out`.
+    /// Sub-expressions (nested BinOp / UnaryOp) are recursively
+    /// flattened first so their indices are available as operands.
+    fn flatten_expr_to_global(
         &self,
         expr: &RuntimeExpr,
-    ) -> Option<pilout_proto::GlobalExpression> {
+        out: &mut Vec<pilout_proto::GlobalExpression>,
+    ) -> u32 {
         let op = match expr {
             RuntimeExpr::BinOp { op, left, right } => {
-                let lhs = self.runtime_expr_to_global_operand(left);
-                let rhs = self.runtime_expr_to_global_operand(right);
+                let lhs = self.flatten_operand_to_global(left, out);
+                let rhs = self.flatten_operand_to_global(right, out);
                 match op {
                     RuntimeOp::Add => {
                         pilout_proto::global_expression::Operation::Add(
@@ -357,22 +377,59 @@ impl<'a> ProtoOutBuilder<'a> {
             }
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
-                    let value = self.runtime_expr_to_global_operand(operand);
+                    let value = self.flatten_operand_to_global(operand, out);
                     pilout_proto::global_expression::Operation::Neg(
                         pilout_proto::global_expression::Neg { value },
                     )
                 }
             },
-            _ => return None,
+            // Leaf nodes (Value, ColRef) are not top-level expressions on
+            // their own; wrap them in a trivial Add(x, 0) so they still get
+            // an expression slot.
+            _ => {
+                let leaf = self.leaf_to_global_operand(expr);
+                let zero = Some(pilout_proto::GlobalOperand {
+                    operand: Some(pilout_proto::global_operand::Operand::Constant(
+                        pilout_proto::global_operand::Constant { value: Vec::new() },
+                    )),
+                });
+                pilout_proto::global_expression::Operation::Add(
+                    pilout_proto::global_expression::Add { lhs: leaf, rhs: zero },
+                )
+            }
         };
 
-        Some(pilout_proto::GlobalExpression {
+        let idx = out.len() as u32;
+        out.push(pilout_proto::GlobalExpression {
             operation: Some(op),
-        })
+        });
+        idx
     }
 
-    /// Convert a RuntimeExpr to a global operand.
-    fn runtime_expr_to_global_operand(
+    /// Convert a RuntimeExpr to a global operand, flattening nested
+    /// sub-expressions into `out` and referencing them by index.
+    fn flatten_operand_to_global(
+        &self,
+        expr: &RuntimeExpr,
+        out: &mut Vec<pilout_proto::GlobalExpression>,
+    ) -> Option<pilout_proto::GlobalOperand> {
+        match expr {
+            // Nested expression: flatten recursively and reference by index.
+            RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
+                let idx = self.flatten_expr_to_global(expr, out);
+                Some(pilout_proto::GlobalOperand {
+                    operand: Some(pilout_proto::global_operand::Operand::Expression(
+                        pilout_proto::global_operand::Expression { idx },
+                    )),
+                })
+            }
+            // Leaf: delegate to non-recursive conversion.
+            _ => self.leaf_to_global_operand(expr),
+        }
+    }
+
+    /// Convert a leaf RuntimeExpr (Value or ColRef) to a global operand.
+    fn leaf_to_global_operand(
         &self,
         expr: &RuntimeExpr,
     ) -> Option<pilout_proto::GlobalOperand> {
@@ -423,16 +480,9 @@ impl<'a> ProtoOutBuilder<'a> {
                 }
                 _ => return None,
             },
-            // Recursive expression reference: wrap in an Expression operand.
-            RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
-                // For nested expressions, we would need an expression index.
-                // This simplified version emits a constant zero placeholder.
-                pilout_proto::global_operand::Operand::Constant(
-                    pilout_proto::global_operand::Constant {
-                        value: Vec::new(),
-                    },
-                )
-            }
+            // BinOp/UnaryOp should not reach here; handled by
+            // flatten_operand_to_global above.
+            _ => return None,
         };
 
         Some(pilout_proto::GlobalOperand {

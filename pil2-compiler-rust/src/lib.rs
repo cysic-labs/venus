@@ -103,25 +103,11 @@ pub fn compile(options: &CompileOptions) -> anyhow::Result<()> {
     // Write protobuf output.
     proto_out::write_pilout(&processor, &output_path)?;
 
-    // If fixed-to-file is enabled, write fixed column binary files.
-    if options.fixed_to_file {
-        if let Some(ref output_dir) = options.output_dir {
-            eprintln!("  > Writing fixed columns to {}", output_dir);
-            // The processor's fixed_cols are per-air, but after execution
-            // the final state holds the last air's data. For a complete
-            // implementation, we would iterate all airs. For now, write
-            // what's available.
-            let num_rows = 1u64; // placeholder; actual rows come from air context
-            proto_out::write_fixed_cols_to_file(
-                &processor.fixed_cols,
-                num_rows,
-                output_dir,
-                0,
-                0,
-            )?;
-        } else {
-            eprintln!("  > Warning: fixed-to-file requested but no output directory specified (-u)");
-        }
+    // Fixed column binary files are written per-AIR during execution
+    // (inside the processor) when fixed_to_file is enabled, using each
+    // AIR's real row count. No post-execution write is needed here.
+    if options.fixed_to_file && options.output_dir.is_none() {
+        eprintln!("  > Warning: fixed-to-file requested but no output directory specified (-u)");
     }
 
     eprintln!("  > Compilation complete: {}", output_path);

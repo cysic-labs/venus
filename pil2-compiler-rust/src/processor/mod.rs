@@ -400,15 +400,16 @@ impl Processor {
     }
 
     /// Apply scope cleanup after a pop: unset removed vars, restore shadows.
-    fn apply_scope_cleanup(&mut self, to_unset: &[String], to_restore: &[(String, Value)]) {
+    fn apply_scope_cleanup(
+        &mut self,
+        to_unset: &[String],
+        to_restore: &[(String, Reference)],
+    ) {
         for name in to_unset {
             self.references.unset(name);
         }
-        for (name, _val) in to_restore {
-            // Restore is complex in the full implementation (needs the
-            // full Reference, not just the Value). For now we note it.
-            // Full implementation would save/restore References on push/pop.
-            let _ = name;
+        for (name, reference) in to_restore {
+            self.references.restore(name, reference.clone());
         }
     }
 
@@ -537,6 +538,8 @@ impl Processor {
                 }
             };
 
+            // Check for an existing binding to save for scope restore.
+            let previous = self.references.get_reference(name).cloned();
             self.references.declare(
                 name,
                 ref_type,
@@ -546,6 +549,8 @@ impl Processor {
                 self.scope.deep,
                 &self.source_ref,
             );
+            // Record in scope so that pop() can unset or restore.
+            self.scope.declare(name, previous);
         }
         FlowSignal::None
     }
@@ -1067,6 +1072,7 @@ impl Processor {
                 _ => 0,
             };
 
+            let previous = self.references.get_reference(&arg_def.name).cloned();
             self.references.declare(
                 &arg_def.name,
                 ref_type,
@@ -1076,6 +1082,7 @@ impl Processor {
                 self.scope.deep,
                 &self.source_ref,
             );
+            self.scope.declare(&arg_def.name, previous);
         }
 
         // Execute body.
@@ -1589,6 +1596,23 @@ impl Processor {
         eprintln!("  > Witness cols: {}", witness_count);
         eprintln!("  > Fixed cols: {}", fixed_count);
         eprintln!("  > Constraints: {}", constraint_count);
+
+        // Write fixed columns to binary file before clearing.
+        if self.config.fixed_to_file {
+            if let Some(ref output_dir) = self.config.output_dir.clone() {
+                if let Some(air) = self.air_stack.last() {
+                    if let Err(e) = crate::proto_out::write_fixed_cols_to_file(
+                        &self.fixed_cols,
+                        air.rows,
+                        output_dir,
+                        air.air_group_id,
+                        air.id,
+                    ) {
+                        eprintln!("  > Warning: failed to write fixed cols: {}", e);
+                    }
+                }
+            }
+        }
 
         // Clean up air scope.
         self.constraints.clear();
