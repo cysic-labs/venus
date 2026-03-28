@@ -104,8 +104,11 @@ pub fn compute_const_tree(
         root[2].as_canonical_u64(),
         root[3].as_canonical_u64(),
     ];
-    let verkey_json = serde_json::to_string_pretty(&root_u64)
-        .context("Failed to serialize verkey")?;
+    // Format verkey.json matching the legacy C++ bctree format: 4-space indent
+    let verkey_json = format!(
+        "[\n    {},\n    {},\n    {},\n    {}\n]",
+        root_u64[0], root_u64[1], root_u64[2], root_u64[3]
+    );
     fs::write(verkey_path, &verkey_json)
         .with_context(|| format!("Failed to write verkey file: {verkey_path}"))?;
 

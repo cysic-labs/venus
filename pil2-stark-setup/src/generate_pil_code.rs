@@ -799,7 +799,7 @@ mod tests {
     fn test_generate_expressions_code_basic() {
         // Build a minimal expression set:
         // [0] = number("1"), [1] = cm(0), [2] = add(0,1) with keep=true
-        let expressions = vec![
+        let mut expressions = vec![
             make_number("1"),
             make_cm(0, 1),
             {
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn test_add_hints_info_basic() {
-        let expressions = vec![
+        let mut expressions = vec![
             make_number("5"),
             make_cm(0, 1),
         ];
@@ -853,7 +853,7 @@ mod tests {
             }],
         }];
 
-        let result = add_hints_info(&params, &expressions, &hints, false);
+        let result = add_hints_info(&params, &mut expressions, &hints, false, None);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "test_hint");
         assert_eq!(result[0].fields.len(), 1);
@@ -864,7 +864,7 @@ mod tests {
 
     #[test]
     fn test_constraints_debug_code() {
-        let expressions = vec![
+        let mut expressions = vec![
             make_number("1"),
             make_cm(0, 1),
             make_add(0, 1),
@@ -901,7 +901,7 @@ mod tests {
 
     #[test]
     fn test_process_hint_field_nested() {
-        let expressions = vec![make_number("1")];
+        let mut expressions = vec![make_number("1")];
         let params = make_params();
 
         let values = vec![HintFieldValue::Array(vec![
@@ -919,7 +919,7 @@ mod tests {
             }),
         ])];
 
-        let result = process_hint_field_values(&values, &params, &expressions, &[]);
+        let result = process_hint_field_values(&values, &params, &mut expressions, &[], None);
         // Should flatten to 2 entries
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].pos, vec![0, 0]);
