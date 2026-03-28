@@ -18,6 +18,7 @@ pub mod map;
 pub mod ntt;
 pub mod parser_args;
 pub mod pil_info;
+pub mod print_expression;
 pub mod pilout_info;
 pub mod prepare_pil;
 pub mod recursive_setup;

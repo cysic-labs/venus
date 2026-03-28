@@ -13,7 +13,6 @@ use pilout::pilout as pb;
 use prost::Message;
 use serde_json::json;
 
-use crate::bctree;
 use crate::json_output;
 use crate::pil_info;
 use crate::prepare_pil::PrepareOptions;
@@ -197,21 +196,30 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             let verkey_json_path = files_dir.join(format!("{}.verkey.json", air_name));
             if const_path.exists() {
                 tracing::info!("Computing Constant Tree...");
-                let const_root = bctree::compute_const_tree(
+                match run_bctree_binary(
                     const_path.to_str().unwrap_or(""),
                     starkinfo_path.to_str().unwrap_or(""),
                     verkey_json_path.to_str().unwrap_or(""),
-                )?;
-
-                // Write verkey.bin from the returned root values
-                let mut verkey_bin = Vec::with_capacity(32);
-                for &val in const_root.iter() {
-                    verkey_bin.extend_from_slice(&val.to_le_bytes());
+                ) {
+                    Ok(const_root) => {
+                        // Write verkey.bin from the returned root values
+                        let mut verkey_bin = Vec::with_capacity(32);
+                        for &val in const_root.iter() {
+                            verkey_bin.extend_from_slice(&val.to_le_bytes());
+                        }
+                        fs::write(
+                            files_dir.join(format!("{}.verkey.bin", air_name)),
+                            &verkey_bin,
+                        )?;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "bctree failed for air '{}': {:#}. \
+                             Skipping verkey generation.",
+                            air_name, e
+                        );
+                    }
                 }
-                fs::write(
-                    files_dir.join(format!("{}.verkey.bin", air_name)),
-                    &verkey_bin,
-                )?;
             } else {
                 tracing::warn!(
                     "Skipping bctree: const file not found at {}",
@@ -744,17 +752,20 @@ pub fn build_starkinfo_output(
             } else {
                 // Regular: stageId first
                 obj.insert("stageId".to_string(), json!(p.stage_id.unwrap_or(0)));
-                // Then lengths (if present), before stagePos
+                // Then lengths (if present)
                 if let Some(ref lengths) = p.lengths {
                     obj.insert("lengths".to_string(), json!(lengths));
                 }
-                obj.insert("stagePos".to_string(), json!(p.stage_pos.unwrap_or(0)));
-            }
-            if p.im_pol {
-                obj.insert("imPol".to_string(), json!(true));
-                if let Some(eid) = p.exp_id {
-                    obj.insert("expId".to_string(), json!(eid));
+                // imPol and expId come before stagePos (matches JS insertion
+                // order: addPol sets imPol/expId, then setStageInfoSymbols
+                // appends stagePos)
+                if p.im_pol {
+                    obj.insert("imPol".to_string(), json!(true));
+                    if let Some(eid) = p.exp_id {
+                        obj.insert("expId".to_string(), json!(eid));
+                    }
                 }
+                obj.insert("stagePos".to_string(), json!(p.stage_pos.unwrap_or(0)));
             }
             serde_json::Value::Object(obj)
         })
@@ -973,9 +984,7 @@ pub fn build_expressions_info_json(
                     }),
                 );
             }
-            if !e.line.is_empty() {
-                obj.insert("line".to_string(), json!(e.line));
-            }
+            obj.insert("line".to_string(), json!(e.line));
             serde_json::Value::Object(obj)
         })
         .collect();
@@ -1116,11 +1125,29 @@ fn hint_value_to_json(v: &crate::generate_pil_code::ProcessedHintField) -> serde
             }
             obj.insert("pos".to_string(), json!(v.pos));
         }
-        _ => {
-            // challenge, public, airgroupvalue, airvalue, proofvalue
-            // Golden: {"op":"<op>","id":<id>,"dim":<d>,"stage":<s>,[stageId,][airgroupId,]"pos":[...]}
+        "challenge" => {
+            // JS: { op: "challenge", stage, stageId, id } + pos
+            if let Some(stage) = v.stage {
+                obj.insert("stage".to_string(), json!(stage));
+            }
+            if let Some(sid) = v.stage_id {
+                obj.insert("stageId".to_string(), json!(sid));
+            }
             if let Some(id) = v.id {
                 obj.insert("id".to_string(), json!(id));
+            }
+            if let Some(dim) = v.dim {
+                obj.insert("dim".to_string(), json!(dim));
+            }
+            obj.insert("pos".to_string(), json!(v.pos));
+        }
+        "airgroupvalue" => {
+            // JS: { op: "airgroupvalue", id, airgroupId, dim, stage } + pos
+            if let Some(id) = v.id {
+                obj.insert("id".to_string(), json!(id));
+            }
+            if let Some(agid) = v.airgroup_id {
+                obj.insert("airgroupId".to_string(), json!(agid));
             }
             if let Some(dim) = v.dim {
                 obj.insert("dim".to_string(), json!(dim));
@@ -1128,11 +1155,20 @@ fn hint_value_to_json(v: &crate::generate_pil_code::ProcessedHintField) -> serde
             if let Some(stage) = v.stage {
                 obj.insert("stage".to_string(), json!(stage));
             }
-            if let Some(sid) = v.stage_id {
-                obj.insert("stageId".to_string(), json!(sid));
+            obj.insert("pos".to_string(), json!(v.pos));
+        }
+        _ => {
+            // airvalue, proofvalue, public
+            // JS airvalue/proofvalue: { op, id, stage, dim } + pos
+            // JS public: { op, id, stage } + pos
+            if let Some(id) = v.id {
+                obj.insert("id".to_string(), json!(id));
             }
-            if let Some(agid) = v.airgroup_id {
-                obj.insert("airgroupId".to_string(), json!(agid));
+            if let Some(stage) = v.stage {
+                obj.insert("stage".to_string(), json!(stage));
+            }
+            if let Some(dim) = v.dim {
+                obj.insert("dim".to_string(), json!(dim));
             }
             obj.insert("pos".to_string(), json!(v.pos));
         }
@@ -1196,6 +1232,12 @@ pub fn code_ref_to_json(r: &crate::types::CodeRef) -> serde_json::Value {
             obj.insert("dim".to_string(), json!(r.dim));
         }
         "cm" | "const" | "custom" => {
+            // For ImPol cm refs, expId comes before id (matching JS object
+            // property insertion order from evalExp where r starts as
+            // {type: "exp", expId, id, ...} then fixCommitPol changes type/id)
+            if let Some(eid) = r.exp_id {
+                obj.insert("expId".to_string(), json!(eid));
+            }
             obj.insert("id".to_string(), json!(r.id));
             obj.insert("prime".to_string(), json!(r.prime.unwrap_or(0)));
             obj.insert("dim".to_string(), json!(r.dim));
@@ -1220,7 +1262,16 @@ pub fn code_ref_to_json(r: &crate::types::CodeRef) -> serde_json::Value {
                 obj.insert("stage".to_string(), json!(stage));
             }
         }
-        "eval" | "public" => {
+        "eval" => {
+            // eval refs may carry an expId from the original exp ref
+            // (through fixCommitPol -> fixEval, expId survives)
+            if let Some(eid) = r.exp_id {
+                obj.insert("expId".to_string(), json!(eid));
+            }
+            obj.insert("id".to_string(), json!(r.id));
+            obj.insert("dim".to_string(), json!(r.dim));
+        }
+        "public" => {
             obj.insert("id".to_string(), json!(r.id));
             obj.insert("dim".to_string(), json!(r.dim));
         }
@@ -1393,5 +1444,86 @@ fn write_bin_files_native(
 fn log2_usize(n: usize) -> usize {
     assert!(n > 0, "log2_usize: n must be positive");
     (usize::BITS - 1 - n.leading_zeros()) as usize
+}
+
+/// Run the C++ bctree binary as a subprocess to compute the constant tree.
+///
+/// Uses the pre-built binary at `pil2-proofman-js/src/setup/build/bctree`.
+/// This ensures verkey parity with the golden reference which was generated
+/// by the same C++ code.
+fn run_bctree_binary(
+    const_path: &str,
+    starkinfo_path: &str,
+    verkey_path: &str,
+) -> Result<[u64; 4]> {
+    // Resolve bctree binary path relative to the cargo manifest dir,
+    // or fall back to a path relative to the current executable.
+    let bctree_path = resolve_bctree_path();
+
+    tracing::info!("Running bctree binary: {}", bctree_path);
+
+    let output = std::process::Command::new(&bctree_path)
+        .arg("-c").arg(const_path)
+        .arg("-s").arg(starkinfo_path)
+        .arg("-v").arg(verkey_path)
+        .output()
+        .map_err(|e| anyhow::anyhow!(
+            "Failed to execute bctree binary '{}': {}. \
+             Make sure the C++ bctree binary exists.",
+            bctree_path, e
+        ))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        anyhow::bail!(
+            "bctree binary failed (exit code {:?}):\nstdout: {}\nstderr: {}",
+            output.status.code(),
+            stdout,
+            stderr
+        );
+    }
+
+    // Parse verkey.json to get root
+    let verkey_content = fs::read_to_string(verkey_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read verkey after bctree: {}", e))?;
+    let verkey_values: Vec<serde_json::Value> = serde_json::from_str(&verkey_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse verkey JSON: {}", e))?;
+
+    let root: [u64; 4] = [
+        verkey_values.get(0).and_then(|v| v.as_u64()).unwrap_or(0),
+        verkey_values.get(1).and_then(|v| v.as_u64()).unwrap_or(0),
+        verkey_values.get(2).and_then(|v| v.as_u64()).unwrap_or(0),
+        verkey_values.get(3).and_then(|v| v.as_u64()).unwrap_or(0),
+    ];
+
+    tracing::info!("Verkey root: {:?}", root);
+    Ok(root)
+}
+
+/// Resolve the path to the C++ bctree binary.
+fn resolve_bctree_path() -> String {
+    // Try relative to the workspace root (assumes running from repo root)
+    let candidates = [
+        "pil2-proofman-js/src/setup/build/bctree",
+        "../pil2-proofman-js/src/setup/build/bctree",
+    ];
+    for candidate in &candidates {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    // Try using CARGO_MANIFEST_DIR
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let p = PathBuf::from(&manifest_dir)
+            .parent()
+            .map(|p| p.join("pil2-proofman-js/src/setup/build/bctree"))
+            .unwrap_or_default();
+        if p.exists() {
+            return p.to_string_lossy().to_string();
+        }
+    }
+    // Fall back to the default path
+    "pil2-proofman-js/src/setup/build/bctree".to_string()
 }
 

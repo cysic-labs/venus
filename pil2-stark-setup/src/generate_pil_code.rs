@@ -17,6 +17,7 @@ use crate::helpers::{add_info_expressions, add_info_expressions_symbols, EvMapIt
 use crate::pilout_info::{
     ConstraintInfo, HintFieldValue, HintInfo, SymbolInfo, FIELD_EXTENSION,
 };
+use crate::print_expression::{self, PrintCtx};
 use crate::types::CodeRef;
 
 // ---------------------------------------------------------------------------
@@ -147,6 +148,7 @@ pub fn generate_pil_code(
     expressions: &mut Vec<Expression>,
     hints: &[HintInfo],
     debug: bool,
+    print_ctx: Option<&PrintCtx>,
 ) -> PilCodeResult {
     let mut ev_map_items: Vec<EvMapRef> = Vec::new();
     let mut challenges_map: Vec<ChallengeMapEntry> = Vec::new();
@@ -193,22 +195,26 @@ pub fn generate_pil_code(
         }
     };
 
-    let hints_info = add_hints_info(params, expressions, hints, false);
+    let hints_info = add_hints_info(params, expressions, hints, false, print_ctx);
 
-    let expressions_code = generate_expressions_code(params, symbols, expressions);
+    let mut expressions_code = generate_expressions_code(params, symbols, expressions);
 
-    // Build query_verifier from the FRI expression code entry
-    let query_verifier = {
-        let mut qv = expressions_code
-            .iter()
-            .find(|e| e.exp_id == params.fri_exp_id)
-            .cloned()
-            .expect("FRI expression code not found");
-        // Overwrite last dest to be a tmp with FIELD_EXTENSION dim
-        if let Some(last) = qv.code.last_mut() {
+    // Build query_verifier from the FRI expression code entry.
+    // In JS, `find` returns a reference, so modifying the found element also
+    // modifies the `expressionsCode` array. We replicate this by modifying
+    // the entry in-place in `expressions_code` first, then cloning.
+    let fri_entry_idx = expressions_code
+        .iter()
+        .position(|e| e.exp_id == params.fri_exp_id)
+        .expect("FRI expression code not found");
+
+    // Overwrite last dest to be a tmp with FIELD_EXTENSION dim (in-place)
+    {
+        let fri_entry = &mut expressions_code[fri_entry_idx];
+        if let Some(last) = fri_entry.code.last_mut() {
             last.dest = CodeRef {
                 ref_type: "tmp".to_string(),
-                id: qv.tmp_used - 1,
+                id: fri_entry.tmp_used - 1,
                 dim: FIELD_EXTENSION,
                 prime: None,
                 value: None,
@@ -221,8 +227,9 @@ pub fn generate_pil_code(
                 exp_id: None,
             };
         }
-        qv
-    };
+    }
+
+    let query_verifier = expressions_code[fri_entry_idx].clone();
 
     let constraints_code = generate_constraints_debug_code(params, symbols, constraints, expressions);
 
@@ -362,13 +369,18 @@ fn generate_expressions_code(
         // clamping stages beyond nStages+1 (the Q stage) to 0.
         let entry_stage = if exp.stage > params.n_stages + 1 { 0 } else { exp.stage };
 
+        // Copy the cached line from the expression (set by printExpressions
+        // during hint processing or map phase), or empty string.
+        // Mirrors JS: `expInfo.line = exp.line || ""`
+        let line = exp.line.clone().unwrap_or_default();
+
         result.push(ExpressionCodeEntry {
             tmp_used: block.tmp_used,
             code: block.code,
             exp_id: j,
             stage: entry_stage,
             dest: expr_dest,
-            line: String::new(),
+            line,
         });
     }
 
@@ -577,9 +589,10 @@ fn type_sort_key(entry_type: &str, commit_id: Option<usize>, _custom_count: usiz
 /// Mirrors JS `addHintsInfo(res, expressions, hints, global)`.
 fn add_hints_info(
     params: &CodeGenParams,
-    expressions: &[Expression],
+    expressions: &mut Vec<Expression>,
     hints: &[HintInfo],
     _global: bool,
+    print_ctx: Option<&PrintCtx>,
 ) -> Vec<ProcessedHint> {
     let mut result = Vec::new();
 
@@ -592,6 +605,7 @@ fn add_hints_info(
                 params,
                 expressions,
                 &[],
+                print_ctx,
             );
 
             let mut entry = ProcessedHintFieldEntry {
@@ -622,8 +636,9 @@ fn add_hints_info(
 fn process_hint_field_values(
     values: &[HintFieldValue],
     params: &CodeGenParams,
-    expressions: &[Expression],
+    expressions: &mut Vec<Expression>,
     pos: &[usize],
+    print_ctx: Option<&PrintCtx>,
 ) -> Vec<ProcessedHintField> {
     let mut result = Vec::new();
 
@@ -633,11 +648,11 @@ fn process_hint_field_values(
 
         match field {
             HintFieldValue::Array(arr) => {
-                let inner = process_hint_field_values(arr, params, expressions, &current_pos);
+                let inner = process_hint_field_values(arr, params, expressions, &current_pos, print_ctx);
                 result.extend(inner);
             }
             HintFieldValue::Single(expr) => {
-                let processed = process_single_hint_field(expr, params, expressions, &current_pos);
+                let processed = process_single_hint_field(expr, params, expressions, &current_pos, print_ctx);
                 result.push(processed);
             }
         }
@@ -650,13 +665,23 @@ fn process_hint_field_values(
 fn process_single_hint_field(
     expr: &Expression,
     params: &CodeGenParams,
-    expressions: &[Expression],
+    expressions: &mut Vec<Expression>,
     pos: &[usize],
+    print_ctx: Option<&PrintCtx>,
 ) -> ProcessedHintField {
     match expr.op.as_str() {
         "exp" => {
             let ref_id = expr.id.unwrap_or(0);
             let dim = expressions.get(ref_id).map_or(expr.dim.max(1), |e| e.dim);
+
+            // Set the line on the expression (mirrors JS:
+            // expressions[field.id].line = printExpressions(...))
+            if let Some(ctx) = print_ctx {
+                if ref_id < expressions.len() {
+                    print_expression::print_expression(ctx, expressions, ref_id, false);
+                }
+            }
+
             ProcessedHintField {
                 op: "tmp".to_string(),
                 id: Some(ref_id),

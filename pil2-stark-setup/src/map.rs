@@ -1,4 +1,5 @@
 use crate::pilout_info::{SetupResult, SymbolInfo};
+use crate::print_expression::{self, PrintCtx};
 
 // ---------------------------------------------------------------------------
 // map_symbols
@@ -206,21 +207,53 @@ pub fn map(res: &mut SetupResult, recursion: bool) {
 
     let im_pol_marker = format!("{}.ImPol", res.name);
 
-    // Mark imPol constraints and append " == 0" to lines
-    for c in res.constraints.iter_mut() {
-        if c.line.as_deref() == Some(&im_pol_marker) {
-            c.im_pol = true;
-            if !recursion {
-                // In non-recursion mode, the line would be filled by printExpressions;
-                // we keep whatever line is already set (or empty).
-                if c.line.is_none() {
-                    c.line = Some(String::new());
-                }
-            } else {
-                c.line = Some(String::new());
+    // Collect constraint indices that are ImPol, along with their expression IDs
+    let im_pol_constraints: Vec<(usize, usize)> = res.constraints.iter().enumerate()
+        .filter(|(_, c)| c.line.as_deref() == Some(&im_pol_marker))
+        .map(|(i, c)| (i, c.e))
+        .collect();
+
+    // Mark imPol constraints
+    for &(ci, _) in &im_pol_constraints {
+        res.constraints[ci].im_pol = true;
+    }
+
+    // Use printExpressions for ImPol constraint lines in non-recursion mode.
+    // We temporarily take expressions out to allow mutable access while also
+    // reading the maps.
+    if !recursion && !im_pol_constraints.is_empty() {
+        let mut expressions = std::mem::take(&mut res.expressions);
+        {
+            let ctx = PrintCtx {
+                cm_pols_map: &res.cm_pols_map,
+                const_pols_map: &res.const_pols_map,
+                custom_commits_map: &res.custom_commits_map,
+                publics_map: &res.publics_map,
+                challenges_map: &res.challenges_map,
+                air_values_map: &res.air_values_map,
+                airgroup_values_map: &res.airgroup_values_map,
+                proof_values_map: &res.proof_values_map,
+            };
+            for &(ci, exp_id) in &im_pol_constraints {
+                let line = print_expression::print_expression_no_cache(
+                    &ctx,
+                    &mut expressions,
+                    exp_id,
+                    true,
+                );
+                res.constraints[ci].line = Some(line);
             }
         }
-        // Append " == 0" to the constraint line
+        res.expressions = expressions;
+    } else {
+        // In recursion mode or no ImPol constraints, set empty lines
+        for &(ci, _) in &im_pol_constraints {
+            res.constraints[ci].line = Some(String::new());
+        }
+    }
+
+    // Append " == 0" to ALL constraint lines
+    for c in res.constraints.iter_mut() {
         if let Some(ref mut line) = c.line {
             line.push_str(" == 0");
         } else {
@@ -228,25 +261,53 @@ pub fn map(res: &mut SetupResult, recursion: bool) {
         }
     }
 
-    // Build imPolsInfo: collect intermediate polynomial expression strings
+    // Build imPolsInfo: collect intermediate polynomial expression strings.
+    // Use printExpressions for imPol expression strings.
     let mut base_field_info: Vec<String> = Vec::new();
     let mut extended_field_info: Vec<String> = Vec::new();
 
-    let im_pols: Vec<&SymbolInfo> = res
+    let im_pols: Vec<(usize, usize)> = res
         .cm_pols_map
         .iter()
-        .filter(|p| p.name.ends_with(".ImPol"))
+        .filter(|p| p.im_pol)
+        .map(|p| (p.dim, p.exp_id.unwrap_or(0)))
         .collect();
 
-    if !recursion {
-        for im_pol in &im_pols {
-            // The expression string representation would come from printExpressions
-            // in JS. For our Rust port, we store the expression ID reference.
-            let im_pol_expr = String::new();
-            if im_pol.dim == 1 {
-                base_field_info.push(im_pol_expr);
+    if !recursion && !im_pols.is_empty() {
+        let mut expressions = std::mem::take(&mut res.expressions);
+        {
+            let ctx = PrintCtx {
+                cm_pols_map: &res.cm_pols_map,
+                const_pols_map: &res.const_pols_map,
+                custom_commits_map: &res.custom_commits_map,
+                publics_map: &res.publics_map,
+                challenges_map: &res.challenges_map,
+                air_values_map: &res.air_values_map,
+                airgroup_values_map: &res.airgroup_values_map,
+                proof_values_map: &res.proof_values_map,
+            };
+            for &(dim, exp_id) in &im_pols {
+                let im_pol_expr = print_expression::print_expression_no_cache(
+                    &ctx,
+                    &mut expressions,
+                    exp_id,
+                    false,
+                );
+                if dim == 1 {
+                    base_field_info.push(im_pol_expr);
+                } else {
+                    extended_field_info.push(im_pol_expr);
+                }
+            }
+        }
+        res.expressions = expressions;
+    } else if !recursion {
+        // No imPols but not recursion
+        for &(dim, _) in &im_pols {
+            if dim == 1 {
+                base_field_info.push(String::new());
             } else {
-                extended_field_info.push(im_pol_expr);
+                extended_field_info.push(String::new());
             }
         }
     }

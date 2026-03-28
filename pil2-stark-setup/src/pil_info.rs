@@ -11,6 +11,7 @@ use crate::im_polynomials::{add_im_polynomials, calculate_intermediate_polynomia
 use crate::map;
 use crate::pilout_info::{SetupResult, FIELD_EXTENSION};
 use crate::prepare_pil::{prepare_pil, PrepareOptions};
+use crate::print_expression::PrintCtx;
 use crate::stark_struct::StarkStruct;
 
 /// The assembled pil info result returned by `pil_info`.
@@ -138,14 +139,34 @@ pub fn pil_info(
     // Store hints back into setup for generate_pil_code
     setup.hints = hints;
 
+    // Temporarily take out mutable fields to allow PrintCtx to borrow map fields
+    let mut expressions = std::mem::take(&mut setup.expressions);
+    let mut symbols = std::mem::take(&mut setup.symbols);
+
+    let print_ctx = PrintCtx {
+        cm_pols_map: &setup.cm_pols_map,
+        const_pols_map: &setup.const_pols_map,
+        custom_commits_map: &setup.custom_commits_map,
+        publics_map: &setup.publics_map,
+        challenges_map: &setup.challenges_map,
+        air_values_map: &setup.air_values_map,
+        airgroup_values_map: &setup.airgroup_values_map,
+        proof_values_map: &setup.proof_values_map,
+    };
+
     let pil_code = generate_pil_code::generate_pil_code(
         &mut params,
-        &mut setup.symbols,
+        &mut symbols,
         &setup.constraints,
-        &mut setup.expressions,
+        &mut expressions,
         &setup.hints,
         options.debug,
+        Some(&print_ctx),
     );
+
+    // Put expressions and symbols back
+    setup.expressions = expressions;
+    setup.symbols = symbols;
 
     // Print AIR info summary
     let mut summary = String::new();

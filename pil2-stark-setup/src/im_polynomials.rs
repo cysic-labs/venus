@@ -501,6 +501,8 @@ pub fn add_im_polynomials(
             dim: exp_dim,
             air_id: Some(air_id),
             airgroup_id: Some(airgroup_id),
+            im_pol: true,
+            exp_id: Some(exp_id),
             ..Default::default()
         });
 

@@ -65,6 +65,10 @@ pub struct Expression {
     /// True once `add_info_expressions` has fully processed this node.
     /// Mirrors the JS pattern `if("expDeg" in exp) return;`.
     pub info_computed: bool,
+    /// Cached pretty-printed representation of this expression.
+    /// Set by `print_expression` and used by `generateExpressionsCode`.
+    /// Mirrors the JS pattern where `exp.line` is set lazily.
+    pub line: Option<String>,
 }
 
 impl Default for Expression {
@@ -89,6 +93,7 @@ impl Default for Expression {
             pol_id: None,
             keep: None,
             info_computed: false,
+            line: None,
         }
     }
 }
