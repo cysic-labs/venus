@@ -218,6 +218,7 @@ pub fn generate_pil_code(
                 opening: None,
                 boundary_id: None,
                 airgroup_id: None,
+                exp_id: None,
             };
         }
         qv
@@ -331,6 +332,7 @@ fn generate_expressions_code(
                     opening: None,
                     boundary_id: None,
                     airgroup_id: None,
+                    exp_id: None,
                 };
             }
         }
@@ -349,15 +351,22 @@ fn generate_expressions_code(
                     opening: None,
                     boundary_id: None,
                     airgroup_id: None,
+                    exp_id: None,
                 };
             }
         }
+
+        // Match JS `expInfo.stage = exp.stage || 0`:
+        // In JS, the FRI expression ends up with stage=NaN (due to eval/xDivXSubXi
+        // nodes lacking a stage property), and NaN||0 gives 0.  Replicate this by
+        // clamping stages beyond nStages+1 (the Q stage) to 0.
+        let entry_stage = if exp.stage > params.n_stages + 1 { 0 } else { exp.stage };
 
         result.push(ExpressionCodeEntry {
             tmp_used: block.tmp_used,
             code: block.code,
             exp_id: j,
-            stage: if exp.stage == 0 { 0 } else { exp.stage },
+            stage: entry_stage,
             dest: expr_dest,
             line: String::new(),
         });

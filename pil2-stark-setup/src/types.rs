@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct StarkInfoOutput {
     pub name: String,
-    pub cm_pols_map: Vec<PolMapEntry>,
+    /// cmPolsMap entries are JSON values (not PolMapEntry structs) because
+    /// the golden reference requires different field orders for Q-stage
+    /// entries vs regular entries.
+    pub cm_pols_map: Vec<serde_json::Value>,
     pub const_pols_map: Vec<PolMapEntry>,
     pub challenges_map: Vec<ChallengeMapEntryOutput>,
     pub publics_map: Vec<PublicMapEntry>,
@@ -173,4 +176,8 @@ pub struct CodeRef {
     pub boundary_id: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub airgroup_id: Option<usize>,
+    /// Original expression id, preserved when an `exp` ref is converted to
+    /// `tmp` via fixExpression (matches JS `expId` property).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exp_id: Option<usize>,
 }

@@ -77,12 +77,19 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
 
             tracing::info!("Computing setup for air '{}'", air_name);
 
-            // Resolve settings for this air
-            let air_settings = settings_map
-                .get(&air_name)
-                .or_else(|| settings_map.get("default"))
-                .cloned()
-                .unwrap_or_default();
+            // Resolve settings for this air.
+            // Match JS setup_cmd behavior: default powBits to 16 when not set.
+            let air_settings = {
+                let mut s = settings_map
+                    .get(&air_name)
+                    .or_else(|| settings_map.get("default"))
+                    .cloned()
+                    .unwrap_or_default();
+                if s.pow_bits.is_none() {
+                    s.pow_bits = Some(16);
+                }
+                s
+            };
 
             // Generate stark struct
             let stark_struct = if let Some(ref _existing) = None::<StarkStruct> {
@@ -711,24 +718,45 @@ pub fn build_starkinfo_output(
 
     let n_stages = setup.n_stages;
 
-    // Build cmPolsMap as flat array matching golden schema
-    let cm_pols_map: Vec<PolMapEntry> = setup
+    // Build cmPolsMap as flat array matching golden schema.
+    // Field order differs between Q-stage entries and regular entries.
+    // JS map.js builds objects in this order:
+    //   setSymbolSections: {stage, name, dim, polsMapId, [stageId], [lengths], [imPol, expId]}
+    //   setStageInfoSymbols: adds stagePos, then stageId if not already set
+    // Result for regular entries: stage, name, dim, polsMapId, stageId, [lengths], stagePos, [imPol, expId]
+    // Result for Q-stage entries: stage, name, dim, polsMapId, stagePos, stageId
+    let q_stage = n_stages + 1;
+    let cm_pols_map: Vec<serde_json::Value> = setup
         .cm_pols_map
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let entry = PolMapEntry {
-                stage: p.stage.unwrap_or(0),
-                name: p.name.clone(),
-                dim: p.dim,
-                pols_map_id: i,
-                stage_id: p.stage_id.unwrap_or(0),
-                lengths: p.lengths.clone(),
-                stage_pos: Some(p.stage_pos.unwrap_or(0)),
-                im_pol: if p.im_pol { Some(true) } else { None },
-                exp_id: if p.im_pol { p.exp_id } else { None },
-            };
-            entry
+            let stage = p.stage.unwrap_or(0);
+            let mut obj = serde_json::Map::new();
+            obj.insert("stage".to_string(), json!(stage));
+            obj.insert("name".to_string(), json!(p.name));
+            obj.insert("dim".to_string(), json!(p.dim));
+            obj.insert("polsMapId".to_string(), json!(i));
+            if stage == q_stage {
+                // Q-stage: stagePos before stageId
+                obj.insert("stagePos".to_string(), json!(p.stage_pos.unwrap_or(0)));
+                obj.insert("stageId".to_string(), json!(p.stage_id.unwrap_or(0)));
+            } else {
+                // Regular: stageId first
+                obj.insert("stageId".to_string(), json!(p.stage_id.unwrap_or(0)));
+                // Then lengths (if present), before stagePos
+                if let Some(ref lengths) = p.lengths {
+                    obj.insert("lengths".to_string(), json!(lengths));
+                }
+                obj.insert("stagePos".to_string(), json!(p.stage_pos.unwrap_or(0)));
+            }
+            if p.im_pol {
+                obj.insert("imPol".to_string(), json!(true));
+                if let Some(eid) = p.exp_id {
+                    obj.insert("expId".to_string(), json!(eid));
+                }
+            }
+            serde_json::Value::Object(obj)
         })
         .collect();
 
@@ -985,39 +1013,7 @@ pub fn build_expressions_info_json(
                     json!({
                         "name": f.name,
                         "values": f.values.iter().map(|v| {
-                            let mut obj = serde_json::Map::new();
-                            obj.insert("op".to_string(), json!(v.op));
-                            if let Some(id) = v.id {
-                                obj.insert("id".to_string(), json!(id));
-                            }
-                            if let Some(dim) = v.dim {
-                                obj.insert("dim".to_string(), json!(dim));
-                            }
-                            if !v.pos.is_empty() {
-                                obj.insert("pos".to_string(), json!(v.pos));
-                            }
-                            if let Some(stage) = v.stage {
-                                obj.insert("stage".to_string(), json!(stage));
-                            }
-                            if let Some(sid) = v.stage_id {
-                                obj.insert("stageId".to_string(), json!(sid));
-                            }
-                            if let Some(ref val) = v.value {
-                                obj.insert("value".to_string(), json!(val));
-                            }
-                            if let Some(ro) = v.row_offset {
-                                obj.insert("rowOffset".to_string(), json!(ro));
-                            }
-                            if let Some(roi) = v.row_offset_index {
-                                obj.insert("rowOffsetIndex".to_string(), json!(roi));
-                            }
-                            if let Some(cid) = v.commit_id {
-                                obj.insert("commitId".to_string(), json!(cid));
-                            }
-                            if let Some(agid) = v.airgroup_id {
-                                obj.insert("airgroupId".to_string(), json!(agid));
-                            }
-                            serde_json::Value::Object(obj)
+                            hint_value_to_json(v)
                         }).collect::<Vec<_>>(),
                     })
                 }).collect::<Vec<serde_json::Value>>(),
@@ -1037,16 +1033,111 @@ pub fn build_expressions_info_json(
 pub fn build_verifier_info_json(
     info: &crate::generate_pil_code::VerifierInfo,
 ) -> serde_json::Value {
-    json!({
-        "qVerifier": {
-            "tmpUsed": info.q_verifier.tmp_used,
-            "code": code_entries_to_json(&info.q_verifier.code),
-        },
-        "queryVerifier": {
-            "tmpUsed": info.query_verifier.tmp_used,
-            "code": code_entries_to_json(&info.query_verifier.code),
-        },
-    })
+    // qVerifier: {tmpUsed, code, line: ""}
+    let mut qv = serde_json::Map::new();
+    qv.insert("tmpUsed".to_string(), json!(info.q_verifier.tmp_used));
+    qv.insert("code".to_string(), code_entries_to_json(&info.q_verifier.code));
+    qv.insert("line".to_string(), json!(""));
+
+    // queryVerifier: {tmpUsed, code, expId, stage, line}
+    let mut qr = serde_json::Map::new();
+    qr.insert("tmpUsed".to_string(), json!(info.query_verifier.tmp_used));
+    qr.insert("code".to_string(), code_entries_to_json(&info.query_verifier.code));
+    qr.insert("expId".to_string(), json!(info.query_verifier.exp_id));
+    qr.insert("stage".to_string(), json!(info.query_verifier.stage));
+    qr.insert("line".to_string(), json!(info.query_verifier.line));
+
+    let mut result = serde_json::Map::new();
+    result.insert("qVerifier".to_string(), serde_json::Value::Object(qv));
+    result.insert("queryVerifier".to_string(), serde_json::Value::Object(qr));
+    serde_json::Value::Object(result)
+}
+
+/// Serialize a hint field value to JSON matching golden field order per op type.
+///
+/// Field order per op type (matching JS object spread behavior):
+///   string:         op, string, pos
+///   number:         op, value, pos
+///   tmp:            op, id, dim, pos
+///   cm/custom/const: op, id, stageId, rowOffset, stage, dim, [commitId,] rowOffsetIndex, pos
+///   challenge/public/airgroupvalue/airvalue/proofvalue:
+///                   op, id, dim, stage, [stageId,] [airgroupId,] pos
+fn hint_value_to_json(v: &crate::generate_pil_code::ProcessedHintField) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("op".to_string(), json!(v.op));
+    match v.op.as_str() {
+        "string" => {
+            // Golden: {"op":"string","string":"<value>","pos":[]}
+            if let Some(ref val) = v.value {
+                obj.insert("string".to_string(), json!(val));
+            }
+            obj.insert("pos".to_string(), json!(v.pos));
+        }
+        "number" => {
+            // Golden: {"op":"number","value":"<value>","pos":[]}
+            if let Some(ref val) = v.value {
+                obj.insert("value".to_string(), json!(val));
+            }
+            obj.insert("pos".to_string(), json!(v.pos));
+        }
+        "tmp" => {
+            // Golden: {"op":"tmp","id":<id>,"dim":<dim>,"pos":[...]}
+            if let Some(id) = v.id {
+                obj.insert("id".to_string(), json!(id));
+            }
+            if let Some(dim) = v.dim {
+                obj.insert("dim".to_string(), json!(dim));
+            }
+            obj.insert("pos".to_string(), json!(v.pos));
+        }
+        "cm" | "custom" | "const" => {
+            // Golden: {"op":"cm","id":<id>,"stageId":<sid>,"rowOffset":<ro>,
+            //          "stage":<s>,"dim":<d>,[commitId,]"rowOffsetIndex":<roi>,"pos":[...]}
+            if let Some(id) = v.id {
+                obj.insert("id".to_string(), json!(id));
+            }
+            if let Some(sid) = v.stage_id {
+                obj.insert("stageId".to_string(), json!(sid));
+            }
+            if let Some(ro) = v.row_offset {
+                obj.insert("rowOffset".to_string(), json!(ro));
+            }
+            if let Some(stage) = v.stage {
+                obj.insert("stage".to_string(), json!(stage));
+            }
+            if let Some(dim) = v.dim {
+                obj.insert("dim".to_string(), json!(dim));
+            }
+            if let Some(cid) = v.commit_id {
+                obj.insert("commitId".to_string(), json!(cid));
+            }
+            if let Some(roi) = v.row_offset_index {
+                obj.insert("rowOffsetIndex".to_string(), json!(roi));
+            }
+            obj.insert("pos".to_string(), json!(v.pos));
+        }
+        _ => {
+            // challenge, public, airgroupvalue, airvalue, proofvalue
+            // Golden: {"op":"<op>","id":<id>,"dim":<d>,"stage":<s>,[stageId,][airgroupId,]"pos":[...]}
+            if let Some(id) = v.id {
+                obj.insert("id".to_string(), json!(id));
+            }
+            if let Some(dim) = v.dim {
+                obj.insert("dim".to_string(), json!(dim));
+            }
+            if let Some(stage) = v.stage {
+                obj.insert("stage".to_string(), json!(stage));
+            }
+            if let Some(sid) = v.stage_id {
+                obj.insert("stageId".to_string(), json!(sid));
+            }
+            if let Some(agid) = v.airgroup_id {
+                obj.insert("airgroupId".to_string(), json!(agid));
+            }
+            obj.insert("pos".to_string(), json!(v.pos));
+        }
+    }
+    serde_json::Value::Object(obj)
 }
 
 pub fn code_entries_to_json(entries: &[crate::types::CodeEntry]) -> serde_json::Value {
@@ -1063,34 +1154,120 @@ pub fn code_entries_to_json(entries: &[crate::types::CodeEntry]) -> serde_json::
     serde_json::Value::Array(arr)
 }
 
+/// Serialize a code ref to JSON matching the golden field order per type.
+///
+/// Each type has its own property order matching the JS object construction
+/// order in codegen.js. The patterns are:
+///   tmp (from binary op):  type, id, dim
+///   tmp (from exp ref):    type, [expId,] id, prime, dim
+///   cm/const/custom:       type, id, prime, dim, [commitId]
+///   eval:                  type, id, dim
+///   challenge:             type, id, stageId, dim, stage
+///   public:                type, id, dim
+///   proofvalue:            type, id, stage, dim
+///   number:                type, value, dim
+///   airgroupvalue/airvalue: type, id, stage, dim, [airgroupId]
+///   xDivXSubXi:            type, id, opening, dim
+///   Zi:                    type, boundaryId, dim
 pub fn code_ref_to_json(r: &crate::types::CodeRef) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("type".to_string(), json!(r.ref_type));
-    obj.insert("id".to_string(), json!(r.id));
-    obj.insert("dim".to_string(), json!(r.dim));
-    if let Some(prime) = r.prime {
-        obj.insert("prime".to_string(), json!(prime));
-    }
-    if let Some(ref value) = r.value {
-        obj.insert("value".to_string(), json!(value));
-    }
-    if let Some(stage) = r.stage {
-        obj.insert("stage".to_string(), json!(stage));
-    }
-    if let Some(sid) = r.stage_id {
-        obj.insert("stageId".to_string(), json!(sid));
-    }
-    if let Some(cid) = r.commit_id {
-        obj.insert("commitId".to_string(), json!(cid));
-    }
-    if let Some(opening) = r.opening {
-        obj.insert("opening".to_string(), json!(opening));
-    }
-    if let Some(bid) = r.boundary_id {
-        obj.insert("boundaryId".to_string(), json!(bid));
-    }
-    if let Some(agid) = r.airgroup_id {
-        obj.insert("airgroupId".to_string(), json!(agid));
+    match r.ref_type.as_str() {
+        "tmp" => {
+            // Three tmp patterns based on JS object construction order:
+            //   1. Binary op dest:       type, id, dim (no prime, no expId)
+            //   2. pilCodeGen wrapper:    type, prime, id, dim (prime present, no expId)
+            //   3. evalExp exp ref:       type, expId, id, prime, dim
+            if let Some(eid) = r.exp_id {
+                // Pattern 3: expId before id
+                obj.insert("expId".to_string(), json!(eid));
+                obj.insert("id".to_string(), json!(r.id));
+                if let Some(prime) = r.prime {
+                    obj.insert("prime".to_string(), json!(prime));
+                }
+            } else if r.prime.is_some() {
+                // Pattern 2: prime before id
+                obj.insert("prime".to_string(), json!(r.prime.unwrap()));
+                obj.insert("id".to_string(), json!(r.id));
+            } else {
+                // Pattern 1: just id
+                obj.insert("id".to_string(), json!(r.id));
+            }
+            obj.insert("dim".to_string(), json!(r.dim));
+        }
+        "cm" | "const" | "custom" => {
+            obj.insert("id".to_string(), json!(r.id));
+            obj.insert("prime".to_string(), json!(r.prime.unwrap_or(0)));
+            obj.insert("dim".to_string(), json!(r.dim));
+            if let Some(cid) = r.commit_id {
+                obj.insert("commitId".to_string(), json!(cid));
+            }
+        }
+        "number" => {
+            // No id field for number refs
+            if let Some(ref value) = r.value {
+                obj.insert("value".to_string(), json!(value));
+            }
+            obj.insert("dim".to_string(), json!(r.dim));
+        }
+        "challenge" => {
+            obj.insert("id".to_string(), json!(r.id));
+            if let Some(sid) = r.stage_id {
+                obj.insert("stageId".to_string(), json!(sid));
+            }
+            obj.insert("dim".to_string(), json!(r.dim));
+            if let Some(stage) = r.stage {
+                obj.insert("stage".to_string(), json!(stage));
+            }
+        }
+        "eval" | "public" => {
+            obj.insert("id".to_string(), json!(r.id));
+            obj.insert("dim".to_string(), json!(r.dim));
+        }
+        "proofvalue" => {
+            obj.insert("id".to_string(), json!(r.id));
+            if let Some(stage) = r.stage {
+                obj.insert("stage".to_string(), json!(stage));
+            }
+            obj.insert("dim".to_string(), json!(r.dim));
+        }
+        "airgroupvalue" | "airvalue" => {
+            obj.insert("id".to_string(), json!(r.id));
+            if let Some(stage) = r.stage {
+                obj.insert("stage".to_string(), json!(stage));
+            }
+            obj.insert("dim".to_string(), json!(r.dim));
+            if let Some(agid) = r.airgroup_id {
+                obj.insert("airgroupId".to_string(), json!(agid));
+            }
+        }
+        "xDivXSubXi" => {
+            obj.insert("id".to_string(), json!(r.id));
+            if let Some(opening) = r.opening {
+                obj.insert("opening".to_string(), json!(opening));
+            }
+            obj.insert("dim".to_string(), json!(r.dim));
+        }
+        "Zi" => {
+            if let Some(bid) = r.boundary_id {
+                obj.insert("boundaryId".to_string(), json!(bid));
+            }
+            obj.insert("dim".to_string(), json!(r.dim));
+        }
+        _ => {
+            // Fallback: emit all present fields
+            obj.insert("id".to_string(), json!(r.id));
+            obj.insert("dim".to_string(), json!(r.dim));
+            if let Some(prime) = r.prime {
+                obj.insert("prime".to_string(), json!(prime));
+            }
+            if let Some(ref value) = r.value {
+                obj.insert("value".to_string(), json!(value));
+            }
+            if let Some(stage) = r.stage {
+                obj.insert("stage".to_string(), json!(stage));
+            }
+        }
     }
     serde_json::Value::Object(obj)
 }

@@ -109,7 +109,12 @@ impl<'a> JBR<'a> {
 
     fn gap(&self) -> Float {
         let base_correction = Float::with_val(PREC, hpf(1) / hpf(300));
-        let alpha_plus_one = hpf_from_f64(1.0 + self.params.alpha);
+        // Match JS Decimal.js behavior: convert alpha via string repr to avoid
+        // f64 binary approximation errors (e.g. 1.6_f64 is not exactly 1.6).
+        let alpha_plus_one = {
+            let alpha_str = format!("{}", 1.0 + self.params.alpha);
+            Float::with_val(PREC, Float::parse(&alpha_str).unwrap())
+        };
         let raw = Float::with_val(PREC, &base_correction * &alpha_plus_one);
         let gap = truncate_decimal_places(&raw, 20);
         // Assert: minDecodingRadius < maxDecodingRadius - gap

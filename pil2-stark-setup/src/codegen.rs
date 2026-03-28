@@ -100,6 +100,7 @@ fn make_ref(
         opening: None,
         boundary_id: None,
         airgroup_id: None,
+        exp_id: None,
     }
 }
 
@@ -144,6 +145,8 @@ pub fn pil_code_gen(
 
     let ret_ref = eval_exp(&mut code_ctx, symbols, expressions, e, prime);
 
+    // JS pilCodeGen creates: { type: "exp", prime, id: expId, dim: e.dim }
+    // Note: no expId property (unlike evalExp "exp" case which has expId).
     let mut r = CodeRef {
         ref_type: "exp".to_string(),
         id: exp_id,
@@ -156,6 +159,7 @@ pub fn pil_code_gen(
         opening: None,
         boundary_id: None,
         airgroup_id: None,
+        exp_id: None,
     };
 
     if ret_ref.ref_type == "tmp" {
@@ -241,6 +245,7 @@ fn eval_exp(
                     opening: None,
                     boundary_id: None,
                     airgroup_id: None,
+                    exp_id: Some(ref_id),
                 };
                 fix_commit_pol(&mut r, ctx, symbols);
                 r
@@ -258,6 +263,7 @@ fn eval_exp(
             opening: None,
             boundary_id: None,
             airgroup_id: None,
+            exp_id: None,
         },
         "public" => CodeRef {
             ref_type: "public".to_string(),
@@ -271,6 +277,7 @@ fn eval_exp(
             opening: None,
             boundary_id: None,
             airgroup_id: None,
+            exp_id: None,
         },
         "proofvalue" => CodeRef {
             ref_type: "proofvalue".to_string(),
@@ -284,6 +291,7 @@ fn eval_exp(
             opening: None,
             boundary_id: None,
             airgroup_id: None,
+            exp_id: None,
         },
         "number" => CodeRef {
             ref_type: "number".to_string(),
@@ -297,6 +305,7 @@ fn eval_exp(
             opening: None,
             boundary_id: None,
             airgroup_id: None,
+            exp_id: None,
         },
         "eval" => CodeRef {
             ref_type: "eval".to_string(),
@@ -310,6 +319,7 @@ fn eval_exp(
             opening: None,
             boundary_id: None,
             airgroup_id: None,
+            exp_id: None,
         },
         "airgroupvalue" | "airvalue" => CodeRef {
             ref_type: exp.op.clone(),
@@ -323,6 +333,7 @@ fn eval_exp(
             opening: None,
             boundary_id: None,
             airgroup_id: exp.airgroup_id,
+            exp_id: None,
         },
         "xDivXSubXi" => CodeRef {
             ref_type: "xDivXSubXi".to_string(),
@@ -336,6 +347,7 @@ fn eval_exp(
             opening: exp.opening,
             boundary_id: None,
             airgroup_id: None,
+            exp_id: None,
         },
         "Zi" => CodeRef {
             ref_type: "Zi".to_string(),
@@ -349,6 +361,7 @@ fn eval_exp(
             opening: None,
             boundary_id: exp.boundary_id,
             airgroup_id: None,
+            exp_id: None,
         },
         _ => panic!("Invalid op: {}", exp.op),
     }
@@ -383,6 +396,7 @@ fn build_column_ref(
         opening: None,
         boundary_id: None,
         airgroup_id: None,
+        exp_id: None,
     };
     if ctx.verifier_evaluations {
         fix_eval(&mut r, ctx, symbols);
@@ -504,7 +518,7 @@ fn fix_expression(r: &mut CodeRef, ctx: &mut CodeGenCtx) {
 
     r.ref_type = "tmp".to_string();
     r.id = *entry;
-    r.prime = None;
+    // JS fixExpression does NOT delete r.prime or r.expId, so we keep them.
 }
 
 // ---------------------------------------------------------------------------
