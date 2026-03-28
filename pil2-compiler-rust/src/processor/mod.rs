@@ -1621,14 +1621,15 @@ impl Processor {
         self.air_stack.pop();
 
         // Update built-in constants back.
-        if let Some(air) = self.air_stack.last() {
-            self.set_builtin_int("BITS", air.bits as i128);
-            self.set_builtin_int("AIR_ID", air.id as i128);
-            self.set_builtin_string("AIR_NAME", &air.name);
+        let (bits_val, air_id_val, air_name_val) = if let Some(air) = self.air_stack.last() {
+            (air.bits as i128, air.id as i128, air.name.clone())
         } else {
-            self.set_builtin_int("BITS", 0);
-            self.set_builtin_int("AIR_ID", -1);
-            self.set_builtin_string("AIR_NAME", "");
+            (0, -1, String::new())
+        };
+        self.set_builtin_int("BITS", bits_val);
+        self.set_builtin_int("AIR_ID", air_id_val);
+        self.set_builtin_string("AIR_NAME", &air_name_val);
+        if self.air_stack.is_empty() {
         }
 
         let (to_unset, to_restore) = self.scope.pop();
@@ -1694,24 +1695,26 @@ impl Processor {
 
     fn exec_deferred_function_call(&mut self, dc: &DeferredCall) -> FlowSignal {
         let scope = &dc.scope;
-        let fname = &dc.function.path;
-        let event = &dc.event;
+        let fname = dc.function.path.clone();
+        let event = dc.event.clone();
+        let priority_val = dc
+            .priority
+            .as_ref()
+            .and_then(|e| self.eval_expr(e).as_int().map(|v| v as i64));
+        let src_ref = self.source_ref.clone();
 
         let scope_entry = self
             .deferred_calls
             .entry(scope.clone())
             .or_default();
-        let event_entry = scope_entry.entry(event.clone()).or_default();
+        let event_entry = scope_entry.entry(event).or_default();
 
         // Check if already registered.
-        if !event_entry.iter().any(|d| d.function_name == *fname) {
+        if !event_entry.iter().any(|d| d.function_name == fname) {
             event_entry.push(DeferredCallInfo {
-                function_name: fname.clone(),
-                priority: dc
-                    .priority
-                    .as_ref()
-                    .and_then(|e| self.eval_expr(e).as_int().map(|v| v as i64)),
-                source_refs: vec![self.source_ref.clone()],
+                function_name: fname,
+                priority: priority_val,
+                source_refs: vec![src_ref],
             });
         }
         FlowSignal::None
