@@ -48,8 +48,6 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             IndexMap::new()
         };
 
-    // Resolve binFile binary path
-    let binfile_path = resolve_binfile_path()?;
 
     // Process each airgroup / air
     for (ag_idx, airgroup) in pilout.air_groups.iter().enumerate() {
@@ -211,45 +209,14 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 );
             }
 
-            // Write binary files via binFile tool
-            if Path::new(&binfile_path).exists() {
-                run_binfile(
-                    &binfile_path,
-                    starkinfo_path.to_str().unwrap_or(""),
-                    files_dir
-                        .join(format!("{}.expressionsinfo.json", air_name))
-                        .to_str()
-                        .unwrap_or(""),
-                    files_dir
-                        .join(format!("{}.bin", air_name))
-                        .to_str()
-                        .unwrap_or(""),
-                    false,
-                )?;
-
-                run_binfile(
-                    &binfile_path,
-                    starkinfo_path.to_str().unwrap_or(""),
-                    files_dir
-                        .join(format!("{}.verifierinfo.json", air_name))
-                        .to_str()
-                        .unwrap_or(""),
-                    files_dir
-                        .join(format!("{}.verifier.bin", air_name))
-                        .to_str()
-                        .unwrap_or(""),
-                    true,
-                )?;
-            } else {
-                // Use the Rust bin_file writer directly if the external binary
-                // is not available (which is the typical Rust-native path).
-                write_bin_files_native(
-                    &starkinfo_output,
-                    &pil_code,
-                    &files_dir,
-                    &air_name,
-                )?;
-            }
+            // Write binary files using native Rust implementation
+            write_bin_files_native(
+                &starkinfo_path,
+                &files_dir.join(format!("{}.expressionsinfo.json", air_name)),
+                &files_dir.join(format!("{}.verifierinfo.json", air_name)),
+                &files_dir.join(format!("{}.bin", air_name)),
+                &files_dir.join(format!("{}.verifier.bin", air_name)),
+            )?;
 
             tracing::info!("Setup for air '{}' complete", air_name);
         }
@@ -1078,51 +1045,40 @@ fn write_global_info(
 }
 
 /// Write binary files using native Rust implementation.
+/// Reads the JSON files back and uses the bin_file module to generate .bin output.
 fn write_bin_files_native(
-    _starkinfo_output: &StarkInfoOutput,
-    _pil_code: &crate::generate_pil_code::PilCodeResult,
-    _files_dir: &Path,
-    air_name: &str,
+    starkinfo_path: &Path,
+    expressions_path: &Path,
+    verifier_path: &Path,
+    bin_output: &Path,
+    verifier_bin_output: &Path,
 ) -> Result<()> {
-    // The bin_file module works with StarkInfo and ExpressionsInfo/VerifierInfo
-    // from stark_info.rs. For now we create minimal stubs that carry the needed
-    // metadata. The full native binary file generation is a future enhancement.
-    tracing::info!(
-        "Native binary generation not yet wired; skipping .bin for '{}'",
-        air_name
-    );
-    Ok(())
-}
+    use crate::stark_info::{StarkInfo, ExpressionsInfo, VerifierInfo};
 
-/// Invoke the external binFile tool.
-fn run_binfile(
-    binfile_path: &str,
-    starkinfo_path: &str,
-    expressions_path: &str,
-    output_path: &str,
-    verifier: bool,
-) -> Result<()> {
-    let mut cmd = std::process::Command::new(binfile_path);
-    cmd.arg("-s").arg(starkinfo_path);
-    cmd.arg("-e").arg(expressions_path);
-    cmd.arg("-b").arg(output_path);
-    if verifier {
-        cmd.arg("--verifier");
-    }
+    let si_data = fs::read_to_string(starkinfo_path)?;
+    let si_json: serde_json::Value = serde_json::from_str(&si_data)?;
+    let stark_info = StarkInfo::from_json(&si_json)?;
 
-    let output = cmd.output()?;
-    if !output.stdout.is_empty() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        print!("{}", stdout);
-    }
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "binFile tool failed with exit code {:?}: {}",
-            output.status.code(),
-            stderr
-        );
-    }
+    let expr_data = fs::read_to_string(expressions_path)?;
+    let expr_json: serde_json::Value = serde_json::from_str(&expr_data)?;
+    let expressions_info = ExpressionsInfo::from_json(&expr_json)?;
+
+    crate::bin_file::write_expressions_bin_file(
+        bin_output.to_str().unwrap_or(""),
+        &stark_info,
+        &expressions_info,
+    )?;
+
+    let ver_data = fs::read_to_string(verifier_path)?;
+    let ver_json: serde_json::Value = serde_json::from_str(&ver_data)?;
+    let verifier_info = VerifierInfo::from_json(&ver_json)?;
+
+    crate::bin_file::write_verifier_expressions_bin_file(
+        verifier_bin_output.to_str().unwrap_or(""),
+        &stark_info,
+        &verifier_info,
+    )?;
+
     Ok(())
 }
 
@@ -1132,17 +1088,3 @@ fn log2_usize(n: usize) -> usize {
     (usize::BITS - 1 - n.leading_zeros()) as usize
 }
 
-/// Resolve the binFile binary path.
-fn resolve_binfile_path() -> Result<String> {
-    let candidates = [
-        "binfile",
-        "./binfile",
-        "../pil2-proofman-js/src/setup/build/binfile",
-    ];
-    for path in &candidates {
-        if Path::new(path).exists() {
-            return Ok(path.to_string());
-        }
-    }
-    Ok("binfile".to_string())
-}
