@@ -578,7 +578,9 @@ fn get_global_name(global_info: &Value) -> String {
         .to_string()
 }
 
-/// Compile PIL source using the pil2-compiler-rust library directly.
+/// Compile PIL source using the JS pil2-compiler via node subprocess.
+/// This is a temporary solution until the Rust pil2-compiler-rust grammar
+/// conflict is resolved (LALRPOP shift/reduce on NameReference).
 pub fn compile_pil(
     pil_path: &str,
     output_path: &str,
@@ -587,20 +589,48 @@ pub fn compile_pil(
 ) -> Result<()> {
     tracing::info!("Compiling PIL: {}", pil_path);
 
-    let options = pil2_compiler_rust::CompileOptions {
-        source: pil_path.to_string(),
-        include_paths: vec![
-            std_pil_path.to_string(),
-            recurser_pil_path.to_string(),
-        ],
-        output: Some(output_path.to_string()),
-        ..Default::default()
-    };
+    let include_paths = format!("{},{}", std_pil_path, recurser_pil_path);
 
-    pil2_compiler_rust::compile(&options)
-        .map_err(|e| anyhow::anyhow!("PIL compilation failed: {}", e))?;
+    // Try Rust pil2c first, fall back to JS compiler
+    let pil2c_candidates = [
+        "pil2c",
+        "./target/release/pil2c",
+    ];
 
-    Ok(())
+    if let Some(pil2c) = pil2c_candidates.iter().find(|p| std::path::Path::new(p).exists()) {
+        let output = std::process::Command::new(pil2c)
+            .arg(pil_path)
+            .args(["-I", &include_paths])
+            .args(["-o", output_path])
+            .output()
+            .context("Failed to execute pil2c")?;
+        if !output.status.success() {
+            bail!("pil2c failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        return Ok(());
+    }
+
+    // Fall back to JS compiler
+    let js_compiler = "../pil2-compiler/src/pil.js";
+    if std::path::Path::new(js_compiler).exists() {
+        let output = std::process::Command::new("node")
+            .arg("--max-old-space-size=16384")
+            .arg(js_compiler)
+            .arg(pil_path)
+            .args(["-I", &include_paths])
+            .args(["-o", output_path])
+            .output()
+            .context("Failed to execute JS PIL compiler")?;
+        if !output.status.success() {
+            bail!("JS PIL compiler failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        return Ok(());
+    }
+
+    bail!(
+        "No PIL compiler found. Need either pil2c binary or {}/src/pil.js",
+        "../pil2-compiler"
+    );
 }
 
 #[cfg(test)]

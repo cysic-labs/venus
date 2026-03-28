@@ -3151,7 +3151,6 @@ dependencies = [
  "clap",
  "fields",
  "indexmap",
- "pil2-compiler-rust",
  "pilout",
  "prost 0.13.5",
  "rug",
