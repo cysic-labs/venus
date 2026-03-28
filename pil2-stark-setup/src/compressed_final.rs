@@ -332,10 +332,22 @@ pub fn gen_compressed_final_setup(
         tracing::warn!("Skipping const tree for {}: const file not found", template);
     }
 
-    // Write verifier.rs
-    tracing::info!(
-        "Compressed final verifier.rs generation pending full starkSetup integration"
-    );
+    // Write verifier.rs from computed starkinfo and verifierinfo
+    {
+        let si_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(files_dir.join(format!("{}.starkinfo.json", template)))?
+        )?;
+        let si_loaded = crate::stark_info::StarkInfo::from_json(&si_val)?;
+        let ver_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(files_dir.join(format!("{}.verifierinfo.json", template)))?
+        )?;
+        let ver_loaded = crate::stark_info::VerifierInfo::from_json(&ver_val)?;
+        crate::verifier_rs_gen::write_verifier_rust_file(
+            files_dir.join(format!("{}.verifier.rs", template)).to_str().unwrap(),
+            &si_loaded,
+            &ver_loaded,
+        )?;
+    }
 
     // Wait for witness library
     witness_tracker.await_all()?;
