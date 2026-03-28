@@ -992,7 +992,8 @@ pub fn get_pilout_info(
     let air = &airgroup.airs[air_id];
 
     let air_name = air.name.clone().unwrap_or_default();
-    let pil_power = air.num_rows.unwrap_or(0);
+    let num_rows = air.num_rows.unwrap_or(0);
+    let pil_power = if num_rows > 0 { (num_rows as f64).log2() as u32 } else { 0 };
 
     let constraints = format_constraints(&air.constraints);
 
