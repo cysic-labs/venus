@@ -146,11 +146,14 @@ fn ntt_core(data: &mut [Goldilocks], n_bits: usize, n_cols: usize, inverse: bool
 /// (row i, col c at index i * n_cols + c). The output is `N_ext * n_cols`
 /// elements in the same layout.
 ///
-/// Algorithm: INTT on the small domain, then zero-pad to the extended size,
-/// then NTT on the extended domain. The C++ code uses a "shift" coset
-/// approach internally but the net effect is the same as a standard LDE
-/// (low-degree extension) because the NTT construction already incorporates
-/// the appropriate roots.
+/// Algorithm: Coset LDE matching C++ NTT_Goldilocks::extendPol():
+/// 1. INTT on the small domain to get coefficients
+/// 2. Multiply each coefficient c[row] by shift^row (coset shift, shift=7)
+/// 3. Zero-pad to extended size
+/// 4. Forward NTT on extended domain
+///
+/// The coset shift ensures evaluation on the domain {shift * omega^i}
+/// instead of {omega^i}, which is required for FRI-based STARK proofs.
 pub fn extend_pol(
     input: &[Goldilocks],
     n_bits: usize,
@@ -165,6 +168,19 @@ pub fn extend_pol(
     // INTT on original domain
     let mut coeffs = input.to_vec();
     ntt_core(&mut coeffs, n_bits, n_cols, true);
+
+    // Apply coset shift: multiply row i coefficients by shift^i
+    // C++ uses Goldilocks::SHIFT = 7
+    let shift = Goldilocks::new(7);
+    let mut shift_pow = Goldilocks::ONE; // shift^0 = 1
+    for row in 0..n {
+        if row > 0 {
+            shift_pow = shift_pow * shift;
+        }
+        for col in 0..n_cols {
+            coeffs[row * n_cols + col] = coeffs[row * n_cols + col] * shift_pow;
+        }
+    }
 
     // Zero-pad to extended size
     let mut extended = vec![Goldilocks::ZERO; n_ext * n_cols];
