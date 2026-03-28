@@ -23,6 +23,7 @@ pub enum BuiltinKind {
     Evaluate,
     IsArray,
     Dump,
+    Log,
 }
 
 impl BuiltinKind {
@@ -43,6 +44,7 @@ impl BuiltinKind {
             "evaluate" => Some(Self::Evaluate),
             "is_array" => Some(Self::IsArray),
             "dump" => Some(Self::Dump),
+            "log" => Some(Self::Log),
             _ => None,
         }
     }
@@ -63,6 +65,7 @@ impl BuiltinKind {
             Self::Evaluate => "evaluate",
             Self::IsArray => "is_array",
             Self::Dump => "dump",
+            Self::Log => "log",
         }
     }
 
@@ -83,6 +86,7 @@ impl BuiltinKind {
             "evaluate",
             "is_array",
             "dump",
+            "log",
         ]
     }
 }
@@ -120,6 +124,7 @@ pub fn exec_builtin(
         BuiltinKind::Evaluate => exec_evaluate(args),
         BuiltinKind::IsArray => exec_is_array(args),
         BuiltinKind::Dump => exec_dump(args),
+        BuiltinKind::Log => Ok(Value::Int(0)),
     }
 }
 

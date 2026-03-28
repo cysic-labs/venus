@@ -211,6 +211,19 @@ impl References {
             return Some(r);
         }
 
+        // Fast path: no dots means no container resolution needed.
+        if !name.contains('.') {
+            // Only check current container.
+            if let Some(container_name) = &self.current_container {
+                if let Some(container) = self.containers.get(container_name) {
+                    if let Some(r) = container.get(name) {
+                        return Some(r);
+                    }
+                }
+            }
+            return None;
+        }
+
         // Try dotted name: container.inner_name.
         let parts: Vec<&str> = name.split('.').collect();
         if parts.len() > 1 {

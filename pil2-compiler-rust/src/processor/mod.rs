@@ -336,14 +336,27 @@ impl Processor {
     // -----------------------------------------------------------------------
 
     /// Execute a list of statements, returning on the first flow abort.
+    ///
+    /// Matches JS `executeStatements` / `execute` behavior: each statement
+    /// is executed inside an implicit try/catch. If `error_raised` is set
+    /// (equivalent to a JS `throw`), the error is caught at the per-statement
+    /// boundary, logged, and cleared so the next statement can proceed.
     fn execute_statements(&mut self, statements: &[Statement]) -> FlowSignal {
         for st in statements {
-            // Short-circuit when an error() call has set the flag,
-            // matching JS exception-unwind semantics.
-            if self.error_raised {
-                return FlowSignal::Return(Value::Void);
-            }
             let signal = self.execute_statement(st);
+
+            // After each statement, catch any error that was raised during
+            // its execution. This mirrors the JS `executeStatement` try/catch
+            // that wraps every individual statement call. The error has
+            // already been printed when it was raised; we just clear the
+            // flag so the next statement can proceed.
+            if self.error_raised {
+                self.error_raised = false;
+                // The error swallowed the statement's result; treat it as
+                // a no-op and continue with the next statement.
+                continue;
+            }
+
             if signal.is_abort() {
                 return signal;
             }
@@ -821,10 +834,25 @@ impl Processor {
         self.scope.push();
         self.execute_statement(&s.init);
 
+        let mut loop_count: u64 = 0;
+        let loop_start = Instant::now();
         loop {
             let cond = self.eval_expr(&s.condition);
             if !cond.as_bool().unwrap_or(false) {
                 break;
+            }
+
+            // Progress indicator for long-running loops (only shown
+            // after 5 seconds to avoid noise on fast loops).
+            loop_count += 1;
+            if loop_count & 0xFFFFF == 0 {
+                let elapsed = loop_start.elapsed().as_secs_f64();
+                if elapsed >= 5.0 {
+                    eprintln!(
+                        "  > loop progress: {} iterations ({:.1}s)",
+                        loop_count, elapsed
+                    );
+                }
             }
 
             let result = self.execute_statements(&s.body);
@@ -1072,8 +1100,13 @@ impl Processor {
     /// Evaluate a reference (variable or column lookup).
     fn eval_reference(&mut self, name_id: &NameId) -> Value {
         let name = &name_id.path;
-        let names = self.namespace_ctx.get_names(name);
-        if let Some(reference) = self.references.get_reference_multi(&names).cloned() {
+        // Fast path: try direct lookup first to avoid allocating namespace
+        // variants. This is a significant optimization for tight loops.
+        let reference_opt = self.references.get_reference(name).cloned().or_else(|| {
+            let names = self.namespace_ctx.get_names(name);
+            self.references.get_reference_multi(&names).cloned()
+        });
+        if let Some(reference) = reference_opt {
             // Handle array indexing.
             if !name_id.indexes.is_empty() && !reference.array_dims.is_empty() {
                 let indexes: Vec<i128> = name_id
@@ -1135,6 +1168,13 @@ impl Processor {
     /// Evaluate a function call.
     fn eval_function_call(&mut self, fc: &FunctionCall) -> Value {
         let name = &fc.function.path;
+
+        // Fast path for no-op builtins: skip argument evaluation entirely.
+        // In the JS compiler, `log` is handled by the transpiler context and
+        // is effectively a no-op during normal interpreted execution.
+        if matches!(name.as_str(), "log") {
+            return Value::Int(0);
+        }
 
         // Evaluate all call arguments (values only).
         let raw_args: Vec<Value> = fc.args.iter().map(|a| self.eval_expr(&a.value)).collect();
@@ -1208,6 +1248,12 @@ impl Processor {
         is_virtual: bool,
     ) -> FlowSignal {
         let name = &fc.function.path;
+
+        // Fast path for no-op builtins (see eval_function_call).
+        if matches!(name.as_str(), "log") {
+            return FlowSignal::None;
+        }
+
         let raw_args: Vec<Value> = fc.args.iter().map(|a| self.eval_expr(&a.value)).collect();
         let has_named = fc.args.iter().any(|a| a.name.is_some());
 
@@ -1335,10 +1381,12 @@ impl Processor {
         // Execute body.
         let result = self.execute_statements(&func.body);
 
-        // Clear the error flag so that the caller can continue -- the
-        // error has been handled by unwinding this function, mirroring
-        // what a JS `throw` + `try/catch` would do at the call-site.
-        self.error_raised = false;
+        // Do NOT clear error_raised here. In the JS compiler, errors
+        // (thrown exceptions) propagate through all function call frames
+        // (executeFunctionCall uses try/finally, not try/catch) and are
+        // only caught at the statement execution level or the airtemplate
+        // call boundary. Clearing here would swallow errors from nested
+        // callees, allowing the caller to resume incorrectly.
 
         self.references.pop_visibility_scope();
         let (to_unset, to_restore) = self.scope.pop();
@@ -2108,12 +2156,15 @@ impl Processor {
 
     /// Expand template strings (e.g. `${N}` inside backtick strings).
     fn expand_templates(&self, text: &str) -> String {
+        use std::sync::OnceLock;
+        static RE: OnceLock<regex::Regex> = OnceLock::new();
+
         if !text.contains("${") {
             return text.to_string();
         }
         // Simple template expansion: replace ${NAME} with the value.
         let mut result = text.to_string();
-        let re = regex::Regex::new(r"\$\{([^}]*)\}").unwrap();
+        let re = RE.get_or_init(|| regex::Regex::new(r"\$\{([^}]*)\}").unwrap());
         let captures: Vec<(String, String)> = re
             .captures_iter(text)
             .map(|cap| {

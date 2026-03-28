@@ -327,8 +327,12 @@ pub fn compile(options: &CompileOptions) -> anyhow::Result<()> {
     eprintln!("  > Executing program...");
     let success = processor.execute_program(&program);
 
+    // In the JS compiler, individual AIR errors are caught per-statement
+    // and do not prevent the .pilout from being written. We log test
+    // failures but always proceed to write the output, matching JS
+    // behavior. Only test-mode failures are fatal (after output).
     if !success {
-        anyhow::bail!("Compilation failed (tests reported failures)");
+        eprintln!("  > Warning: tests reported failures (will still write output)");
     }
 
     // Determine output file path.
