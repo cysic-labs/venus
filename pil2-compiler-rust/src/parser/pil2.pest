@@ -92,6 +92,8 @@ airgroup_stmt = { "airgroup" ~ ident ~ "{" ~ statement* ~ "}" ~ semi? }
 airtemplate_stmt = {
     "airtemplate" ~ ident ~ "(" ~ args_list ~ ")" ~ "{" ~ statement* ~ "}" ~ semi?
   | "airtemplate" ~ ident ~ "{" ~ statement* ~ "}" ~ semi?
+  | "air" ~ ident ~ "(" ~ args_list ~ ")" ~ "{" ~ statement* ~ "}" ~ semi?
+  | "air" ~ ident ~ "{" ~ statement* ~ "}" ~ semi?
 }
 
 // ===================================================================
@@ -365,7 +367,7 @@ deferred_call_stmt = {
     "on" ~ "final" ~ ("(" ~ expression ~ ")")? ~ defined_scope ~ name_optional_index ~ "(" ~ multi_expression_list ~ ")" ~ semi?
 }
 
-defined_scope = { "air" | "proof" | "airgroup" }
+defined_scope = { "airgroup" | "air" | "proof" }
 
 // ===================================================================
 // Hint
@@ -443,7 +445,14 @@ unary_expr = {
     "-" ~ unary_expr
   | "+" ~ unary_expr
   | "!" ~ unary_expr
+  | prefix_row_offset
   | pow_expr
+}
+
+// Prefix row offset: 'ident, N'ident, (expr)'ident
+prefix_row_offset = {
+    number ~ "'" ~ postfix_expr
+  | "'" ~ postfix_expr
 }
 
 pow_expr = { postfix_expr ~ ("**" ~ unary_expr)? }
@@ -453,6 +462,7 @@ postfix_expr = { atom_expr ~ postfix_suffix* }
 postfix_suffix = {
     "'"
   | "[" ~ expression ~ "]"
+  | "." ~ template_lit
   | "." ~ ident
 }
 
@@ -481,8 +491,10 @@ func_call_expr = { name_optional_index ~ "(" ~ multi_expression_list ~ ")" }
 // Name references
 // ===================================================================
 
-name_reference = @{ name_ref_base ~ ("." ~ ident_inner)* }
-name_ref_base = _{ "airgroup" | "proof" | "air" | ident_inner }
+name_reference = @{ name_ref_base ~ ("." ~ name_ref_segment)* }
+name_ref_segment = _{ template_lit_inner | ident_inner }
+name_ref_base = _{ "airgroup" ~ !(ASCII_ALPHANUMERIC | "_") | "proof" ~ !(ASCII_ALPHANUMERIC | "_") | "air" ~ !(ASCII_ALPHANUMERIC | "_") | ident_inner }
+template_lit_inner = _{ "`" ~ (!"`" ~ ANY)* ~ "`" }
 
 // Name with optional array indices and optional row-offset for assignment targets
 name_id = {
@@ -515,7 +527,8 @@ comma_sep_expr = { expression ~ ("," ~ expression)* }
 // ===================================================================
 
 sequence_def = {
-    "[" ~ comma_sep_seq_elem ~ "]" ~ ":" ~ expression ~ "..."
+    "[" ~ comma_sep_seq_elem ~ "]" ~ "*"
+  | "[" ~ comma_sep_seq_elem ~ "]" ~ ":" ~ expression ~ "..."
   | "[" ~ comma_sep_seq_elem ~ "]" ~ ":" ~ expression
   | "[" ~ comma_sep_seq_elem ~ "]" ~ "..."
   | "[" ~ comma_sep_seq_elem ~ "]"

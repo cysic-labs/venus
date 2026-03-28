@@ -301,8 +301,10 @@ fn build_function_def(pair: pest::iterators::Pair<'_, Rule>) -> Result<Statement
             Rule::args_list_with_varargs => {
                 let va_text = inner.as_str();
                 varargs = va_text.contains("...");
-                if let Some(al) = first_child(&inner, Rule::args_list) {
-                    args = build_args_list(al)?;
+                for fa in inner.into_inner() {
+                    if fa.as_rule() == Rule::function_arg {
+                        args.push(build_function_arg(fa)?);
+                    }
                 }
             }
             Rule::return_type_spec => {
@@ -1912,6 +1914,7 @@ fn build_unary_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, Parse
         return match child.as_rule() {
             Rule::unary_expr => build_unary_expr(child),
             Rule::pow_expr => build_pow_expr(child),
+            Rule::prefix_row_offset => build_prefix_row_offset(child),
             _ => build_pow_expr(child),
         };
     }
@@ -1949,6 +1952,23 @@ fn build_pow_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, ParseEr
     }
 }
 
+fn build_prefix_row_offset(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, ParseError> {
+    let children: Vec<pest::iterators::Pair<'_, Rule>> = pair.into_inner().collect();
+    if children.is_empty() {
+        return Err(err("empty prefix_row_offset"));
+    }
+
+    // Two forms: number ~ "'" ~ postfix_expr  OR  "'" ~ postfix_expr
+    if children.len() >= 2 && children[0].as_rule() == Rule::number {
+        let offset = make_number_expr(children[0].as_str());
+        let base = build_postfix_expr(children[1].clone())?;
+        Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(offset) })
+    } else {
+        let base = build_postfix_expr(children[0].clone())?;
+        Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(one_literal()) })
+    }
+}
+
 fn build_postfix_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, ParseError> {
     let children: Vec<pest::iterators::Pair<'_, Rule>> = pair.into_inner().collect();
     if children.is_empty() {
@@ -1974,8 +1994,10 @@ fn build_postfix_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, Par
                     result = Expr::ArrayIndex { base: Box::new(result), index: Box::new(idx) };
                 }
             } else if suffix_text.starts_with('.') {
-                // Member access
-                if let Some(ident_pair) = suffix_children.into_iter().find(|p| p.as_rule() == Rule::ident) {
+                // Member access (ident or template literal)
+                if let Some(tl_pair) = suffix_children.iter().find(|p| p.as_rule() == Rule::template_lit) {
+                    result = Expr::MemberAccess { base: Box::new(result), member: strip_quotes(tl_pair.as_str()) };
+                } else if let Some(ident_pair) = suffix_children.into_iter().find(|p| p.as_rule() == Rule::ident) {
                     result = Expr::MemberAccess { base: Box::new(result), member: ident_pair.as_str().to_string() };
                 }
             }
@@ -2150,7 +2172,7 @@ fn build_comma_sep_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Vec<Exp
 
 fn build_sequence_def(pair: pest::iterators::Pair<'_, Rule>) -> Result<SequenceDef, ParseError> {
     let text = pair.as_str().trim();
-    let is_padded = text.ends_with("...");
+    let is_padded = text.ends_with("...") || text.ends_with("*");
     let _has_colon = text.contains("]:") || text.contains("] :");
 
     let mut elements = Vec::new();
