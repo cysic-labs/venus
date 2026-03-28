@@ -586,7 +586,24 @@ impl Processor {
         };
 
         let name = &a.target.path;
-        if let Some(reference) = self.references.get_reference(name).cloned() {
+        // Try namespace-qualified resolution first, then fall back to
+        // direct lookup so that columns inside airtemplates are found.
+        let names = self.namespace_ctx.get_names(name);
+        let reference = self
+            .references
+            .get_reference_multi(&names)
+            .or_else(|| self.references.get_reference(name))
+            .cloned();
+
+        if let Some(reference) = reference {
+            // Evaluate target indexes (e.g. C[i] has one index expression).
+            let target_indexes: Vec<i128> = a
+                .target
+                .indexes
+                .iter()
+                .map(|e| self.eval_expr(e).as_int().unwrap_or(0))
+                .collect();
+
             let final_value = match a.op {
                 AssignOp::Assign => value,
                 AssignOp::AddAssign => {
@@ -614,7 +631,33 @@ impl Processor {
                     }
                 }
             };
-            self.set_var_value(&reference, final_value);
+
+            // Handle column writes with row indexes (e.g. C[i] = expr).
+            if !target_indexes.is_empty() && matches!(reference.ref_type, RefType::Fixed) {
+                let col_id = if !reference.array_dims.is_empty() && target_indexes.len() > 1 {
+                    // Multi-dimensional column array: split last index as
+                    // row, earlier indexes select the sub-column.
+                    let dim_indexes = &target_indexes[..target_indexes.len() - 1];
+                    let flat = compute_flat_index(dim_indexes, &reference.array_dims);
+                    reference.id + flat
+                } else {
+                    reference.id
+                };
+                let row = *target_indexes.last().unwrap() as usize;
+                if let Some(v) = final_value.as_int() {
+                    self.fixed_cols.set_row_value(col_id, row, v);
+                }
+            } else if !target_indexes.is_empty()
+                && !reference.array_dims.is_empty()
+            {
+                // Array variable: compute the flat offset and write to the
+                // element at that position.
+                let flat = compute_flat_index(&target_indexes, &reference.array_dims);
+                let id = reference.id + flat;
+                self.set_var_value_by_type_and_id(&reference.ref_type, id, final_value);
+            } else {
+                self.set_var_value(&reference, final_value);
+            }
         }
         FlowSignal::None
     }
@@ -634,6 +677,26 @@ impl Processor {
                 .get(reference.id)
                 .cloned()
                 .unwrap_or(Value::Void),
+            RefType::Fixed => Value::ColRef {
+                col_type: ColRefKind::Fixed,
+                id: reference.id,
+                row_offset: None,
+            },
+            RefType::Witness => Value::ColRef {
+                col_type: ColRefKind::Witness,
+                id: reference.id,
+                row_offset: None,
+            },
+            RefType::Public => Value::ColRef {
+                col_type: ColRefKind::Public,
+                id: reference.id,
+                row_offset: None,
+            },
+            RefType::Challenge => Value::ColRef {
+                col_type: ColRefKind::Challenge,
+                id: reference.id,
+                row_offset: None,
+            },
             _ => Value::Void,
         }
     }
@@ -645,6 +708,17 @@ impl Processor {
             RefType::Fe => self.fes.set(reference.id, value),
             RefType::Str => self.strings.set(reference.id, value),
             RefType::Expr => self.exprs.set(reference.id, value),
+            _ => {}
+        }
+    }
+
+    /// Set a variable value by type and explicit ID (for indexed array writes).
+    fn set_var_value_by_type_and_id(&mut self, ref_type: &RefType, id: u32, value: Value) {
+        match ref_type {
+            RefType::Int => self.ints.set(id, value),
+            RefType::Fe => self.fes.set(id, value),
+            RefType::Str => self.strings.set(id, value),
+            RefType::Expr => self.exprs.set(id, value),
             _ => {}
         }
     }
@@ -874,11 +948,34 @@ impl Processor {
             Expr::ArrayIndex { base, index } => {
                 let base_val = self.eval_expr(base);
                 let idx_val = self.eval_expr(index);
-                if let (Value::Array(items), Some(i)) = (&base_val, idx_val.as_int()) {
-                    let idx = i as usize;
-                    items.get(idx).cloned().unwrap_or(Value::Void)
-                } else {
-                    Value::Void
+                match (&base_val, idx_val.as_int()) {
+                    (Value::Array(items), Some(i)) => {
+                        let idx = i as usize;
+                        items.get(idx).cloned().unwrap_or(Value::Void)
+                    }
+                    (Value::ColRef { col_type, id, .. }, Some(i)) => {
+                        match col_type {
+                            ColRefKind::Fixed => {
+                                // Row-level read: FIXED_COL[row] during
+                                // fixed-column generation.
+                                if let Some(v) = self.fixed_cols.get_row_value(*id, i as usize) {
+                                    Value::Int(v)
+                                } else {
+                                    Value::Int(0)
+                                }
+                            }
+                            _ => {
+                                // For witness/other column arrays, offset the
+                                // base id to obtain the indexed sub-column.
+                                Value::ColRef {
+                                    col_type: *col_type,
+                                    id: id + i as u32,
+                                    row_offset: None,
+                                }
+                            }
+                        }
+                    }
+                    _ => Value::Void,
                 }
             }
             Expr::ArrayLiteral(items) => {
@@ -1133,6 +1230,70 @@ impl Processor {
     }
 
     // -----------------------------------------------------------------------
+    // Sequence resolution
+    // -----------------------------------------------------------------------
+
+    /// Pre-resolve all expressions in a sequence definition by evaluating them
+    /// through the processor (which can resolve named constants like `OP_MINU`,
+    /// `P2_8`, etc.).  The resolved sequence uses only numeric literals so that
+    /// the standalone `evaluate_sequence` can process it.
+    fn resolve_sequence(&mut self, seq: &SequenceDef) -> SequenceDef {
+        SequenceDef {
+            elements: seq.elements.iter().map(|e| self.resolve_seq_element(e)).collect(),
+            is_padded: seq.is_padded,
+        }
+    }
+
+    fn resolve_seq_element(&mut self, elem: &SequenceElement) -> SequenceElement {
+        match elem {
+            SequenceElement::Value(expr) => {
+                SequenceElement::Value(self.resolve_seq_expr(expr))
+            }
+            SequenceElement::Repeat { value, times } => SequenceElement::Repeat {
+                value: self.resolve_seq_expr(value),
+                times: self.resolve_seq_expr(times),
+            },
+            SequenceElement::Range { from, to, from_times, to_times } => SequenceElement::Range {
+                from: self.resolve_seq_expr(from),
+                to: self.resolve_seq_expr(to),
+                from_times: from_times.as_ref().map(|e| self.resolve_seq_expr(e)),
+                to_times: to_times.as_ref().map(|e| self.resolve_seq_expr(e)),
+            },
+            SequenceElement::Padding(inner) => {
+                SequenceElement::Padding(Box::new(self.resolve_seq_element(inner)))
+            }
+            SequenceElement::SubSeq(elements) => {
+                SequenceElement::SubSeq(
+                    elements.iter().map(|e| self.resolve_seq_element(e)).collect(),
+                )
+            }
+            SequenceElement::ArithSeq { t1, t2, tn } => SequenceElement::ArithSeq {
+                t1: Box::new(self.resolve_seq_element(t1)),
+                t2: Box::new(self.resolve_seq_element(t2)),
+                tn: tn.as_ref().map(|e| Box::new(self.resolve_seq_element(e))),
+            },
+            SequenceElement::GeomSeq { t1, t2, tn } => SequenceElement::GeomSeq {
+                t1: Box::new(self.resolve_seq_element(t1)),
+                t2: Box::new(self.resolve_seq_element(t2)),
+                tn: tn.as_ref().map(|e| Box::new(self.resolve_seq_element(e))),
+            },
+        }
+    }
+
+    /// Resolve a single expression to a numeric literal if possible, falling
+    /// back to the original expression if evaluation fails.
+    fn resolve_seq_expr(&mut self, expr: &Expr) -> Expr {
+        if let Some(v) = self.eval_expr(expr).as_int() {
+            Expr::Number(NumericLiteral {
+                value: v.to_string(),
+                radix: NumericRadix::Decimal,
+            })
+        } else {
+            expr.clone()
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Column declarations
     // -----------------------------------------------------------------------
 
@@ -1218,8 +1379,9 @@ impl Processor {
                                     .and_then(|v| v.as_int())
                                     .unwrap_or(0) as u64;
                                 if num_rows > 0 {
+                                    let resolved = self.resolve_sequence(seq);
                                     let data =
-                                        fixed_cols::evaluate_sequence(seq, num_rows);
+                                        fixed_cols::evaluate_sequence(&resolved, num_rows);
                                     self.fixed_cols.set_row_data(id, data);
                                 }
                             }

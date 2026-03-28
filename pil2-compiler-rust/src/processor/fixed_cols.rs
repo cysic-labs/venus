@@ -134,18 +134,27 @@ impl FixedCols {
 /// Given a sequence like `[1, 0]*` and a target size `num_rows`, this
 /// expands the pattern to fill exactly `num_rows` entries.
 pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
+    evaluate_sequence_impl(seq, num_rows, &try_const_eval_expr)
+}
+
+/// Shared implementation for sequence evaluation, parameterized over the
+/// expression evaluator function.
+fn evaluate_sequence_impl<F>(seq: &SequenceDef, num_rows: u64, eval_fn: &F) -> Vec<i128>
+where
+    F: Fn(&crate::parser::ast::Expr) -> Option<i128>,
+{
     let mut base_pattern = Vec::new();
     let mut padding_value: Option<i128> = None;
 
     for element in &seq.elements {
         match element {
             SequenceElement::Value(expr) => {
-                if let Some(v) = try_const_eval_expr(expr) {
+                if let Some(v) = eval_fn(expr) {
                     base_pattern.push(v);
                 }
             }
             SequenceElement::Repeat { value, times } => {
-                if let (Some(v), Some(t)) = (try_const_eval_expr(value), try_const_eval_expr(times))
+                if let (Some(v), Some(t)) = (eval_fn(value), eval_fn(times))
                 {
                     for _ in 0..t {
                         base_pattern.push(v);
@@ -153,9 +162,9 @@ pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
                 }
             }
             SequenceElement::Range { from, to, from_times, to_times } => {
-                if let (Some(f), Some(t)) = (try_const_eval_expr(from), try_const_eval_expr(to)) {
-                    let ft = from_times.as_ref().and_then(|e| try_const_eval_expr(e)).unwrap_or(1);
-                    let tt = to_times.as_ref().and_then(|e| try_const_eval_expr(e)).unwrap_or(ft);
+                if let (Some(f), Some(t)) = (eval_fn(from), eval_fn(to)) {
+                    let ft = from_times.as_ref().and_then(|e| eval_fn(e)).unwrap_or(1);
+                    let tt = to_times.as_ref().and_then(|e| eval_fn(e)).unwrap_or(ft);
                     if f <= t {
                         for v in f..=t {
                             let rep = if v == f { ft } else if v == t { tt } else { ft.min(tt).max(1) };
@@ -175,7 +184,7 @@ pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
             }
             SequenceElement::Padding(inner) => {
                 if let SequenceElement::Value(expr) = inner.as_ref() {
-                    padding_value = try_const_eval_expr(expr);
+                    padding_value = eval_fn(expr);
                 }
             }
             SequenceElement::SubSeq(elements) => {
@@ -184,17 +193,17 @@ pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
                     elements: elements.clone(),
                     is_padded: false,
                 };
-                let sub_vals = evaluate_sequence(&sub, num_rows);
+                let sub_vals = evaluate_sequence_impl(&sub, num_rows, eval_fn);
                 base_pattern.extend(sub_vals);
             }
             SequenceElement::ArithSeq { t1, t2, tn } => {
-                let (v1, times1) = extract_seq_value_and_times(t1);
-                let (v2, _times2) = extract_seq_value_and_times(t2);
+                let (v1, times1) = extract_seq_value_and_times(t1, eval_fn);
+                let (v2, _times2) = extract_seq_value_and_times(t2, eval_fn);
                 if let (Some(t1_val), Some(t2_val)) = (v1, v2) {
                     let delta = t2_val - t1_val;
                     let times = times1.unwrap_or(1) as usize;
                     let tn_val = tn.as_ref().and_then(|e| {
-                        let (v, _) = extract_seq_value_and_times(e);
+                        let (v, _) = extract_seq_value_and_times(e, eval_fn);
                         v
                     });
                     // Determine how many distinct values to produce.
@@ -223,8 +232,8 @@ pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
                 }
             }
             SequenceElement::GeomSeq { t1, t2, tn } => {
-                let (v1, times1) = extract_seq_value_and_times(t1);
-                let (v2, _times2) = extract_seq_value_and_times(t2);
+                let (v1, times1) = extract_seq_value_and_times(t1, eval_fn);
+                let (v2, _times2) = extract_seq_value_and_times(t2, eval_fn);
                 if let (Some(t1_val), Some(t2_val)) = (v1, v2) {
                     let times = times1.unwrap_or(1) as usize;
                     if t1_val == 0 || t2_val == 0 {
@@ -237,7 +246,7 @@ pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
                         let reverse = t1_val > t2_val;
                         let ratio = if reverse { t1_val / t2_val } else { t2_val / t1_val };
                         let tn_val = tn.as_ref().and_then(|e| {
-                            let (v, _) = extract_seq_value_and_times(e);
+                            let (v, _) = extract_seq_value_and_times(e, eval_fn);
                             v
                         });
                         // Determine count.
@@ -320,11 +329,17 @@ pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
 
 /// Extract the constant value and optional repeat times from a SequenceElement
 /// inside an ArithSeq/GeomSeq (which wraps either Value(expr) or Repeat{value, times}).
-fn extract_seq_value_and_times(elem: &SequenceElement) -> (Option<i128>, Option<i128>) {
+fn extract_seq_value_and_times<F>(
+    elem: &SequenceElement,
+    eval_fn: &F,
+) -> (Option<i128>, Option<i128>)
+where
+    F: Fn(&crate::parser::ast::Expr) -> Option<i128>,
+{
     match elem {
-        SequenceElement::Value(expr) => (try_const_eval_expr(expr), None),
+        SequenceElement::Value(expr) => (eval_fn(expr), None),
         SequenceElement::Repeat { value, times } => {
-            (try_const_eval_expr(value), try_const_eval_expr(times))
+            (eval_fn(value), eval_fn(times))
         }
         _ => (None, None),
     }
