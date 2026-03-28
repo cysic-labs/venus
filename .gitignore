@@ -46,3 +46,4 @@ pil2-proofman/pil2-stark/lib/
 # AI Automation flow
 **/superpowers/*
 .claude/
+golden_reference/
