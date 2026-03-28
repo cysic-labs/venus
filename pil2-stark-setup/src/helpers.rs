@@ -1,4 +1,4 @@
-use crate::expression::Expression;
+use crate::expression::{ExprChild, Expression};
 use crate::pilout_info::FIELD_EXTENSION;
 
 /// Goldilocks field negation of 1: p - 1 = 2^64 - 2^32 + 1 - 1 = 18446744069414584320
@@ -13,9 +13,12 @@ const NEG_ONE: &str = "18446744069414584320";
 ///
 /// The `expressions` slice must be the flat expression array (indexed by ID).
 /// This function mutates expressions in-place.
+///
+/// For arena-indexed expressions, call with the arena index. For expressions
+/// with inline children, the inline children are processed recursively.
 pub fn add_info_expressions(expressions: &mut Vec<Expression>, idx: usize) {
-    // Guard: already processed
-    if expressions[idx].exp_deg != 0 || is_info_computed(expressions, idx) {
+    // Guard: already processed (mirrors JS `if("expDeg" in exp) return;`)
+    if expressions[idx].info_computed {
         return;
     }
 
@@ -113,35 +116,97 @@ pub fn add_info_expressions(expressions: &mut Vec<Expression>, idx: usize) {
             panic!("Exp op not defined: {}", op);
         }
     }
+    expressions[idx].info_computed = true;
 }
 
-/// Check if info is already computed for a given expression.
-/// For leaf nodes, exp_deg == 0 is the default but also a valid computed value,
-/// so we need an additional check.
-fn is_info_computed(expressions: &[Expression], idx: usize) -> bool {
-    let e = &expressions[idx];
-    if e.exp_deg != 0 {
-        return true;
+/// Compute info (exp_deg, dim, stage, rows_offsets) on a standalone
+/// Expression that is NOT in the arena. Inline children are processed
+/// recursively; `exp` references are resolved via the arena.
+pub fn add_info_expression_inline(expressions: &mut Vec<Expression>, expr: &mut Expression) {
+    if expr.info_computed {
+        return;
     }
-    // For leaves that have exp_deg=0 as their final value, check if
-    // stage/dim have been meaningfully set.
-    match e.op.as_str() {
-        "number" | "public" | "challenge" | "eval" | "airgroupvalue" | "proofvalue"
-        | "airvalue" => {
-            // These all have exp_deg=0 as their target. Check if dim
-            // has been set above the default.
-            e.dim > 1
-                || e.stage > 0
-                || e.op == "number"
-                    && e.dim == 1
-                    && !e.rows_offsets.is_empty()
-        }
+
+    let op = expr.op.clone();
+
+    match op.as_str() {
         "exp" => {
-            // An exp ref is computed if it has rows_offsets populated
-            !e.rows_offsets.is_empty() || e.dim > 1 || e.stage > 0
+            let ref_id = expr.id.unwrap_or(0);
+            add_info_expressions(expressions, ref_id);
+
+            expr.exp_deg = expressions[ref_id].exp_deg;
+            expr.rows_offsets = expressions[ref_id].rows_offsets.clone();
+            if expr.dim <= 1 {
+                expr.dim = expressions[ref_id].dim;
+            }
+            if expr.stage == 0 {
+                expr.stage = expressions[ref_id].stage;
+            }
         }
-        _ => false,
+        "cm" | "custom" | "const" => {
+            expr.exp_deg = 1;
+            if expr.stage == 0 || op == "const" {
+                expr.stage = if op == "cm" { 1 } else { 0 };
+            }
+            if expr.dim == 0 || expr.dim == 1 {
+                expr.dim = 1;
+            }
+            if let Some(row_off) = expr.row_offset {
+                expr.rows_offsets = vec![row_off];
+            }
+        }
+        "Zi" => {
+            if expr.boundary.as_deref() != Some("everyRow") {
+                expr.exp_deg = 1;
+            } else {
+                expr.exp_deg = 0;
+                expr.stage = 0;
+                if expr.dim <= 1 {
+                    expr.dim = 1;
+                }
+            }
+        }
+        "xDivXSubXi" => {
+            expr.exp_deg = 1;
+        }
+        "challenge" | "eval" => {
+            expr.exp_deg = 0;
+            expr.dim = FIELD_EXTENSION;
+        }
+        "airgroupvalue" | "proofvalue" => {
+            expr.exp_deg = 0;
+            if expr.dim <= 1 {
+                expr.dim = if expr.stage != 1 { FIELD_EXTENSION } else { 1 };
+            }
+        }
+        "airvalue" => {
+            expr.exp_deg = 0;
+            if expr.dim <= 1 {
+                expr.dim = if expr.stage != 1 { FIELD_EXTENSION } else { 1 };
+            }
+        }
+        "public" => {
+            expr.exp_deg = 0;
+            expr.stage = 1;
+            if expr.dim <= 1 {
+                expr.dim = 1;
+            }
+        }
+        "number" => {
+            expr.exp_deg = 0;
+            expr.stage = 0;
+            if expr.dim <= 1 {
+                expr.dim = 1;
+            }
+        }
+        "add" | "sub" | "mul" | "neg" => {
+            handle_binary_or_neg_inline(expressions, expr);
+        }
+        _ => {
+            panic!("Exp op not defined: {}", op);
+        }
     }
+    expr.info_computed = true;
 }
 
 /// Handle add/sub/mul/neg operations in add_info_expressions.
@@ -153,7 +218,6 @@ fn handle_binary_or_neg(expressions: &mut Vec<Expression>, idx: usize) {
     // neg -> mul by NEG_ONE
     if op == "neg" {
         expressions[idx].op = "mul".to_string();
-        // Insert NEG_ONE as lhs, existing value becomes rhs
         let neg_one = Expression {
             op: "number".to_string(),
             value: Some(NEG_ONE.to_string()),
@@ -162,30 +226,32 @@ fn handle_binary_or_neg(expressions: &mut Vec<Expression>, idx: usize) {
             dim: 1,
             ..Default::default()
         };
-        // The neg has values = [child_idx]. We need to restructure:
-        // values becomes [neg_one_inline_idx, child_idx]
-        // But since our arena stores inline Expression objects in `values`
-        // as indices, and the neg case stores children as ExprId indices,
-        // we need to handle this carefully.
-        //
-        // In our representation, values[] are ExprId indices into the arena.
-        // We push the neg_one expression into the arena and use its index.
+        // Push neg_one into the arena for arena-based children
         let neg_one_id = expressions.len();
         expressions.push(neg_one);
         let existing_values = expressions[idx].values.clone();
-        expressions[idx].values = vec![neg_one_id, existing_values[0]];
+        expressions[idx].values = vec![ExprChild::Id(neg_one_id), existing_values[0].clone()];
     }
 
     let current_op = expressions[idx].op.clone();
 
     // For add where LHS is number(0), convert to mul with LHS=1
     if current_op == "add" {
-        let lhs_idx = expressions[idx].values[0];
-        if expressions[lhs_idx].op == "number" {
-            if let Some(ref val) = expressions[lhs_idx].value {
-                if val == "0" {
-                    expressions[idx].op = "mul".to_string();
-                    expressions[lhs_idx].value = Some("1".to_string());
+        let lhs_is_zero = {
+            let lhs = expressions[idx].values[0].resolve(expressions);
+            lhs.op == "number" && lhs.value.as_deref() == Some("0")
+        };
+        if lhs_is_zero {
+            expressions[idx].op = "mul".to_string();
+            // Extract child kind first to avoid overlapping borrows
+            let child = expressions[idx].values[0].clone();
+            match child {
+                ExprChild::Id(id) => {
+                    expressions[id].value = Some("1".to_string());
+                }
+                ExprChild::Inline(mut expr) => {
+                    expr.value = Some("1".to_string());
+                    expressions[idx].values[0] = ExprChild::Inline(expr);
                 }
             }
         }
@@ -194,25 +260,57 @@ fn handle_binary_or_neg(expressions: &mut Vec<Expression>, idx: usize) {
     // For add/sub where RHS is number(0), convert to mul with RHS=1
     let current_op = expressions[idx].op.clone();
     if current_op == "add" || current_op == "sub" {
-        let rhs_idx = expressions[idx].values[1];
-        if expressions[rhs_idx].op == "number" {
-            if let Some(ref val) = expressions[rhs_idx].value {
-                if val == "0" {
-                    expressions[idx].op = "mul".to_string();
-                    expressions[rhs_idx].value = Some("1".to_string());
+        let rhs_is_zero = {
+            let rhs = expressions[idx].values[1].resolve(expressions);
+            rhs.op == "number" && rhs.value.as_deref() == Some("0")
+        };
+        if rhs_is_zero {
+            expressions[idx].op = "mul".to_string();
+            let child = expressions[idx].values[1].clone();
+            match child {
+                ExprChild::Id(id) => {
+                    expressions[id].value = Some("1".to_string());
+                }
+                ExprChild::Inline(mut expr) => {
+                    expr.value = Some("1".to_string());
+                    expressions[idx].values[1] = ExprChild::Inline(expr);
                 }
             }
         }
     }
 
-    let lhs_idx = expressions[idx].values[0];
-    let rhs_idx = expressions[idx].values[1];
+    // Process children: for Id children, recurse via arena; for Inline, recurse inline
+    for i in 0..expressions[idx].values.len() {
+        match expressions[idx].values[i].clone() {
+            ExprChild::Id(child_id) => {
+                add_info_expressions(expressions, child_id);
+            }
+            ExprChild::Inline(mut child) => {
+                add_info_expression_inline(expressions, &mut child);
+                expressions[idx].values[i] = ExprChild::Inline(child);
+            }
+        }
+    }
 
-    add_info_expressions(expressions, lhs_idx);
-    add_info_expressions(expressions, rhs_idx);
-
-    let lhs_deg = expressions[lhs_idx].exp_deg;
-    let rhs_deg = expressions[rhs_idx].exp_deg;
+    // Read child info
+    let (lhs_deg, lhs_dim, lhs_stage, lhs_offsets) = {
+        let lhs = expressions[idx].values[0].resolve(expressions);
+        (
+            lhs.exp_deg,
+            lhs.dim,
+            lhs.stage,
+            if lhs.rows_offsets.is_empty() { vec![0] } else { lhs.rows_offsets.clone() },
+        )
+    };
+    let (rhs_deg, rhs_dim, rhs_stage, rhs_offsets) = {
+        let rhs = expressions[idx].values[1].resolve(expressions);
+        (
+            rhs.exp_deg,
+            rhs.dim,
+            rhs.stage,
+            if rhs.rows_offsets.is_empty() { vec![0] } else { rhs.rows_offsets.clone() },
+        )
+    };
 
     let final_op = expressions[idx].op.clone();
     expressions[idx].exp_deg = if final_op == "mul" {
@@ -221,21 +319,10 @@ fn handle_binary_or_neg(expressions: &mut Vec<Expression>, idx: usize) {
         lhs_deg.max(rhs_deg)
     };
 
-    expressions[idx].dim = expressions[lhs_idx].dim.max(expressions[rhs_idx].dim);
-    expressions[idx].stage = expressions[lhs_idx].stage.max(expressions[rhs_idx].stage);
+    expressions[idx].dim = lhs_dim.max(rhs_dim);
+    expressions[idx].stage = lhs_stage.max(rhs_stage);
 
     // Merge rows_offsets
-    let lhs_offsets = if expressions[lhs_idx].rows_offsets.is_empty() {
-        vec![0]
-    } else {
-        expressions[lhs_idx].rows_offsets.clone()
-    };
-    let rhs_offsets = if expressions[rhs_idx].rows_offsets.is_empty() {
-        vec![0]
-    } else {
-        expressions[rhs_idx].rows_offsets.clone()
-    };
-
     let mut merged: Vec<i64> = lhs_offsets;
     for o in rhs_offsets {
         if !merged.contains(&o) {
@@ -243,6 +330,115 @@ fn handle_binary_or_neg(expressions: &mut Vec<Expression>, idx: usize) {
         }
     }
     expressions[idx].rows_offsets = merged;
+}
+
+/// Handle add/sub/mul/neg for inline expressions (not in the arena).
+fn handle_binary_or_neg_inline(expressions: &mut Vec<Expression>, expr: &mut Expression) {
+    let op = expr.op.clone();
+
+    // neg -> mul by NEG_ONE
+    if op == "neg" {
+        expr.op = "mul".to_string();
+        let neg_one = Expression {
+            op: "number".to_string(),
+            value: Some(NEG_ONE.to_string()),
+            exp_deg: 0,
+            stage: 0,
+            dim: 1,
+            ..Default::default()
+        };
+        let existing_values = expr.values.clone();
+        expr.values = vec![ExprChild::Inline(Box::new(neg_one)), existing_values[0].clone()];
+    }
+
+    let current_op = expr.op.clone();
+    if current_op == "add" {
+        let lhs_is_zero = {
+            let lhs = expr.values[0].resolve(expressions);
+            lhs.op == "number" && lhs.value.as_deref() == Some("0")
+        };
+        if lhs_is_zero {
+            expr.op = "mul".to_string();
+            match &mut expr.values[0] {
+                ExprChild::Id(id) => {
+                    expressions[*id].value = Some("1".to_string());
+                }
+                ExprChild::Inline(e) => {
+                    e.value = Some("1".to_string());
+                }
+            }
+        }
+    }
+
+    let current_op = expr.op.clone();
+    if current_op == "add" || current_op == "sub" {
+        let rhs_is_zero = {
+            let rhs = expr.values[1].resolve(expressions);
+            rhs.op == "number" && rhs.value.as_deref() == Some("0")
+        };
+        if rhs_is_zero {
+            expr.op = "mul".to_string();
+            match &mut expr.values[1] {
+                ExprChild::Id(id) => {
+                    expressions[*id].value = Some("1".to_string());
+                }
+                ExprChild::Inline(e) => {
+                    e.value = Some("1".to_string());
+                }
+            }
+        }
+    }
+
+    // Process children
+    for i in 0..expr.values.len() {
+        match expr.values[i].clone() {
+            ExprChild::Id(child_id) => {
+                add_info_expressions(expressions, child_id);
+            }
+            ExprChild::Inline(mut child) => {
+                add_info_expression_inline(expressions, &mut child);
+                expr.values[i] = ExprChild::Inline(child);
+            }
+        }
+    }
+
+    // Read child info
+    let (lhs_deg, lhs_dim, lhs_stage, lhs_offsets) = {
+        let lhs = expr.values[0].resolve(expressions);
+        (
+            lhs.exp_deg,
+            lhs.dim,
+            lhs.stage,
+            if lhs.rows_offsets.is_empty() { vec![0] } else { lhs.rows_offsets.clone() },
+        )
+    };
+    let (rhs_deg, rhs_dim, rhs_stage, rhs_offsets) = {
+        let rhs = expr.values[1].resolve(expressions);
+        (
+            rhs.exp_deg,
+            rhs.dim,
+            rhs.stage,
+            if rhs.rows_offsets.is_empty() { vec![0] } else { rhs.rows_offsets.clone() },
+        )
+    };
+
+    let final_op = expr.op.clone();
+    expr.exp_deg = if final_op == "mul" {
+        lhs_deg + rhs_deg
+    } else {
+        lhs_deg.max(rhs_deg)
+    };
+
+    expr.dim = lhs_dim.max(rhs_dim);
+    expr.stage = lhs_stage.max(rhs_stage);
+
+    let mut merged: Vec<i64> = lhs_offsets;
+    for o in rhs_offsets {
+        if !merged.contains(&o) {
+            merged.push(o);
+        }
+    }
+    expr.rows_offsets = merged;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,8 +458,9 @@ fn get_exp_dim_inner(expressions: &[Expression], exp: &Expression) -> usize {
     match exp.op.as_str() {
         "add" | "sub" | "mul" => {
             let mut max_dim = 0;
-            for &child_id in &exp.values {
-                let child_dim = get_exp_dim_inner(expressions, &expressions[child_id]);
+            for child in &exp.values {
+                let child_expr = child.resolve(expressions);
+                let child_dim = get_exp_dim_inner(expressions, child_expr);
                 if child_dim > max_dim {
                     max_dim = child_dim;
                 }
@@ -305,18 +502,19 @@ pub fn add_info_expressions_symbols(
         return;
     }
 
-    let op = expressions[idx].op.clone();
+    let exp = &expressions[idx];
+    let op = exp.op.clone();
 
     match op.as_str() {
         "exp" => {
-            let ref_id = expressions[idx].id.unwrap_or(0);
+            let ref_id = exp.id.unwrap_or(0);
             add_info_expressions_symbols(ev_map, expressions, ref_id, explored);
             explored[idx] = true;
         }
         "cm" | "const" | "custom" => {
-            let id = expressions[idx].id.unwrap_or(0);
-            let prime = expressions[idx].row_offset.unwrap_or(0);
-            let commit_id = expressions[idx].commit_id;
+            let id = exp.id.unwrap_or(0);
+            let prime = exp.row_offset.unwrap_or(0);
+            let commit_id = exp.commit_id;
 
             let new_item = EvMapItem {
                 entry_type: op.clone(),
@@ -338,10 +536,73 @@ pub fn add_info_expressions_symbols(
             }
         }
         "add" | "sub" | "mul" | "neg" => {
-            for &child_id in &expressions[idx].values {
-                add_info_expressions_symbols(ev_map, expressions, child_id, explored);
+            // Collect child arena IDs; for inline children, recurse into them
+            let values = expressions[idx].values.clone();
+            for child in &values {
+                match child {
+                    ExprChild::Id(child_id) => {
+                        add_info_expressions_symbols(ev_map, expressions, *child_id, explored);
+                    }
+                    ExprChild::Inline(child_expr) => {
+                        add_info_expressions_symbols_inline(ev_map, expressions, child_expr);
+                    }
+                }
             }
             explored[idx] = true;
+        }
+        _ => {}
+    }
+}
+
+/// Walk inline expression trees for symbol collection.
+fn add_info_expressions_symbols_inline(
+    ev_map: &mut Vec<EvMapItem>,
+    expressions: &[Expression],
+    expr: &Expression,
+) {
+    match expr.op.as_str() {
+        "exp" => {
+            let ref_id = expr.id.unwrap_or(0);
+            // Use a temporary explored vec for the referenced arena expression
+            let mut explored = vec![false; expressions.len()];
+            add_info_expressions_symbols(ev_map, expressions, ref_id, &mut explored);
+        }
+        "cm" | "const" | "custom" => {
+            let id = expr.id.unwrap_or(0);
+            let prime = expr.row_offset.unwrap_or(0);
+            let commit_id = expr.commit_id;
+
+            let new_item = EvMapItem {
+                entry_type: expr.op.clone(),
+                id,
+                prime,
+                commit_id,
+            };
+
+            let already_present = ev_map.iter().any(|item| {
+                item.entry_type == new_item.entry_type
+                    && item.id == new_item.id
+                    && item.prime == new_item.prime
+                    && (new_item.commit_id.is_none()
+                        || item.commit_id == new_item.commit_id)
+            });
+
+            if !already_present {
+                ev_map.push(new_item);
+            }
+        }
+        "add" | "sub" | "mul" | "neg" => {
+            for child in &expr.values {
+                match child {
+                    ExprChild::Id(child_id) => {
+                        let mut explored = vec![false; expressions.len()];
+                        add_info_expressions_symbols(ev_map, expressions, *child_id, &mut explored);
+                    }
+                    ExprChild::Inline(child_expr) => {
+                        add_info_expressions_symbols_inline(ev_map, expressions, child_expr);
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -399,7 +660,7 @@ mod tests {
         let cm2 = make_cm(1, 1);
         let mul_expr = Expression {
             op: "mul".to_string(),
-            values: vec![0, 1],
+            values: vec![ExprChild::Id(0), ExprChild::Id(1)],
             ..Default::default()
         };
         let mut exprs = vec![cm1, cm2, mul_expr];
@@ -437,7 +698,7 @@ mod tests {
             make_cm(0, 1),
             Expression {
                 op: "add".to_string(),
-                values: vec![0, 1],
+                values: vec![ExprChild::Id(0), ExprChild::Id(1)],
                 ..Default::default()
             },
         ];

@@ -1,5 +1,5 @@
-use crate::expression::Expression;
-use crate::helpers::{add_info_expressions, get_exp_dim};
+use crate::expression::{ExprChild, Expression};
+use crate::helpers::{add_info_expression_inline, get_exp_dim};
 use crate::pilout_info::{ConstraintInfo, SymbolInfo, FIELD_EXTENSION};
 
 /// Result of constraint polynomial generation, attached to the setup result.
@@ -27,12 +27,10 @@ pub struct Boundary {
 /// Mirrors `generateConstraintPolynomial` from
 /// `pil2-proofman-js/src/pil2-stark/pil_info/helpers/polynomials/constraintPolynomial.js`.
 ///
-/// This function:
-/// 1. Creates the `std_vc` challenge symbol
-/// 2. For each constraint, wraps non-everyRow boundaries with Zi
-/// 3. Accumulates: c_exp = c_exp * vc + next_constraint
-/// 4. Creates the `std_xi` challenge symbol
-/// 5. Computes the initial (pre-imPol) constraint degree
+/// In JS, helper nodes (challenge, exp refs, zi) are inline objects, and only
+/// composite expressions are pushed to the expressions array. We match that
+/// by using `ExprChild::Inline` for helper nodes and only pushing the final
+/// composite mul/add expressions.
 pub fn generate_constraint_polynomial(
     n_stages: usize,
     expressions: &mut Vec<Expression>,
@@ -69,7 +67,7 @@ pub fn generate_constraint_polynomial(
         exp_id: None,
     });
 
-    // Build the vc expression node (inline, not in arena)
+    // Build the vc expression node INLINE (not pushed to arena, matching JS)
     let vc_expr = Expression {
         op: "challenge".to_string(),
         stage,
@@ -77,10 +75,9 @@ pub fn generate_constraint_polynomial(
         stage_id: Some(0),
         id: Some(vc_id),
         value: Some("std_vc".to_string()),
+        exp_deg: 0,
         ..Default::default()
     };
-    let vc_idx = expressions.len();
-    expressions.push(vc_expr);
 
     let mut c_exp_id: Option<usize> = None;
 
@@ -90,7 +87,7 @@ pub fn generate_constraint_polynomial(
             panic!("Boundary {} not supported", boundary);
         }
 
-        // Build expression reference to the constraint's expression
+        // Build inline expression reference to the constraint's expression
         let e = Expression {
             op: "exp".to_string(),
             id: Some(constraint.e),
@@ -98,8 +95,6 @@ pub fn generate_constraint_polynomial(
             stage,
             ..Default::default()
         };
-        let e_idx = expressions.len();
-        expressions.push(e);
 
         let constraint_id;
 
@@ -115,12 +110,14 @@ pub fn generate_constraint_polynomial(
                 boundary: Some("everyFrame".to_string()),
                 ..Default::default()
             };
-            let zi_idx = expressions.len();
-            expressions.push(zi);
 
+            // mul(e, zi) - one push, inline children (matches JS)
             let mul_expr = Expression {
                 op: "mul".to_string(),
-                values: vec![e_idx, zi_idx],
+                values: vec![
+                    ExprChild::Inline(Box::new(e)),
+                    ExprChild::Inline(Box::new(zi)),
+                ],
                 ..Default::default()
             };
             expressions.push(mul_expr);
@@ -133,25 +130,30 @@ pub fn generate_constraint_polynomial(
                 boundary: Some(boundary.clone()),
                 ..Default::default()
             };
-            let zi_idx = expressions.len();
-            expressions.push(zi);
 
+            // mul(e, zi) - one push, inline children (matches JS)
             let mul_expr = Expression {
                 op: "mul".to_string(),
-                values: vec![e_idx, zi_idx],
+                values: vec![
+                    ExprChild::Inline(Box::new(e)),
+                    ExprChild::Inline(Box::new(zi)),
+                ],
                 ..Default::default()
             };
             expressions.push(mul_expr);
             constraint_id = expressions.len() - 1;
         } else {
-            constraint_id = e_idx;
+            // everyRow: use the original constraint expression directly
+            constraint_id = constraint.e;
         }
 
         if i == 0 {
             c_exp_id = Some(constraint_id);
         } else {
             let prev_c_exp_id = c_exp_id.unwrap();
-            // weighted = vc * prev_c_exp
+
+            // weightedConstraint = mul(vc, exp(prev_c_exp_id))
+            // All children are inline, ONE push (matches JS)
             let prev_exp_ref = Expression {
                 op: "exp".to_string(),
                 id: Some(prev_c_exp_id),
@@ -159,19 +161,20 @@ pub fn generate_constraint_polynomial(
                 stage,
                 ..Default::default()
             };
-            let prev_ref_idx = expressions.len();
-            expressions.push(prev_exp_ref);
-
-            let weighted = Expression {
+            let mut weighted = Expression {
                 op: "mul".to_string(),
-                values: vec![vc_idx, prev_ref_idx],
+                values: vec![
+                    ExprChild::Inline(Box::new(vc_expr.clone())),
+                    ExprChild::Inline(Box::new(prev_exp_ref)),
+                ],
                 ..Default::default()
             };
+            add_info_expression_inline(expressions, &mut weighted);
             expressions.push(weighted);
             let weighted_id = expressions.len() - 1;
-            add_info_expressions(expressions, weighted_id);
 
-            // accumulated = weighted + current constraint
+            // accumulatedConstraints = add(exp(weighted_id), exp(constraint_id))
+            // All children are inline, ONE push (matches JS)
             let weighted_ref = Expression {
                 op: "exp".to_string(),
                 id: Some(weighted_id),
@@ -179,9 +182,6 @@ pub fn generate_constraint_polynomial(
                 stage,
                 ..Default::default()
             };
-            let weighted_ref_idx = expressions.len();
-            expressions.push(weighted_ref);
-
             let constraint_ref = Expression {
                 op: "exp".to_string(),
                 id: Some(constraint_id),
@@ -189,17 +189,17 @@ pub fn generate_constraint_polynomial(
                 stage,
                 ..Default::default()
             };
-            let constraint_ref_idx = expressions.len();
-            expressions.push(constraint_ref);
-
-            let accumulated = Expression {
+            let mut accumulated = Expression {
                 op: "add".to_string(),
-                values: vec![weighted_ref_idx, constraint_ref_idx],
+                values: vec![
+                    ExprChild::Inline(Box::new(weighted_ref)),
+                    ExprChild::Inline(Box::new(constraint_ref)),
+                ],
                 ..Default::default()
             };
+            add_info_expression_inline(expressions, &mut accumulated);
             expressions.push(accumulated);
             let accumulated_id = expressions.len() - 1;
-            add_info_expressions(expressions, accumulated_id);
 
             c_exp_id = Some(accumulated_id);
         }
@@ -277,17 +277,68 @@ pub fn calculate_exp_deg(
         "number" | "public" | "challenge" | "eval" | "airgroupvalue" | "airvalue"
         | "proofvalue" => 0,
         "neg" => {
-            let child_idx = exp.values[0];
-            calculate_exp_deg(expressions, child_idx, im_exps, _cache_values)
+            let child = exp.values[0].resolve(expressions);
+            match &exp.values[0] {
+                ExprChild::Id(id) => calculate_exp_deg(expressions, *id, im_exps, _cache_values),
+                ExprChild::Inline(_) => calculate_exp_deg_inline(expressions, child, im_exps, _cache_values),
+            }
         }
         "add" | "sub" | "mul" => {
-            let lhs_deg = calculate_exp_deg(expressions, exp.values[0], im_exps, _cache_values);
-            let rhs_deg = calculate_exp_deg(expressions, exp.values[1], im_exps, _cache_values);
+            let lhs_deg = match &exp.values[0] {
+                ExprChild::Id(id) => calculate_exp_deg(expressions, *id, im_exps, _cache_values),
+                ExprChild::Inline(e) => calculate_exp_deg_inline(expressions, e, im_exps, _cache_values),
+            };
+            let rhs_deg = match &exp.values[1] {
+                ExprChild::Id(id) => calculate_exp_deg(expressions, *id, im_exps, _cache_values),
+                ExprChild::Inline(e) => calculate_exp_deg_inline(expressions, e, im_exps, _cache_values),
+            };
             if exp.op == "mul" {
                 lhs_deg + rhs_deg
             } else {
                 lhs_deg.max(rhs_deg)
             }
+        }
+        _ => panic!("Exp op not defined: {}", exp.op),
+    }
+}
+
+/// Calculate degree for an inline (non-arena) expression.
+fn calculate_exp_deg_inline(
+    expressions: &[Expression],
+    exp: &Expression,
+    im_exps: &[usize],
+    cache_values: bool,
+) -> i64 {
+    match exp.op.as_str() {
+        "exp" => {
+            let ref_id = exp.id.unwrap_or(0);
+            if im_exps.contains(&ref_id) {
+                return 1;
+            }
+            calculate_exp_deg(expressions, ref_id, im_exps, cache_values)
+        }
+        "const" | "cm" | "custom" => 1,
+        "Zi" => {
+            if exp.boundary.as_deref() == Some("everyRow") { 0 } else { 1 }
+        }
+        "number" | "public" | "challenge" | "eval" | "airgroupvalue" | "airvalue"
+        | "proofvalue" => 0,
+        "neg" => {
+            match &exp.values[0] {
+                ExprChild::Id(id) => calculate_exp_deg(expressions, *id, im_exps, cache_values),
+                ExprChild::Inline(e) => calculate_exp_deg_inline(expressions, e, im_exps, cache_values),
+            }
+        }
+        "add" | "sub" | "mul" => {
+            let lhs_deg = match &exp.values[0] {
+                ExprChild::Id(id) => calculate_exp_deg(expressions, *id, im_exps, cache_values),
+                ExprChild::Inline(e) => calculate_exp_deg_inline(expressions, e, im_exps, cache_values),
+            };
+            let rhs_deg = match &exp.values[1] {
+                ExprChild::Id(id) => calculate_exp_deg(expressions, *id, im_exps, cache_values),
+                ExprChild::Inline(e) => calculate_exp_deg_inline(expressions, e, im_exps, cache_values),
+            };
+            if exp.op == "mul" { lhs_deg + rhs_deg } else { lhs_deg.max(rhs_deg) }
         }
         _ => panic!("Exp op not defined: {}", exp.op),
     }
@@ -342,7 +393,7 @@ mod tests {
     fn make_mul(lhs: usize, rhs: usize) -> Expression {
         Expression {
             op: "mul".to_string(),
-            values: vec![lhs, rhs],
+            values: vec![ExprChild::Id(lhs), ExprChild::Id(rhs)],
             ..Default::default()
         }
     }
@@ -400,8 +451,8 @@ mod tests {
             &mut boundaries,
         );
 
-        // With one constraint, c_exp_id is the exp reference to constraint 0
-        assert!(result.c_exp_id > 0);
+        // With one everyRow constraint, c_exp_id is the original expression
+        assert_eq!(result.c_exp_id, 0);
         assert_eq!(result.q_dim, 1);
         assert_eq!(result.initial_q_degree, 1);
 
@@ -457,8 +508,8 @@ mod tests {
             &mut boundaries,
         );
 
-        // With two constraints, degree should still be 1 (simple cm refs combined)
-        assert!(result.c_exp_id > 1);
+        // With two constraints: 2 original + 1 weighted + 1 accumulated = 4 total
+        assert_eq!(result.c_exp_id, 3);
         assert!(result.q_dim >= 1);
     }
 

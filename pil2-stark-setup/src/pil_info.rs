@@ -27,6 +27,8 @@ pub struct PilInfoResult {
     pub c_exp_id: usize,
     /// FRI polynomial expression ID (distinct from c_exp_id).
     pub fri_exp_id: usize,
+    /// Polynomial Q degree.
+    pub q_deg: i64,
 }
 
 /// Main entry point: assemble pil info for a single air.
@@ -261,6 +263,7 @@ pub fn pil_info(
         im_pols_info,
         c_exp_id,
         fri_exp_id,
+        q_deg,
     }
 }
 

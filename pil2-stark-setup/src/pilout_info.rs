@@ -9,7 +9,7 @@ use pilout::pilout::{
     SymbolType,
 };
 
-use crate::expression::{ExprId, Expression, ExpressionArena};
+use crate::expression::{ExprChild, Expression, ExpressionArena};
 
 /// Constant for field extension dimension (Goldilocks cubic extension).
 pub const FIELD_EXTENSION: usize = 3;
@@ -151,39 +151,33 @@ struct FormatCtx<'a> {
 }
 
 impl<'a> FormatCtx<'a> {
-    /// Push an expression into the arena and return its index.
-    fn push(&mut self, expr: Expression) -> ExprId {
-        let id = self.arena.len();
-        self.arena.push(expr);
-        id
-    }
-
-    /// Format a protobuf Operand into an arena slot, returning its ExprId.
-    fn format_operand(&mut self, op: &operand::Operand) -> ExprId {
+    /// Format a protobuf Operand into an inline Expression (not pushed to arena).
+    /// Matches JS behavior where child operands are inline objects.
+    fn format_operand_inline(&mut self, op: &operand::Operand) -> Expression {
         match op {
             operand::Operand::Expression(expr_ref) => {
                 let id = expr_ref.idx as usize;
                 // Optimization: unwrap add/sub(X, 0) where LHS is not an expression ref
                 if let Some(inner_expr) = self.air_expressions.get(id) {
                     if let Some(ref operation) = inner_expr.operation {
-                        if let Some(unwrapped_id) = self.try_unwrap_zero_rhs(operation) {
-                            return unwrapped_id;
+                        if let Some(unwrapped) = self.try_unwrap_zero_rhs_inline(operation) {
+                            return unwrapped;
                         }
                     }
                 }
-                self.push(Expression {
+                Expression {
                     op: "exp".to_string(),
                     id: Some(id),
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::Constant(c) => {
                 let value = buf_to_bigint_string(&c.value);
-                self.push(Expression {
+                Expression {
                     op: "number".to_string(),
                     value: Some(value),
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::WitnessCol(wc) => {
                 let stage_id = wc.col_idx as usize;
@@ -196,7 +190,7 @@ impl<'a> FormatCtx<'a> {
                         .map(|w| *w as usize)
                         .sum::<usize>();
                 let dim = if stage <= 1 { 1 } else { FIELD_EXTENSION };
-                self.push(Expression {
+                Expression {
                     op: "cm".to_string(),
                     id: Some(id),
                     stage_id: Some(stage_id),
@@ -204,7 +198,7 @@ impl<'a> FormatCtx<'a> {
                     stage,
                     dim,
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::CustomCol(cc) => {
                 let commit_id = cc.commit_id as usize;
@@ -219,7 +213,7 @@ impl<'a> FormatCtx<'a> {
                         .map(|w| *w as usize)
                         .sum::<usize>();
                 let dim = if stage <= 1 { 1 } else { FIELD_EXTENSION };
-                self.push(Expression {
+                Expression {
                     op: "custom".to_string(),
                     id: Some(id),
                     stage_id: Some(stage_id),
@@ -228,45 +222,43 @@ impl<'a> FormatCtx<'a> {
                     dim,
                     commit_id: Some(commit_id),
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::FixedCol(fc) => {
                 let id = fc.idx as usize;
                 let row_offset = fc.row_offset as i64;
-                self.push(Expression {
+                Expression {
                     op: "const".to_string(),
                     id: Some(id),
                     row_offset: Some(row_offset),
                     stage: 0,
                     dim: 1,
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::PublicValue(pv) => {
                 let id = pv.idx as usize;
-                self.push(Expression {
+                Expression {
                     op: "public".to_string(),
                     id: Some(id),
                     stage: 1,
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::AirGroupValue(agv) => {
-                // Air-level AirGroupValue operand only has idx (no airGroupId field).
-                // The airgroup context is implicit from the air we are processing.
                 let id = agv.idx as usize;
                 let stage = self.air_group_values
                     .get(id)
                     .map(|v| v.stage as usize)
                     .unwrap_or(0);
                 let dim = if stage == 1 { 1 } else { FIELD_EXTENSION };
-                self.push(Expression {
+                Expression {
                     op: "airgroupvalue".to_string(),
                     id: Some(id),
                     dim,
                     stage,
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::AirValue(av) => {
                 let id = av.idx as usize;
@@ -275,13 +267,13 @@ impl<'a> FormatCtx<'a> {
                     .map(|v| v.stage as usize)
                     .unwrap_or(0);
                 let dim = if stage == 1 { 1 } else { FIELD_EXTENSION };
-                self.push(Expression {
+                Expression {
                     op: "airvalue".to_string(),
                     id: Some(id),
                     stage,
                     dim,
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::Challenge(ch) => {
                 let stage_id_val = ch.idx as usize;
@@ -292,43 +284,44 @@ impl<'a> FormatCtx<'a> {
                         .take(stage.saturating_sub(1))
                         .map(|c| *c as usize)
                         .sum::<usize>();
-                self.push(Expression {
+                Expression {
                     op: "challenge".to_string(),
                     stage,
                     stage_id: Some(stage_id_val),
                     id: Some(id),
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::ProofValue(pv) => {
                 let id = pv.idx as usize;
                 let stage = pv.stage as usize;
                 let dim = if stage == 1 { 1 } else { FIELD_EXTENSION };
-                self.push(Expression {
+                Expression {
                     op: "proofvalue".to_string(),
                     id: Some(id),
                     stage,
                     dim,
                     ..Default::default()
-                })
+                }
             }
             operand::Operand::PeriodicCol(pc) => {
                 let id = pc.idx as usize;
                 let row_offset = pc.row_offset as i64;
-                self.push(Expression {
+                Expression {
                     op: "const".to_string(),
                     id: Some(id),
                     row_offset: Some(row_offset),
                     stage: 0,
                     dim: 1,
                     ..Default::default()
-                })
+                }
             }
         }
     }
 
     /// Try to unwrap add/sub(X, const(0)) where LHS is not an expression reference.
-    fn try_unwrap_zero_rhs(&mut self, operation: &expr_mod::Operation) -> Option<ExprId> {
+    /// Returns an inline Expression instead of an arena index.
+    fn try_unwrap_zero_rhs_inline(&mut self, operation: &expr_mod::Operation) -> Option<Expression> {
         let (lhs_operand, rhs_operand) = match operation {
             expr_mod::Operation::Add(add) => (add.lhs.as_ref()?, add.rhs.as_ref()?),
             expr_mod::Operation::Sub(sub) => (sub.lhs.as_ref()?, sub.rhs.as_ref()?),
@@ -345,27 +338,27 @@ impl<'a> FormatCtx<'a> {
         if let operand::Operand::Constant(c) = rhs_op {
             let val = buf_to_bigint_string(&c.value);
             if val == "0" {
-                return Some(self.format_operand(lhs_op));
+                return Some(self.format_operand_inline(lhs_op));
             }
         }
 
         None
     }
 
-    /// Format an `Option<&Operand>`, returning an ExprId (zero-number if None).
-    fn format_operand_option(&mut self, operand: Option<&pb::Operand>) -> ExprId {
+    /// Format an `Option<&Operand>` into an inline ExprChild.
+    fn format_operand_child(&mut self, operand: Option<&pb::Operand>) -> ExprChild {
         match operand.and_then(|o| o.operand.as_ref()) {
-            Some(op) => self.format_operand(op),
-            None => self.push(Expression {
+            Some(op) => ExprChild::Inline(Box::new(self.format_operand_inline(op))),
+            None => ExprChild::Inline(Box::new(Expression {
                 op: "number".to_string(),
                 value: Some("0".to_string()),
                 ..Default::default()
-            }),
+            })),
         }
     }
 
     /// Format a single top-level protobuf Expression (add/sub/mul/neg with children).
-    /// The resulting Expression is placed at a specific arena position.
+    /// Children are stored as inline ExprChild values (not pushed to arena).
     fn format_expression_node(&mut self, expr: &pb::Expression) -> Expression {
         let operation = match &expr.operation {
             Some(op) => op,
@@ -380,37 +373,37 @@ impl<'a> FormatCtx<'a> {
 
         match operation {
             expr_mod::Operation::Add(add) => {
-                let lhs_id = self.format_operand_option(add.lhs.as_ref());
-                let rhs_id = self.format_operand_option(add.rhs.as_ref());
+                let lhs = self.format_operand_child(add.lhs.as_ref());
+                let rhs = self.format_operand_child(add.rhs.as_ref());
                 Expression {
                     op: "add".to_string(),
-                    values: vec![lhs_id, rhs_id],
+                    values: vec![lhs, rhs],
                     ..Default::default()
                 }
             }
             expr_mod::Operation::Sub(sub) => {
-                let lhs_id = self.format_operand_option(sub.lhs.as_ref());
-                let rhs_id = self.format_operand_option(sub.rhs.as_ref());
+                let lhs = self.format_operand_child(sub.lhs.as_ref());
+                let rhs = self.format_operand_child(sub.rhs.as_ref());
                 Expression {
                     op: "sub".to_string(),
-                    values: vec![lhs_id, rhs_id],
+                    values: vec![lhs, rhs],
                     ..Default::default()
                 }
             }
             expr_mod::Operation::Mul(mul) => {
-                let lhs_id = self.format_operand_option(mul.lhs.as_ref());
-                let rhs_id = self.format_operand_option(mul.rhs.as_ref());
+                let lhs = self.format_operand_child(mul.lhs.as_ref());
+                let rhs = self.format_operand_child(mul.rhs.as_ref());
                 Expression {
                     op: "mul".to_string(),
-                    values: vec![lhs_id, rhs_id],
+                    values: vec![lhs, rhs],
                     ..Default::default()
                 }
             }
             expr_mod::Operation::Neg(neg) => {
-                let val_id = self.format_operand_option(neg.value.as_ref());
+                let val = self.format_operand_child(neg.value.as_ref());
                 Expression {
                     op: "neg".to_string(),
-                    values: vec![val_id],
+                    values: vec![val],
                     ..Default::default()
                 }
             }
@@ -424,10 +417,9 @@ impl<'a> FormatCtx<'a> {
 
 /// Format all Air-level protobuf expressions into a flat `Vec<Expression>`.
 ///
-/// Top-level expressions occupy indices 0..N-1. Child operands that are
-/// not "exp" references are allocated additional arena slots at indices >= N.
-/// This matches the JS representation where inline child nodes are nested
-/// objects, but in Rust they are arena-allocated and referenced by ExprId.
+/// Top-level expressions occupy indices 0..N-1. Child operands are stored
+/// as inline `ExprChild::Inline` values within each expression, matching
+/// the JS representation where child nodes are nested objects.
 pub fn format_expressions(
     air_expressions: &[pb::Expression],
     stage_widths: &[u32],
@@ -438,7 +430,6 @@ pub fn format_expressions(
 ) -> Vec<Expression> {
     let n = air_expressions.len();
 
-    // Pre-allocate arena with placeholder expressions for the top-level slots.
     let mut ctx = FormatCtx {
         air_expressions,
         stage_widths,
@@ -446,7 +437,7 @@ pub fn format_expressions(
         air_values,
         air_group_values,
         custom_commits,
-        arena: Vec::with_capacity(n * 3),
+        arena: Vec::with_capacity(n),
     };
 
     // Reserve the first N slots with placeholders.
@@ -943,8 +934,7 @@ fn process_hint_field(
                     custom_commits,
                     arena: Vec::new(),
                 };
-                let expr_id = ctx.format_operand(op);
-                let value = ctx.arena[expr_id].clone();
+                let value = ctx.format_operand_inline(op);
 
                 // If the value is an "exp" reference, mark keep=true
                 if value.op == "exp" {

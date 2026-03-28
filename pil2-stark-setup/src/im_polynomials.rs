@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use tracing::info;
 
-use crate::expression::Expression;
-use crate::helpers::{add_info_expressions, get_exp_dim};
+use crate::expression::{ExprChild, Expression};
+use crate::helpers::{add_info_expression_inline, get_exp_dim};
 use crate::pilout_info::{ConstraintInfo, SymbolInfo, FIELD_EXTENSION};
 
 // ---------------------------------------------------------------------------
@@ -43,6 +43,17 @@ fn calc_deg_inner(
     degree_cache: &mut HashMap<usize, i64>,
 ) -> i64 {
     let exp = &expressions[idx];
+    calc_deg_expr(expressions, exp, im_exps, cache_values, degree_cache)
+}
+
+/// Calculate degree for an expression (may be arena-based or inline).
+fn calc_deg_expr(
+    expressions: &[Expression],
+    exp: &Expression,
+    im_exps: &[usize],
+    cache_values: bool,
+    degree_cache: &mut HashMap<usize, i64>,
+) -> i64 {
     match exp.op.as_str() {
         "exp" => {
             let id = exp.id.unwrap_or(0);
@@ -62,23 +73,33 @@ fn calc_deg_inner(
         "number" | "public" | "challenge" | "eval" | "airgroupvalue" | "airvalue"
         | "proofvalue" => 0,
         "neg" => {
-            calculate_exp_deg(expressions, exp.values[0], im_exps, cache_values, degree_cache)
+            calc_deg_child(expressions, &exp.values[0], im_exps, cache_values, degree_cache)
         }
         "add" | "sub" => {
-            let lhs =
-                calculate_exp_deg(expressions, exp.values[0], im_exps, cache_values, degree_cache);
-            let rhs =
-                calculate_exp_deg(expressions, exp.values[1], im_exps, cache_values, degree_cache);
+            let lhs = calc_deg_child(expressions, &exp.values[0], im_exps, cache_values, degree_cache);
+            let rhs = calc_deg_child(expressions, &exp.values[1], im_exps, cache_values, degree_cache);
             lhs.max(rhs)
         }
         "mul" => {
-            let lhs =
-                calculate_exp_deg(expressions, exp.values[0], im_exps, cache_values, degree_cache);
-            let rhs =
-                calculate_exp_deg(expressions, exp.values[1], im_exps, cache_values, degree_cache);
+            let lhs = calc_deg_child(expressions, &exp.values[0], im_exps, cache_values, degree_cache);
+            let rhs = calc_deg_child(expressions, &exp.values[1], im_exps, cache_values, degree_cache);
             lhs + rhs
         }
         other => panic!("Exp op not defined: {}", other),
+    }
+}
+
+/// Calculate degree for a child (either arena index or inline).
+fn calc_deg_child(
+    expressions: &[Expression],
+    child: &ExprChild,
+    im_exps: &[usize],
+    cache_values: bool,
+    degree_cache: &mut HashMap<usize, i64>,
+) -> i64 {
+    match child {
+        ExprChild::Id(id) => calculate_exp_deg(expressions, *id, im_exps, cache_values, degree_cache),
+        ExprChild::Inline(expr) => calc_deg_expr(expressions, expr, im_exps, cache_values, degree_cache),
     }
 }
 
@@ -176,8 +197,10 @@ fn calculate_added_cols(
 // Inner recursive search (mirrors JS `_calculateImPols`)
 // ---------------------------------------------------------------------------
 
-/// Memoization key: (absolute_max, sorted list of current im_pol IDs).
-type MemoKey = (usize, Vec<usize>);
+/// Memoization key: (expression_id, absolute_max, sorted list of current im_pol IDs).
+/// Bug fix: include expression_id in the key so per-expression caching works
+/// correctly (matching JS `exp.res[absoluteMax][JSON.stringify(imPols)]`).
+type MemoKey = (usize, usize, Vec<usize>);
 /// Memoization value: (Option<im_pols_vec>, degree).
 /// `None` means the search failed for this sub-tree.
 type MemoVal = (Option<Vec<usize>>, i64);
@@ -223,22 +246,37 @@ fn calc_im_pols_inner(
     memo: &mut HashMap<MemoKey, MemoVal>,
 ) -> (Option<Vec<usize>>, i64) {
     let exp = &expressions[idx];
+    calc_im_pols_expr(expressions, exp, idx, im_pols, max_deg, absolute_max, abs_max_d, memo)
+}
+
+/// Inner recursive search that works on any expression (arena or inline).
+/// `expr_id` is the arena index of the expression if it's in the arena,
+/// or the original arena entry that led here for inline children.
+fn calc_im_pols_expr(
+    expressions: &[Expression],
+    exp: &Expression,
+    expr_id: usize,
+    im_pols: &[usize],
+    max_deg: usize,
+    absolute_max: usize,
+    abs_max_d: &mut i64,
+    memo: &mut HashMap<MemoKey, MemoVal>,
+) -> (Option<Vec<usize>>, i64) {
     let op = exp.op.as_str();
 
     match op {
         "add" | "sub" => {
             let mut md: i64 = 0;
             let mut current_pols = im_pols.to_vec();
-            for &child_id in &exp.values {
-                let (child_pols, d) = calc_im_pols_inner(
-                    expressions,
-                    child_id,
-                    &current_pols,
-                    max_deg,
-                    absolute_max,
-                    abs_max_d,
-                    memo,
-                );
+            for child in &exp.values {
+                let (child_pols, d) = match child {
+                    ExprChild::Id(id) => calc_im_pols_inner(
+                        expressions, *id, &current_pols, max_deg, absolute_max, abs_max_d, memo,
+                    ),
+                    ExprChild::Inline(e) => calc_im_pols_expr(
+                        expressions, e, expr_id, &current_pols, max_deg, absolute_max, abs_max_d, memo,
+                    ),
+                };
                 match child_pols {
                     None => return (None, -1),
                     Some(p) => {
@@ -253,29 +291,27 @@ fn calc_im_pols_inner(
         }
         "mul" => {
             // If either child is a non-composite degree-0 node, skip it
-            let lhs = &expressions[exp.values[0]];
-            if !["add", "mul", "sub", "exp"].contains(&lhs.op.as_str()) && lhs.exp_deg == 0 {
-                return calc_im_pols_inner(
-                    expressions,
-                    exp.values[1],
-                    im_pols,
-                    max_deg,
-                    absolute_max,
-                    abs_max_d,
-                    memo,
-                );
+            let lhs_expr = exp.values[0].resolve(expressions);
+            if !["add", "mul", "sub", "exp"].contains(&lhs_expr.op.as_str()) && lhs_expr.exp_deg == 0 {
+                return match &exp.values[1] {
+                    ExprChild::Id(id) => calc_im_pols_inner(
+                        expressions, *id, im_pols, max_deg, absolute_max, abs_max_d, memo,
+                    ),
+                    ExprChild::Inline(e) => calc_im_pols_expr(
+                        expressions, e, expr_id, im_pols, max_deg, absolute_max, abs_max_d, memo,
+                    ),
+                };
             }
-            let rhs = &expressions[exp.values[1]];
-            if !["add", "mul", "sub", "exp"].contains(&rhs.op.as_str()) && rhs.exp_deg == 0 {
-                return calc_im_pols_inner(
-                    expressions,
-                    exp.values[0],
-                    im_pols,
-                    max_deg,
-                    absolute_max,
-                    abs_max_d,
-                    memo,
-                );
+            let rhs_expr = exp.values[1].resolve(expressions);
+            if !["add", "mul", "sub", "exp"].contains(&rhs_expr.op.as_str()) && rhs_expr.exp_deg == 0 {
+                return match &exp.values[0] {
+                    ExprChild::Id(id) => calc_im_pols_inner(
+                        expressions, *id, im_pols, max_deg, absolute_max, abs_max_d, memo,
+                    ),
+                    ExprChild::Inline(e) => calc_im_pols_expr(
+                        expressions, e, expr_id, im_pols, max_deg, absolute_max, abs_max_d, memo,
+                    ),
+                };
             }
 
             let max_deg_here = exp.exp_deg as usize;
@@ -288,28 +324,26 @@ fn calc_im_pols_inner(
 
             for l in 0..=max_deg {
                 let r = max_deg - l;
-                let (e1, d1) = calc_im_pols_inner(
-                    expressions,
-                    exp.values[0],
-                    im_pols,
-                    l,
-                    absolute_max,
-                    abs_max_d,
-                    memo,
-                );
+                let (e1, d1) = match &exp.values[0] {
+                    ExprChild::Id(id) => calc_im_pols_inner(
+                        expressions, *id, im_pols, l, absolute_max, abs_max_d, memo,
+                    ),
+                    ExprChild::Inline(e) => calc_im_pols_expr(
+                        expressions, e, expr_id, im_pols, l, absolute_max, abs_max_d, memo,
+                    ),
+                };
                 if e1.is_none() {
                     continue;
                 }
                 let e1_vec = e1.unwrap();
-                let (e2, d2) = calc_im_pols_inner(
-                    expressions,
-                    exp.values[1],
-                    &e1_vec,
-                    r,
-                    absolute_max,
-                    abs_max_d,
-                    memo,
-                );
+                let (e2, d2) = match &exp.values[1] {
+                    ExprChild::Id(id) => calc_im_pols_inner(
+                        expressions, *id, &e1_vec, r, absolute_max, abs_max_d, memo,
+                    ),
+                    ExprChild::Inline(e) => calc_im_pols_expr(
+                        expressions, e, expr_id, &e1_vec, r, absolute_max, abs_max_d, memo,
+                    ),
+                };
                 if let Some(ref e2_vec) = e2 {
                     let should_replace = match &eb {
                         None => true,
@@ -336,10 +370,10 @@ fn calc_im_pols_inner(
                 return (Some(im_pols.to_vec()), 1);
             }
 
-            // Check memo
+            // Check memo - key includes expression id (Bug 2 fix)
             let mut sorted_pols = im_pols.to_vec();
             sorted_pols.sort_unstable();
-            let memo_key = (absolute_max, sorted_pols);
+            let memo_key = (id, absolute_max, sorted_pols);
 
             let (e, d) = if let Some(cached) = memo.get(&memo_key) {
                 cached.clone()
@@ -368,11 +402,11 @@ fn calc_im_pols_inner(
                         }
                         (Some(new_pols), 1)
                     } else {
-                        // Store in memo
+                        // Store in memo with expression id in key
                         let mut sorted_key = im_pols.to_vec();
                         sorted_key.sort_unstable();
                         memo.insert(
-                            (absolute_max, sorted_key),
+                            (id, absolute_max, sorted_key),
                             (Some(e_vec.clone()), d),
                         );
                         (Some(e_vec.clone()), d)
@@ -401,6 +435,10 @@ fn calc_im_pols_inner(
 ///
 /// `c_exp_id` is the constraint expression ID, updated in-place.
 /// Returns the final `(q_deg, q_dim, c_exp_id)` to be stored in the output.
+///
+/// Matches JS `addIntermediatePolynomials` from imPolynomials.js:
+/// helper nodes (challenge, exp refs, cm, zi) are inline children,
+/// only composite expressions are pushed to the arena.
 pub fn add_im_polynomials(
     expressions: &mut Vec<Expression>,
     constraints: &mut Vec<ConstraintInfo>,
@@ -425,9 +463,8 @@ pub fn add_im_polynomials(
         .filter(|s| s.sym_type == "challenge" && s.stage.map_or(false, |st| st < stage))
         .count();
 
-    // Create virtual challenge node
-    let vc_idx = expressions.len();
-    expressions.push(Expression {
+    // Create virtual challenge node INLINE (not pushed to arena)
+    let vc_expr = Expression {
         op: "challenge".to_string(),
         id: Some(vc_id),
         dim,
@@ -435,7 +472,7 @@ pub fn add_im_polynomials(
         stage_id: Some(0),
         exp_deg: 0,
         ..Default::default()
-    });
+    };
 
     for &exp_id in im_exps {
         let stage_im = if im_pols_stages {
@@ -471,37 +508,31 @@ pub fn add_im_polynomials(
         expressions[exp_id].pol_id = Some(pol_id);
         expressions[exp_id].stage = stage_im;
 
-        // Create sub-constraint: cm - imExpr
-        // LHS: cm node for the new witness
-        let cm_idx = expressions.len();
-        expressions.push(Expression {
+        // Create sub-constraint: cm - imExpr (matches JS inline pattern)
+        // JS: e = { op: "sub", values: [E.cm(...), Object.assign({}, expressions[imExps[i]])] }
+        let cm_node = Expression {
             op: "cm".to_string(),
             id: Some(pol_id),
             row_offset: Some(0),
             stage: stage_im,
             dim: exp_dim,
             ..Default::default()
-        });
+        };
 
-        // RHS: copy of the im expression (reference via "exp" node)
-        let exp_ref_idx = expressions.len();
-        expressions.push(Expression {
-            op: "exp".to_string(),
-            id: Some(exp_id),
-            row_offset: Some(0),
-            stage: expressions[exp_id].stage,
-            ..Default::default()
-        });
+        // Copy of the im expression (Object.assign in JS)
+        let im_expr_copy = expressions[exp_id].clone();
 
-        // sub node: cm - exp
-        let sub_idx = expressions.len();
-        expressions.push(Expression {
+        let mut sub_expr = Expression {
             op: "sub".to_string(),
-            values: vec![cm_idx, exp_ref_idx],
+            values: vec![
+                ExprChild::Inline(Box::new(cm_node)),
+                ExprChild::Inline(Box::new(im_expr_copy)),
+            ],
             ..Default::default()
-        });
-        add_info_expressions(expressions, sub_idx);
-        let constraint_id = sub_idx;
+        };
+        add_info_expression_inline(expressions, &mut sub_expr);
+        expressions.push(sub_expr);
+        let constraint_id = expressions.len() - 1;
 
         constraints.push(ConstraintInfo {
             e: constraint_id,
@@ -513,84 +544,84 @@ pub fn add_im_polynomials(
             im_pol: false,
         });
 
-        // Weighted constraint: vc * exp(cExpId)
-        let c_exp_ref = expressions.len();
-        expressions.push(Expression {
+        // Weighted constraint: mul(vc, exp(cExpId)) - ONE push
+        let c_exp_ref = Expression {
             op: "exp".to_string(),
             id: Some(*c_exp_id),
             row_offset: Some(0),
             stage,
             ..Default::default()
-        });
+        };
 
-        let weighted_idx = expressions.len();
-        expressions.push(Expression {
+        let mut weighted = Expression {
             op: "mul".to_string(),
-            values: vec![vc_idx, c_exp_ref],
+            values: vec![
+                ExprChild::Inline(Box::new(vc_expr.clone())),
+                ExprChild::Inline(Box::new(c_exp_ref)),
+            ],
             ..Default::default()
-        });
-        add_info_expressions(expressions, weighted_idx);
+        };
+        add_info_expression_inline(expressions, &mut weighted);
+        expressions.push(weighted);
+        let weighted_id = expressions.len() - 1;
 
-        // Accumulated: weighted + constraint
-        let constraint_ref = expressions.len();
-        expressions.push(Expression {
+        // Accumulated: add(exp(weighted_id), exp(constraint_id)) - ONE push
+        let weighted_ref = Expression {
+            op: "exp".to_string(),
+            id: Some(weighted_id),
+            row_offset: Some(0),
+            stage,
+            ..Default::default()
+        };
+        let constraint_ref = Expression {
             op: "exp".to_string(),
             id: Some(constraint_id),
             row_offset: Some(0),
             stage,
             ..Default::default()
-        });
+        };
 
-        let weighted_ref = expressions.len();
-        expressions.push(Expression {
-            op: "exp".to_string(),
-            id: Some(weighted_idx),
-            row_offset: Some(0),
-            stage,
-            ..Default::default()
-        });
-
-        let accum_idx = expressions.len();
-        expressions.push(Expression {
+        let mut accum = Expression {
             op: "add".to_string(),
-            values: vec![weighted_ref, constraint_ref],
+            values: vec![
+                ExprChild::Inline(Box::new(weighted_ref)),
+                ExprChild::Inline(Box::new(constraint_ref)),
+            ],
             ..Default::default()
-        });
-        add_info_expressions(expressions, accum_idx);
-        *c_exp_id = accum_idx;
+        };
+        add_info_expression_inline(expressions, &mut accum);
+        expressions.push(accum);
+        *c_exp_id = expressions.len() - 1;
     }
 
     // Q polynomial: cExp * zi(everyRow)
+    // JS: let q = E.mul(expressions[res.cExpId], E.zi(...));
+    // JS clones the cExp expression inline and uses inline zi - ONE push
     let every_row_idx = boundaries
         .iter()
         .position(|(bname, _, _)| bname == "everyRow")
         .unwrap_or(0);
 
-    let c_exp_ref = expressions.len();
-    expressions.push(Expression {
-        op: "exp".to_string(),
-        id: Some(*c_exp_id),
-        row_offset: Some(0),
-        stage,
-        ..Default::default()
-    });
-
-    let zi_idx = expressions.len();
-    expressions.push(Expression {
+    let c_exp_copy = expressions[*c_exp_id].clone();
+    let zi_node = Expression {
         op: "Zi".to_string(),
         boundary_id: Some(every_row_idx),
         boundary: Some("everyRow".to_string()),
         ..Default::default()
-    });
+    };
 
-    let q_idx = expressions.len();
-    expressions.push(Expression {
+    let mut q_expr = Expression {
         op: "mul".to_string(),
-        values: vec![c_exp_ref, zi_idx],
+        values: vec![
+            ExprChild::Inline(Box::new(c_exp_copy)),
+            ExprChild::Inline(Box::new(zi_node)),
+        ],
         ..Default::default()
-    });
-    add_info_expressions(expressions, q_idx);
-    *c_exp_id = q_idx;
+    };
+    add_info_expression_inline(expressions, &mut q_expr);
+    expressions.push(q_expr);
+    // JS does: res.cExpId++ after push, which means cExpId = expressions.length - 1
+    *c_exp_id = expressions.len() - 1;
 
     let c_exp_dim = get_exp_dim(expressions, *c_exp_id);
     expressions[*c_exp_id].dim = c_exp_dim;
@@ -688,7 +719,7 @@ mod tests {
     fn make_mul(lhs: usize, rhs: usize, deg: i64) -> Expression {
         Expression {
             op: "mul".to_string(),
-            values: vec![lhs, rhs],
+            values: vec![ExprChild::Id(lhs), ExprChild::Id(rhs)],
             exp_deg: deg,
             ..Default::default()
         }
@@ -719,9 +750,6 @@ mod tests {
 
     #[test]
     fn test_calc_exp_deg_with_im_pol() {
-        // exprs[0] = cm*cm => deg 2 normally
-        // exprs[1] = exp ref to 0
-        // If 0 is in im_exps, the exp ref should return 1
         let exprs = vec![
             make_mul(0, 0, 2), // placeholder, not used directly
             make_cm(0, 1),
@@ -749,8 +777,6 @@ mod tests {
 
     #[test]
     fn test_no_im_pols_needed() {
-        // Simple degree-2 expression: cm * cm
-        // With maxQDeg=2, no intermediate polynomials needed (qDeg = 2-1 = 1)
         let exprs = vec![
             make_cm(0, 1),     // 0
             make_cm(1, 1),     // 1
@@ -766,19 +792,7 @@ mod tests {
 
     #[test]
     fn test_im_pols_needed_for_high_degree() {
-        // Build a degree-4 expression tree:
-        //   exprs[0] = cm_a (deg 1)
-        //   exprs[1] = cm_b (deg 1)
-        //   exprs[2] = mul(0,1) => deg 2
-        //   exprs[3] = exp ref to 2 => deg 2
-        //   exprs[4] = cm_c (deg 1)
-        //   exprs[5] = cm_d (deg 1)
-        //   exprs[6] = mul(4,5) => deg 2
-        //   exprs[7] = exp ref to 6 => deg 2
-        //   exprs[8] = mul(3,7) => deg 4
-        //
-        // With maxQDeg=2 (max constraint deg=2), we need imPols.
-        let exprs = vec![
+        let mut exprs = vec![
             make_cm(0, 1),     // 0
             make_cm(1, 1),     // 1
             make_mul(0, 1, 2), // 2: cm_a * cm_b, deg 2
@@ -789,14 +803,10 @@ mod tests {
             make_exp_ref(6),   // 7: ref to expr 6, deg 2
             make_mul(3, 7, 4), // 8: (cm_a*cm_b) * (cm_c*cm_d), deg 4
         ];
-        // Set exp_deg on exp refs
-        let mut exprs = exprs;
         exprs[3].exp_deg = 2;
         exprs[7].exp_deg = 2;
 
         let result = calculate_intermediate_polynomials(&exprs, 8, 2, 1);
-        // At maxQDeg=2, the algorithm should mark at least one sub-expression
-        // as an intermediate polynomial to bring the degree down.
         assert!(
             !result.im_exps.is_empty(),
             "Intermediate polynomials should be needed for degree-4 expr with maxQDeg=2"
@@ -805,24 +815,6 @@ mod tests {
 
     #[test]
     fn test_degree_fits_without_im_pols() {
-        // Build an expression tree using exp references (as in real pilout):
-        //   exprs[0] = cm_a (deg 1)
-        //   exprs[1] = cm_b (deg 1)
-        //   exprs[2] = mul(0,1) => deg 2, this is the "definition" of sub-expr 2
-        //   exprs[3] = exp ref to 2 => deg 2
-        //   exprs[4] = cm_c (deg 1)
-        //   exprs[5] = mul(3,4) => deg 3
-        //
-        // With maxQDeg=3, degree 3 fits directly via d=2 (if the tree cooperates).
-        // But since the root mul has no exp refs at top level, the algorithm
-        // cannot split -- it returns no imPols and the caller must handle the
-        // resulting qDeg accordingly.
-        //
-        // Use a tree that fits at d=2:
-        //   exprs[0] = cm_a
-        //   exprs[1] = cm_b
-        //   exprs[2] = mul(0,1) => deg 2
-        // With maxQDeg=2, the mul node fits directly.
         let exprs = vec![
             make_cm(0, 1),     // 0
             make_cm(1, 1),     // 1
@@ -839,7 +831,6 @@ mod tests {
 
     #[test]
     fn test_add_im_pols_creates_q_symbols() {
-        // Minimal setup: a degree-2 expression, no im_exps, q_deg=1
         let mut expressions = vec![
             make_cm(0, 1),     // 0
             make_cm(1, 1),     // 1
@@ -876,7 +867,6 @@ mod tests {
 
     #[test]
     fn test_add_im_pols_with_im_exp() {
-        // Setup with one intermediate polynomial
         let mut expressions = vec![
             make_cm(0, 1),     // 0: cm_a
             make_cm(1, 1),     // 1: cm_b

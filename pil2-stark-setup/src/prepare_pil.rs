@@ -97,18 +97,11 @@ pub fn prepare_pil(
         constraints[i].stage = Some(expressions[constraints[i].e].stage);
     }
 
-    // Run add_info_expressions on remaining expressions that have not been processed
+    // Run add_info_expressions on remaining expressions that have not been processed.
+    // The info_computed flag inside add_info_expressions guards against re-processing.
     for i in 0..expressions.len() {
-        if expressions[i].op != "__placeholder__" && expressions[i].exp_deg == 0 {
-            // Only process if not already computed (heuristic check)
-            let is_leaf_with_info = matches!(
-                expressions[i].op.as_str(),
-                "number" | "public" | "challenge" | "eval" | "airgroupvalue" | "proofvalue" | "airvalue"
-            ) && (expressions[i].dim > 1 || expressions[i].stage > 0);
-
-            if !is_leaf_with_info {
-                add_info_expressions(&mut expressions, i);
-            }
+        if expressions[i].op != "__placeholder__" {
+            add_info_expressions(&mut expressions, i);
         }
     }
 

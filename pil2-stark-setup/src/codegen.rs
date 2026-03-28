@@ -203,8 +203,9 @@ fn eval_exp(
     match exp.op.as_str() {
         "add" | "sub" | "mul" => {
             let mut values = Vec::new();
-            for &child_id in &exp.values {
-                values.push(eval_exp(ctx, symbols, expressions, &expressions[child_id], prime));
+            for child in &exp.values {
+                let child_expr = child.resolve(expressions);
+                values.push(eval_exp(ctx, symbols, expressions, child_expr, prime));
             }
             let max_dim = values.iter().map(|v| v.dim).max().unwrap_or(1);
             let r = make_ref("tmp", ctx.tmp_used, max_dim);
@@ -408,8 +409,9 @@ fn calculate_deps(
             pil_code_gen(ctx, symbols, expressions, ref_id, p);
         }
         "add" | "sub" | "mul" => {
-            for &child_id in &exp.values {
-                calculate_deps(ctx, symbols, expressions, &expressions[child_id], prime);
+            for child in &exp.values {
+                let child_expr = child.resolve(expressions);
+                calculate_deps(ctx, symbols, expressions, child_expr, prime);
             }
         }
         _ => {}
@@ -611,7 +613,7 @@ pub struct CodeBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expression::Expression;
+    use crate::expression::{ExprChild, Expression};
 
     fn make_number(val: &str) -> Expression {
         Expression {
@@ -636,7 +638,7 @@ mod tests {
     fn make_add(lhs: usize, rhs: usize) -> Expression {
         Expression {
             op: "add".to_string(),
-            values: vec![lhs, rhs],
+            values: vec![ExprChild::Id(lhs), ExprChild::Id(rhs)],
             dim: 1,
             ..Default::default()
         }
@@ -645,7 +647,7 @@ mod tests {
     fn make_mul(lhs: usize, rhs: usize) -> Expression {
         Expression {
             op: "mul".to_string(),
-            values: vec![lhs, rhs],
+            values: vec![ExprChild::Id(lhs), ExprChild::Id(rhs)],
             dim: 1,
             ..Default::default()
         }

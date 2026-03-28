@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::expression::Expression;
-use crate::helpers::{get_exp_dim, EvMapItem};
+use crate::expression::{ExprChild, Expression};
+use crate::helpers::EvMapItem;
 use crate::pilout_info::{SymbolInfo, FIELD_EXTENSION};
 
 /// Result of FRI polynomial generation.
@@ -16,12 +16,10 @@ pub struct FriPolyResult {
 /// Mirrors `generateFRIPolynomial` from
 /// `pil2-proofman-js/src/pil2-stark/pil_info/helpers/polynomials/friPolinomial.js`.
 ///
-/// This function:
-/// 1. Creates `std_vf1` and `std_vf2` challenge symbols
-/// 2. For each evaluation in ev_map, builds `sub(column, eval(i))` and
-///    accumulates with vf2 per opening point
-/// 3. For each opening point, multiplies by `xDivXSubXi` and accumulates
-///    with vf1
+/// In the JS version, all intermediate nodes are built inline and only ONE
+/// `expressions.push(friExp)` happens at the end. We match that by building
+/// the entire FRI tree with inline `ExprChild::Inline` children and pushing
+/// only the final composite expression.
 pub fn generate_fri_polynomial(
     n_stages: usize,
     expressions: &mut Vec<Expression>,
@@ -83,7 +81,7 @@ pub fn generate_fri_polynomial(
     extend_challenges_map(challenges_map, vf1_id, &vf1_symbol);
     extend_challenges_map(challenges_map, vf2_id, &vf2_symbol);
 
-    // Build vf1 and vf2 expression nodes
+    // Build vf1 and vf2 as inline expression nodes (NOT pushed to arena)
     let vf1_expr = Expression {
         op: "challenge".to_string(),
         value: Some("std_vf1".to_string()),
@@ -93,8 +91,6 @@ pub fn generate_fri_polynomial(
         id: Some(vf1_id),
         ..Default::default()
     };
-    let vf1_idx = expressions.len();
-    expressions.push(vf1_expr);
 
     let vf2_expr = Expression {
         op: "challenge".to_string(),
@@ -105,129 +101,147 @@ pub fn generate_fri_polynomial(
         id: Some(vf2_id),
         ..Default::default()
     };
-    let vf2_idx = expressions.len();
-    expressions.push(vf2_expr);
 
-    // Build per-opening-point FRI sub-expressions.
-    // Use BTreeMap so we iterate in sorted order of opening points.
-    let mut fri_exps: BTreeMap<i64, usize> = BTreeMap::new();
+    // Build per-opening-point FRI sub-expressions as inline trees
+    let mut fri_exps: BTreeMap<i64, Expression> = BTreeMap::new();
 
     for (i, ev) in ev_map.iter().enumerate() {
-        // Find the symbol matching this evaluation
         let symbol = find_symbol_for_ev(symbols, ev);
-
-        // Build the column expression node
         let col_expr = build_column_expr(ev, &symbol);
-        let col_idx = expressions.len();
-        expressions.push(col_expr);
 
-        // Build eval(i) node
         let eval_expr = Expression {
             op: "eval".to_string(),
             id: Some(i),
             dim: FIELD_EXTENSION,
             ..Default::default()
         };
-        let eval_idx = expressions.len();
-        expressions.push(eval_expr);
 
         // sub(column, eval(i))
         let sub_expr = Expression {
             op: "sub".to_string(),
-            values: vec![col_idx, eval_idx],
+            values: vec![
+                ExprChild::Inline(Box::new(col_expr)),
+                ExprChild::Inline(Box::new(eval_expr)),
+            ],
             ..Default::default()
         };
-        let sub_idx = expressions.len();
-        expressions.push(sub_expr);
 
-        if let Some(&existing_idx) = fri_exps.get(&ev.prime) {
+        if let Some(existing) = fri_exps.remove(&ev.prime) {
             // acc = add(mul(existing, vf2), sub)
             let mul_expr = Expression {
                 op: "mul".to_string(),
-                values: vec![existing_idx, vf2_idx],
+                values: vec![
+                    ExprChild::Inline(Box::new(existing)),
+                    ExprChild::Inline(Box::new(vf2_expr.clone())),
+                ],
                 ..Default::default()
             };
-            let mul_idx = expressions.len();
-            expressions.push(mul_expr);
 
             let add_expr = Expression {
                 op: "add".to_string(),
-                values: vec![mul_idx, sub_idx],
+                values: vec![
+                    ExprChild::Inline(Box::new(mul_expr)),
+                    ExprChild::Inline(Box::new(sub_expr)),
+                ],
                 ..Default::default()
             };
-            let add_idx = expressions.len();
-            expressions.push(add_expr);
 
-            fri_exps.insert(ev.prime, add_idx);
+            fri_exps.insert(ev.prime, add_expr);
         } else {
-            fri_exps.insert(ev.prime, sub_idx);
+            fri_exps.insert(ev.prime, sub_expr);
         }
     }
 
     // Combine per-opening-point expressions with xDivXSubXi and vf1
-    let mut fri_exp: Option<usize> = None;
+    let mut fri_exp: Option<Expression> = None;
 
     for (i, &opening) in opening_points.iter().enumerate() {
-        let opening_expr_idx = *fri_exps
-            .get(&opening)
+        let opening_expr = fri_exps
+            .remove(&opening)
             .expect("Opening point not found in fri_exps");
 
-        // xDivXSubXi(opening, i)
         let xdiv_expr = Expression {
             op: "xDivXSubXi".to_string(),
-            opening: Some(opening as usize),
+            opening: Some(opening),
             id: Some(i),
             ..Default::default()
         };
-        let xdiv_idx = expressions.len();
-        expressions.push(xdiv_expr);
 
         // mul(fri_exps[opening], xDivXSubXi)
         let mul_expr = Expression {
             op: "mul".to_string(),
-            values: vec![opening_expr_idx, xdiv_idx],
+            values: vec![
+                ExprChild::Inline(Box::new(opening_expr)),
+                ExprChild::Inline(Box::new(xdiv_expr)),
+            ],
             ..Default::default()
         };
-        let mul_idx = expressions.len();
-        expressions.push(mul_expr);
 
-        if let Some(prev_fri_idx) = fri_exp {
+        if let Some(prev_fri) = fri_exp.take() {
             // add(mul(vf1, prev_fri), current)
             let vf1_mul = Expression {
                 op: "mul".to_string(),
-                values: vec![vf1_idx, prev_fri_idx],
+                values: vec![
+                    ExprChild::Inline(Box::new(vf1_expr.clone())),
+                    ExprChild::Inline(Box::new(prev_fri)),
+                ],
                 ..Default::default()
             };
-            let vf1_mul_idx = expressions.len();
-            expressions.push(vf1_mul);
 
             let add_expr = Expression {
                 op: "add".to_string(),
-                values: vec![vf1_mul_idx, mul_idx],
+                values: vec![
+                    ExprChild::Inline(Box::new(vf1_mul)),
+                    ExprChild::Inline(Box::new(mul_expr)),
+                ],
                 ..Default::default()
             };
-            let add_idx = expressions.len();
-            expressions.push(add_expr);
-            fri_exp = Some(add_idx);
+            fri_exp = Some(add_expr);
         } else {
-            fri_exp = Some(mul_idx);
+            fri_exp = Some(mul_expr);
         }
     }
 
-    let fri_exp_id = fri_exp.expect("At least one opening point required");
-
-    // Store the FRI expression at a known position and set its metadata
+    // Push only the final FRI expression (matches JS: one expressions.push)
+    let mut fri_final = fri_exp.expect("At least one opening point required");
     let fri_final_id = expressions.len();
-    let fri_final_expr = expressions[fri_exp_id].clone();
-    expressions.push(fri_final_expr);
 
     // Set dim and stage on the final expression
-    let dim = get_exp_dim(expressions, fri_final_id);
-    expressions[fri_final_id].dim = dim;
-    expressions[fri_final_id].stage = n_stages + 2;
+    fri_final.dim = get_exp_dim_inline(expressions, &fri_final);
+    fri_final.stage = n_stages + 2;
+
+    expressions.push(fri_final);
 
     FriPolyResult {
         fri_exp_id: fri_final_id,
+    }
+}
+
+/// Get dimension for an inline expression tree.
+fn get_exp_dim_inline(expressions: &[Expression], exp: &Expression) -> usize {
+    if exp.dim > 0 && exp.op != "add" && exp.op != "sub" && exp.op != "mul" {
+        return exp.dim;
+    }
+    match exp.op.as_str() {
+        "add" | "sub" | "mul" => {
+            let mut max_dim = 0;
+            for child in &exp.values {
+                let child_expr = child.resolve(expressions);
+                let d = get_exp_dim_inline(expressions, child_expr);
+                if d > max_dim {
+                    max_dim = d;
+                }
+            }
+            max_dim
+        }
+        "exp" => {
+            let id = exp.id.unwrap_or(0);
+            get_exp_dim_inline(expressions, &expressions[id])
+        }
+        "cm" | "custom" => if exp.dim > 0 { exp.dim } else { 1 },
+        "const" | "number" | "public" | "Zi" => 1,
+        "challenge" | "eval" | "xDivXSubXi" => FIELD_EXTENSION,
+        _ => panic!("Exp op not defined: {}", exp.op),
     }
 }
 

@@ -168,7 +168,7 @@ pub struct CodeRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_id: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub opening: Option<usize>,
+    pub opening: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boundary_id: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]

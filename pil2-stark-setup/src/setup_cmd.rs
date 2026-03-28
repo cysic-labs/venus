@@ -162,6 +162,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 &air_name,
                 pil_result.c_exp_id,
                 pil_result.fri_exp_id,
+                pil_result.q_deg,
             );
 
             // Write starkinfo.json
@@ -644,6 +645,7 @@ pub fn build_starkinfo_output(
     air_name: &str,
     c_exp_id: usize,
     fri_exp_id: usize,
+    q_deg: i64,
 ) -> StarkInfoOutput {
     let steps: Vec<StepOutput> = stark_struct
         .steps
@@ -860,9 +862,6 @@ pub fn build_starkinfo_output(
     // which always evaluates to 0. Golden confirms nCommitmentsStage1=0.
     let n_commitments_stage1 = 0;
 
-    let q_stage_key = format!("cm{}", n_stages + 1);
-    let q_cols = setup.map_sections_n.get(&q_stage_key).copied().unwrap_or(0);
-
     StarkInfoOutput {
         name: air_name.to_string(),
         cm_pols_map,
@@ -886,7 +885,7 @@ pub fn build_starkinfo_output(
         opening_points: opening_points.to_vec(),
         c_exp_id,
         q_dim: crate::pilout_info::FIELD_EXTENSION,
-        q_deg: q_cols.max(1),
+        q_deg: q_deg.max(1) as usize,
         n_constraints: setup.constraints.len(),
         n_commitments_stage1,
         ev_map,

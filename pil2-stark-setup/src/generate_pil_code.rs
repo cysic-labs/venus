@@ -733,9 +733,10 @@ mod tests {
     }
 
     fn make_add(lhs: usize, rhs: usize) -> Expression {
+        use crate::expression::ExprChild;
         Expression {
             op: "add".to_string(),
-            values: vec![lhs, rhs],
+            values: vec![ExprChild::Id(lhs), ExprChild::Id(rhs)],
             dim: 1,
             ..Default::default()
         }
