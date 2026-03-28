@@ -107,12 +107,11 @@ pub fn gen_recursive_setup(
         resolve_names_and_paths(config)?;
 
     let airgroup_pil_name = match template {
-        RecursiveTemplate::Compressor | RecursiveTemplate::Recursive1 if !config.has_compressor || template == RecursiveTemplate::Compressor => {
+        RecursiveTemplate::Compressor => {
             format!("{}_{}_{}",
                 config.airgroup_name, config.air_name, template_str)
         }
         RecursiveTemplate::Recursive1 => {
-            // recursive1 with compressor: verifier is the compressor's
             format!("{}_{}_{}",
                 config.airgroup_name, config.air_name, template_str)
         }
