@@ -6,8 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::parser::ast::{AirTemplateDef, FunctionArg, Statement};
-use super::expression::Value;
+use crate::parser::ast::{FunctionArg, Statement};
+use super::constraints::{ConstraintEntry, Constraints};
+use super::expression::RuntimeExpr;
 
 /// An Air instance (one concrete instantiation of an air template).
 ///
@@ -23,6 +24,14 @@ pub struct Air {
     pub is_virtual: bool,
     /// Informational counters set after air execution completes.
     pub info: AirInfo,
+    /// Per-AIR constraint entries, captured before clearing.
+    pub stored_constraints: Vec<ConstraintEntry>,
+    /// Per-AIR expressions referenced by constraints.
+    pub stored_expressions: Vec<RuntimeExpr>,
+    /// Fixed column ID mappings: internal id -> (type char 'F'/'P', proto_index).
+    pub fixed_id_map: Vec<(char, u32)>,
+    /// Witness column ID mappings: internal id -> (stage, proto_index).
+    pub witness_id_map: Vec<(u32, u32)>,
 }
 
 /// Summary statistics collected after an air instance completes.
@@ -59,11 +68,22 @@ impl Air {
             bits,
             is_virtual,
             info: AirInfo::default(),
+            stored_constraints: Vec::new(),
+            stored_expressions: Vec::new(),
+            fixed_id_map: Vec::new(),
+            witness_id_map: Vec::new(),
         }
     }
 
     pub fn set_info(&mut self, info: AirInfo) {
         self.info = info;
+    }
+
+    /// Capture constraint/expression data from the processor before it
+    /// is cleared between AIR template calls.
+    pub fn store_constraints(&mut self, constraints: &Constraints) {
+        self.stored_constraints = constraints.iter().cloned().collect();
+        self.stored_expressions = constraints.all_expressions().to_vec();
     }
 }
 

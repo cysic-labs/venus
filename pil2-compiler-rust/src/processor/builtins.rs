@@ -315,15 +315,37 @@ fn exec_degree(args: &[Value]) -> Result<Value, String> {
     if args.len() != 1 {
         return Err("degree: expected 1 argument".to_string());
     }
-    // Compile-time degree analysis requires expression introspection.
-    // For constant values, degree is 0.
-    let degree = match &args[0] {
-        Value::Int(_) | Value::Fe(_) | Value::Bool(_) => 0,
+    Ok(Value::Int(compute_value_degree(&args[0])))
+}
+
+/// Compute the polynomial degree of a Value.
+/// 0 = constant, 1 = linear (single column ref), n = product of n
+/// column-bearing sub-expressions, etc.
+fn compute_value_degree(val: &Value) -> i128 {
+    match val {
+        Value::Int(_) | Value::Fe(_) | Value::Bool(_) | Value::Str(_) => 0,
         Value::ColRef { .. } => 1,
-        Value::RuntimeExpr(_) => -1i128, // unknown at compile time
+        Value::RuntimeExpr(expr) => compute_runtime_expr_degree(expr),
+        Value::Void => 0,
         _ => 0,
-    };
-    Ok(Value::Int(degree))
+    }
+}
+
+fn compute_runtime_expr_degree(expr: &super::expression::RuntimeExpr) -> i128 {
+    use super::expression::{RuntimeExpr, RuntimeOp, RuntimeUnaryOp};
+    match expr {
+        RuntimeExpr::Value(v) => compute_value_degree(v),
+        RuntimeExpr::ColRef { .. } => 1,
+        RuntimeExpr::BinOp { op, left, right } => {
+            let ld = compute_runtime_expr_degree(left);
+            let rd = compute_runtime_expr_degree(right);
+            match op {
+                RuntimeOp::Add | RuntimeOp::Sub => std::cmp::max(ld, rd),
+                RuntimeOp::Mul => ld + rd,
+            }
+        }
+        RuntimeExpr::UnaryOp { operand, .. } => compute_runtime_expr_degree(operand),
+    }
 }
 
 fn exec_error(args: &[Value], source_ref: &str) -> Result<Value, String> {

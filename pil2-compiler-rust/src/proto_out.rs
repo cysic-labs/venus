@@ -141,14 +141,99 @@ impl<'a> ProtoOutBuilder<'a> {
 
             // Build airs within this group.
             for air in &ag.airs {
+                // Flatten per-AIR expressions into the protobuf array.
+                // Each stored expression may produce multiple flattened
+                // entries; track the root index for each.
+                let mut proto_expressions: Vec<pilout_proto::Expression> = Vec::new();
+                let mut expr_id_map: Vec<u32> = Vec::new();
+                for expr in &air.stored_expressions {
+                    let root_idx = self.flatten_air_expr(
+                        expr,
+                        &air.fixed_id_map,
+                        &air.witness_id_map,
+                        &mut proto_expressions,
+                    );
+                    expr_id_map.push(root_idx);
+                }
+
+                // Build per-AIR constraints, referencing the flattened
+                // expression indices.
+                let mut proto_constraints: Vec<pilout_proto::Constraint> = Vec::new();
+                for entry in &air.stored_constraints {
+                    let expr_idx = expr_id_map
+                        .get(entry.expr_id as usize)
+                        .copied()
+                        .unwrap_or(entry.expr_id);
+                    let debug_line = Some(entry.source_ref.clone());
+                    let expression_idx =
+                        Some(pilout_proto::operand::Expression { idx: expr_idx });
+                    let constraint_kind = match entry.boundary.as_deref() {
+                        Some("first") => {
+                            pilout_proto::constraint::Constraint::FirstRow(
+                                pilout_proto::constraint::FirstRow {
+                                    expression_idx,
+                                    debug_line,
+                                },
+                            )
+                        }
+                        Some("last") => {
+                            pilout_proto::constraint::Constraint::LastRow(
+                                pilout_proto::constraint::LastRow {
+                                    expression_idx,
+                                    debug_line,
+                                },
+                            )
+                        }
+                        Some("frame") => {
+                            pilout_proto::constraint::Constraint::EveryFrame(
+                                pilout_proto::constraint::EveryFrame {
+                                    expression_idx,
+                                    offset_min: 0,
+                                    offset_max: 0,
+                                    debug_line,
+                                },
+                            )
+                        }
+                        _ => {
+                            // Default: everyRow (matches JS false/all).
+                            pilout_proto::constraint::Constraint::EveryRow(
+                                pilout_proto::constraint::EveryRow {
+                                    expression_idx,
+                                    debug_line,
+                                },
+                            )
+                        }
+                    };
+                    proto_constraints.push(pilout_proto::Constraint {
+                        constraint: Some(constraint_kind),
+                    });
+                }
+
+                // Build fixed column entries (empty values when using
+                // fixed-to-file mode; the data is in separate .fixed
+                // files).
+                let mut proto_fixed: Vec<pilout_proto::FixedCol> = Vec::new();
+                let mut proto_periodic: Vec<pilout_proto::PeriodicCol> = Vec::new();
+                for &(ctype, _proto_idx) in &air.fixed_id_map {
+                    match ctype {
+                        'F' => proto_fixed.push(pilout_proto::FixedCol {
+                            values: Vec::new(),
+                        }),
+                        'P' => proto_periodic.push(pilout_proto::PeriodicCol {
+                            values: Vec::new(),
+                        }),
+                        _ => {}
+                    }
+                }
+
                 let proto_air = pilout_proto::Air {
                     name: Some(air.name.clone()),
                     num_rows: Some(air.rows as u32),
-                    periodic_cols: Vec::new(),
-                    fixed_cols: Vec::new(),
+                    periodic_cols: proto_periodic,
+                    fixed_cols: proto_fixed,
                     stage_widths: air.info.witness_cols.clone(),
-                    expressions: Vec::new(),
-                    constraints: Vec::new(),
+                    expressions: proto_expressions,
+                    constraints: proto_constraints,
                     air_values: Vec::new(),
                     aggregable: true,
                     custom_commits: Vec::new(),
@@ -489,6 +574,194 @@ impl<'a> ProtoOutBuilder<'a> {
             operand: Some(operand),
         })
     }
+
+    // -------------------------------------------------------------------
+    // Per-AIR expression/operand flattening (uses Operand, not
+    // GlobalOperand).
+    // -------------------------------------------------------------------
+
+    /// Flatten a RuntimeExpr tree into the per-AIR expressions array.
+    /// Returns the index of the appended expression.
+    fn flatten_air_expr(
+        &self,
+        expr: &RuntimeExpr,
+        fixed_map: &[(char, u32)],
+        witness_map: &[(u32, u32)],
+        out: &mut Vec<pilout_proto::Expression>,
+    ) -> u32 {
+        let op = match expr {
+            RuntimeExpr::BinOp { op, left, right } => {
+                let lhs = self.flatten_air_operand(left, fixed_map, witness_map, out);
+                let rhs = self.flatten_air_operand(right, fixed_map, witness_map, out);
+                match op {
+                    RuntimeOp::Add => pilout_proto::expression::Operation::Add(
+                        pilout_proto::expression::Add { lhs, rhs },
+                    ),
+                    RuntimeOp::Sub => pilout_proto::expression::Operation::Sub(
+                        pilout_proto::expression::Sub { lhs, rhs },
+                    ),
+                    RuntimeOp::Mul => pilout_proto::expression::Operation::Mul(
+                        pilout_proto::expression::Mul { lhs, rhs },
+                    ),
+                }
+            }
+            RuntimeExpr::UnaryOp { op, operand } => match op {
+                RuntimeUnaryOp::Neg => {
+                    let value =
+                        self.flatten_air_operand(operand, fixed_map, witness_map, out);
+                    pilout_proto::expression::Operation::Neg(
+                        pilout_proto::expression::Neg { value },
+                    )
+                }
+            },
+            // Leaf node: wrap in Add(x, 0).
+            _ => {
+                let leaf = self.leaf_to_air_operand(expr, fixed_map, witness_map);
+                let zero = Some(pilout_proto::Operand {
+                    operand: Some(pilout_proto::operand::Operand::Constant(
+                        pilout_proto::operand::Constant { value: Vec::new() },
+                    )),
+                });
+                pilout_proto::expression::Operation::Add(pilout_proto::expression::Add {
+                    lhs: leaf,
+                    rhs: zero,
+                })
+            }
+        };
+
+        let idx = out.len() as u32;
+        out.push(pilout_proto::Expression {
+            operation: Some(op),
+        });
+        idx
+    }
+
+    /// Convert a RuntimeExpr to a per-AIR Operand.
+    fn flatten_air_operand(
+        &self,
+        expr: &RuntimeExpr,
+        fixed_map: &[(char, u32)],
+        witness_map: &[(u32, u32)],
+        out: &mut Vec<pilout_proto::Expression>,
+    ) -> Option<pilout_proto::Operand> {
+        match expr {
+            RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
+                let idx = self.flatten_air_expr(expr, fixed_map, witness_map, out);
+                Some(pilout_proto::Operand {
+                    operand: Some(pilout_proto::operand::Operand::Expression(
+                        pilout_proto::operand::Expression { idx },
+                    )),
+                })
+            }
+            _ => self.leaf_to_air_operand(expr, fixed_map, witness_map),
+        }
+    }
+
+    /// Convert a leaf RuntimeExpr to a per-AIR Operand.
+    fn leaf_to_air_operand(
+        &self,
+        expr: &RuntimeExpr,
+        fixed_map: &[(char, u32)],
+        witness_map: &[(u32, u32)],
+    ) -> Option<pilout_proto::Operand> {
+        let operand = match expr {
+            RuntimeExpr::Value(Value::Int(v)) => {
+                pilout_proto::operand::Operand::Constant(pilout_proto::operand::Constant {
+                    value: bigint_to_bytes(*v),
+                })
+            }
+            RuntimeExpr::Value(Value::Fe(v)) => {
+                pilout_proto::operand::Operand::Constant(pilout_proto::operand::Constant {
+                    value: bigint_to_bytes(*v as i128),
+                })
+            }
+            RuntimeExpr::ColRef {
+                col_type,
+                id,
+                row_offset,
+            } => {
+                let offset = row_offset.unwrap_or(0) as i32;
+                match col_type {
+                    ColRefKind::Fixed => {
+                        let (ctype, proto_idx) =
+                            fixed_map.get(*id as usize).copied().unwrap_or(('F', *id));
+                        if ctype == 'P' {
+                            pilout_proto::operand::Operand::PeriodicCol(
+                                pilout_proto::operand::PeriodicCol {
+                                    idx: proto_idx,
+                                    row_offset: offset,
+                                },
+                            )
+                        } else {
+                            pilout_proto::operand::Operand::FixedCol(
+                                pilout_proto::operand::FixedCol {
+                                    idx: proto_idx,
+                                    row_offset: offset,
+                                },
+                            )
+                        }
+                    }
+                    ColRefKind::Witness => {
+                        let (stage, col_idx) =
+                            witness_map.get(*id as usize).copied().unwrap_or((1, *id));
+                        pilout_proto::operand::Operand::WitnessCol(
+                            pilout_proto::operand::WitnessCol {
+                                stage,
+                                col_idx,
+                                row_offset: offset,
+                            },
+                        )
+                    }
+                    ColRefKind::Challenge => {
+                        pilout_proto::operand::Operand::Challenge(
+                            pilout_proto::operand::Challenge { stage: 0, idx: *id },
+                        )
+                    }
+                    ColRefKind::ProofValue => {
+                        pilout_proto::operand::Operand::ProofValue(
+                            pilout_proto::operand::ProofValue { stage: 0, idx: *id },
+                        )
+                    }
+                    ColRefKind::AirGroupValue => {
+                        pilout_proto::operand::Operand::AirGroupValue(
+                            pilout_proto::operand::AirGroupValue { idx: *id },
+                        )
+                    }
+                    ColRefKind::AirValue => {
+                        pilout_proto::operand::Operand::AirValue(
+                            pilout_proto::operand::AirValue { idx: *id },
+                        )
+                    }
+                    ColRefKind::Public => {
+                        pilout_proto::operand::Operand::PublicValue(
+                            pilout_proto::operand::PublicValue { idx: *id },
+                        )
+                    }
+                    ColRefKind::Custom => {
+                        pilout_proto::operand::Operand::CustomCol(
+                            pilout_proto::operand::CustomCol {
+                                commit_id: 0,
+                                stage: 0,
+                                col_idx: *id,
+                                row_offset: offset,
+                            },
+                        )
+                    }
+                    ColRefKind::Intermediate => {
+                        // Intermediate columns are expression references.
+                        pilout_proto::operand::Operand::Expression(
+                            pilout_proto::operand::Expression { idx: *id },
+                        )
+                    }
+                }
+            }
+            _ => return None,
+        };
+
+        Some(pilout_proto::Operand {
+            operand: Some(operand),
+        })
+    }
 }
 
 /// Serialize the processor state and write the .pilout file.
@@ -496,12 +769,22 @@ pub fn write_pilout(processor: &Processor, path: &str) -> anyhow::Result<()> {
     let mut builder = ProtoOutBuilder::new(processor);
     let pilout = builder.build();
 
+    let total_air_exprs: usize = pilout.air_groups.iter()
+        .flat_map(|ag| ag.airs.iter())
+        .map(|a| a.expressions.len())
+        .sum();
+    let total_air_constraints: usize = pilout.air_groups.iter()
+        .flat_map(|ag| ag.airs.iter())
+        .map(|a| a.constraints.len())
+        .sum();
     eprintln!(
-        "  > Proto: {} air groups, {} symbols, {} global expressions, {} global constraints",
+        "  > Proto: {} air groups, {} symbols, {} global expressions, {} global constraints, {} air expressions, {} air constraints",
         pilout.air_groups.len(),
         pilout.symbols.len(),
         pilout.expressions.len(),
         pilout.constraints.len(),
+        total_air_exprs,
+        total_air_constraints,
     );
 
     let encoded = pilout.encode_to_vec();

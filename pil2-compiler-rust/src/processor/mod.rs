@@ -985,6 +985,25 @@ impl Processor {
                                 return Value::Str(format!("{}{}", ls, rs));
                             }
                         }
+                        // If either operand is a column reference or a
+                        // runtime expression, build a RuntimeExpr tree
+                        // so that constraint expressions can be serialized
+                        // to protobuf with column references intact.
+                        if is_symbolic(&lval) || is_symbolic(&rval) {
+                            let rt_op = match op {
+                                BinOp::Add => RuntimeOp::Add,
+                                BinOp::Sub => RuntimeOp::Sub,
+                                BinOp::Mul => RuntimeOp::Mul,
+                                _ => return Value::Void,
+                            };
+                            let left_rt = value_to_runtime_expr(&lval);
+                            let right_rt = value_to_runtime_expr(&rval);
+                            return Value::RuntimeExpr(Box::new(RuntimeExpr::BinOp {
+                                op: rt_op,
+                                left: Box::new(left_rt),
+                                right: Box::new(right_rt),
+                            }));
+                        }
                         Value::Void
                     }
                 }
@@ -993,6 +1012,12 @@ impl Processor {
                 let val = self.eval_expr(operand);
                 if let Some(v) = val.as_int() {
                     eval_unaryop_int(op, v)
+                } else if is_symbolic(&val) && matches!(op, UnaryOp::Neg) {
+                    let rt = value_to_runtime_expr(&val);
+                    Value::RuntimeExpr(Box::new(RuntimeExpr::UnaryOp {
+                        op: RuntimeUnaryOp::Neg,
+                        operand: Box::new(rt),
+                    }))
                 } else {
                     Value::Void
                 }
@@ -1967,10 +1992,6 @@ impl Processor {
             self.execute_statements(block);
         }
 
-        // Clear the error flag so that the caller (airgroup) can
-        // continue instantiating more AIRs after this one.
-        self.error_raised = false;
-
         let witness_count = self.witness_cols.len();
         let fixed_count = self.fixed_cols.len();
         let constraint_count = self.constraints.len() as u32;
@@ -1978,6 +1999,81 @@ impl Processor {
         eprintln!("  > Witness cols: {}", witness_count);
         eprintln!("  > Fixed cols: {}", fixed_count);
         eprintln!("  > Constraints: {}", constraint_count);
+
+        // Build fixed column ID mappings for this AIR.
+        let mut fixed_id_map: Vec<(char, u32)> = Vec::new();
+        {
+            let num_rows = self.air_stack.last().map(|a| a.rows).unwrap_or(0);
+            let mut fixed_proto_idx = 0u32;
+            let mut periodic_proto_idx = 0u32;
+            for col_id in 0..self.fixed_cols.len() {
+                if let Some(data) = self.fixed_cols.ids.get_data(col_id) {
+                    if data.temporal {
+                        continue;
+                    }
+                }
+                // Detect periodic: column has fewer rows than the AIR
+                let is_periodic = if let Some(row_data) = self.fixed_cols.get_row_data(col_id) {
+                    row_data.len() > 0 && (row_data.len() as u64) < num_rows
+                } else {
+                    false
+                };
+                if is_periodic {
+                    while fixed_id_map.len() <= col_id as usize {
+                        fixed_id_map.push(('F', 0));
+                    }
+                    fixed_id_map[col_id as usize] = ('P', periodic_proto_idx);
+                    periodic_proto_idx += 1;
+                } else {
+                    while fixed_id_map.len() <= col_id as usize {
+                        fixed_id_map.push(('F', 0));
+                    }
+                    fixed_id_map[col_id as usize] = ('F', fixed_proto_idx);
+                    fixed_proto_idx += 1;
+                }
+            }
+        }
+
+        // Build witness column ID mappings (stage -> proto_index).
+        let witness_id_map: Vec<(u32, u32)> = {
+            let mut map = Vec::new();
+            // Group by stage, assign per-stage indices.
+            let mut stages: HashMap<u32, Vec<u32>> = HashMap::new();
+            for wid in 0..self.witness_cols.len() {
+                let stage = self.witness_cols.datas.get(wid as usize)
+                    .and_then(|d| d.stage)
+                    .unwrap_or(1);
+                stages.entry(stage).or_default().push(wid);
+            }
+            let mut sorted_stages: Vec<u32> = stages.keys().cloned().collect();
+            sorted_stages.sort();
+            for stage in sorted_stages {
+                if let Some(ids) = stages.get(&stage) {
+                    for (idx, &wid) in ids.iter().enumerate() {
+                        while map.len() <= wid as usize {
+                            map.push((1, 0));
+                        }
+                        map[wid as usize] = (stage, idx as u32);
+                    }
+                }
+            }
+            map
+        };
+
+        // Store per-AIR data (constraints, expressions, column maps) in the
+        // airgroup's air entry before clearing.
+        if !is_virtual {
+            if let Some(air_on_stack) = self.air_stack.last() {
+                let air_id = air_on_stack.id;
+                if let Some(ag) = self.air_groups.get_mut(&ag_name) {
+                    if let Some(stored_air) = ag.airs.iter_mut().find(|a| a.id == air_id) {
+                        stored_air.store_constraints(&self.constraints);
+                        stored_air.fixed_id_map = fixed_id_map;
+                        stored_air.witness_id_map = witness_id_map;
+                    }
+                }
+            }
+        }
 
         // Write fixed columns to binary file before clearing.
         if self.config.fixed_to_file {
@@ -2084,9 +2180,11 @@ impl Processor {
             .and_then(|e| self.eval_expr(e).as_int().map(|v| v as i64));
         let src_ref = self.source_ref.clone();
 
+        let qualified_scope = self.get_deferred_scope(scope);
+
         let scope_entry = self
             .deferred_calls
-            .entry(scope.clone())
+            .entry(qualified_scope)
             .or_default();
         let event_entry = scope_entry.entry(event).or_default();
 
@@ -2101,26 +2199,103 @@ impl Processor {
         FlowSignal::None
     }
 
+    /// Map a deferred call scope to its qualified key, mirroring the JS
+    /// `getDeferredScope`.  For "airgroup" scopes, the key includes the
+    /// current airgroup ID so that each airgroup has its own call list.
+    fn get_deferred_scope(&self, scope: &str) -> String {
+        if scope == "airgroup" {
+            let ag_id = self.current_air_group.as_ref()
+                .and_then(|name| self.air_groups.get(name))
+                .and_then(|ag| ag.get_id());
+            match ag_id {
+                Some(id) => format!("airgroup#{}", id),
+                None => "airgroup#".to_string(),
+            }
+        } else {
+            scope.to_string()
+        }
+    }
+
     fn call_deferred_functions(&mut self, scope: &str, event: &str) {
-        let key = scope.to_string();
-        if let Some(scope_map) = self.deferred_calls.get(&key) {
-            if let Some(calls) = scope_map.get(event) {
-                let call_names: Vec<String> = calls.iter().map(|c| c.function_name.clone()).collect();
-                for fname in call_names {
-                    if let Some(func) = self.functions.get(&fname).cloned() {
-                        self.execute_user_function(&func, &[]);
+        let key = self.get_deferred_scope(scope);
+        self.call_deferred_functions_by_key(&key, event);
+    }
+
+    fn call_deferred_functions_by_key(&mut self, key: &str, event: &str) {
+        // Support reentrant deferred calls: loop until no new calls are added.
+        let mut processed = std::collections::HashSet::new();
+        loop {
+            let calls = match self.deferred_calls.get(key) {
+                Some(scope_map) => match scope_map.get(event) {
+                    Some(calls) => {
+                        let mut sorted: Vec<DeferredCallInfo> = calls.clone();
+                        // Sort by priority descending (higher priority first).
+                        sorted.sort_by(|a, b| {
+                            let pa = a.priority.unwrap_or(0);
+                            let pb = b.priority.unwrap_or(0);
+                            pb.cmp(&pa)
+                        });
+                        sorted
                     }
+                    None => break,
+                },
+                None => break,
+            };
+
+            let mut executed_something = false;
+            for call in &calls {
+                if processed.contains(&call.function_name) {
+                    continue;
                 }
+                executed_something = true;
+                processed.insert(call.function_name.clone());
+                if let Some(func) = self.functions.get(&call.function_name).cloned() {
+                    self.execute_user_function(&func, &[]);
+                }
+                // Break after each execution for reentrant behavior.
+                break;
+            }
+            if !executed_something {
+                break;
             }
         }
         // Clear after execution.
-        if let Some(scope_map) = self.deferred_calls.get_mut(&key) {
+        if let Some(scope_map) = self.deferred_calls.get_mut(key) {
             scope_map.remove(event);
         }
     }
 
     fn final_closing_air_groups(&mut self) {
+        // First, call any deferred airgroup calls registered under the
+        // current (if any) airgroup scope.
         self.call_deferred_functions("airgroup", "final");
+
+        // Then iterate all airgroups, open each, execute their deferred
+        // calls, and close (mirroring the JS finalClosingAirGroups).
+        let mut closed_ids: Vec<u32> = Vec::new();
+        let mut new_groups = true;
+        while new_groups {
+            new_groups = false;
+            let ag_names: Vec<String> = self.air_groups.iter()
+                .filter_map(|ag| {
+                    let id = ag.get_id()?;
+                    if closed_ids.contains(&id) { None } else { Some(ag.name.clone()) }
+                })
+                .collect();
+            for ag_name in ag_names {
+                let ag_id = self.air_groups.get(&ag_name)
+                    .and_then(|ag| ag.get_id());
+                if let Some(id) = ag_id {
+                    new_groups = true;
+                    closed_ids.push(id);
+                    self.open_air_group(&ag_name.clone());
+                    // Execute airgroup-scoped deferred calls for this group.
+                    let key = format!("airgroup#{}", id);
+                    self.call_deferred_functions_by_key(&key, "final");
+                    self.suspend_current_air_group();
+                }
+            }
+        }
     }
 
     fn final_proof_scope(&mut self) {
@@ -2246,6 +2421,12 @@ fn reorder_named_args(
 }
 
 /// Convert a Value to a RuntimeExpr.
+/// Check if a Value is "symbolic" (a column reference or runtime
+/// expression) rather than a simple compile-time constant.
+fn is_symbolic(val: &Value) -> bool {
+    matches!(val, Value::ColRef { .. } | Value::RuntimeExpr(_))
+}
+
 fn value_to_runtime_expr(val: &Value) -> RuntimeExpr {
     match val {
         Value::ColRef {
