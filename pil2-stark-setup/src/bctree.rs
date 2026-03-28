@@ -106,7 +106,7 @@ pub fn compute_const_tree(
     ];
     // Format verkey.json matching the legacy C++ bctree format: 4-space indent
     let verkey_json = format!(
-        "[\n    {},\n    {},\n    {},\n    {}\n]",
+        "[\n    {},\n    {},\n    {},\n    {}\n]\n",
         root_u64[0], root_u64[1], root_u64[2], root_u64[3]
     );
     fs::write(verkey_path, &verkey_json)
