@@ -1650,9 +1650,9 @@ impl Processor {
     // -----------------------------------------------------------------------
 
     fn exec_include(&mut self, _inc: &IncludeStmt) -> FlowSignal {
-        // Include handling requires the compiler front-end (file loading,
-        // parsing). The processor records the include for the compiler
-        // to handle at a higher level.
+        // All include/require directives are expanded by IncludeResolver
+        // in lib.rs before the AST reaches the processor. This is a no-op
+        // safety fallback; no Include nodes should arrive here.
         FlowSignal::None
     }
 
