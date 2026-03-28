@@ -578,7 +578,7 @@ fn get_global_name(global_info: &Value) -> String {
         .to_string()
 }
 
-/// Compile PIL source using the pil2-compiler-rust binary.
+/// Compile PIL source using the pil2-compiler-rust library directly.
 pub fn compile_pil(
     pil_path: &str,
     output_path: &str,
@@ -587,39 +587,18 @@ pub fn compile_pil(
 ) -> Result<()> {
     tracing::info!("Compiling PIL: {}", pil_path);
 
-    // Try to find the pil2c binary
-    let pil2c_candidates = [
-        "pil2c",
-        "./pil2c",
-        "../pil2-compiler-rust/target/release/pil2c",
-        "../pil2-compiler-rust/target/debug/pil2c",
-    ];
+    let options = pil2_compiler_rust::CompileOptions {
+        source: pil_path.to_string(),
+        include_paths: vec![
+            std_pil_path.to_string(),
+            recurser_pil_path.to_string(),
+        ],
+        output: Some(output_path.to_string()),
+        ..Default::default()
+    };
 
-    let pil2c_path = pil2c_candidates
-        .iter()
-        .find(|p| Path::new(p).exists())
-        .map(|s| s.to_string());
-
-    if let Some(pil2c) = pil2c_path {
-        let include_paths = format!("{},{}", std_pil_path, recurser_pil_path);
-        let output = std::process::Command::new(pil2c)
-            .arg(pil_path)
-            .args(["-I", &include_paths])
-            .args(["-o", output_path])
-            .output()
-            .context("Failed to execute pil2c compiler")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("PIL compilation failed: {}", stderr);
-        }
-    } else {
-        bail!(
-            "pil2c binary not found. Cannot compile PIL: {}. \
-             Build it with: cargo build --release -p pil2-compiler-rust",
-            pil_path
-        );
-    }
+    pil2_compiler_rust::compile(&options)
+        .map_err(|e| anyhow::anyhow!("PIL compilation failed: {}", e))?;
 
     Ok(())
 }
