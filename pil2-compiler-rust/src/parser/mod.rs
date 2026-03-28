@@ -774,15 +774,27 @@ fn build_airval_decl(pair: pest::iterators::Pair<'_, Rule>) -> Result<Statement,
 fn build_commit_decl(pair: pest::iterators::Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut stage: Option<u64> = None;
     let mut name = String::new();
+    let mut publics = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::number => { stage = Some(parse_u64(inner.as_str())); }
             Rule::ident => { name = inner.as_str().to_string(); }
+            Rule::commit_public_ref => {
+                for p in inner.into_inner() {
+                    if p.as_rule() == Rule::name_id_list {
+                        for nid in p.into_inner() {
+                            if nid.as_rule() == Rule::name_id {
+                                publics.push(nid.as_str().trim().to_string());
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
-    Ok(Statement::CommitDeclaration(CommitDeclaration { stage, publics: vec![], name }))
+    Ok(Statement::CommitDeclaration(CommitDeclaration { stage, publics, name }))
 }
 
 // ---------------------------------------------------------------------------
@@ -796,6 +808,8 @@ fn build_var_decl(pair: pest::iterators::Pair<'_, Rule>) -> Result<Statement, Pa
     let mut vtype = TypeKind::Int;
     let mut items = Vec::new();
     let mut init: Option<Expr> = None;
+    let mut has_var_decl_list = false;
+    let mut has_comma_sep_expr = false;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -813,6 +827,7 @@ fn build_var_decl(pair: pest::iterators::Pair<'_, Rule>) -> Result<Statement, Pa
             }
             Rule::var_decl_list => {
                 items = build_var_decl_list(inner)?;
+                has_var_decl_list = true;
             }
             Rule::expression => {
                 init = Some(build_expression(inner)?);
@@ -820,12 +835,14 @@ fn build_var_decl(pair: pest::iterators::Pair<'_, Rule>) -> Result<Statement, Pa
             Rule::comma_sep_expr => {
                 let exprs = build_comma_sep_expr(inner)?;
                 init = Some(Expr::ArrayLiteral(exprs));
+                has_comma_sep_expr = true;
             }
             _ => {}
         }
     }
 
-    Ok(Statement::VariableDeclaration(VariableDeclaration { is_const, vtype, items, init }))
+    let is_multiple = has_var_decl_list && has_comma_sep_expr;
+    Ok(Statement::VariableDeclaration(VariableDeclaration { is_const, vtype, items, init, is_multiple }))
 }
 
 fn build_var_decl_list(pair: pest::iterators::Pair<'_, Rule>) -> Result<Vec<VarDeclItem>, ParseError> {
@@ -1166,7 +1183,7 @@ fn build_var_decl_inner(pair: pest::iterators::Pair<'_, Rule>) -> Result<Stateme
     }
 
     Ok(Statement::VariableDeclaration(VariableDeclaration {
-        is_const, vtype, items: vec![item], init,
+        is_const, vtype, items: vec![item], init, is_multiple: false,
     }))
 }
 
@@ -1958,8 +1975,15 @@ fn build_prefix_row_offset(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr
         return Err(err("empty prefix_row_offset"));
     }
 
-    // Two forms: number ~ "'" ~ postfix_expr  OR  "'" ~ postfix_expr
-    if children.len() >= 2 && children[0].as_rule() == Rule::number {
+    // Three forms:
+    // 1. (expr) ' postfix_expr  → children: [expression, postfix_expr]
+    // 2. number ' postfix_expr  → children: [number, postfix_expr]
+    // 3. ' postfix_expr         → children: [postfix_expr]
+    if children.len() >= 2 && children[0].as_rule() == Rule::expression {
+        let offset = build_expression(children[0].clone())?;
+        let base = build_postfix_expr(children[1].clone())?;
+        Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(offset) })
+    } else if children.len() >= 2 && children[0].as_rule() == Rule::number {
         let offset = make_number_expr(children[0].as_str());
         let base = build_postfix_expr(children[1].clone())?;
         Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(offset) })
@@ -1982,7 +2006,25 @@ fn build_postfix_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, Par
             let suffix_text = children[i].as_str().trim();
             let suffix_children: Vec<pest::iterators::Pair<'_, Rule>> = children[i].clone().into_inner().collect();
 
-            if suffix_text == "'" {
+            if suffix_text.starts_with("'(") {
+                // Row offset with expression: ident'(expr)
+                if let Some(expr_pair) = suffix_children.into_iter().find(|p| p.as_rule() == Rule::expression) {
+                    let offset = build_expression(expr_pair)?;
+                    result = Expr::RowOffset {
+                        base: Box::new(result),
+                        offset: Box::new(offset),
+                    };
+                }
+            } else if suffix_text.starts_with("'") && suffix_children.iter().any(|p| p.as_rule() == Rule::number) {
+                // Row offset with number: ident'N
+                if let Some(num_pair) = suffix_children.into_iter().find(|p| p.as_rule() == Rule::number) {
+                    let offset = make_number_expr(num_pair.as_str());
+                    result = Expr::RowOffset {
+                        base: Box::new(result),
+                        offset: Box::new(offset),
+                    };
+                }
+            } else if suffix_text == "'" {
                 result = Expr::RowOffset {
                     base: Box::new(result),
                     offset: Box::new(one_literal()),
@@ -2212,67 +2254,182 @@ fn build_sequence_def(pair: pest::iterators::Pair<'_, Rule>) -> Result<SequenceD
     }
 }
 
+fn is_open_ended_placeholder(elem: &SequenceElement) -> bool {
+    let t1 = match elem {
+        SequenceElement::ArithSeq { t1, .. } | SequenceElement::GeomSeq { t1, .. } => t1,
+        _ => return false,
+    };
+    matches!(t1.as_ref(), SequenceElement::Value(Expr::Reference(NameId { path, .. })) if path == "__OPEN_ENDED__")
+}
+
 fn build_comma_sep_seq_elem(pair: pest::iterators::Pair<'_, Rule>) -> Result<Vec<SequenceElement>, ParseError> {
     let mut result = Vec::new();
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::sequence_element {
-            result.push(build_sequence_element(inner)?);
+            let elem = build_sequence_element(inner)?;
+            // For open-ended arith/geom sequences, pop the previous element as t1
+            if is_open_ended_placeholder(&elem) && !result.is_empty() {
+                let prev = result.pop().unwrap();
+                match elem {
+                    SequenceElement::ArithSeq { t2, tn, .. } => {
+                        result.push(SequenceElement::ArithSeq {
+                            t1: Box::new(prev), t2, tn,
+                        });
+                    }
+                    SequenceElement::GeomSeq { t2, tn, .. } => {
+                        result.push(SequenceElement::GeomSeq {
+                            t1: Box::new(prev), t2, tn,
+                        });
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                result.push(elem);
+            }
         }
     }
     Ok(result)
 }
 
+fn build_seq_value(pair: pest::iterators::Pair<'_, Rule>) -> Result<SequenceElement, ParseError> {
+    let children: Vec<pest::iterators::Pair<'_, Rule>> = pair.into_inner().collect();
+    if children.len() >= 2 {
+        // expression ~ ":" ~ expression  →  Repeat { value, times }
+        let value = build_expression(children[0].clone())?;
+        let times = build_expression(children[1].clone())?;
+        Ok(SequenceElement::Repeat { value, times })
+    } else if children.len() == 1 {
+        // expression  →  Value
+        let expr = build_expression(children[0].clone())?;
+        Ok(SequenceElement::Value(expr))
+    } else {
+        Err(err("empty seq_value"))
+    }
+}
+
+fn build_sub_seq_elem(pair: pest::iterators::Pair<'_, Rule>) -> Result<Vec<SequenceElement>, ParseError> {
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::comma_sep_seq_elem {
+            return build_comma_sep_seq_elem(inner);
+        }
+    }
+    Err(err("empty sub_seq_elem"))
+}
+
 fn build_sequence_element(pair: pest::iterators::Pair<'_, Rule>) -> Result<SequenceElement, ParseError> {
     let text = pair.as_str().trim().to_string();
     let children: Vec<pest::iterators::Pair<'_, Rule>> = pair.into_inner().collect();
-    let exprs: Vec<pest::iterators::Pair<'_, Rule>> = children.into_iter()
-        .filter(|p| p.as_rule() == Rule::expression)
-        .collect();
 
-    if exprs.is_empty() {
+    if children.is_empty() {
         return Err(err("empty sequence_element"));
     }
 
-    // Check for arithmetic/geometric sequences
-    if text.contains("..+..") && exprs.len() >= 2 {
-        let t1 = SequenceElement::Value(build_expression(exprs[0].clone())?);
-        let t2 = SequenceElement::Value(build_expression(exprs[1].clone())?);
-        let tn = if exprs.len() >= 3 {
-            Some(Box::new(SequenceElement::Value(build_expression(exprs[2].clone())?)))
+    let first_rule = children[0].as_rule();
+
+    // sub_seq_elem  (with optional ":" expression for repeat count)
+    if first_rule == Rule::sub_seq_elem {
+        let sub_elements = build_sub_seq_elem(children[0].clone())?;
+        if children.len() >= 2 && children[1].as_rule() == Rule::expression {
+            // [sub_seq] : times  →  Repeat of a Sequence
+            let times = build_expression(children[1].clone())?;
+            let sub_seq = SequenceDef { elements: sub_elements, is_padded: false };
+            return Ok(SequenceElement::Repeat {
+                value: Expr::Sequence(sub_seq),
+                times,
+            });
         } else {
-            None
-        };
-        return Ok(SequenceElement::ArithSeq { t1: Box::new(t1), t2: Box::new(t2), tn });
+            // plain [sub_seq]
+            return Ok(SequenceElement::SubSeq(sub_elements));
+        }
     }
 
-    if text.contains("..*..") && exprs.len() >= 2 {
-        let t1 = SequenceElement::Value(build_expression(exprs[0].clone())?);
-        let t2 = SequenceElement::Value(build_expression(exprs[1].clone())?);
-        let tn = if exprs.len() >= 3 {
-            Some(Box::new(SequenceElement::Value(build_expression(exprs[2].clone())?)))
+    // All remaining alternatives use seq_value children
+    let seq_values: Vec<pest::iterators::Pair<'_, Rule>> = children.iter()
+        .filter(|p| p.as_rule() == Rule::seq_value)
+        .cloned()
+        .collect();
+
+    if seq_values.is_empty() {
+        return Err(err("sequence_element: no seq_value children"));
+    }
+
+    // Arithmetic/geometric sequences
+    if text.contains("..+..") {
+        if seq_values.len() >= 2 {
+            let t1 = build_seq_value(seq_values[0].clone())?;
+            let t2 = build_seq_value(seq_values[1].clone())?;
+            let tn = if seq_values.len() >= 3 {
+                Some(Box::new(build_seq_value(seq_values[2].clone())?))
+            } else {
+                None
+            };
+            return Ok(SequenceElement::ArithSeq { t1: Box::new(t1), t2: Box::new(t2), tn });
         } else {
-            None
+            // Open-ended: seq_value ..+.. (only t2; t1 will be filled from prev at list level)
+            let t2 = build_seq_value(seq_values[0].clone())?;
+            return Ok(SequenceElement::ArithSeq {
+                t1: Box::new(SequenceElement::Value(Expr::Reference(NameId {
+                    path: "__OPEN_ENDED__".to_string(), indexes: vec![], row_offset: None,
+                }))),
+                t2: Box::new(t2),
+                tn: None,
+            });
+        }
+    }
+
+    if text.contains("..*..") {
+        if seq_values.len() >= 2 {
+            let t1 = build_seq_value(seq_values[0].clone())?;
+            let t2 = build_seq_value(seq_values[1].clone())?;
+            let tn = if seq_values.len() >= 3 {
+                Some(Box::new(build_seq_value(seq_values[2].clone())?))
+            } else {
+                None
+            };
+            return Ok(SequenceElement::GeomSeq { t1: Box::new(t1), t2: Box::new(t2), tn });
+        } else {
+            // Open-ended: seq_value ..*.. (only t2; t1 will be filled from prev at list level)
+            let t2 = build_seq_value(seq_values[0].clone())?;
+            return Ok(SequenceElement::GeomSeq {
+                t1: Box::new(SequenceElement::Value(Expr::Reference(NameId {
+                    path: "__OPEN_ENDED__".to_string(), indexes: vec![], row_offset: None,
+                }))),
+                t2: Box::new(t2),
+                tn: None,
+            });
+        }
+    }
+
+    // Range (..)
+    if text.contains("..") && !text.contains("...") && seq_values.len() == 2 {
+        let sv1 = build_seq_value(seq_values[0].clone())?;
+        let sv2 = build_seq_value(seq_values[1].clone())?;
+        // Extract from/to and optional repeat times
+        let (from, from_times) = match sv1 {
+            SequenceElement::Repeat { value, times } => (value, Some(times)),
+            SequenceElement::Value(v) => (v, None),
+            _ => return Err(err("unexpected seq_value in range")),
         };
-        return Ok(SequenceElement::GeomSeq { t1: Box::new(t1), t2: Box::new(t2), tn });
+        let (to, to_times) = match sv2 {
+            SequenceElement::Repeat { value, times } => (value, Some(times)),
+            SequenceElement::Value(v) => (v, None),
+            _ => return Err(err("unexpected seq_value in range")),
+        };
+        return Ok(SequenceElement::Range { from, to, from_times, to_times });
     }
 
-    // Check for range (..)
-    if text.contains("..") && !text.contains("...") && exprs.len() == 2 {
-        return Ok(SequenceElement::Range {
-            from: build_expression(exprs[0].clone())?,
-            to: build_expression(exprs[1].clone())?,
-        });
+    // Padding (...)
+    if text.ends_with("...") && seq_values.len() == 1 {
+        let inner = build_seq_value(seq_values[0].clone())?;
+        return Ok(SequenceElement::Padding(Box::new(inner)));
     }
 
-    // Check for padding (...)
-    if text.ends_with("...") {
-        let expr = build_expression(exprs[0].clone())?;
-        return Ok(SequenceElement::Padding(Box::new(SequenceElement::Value(expr))));
+    // Simple value (possibly with repeat count)
+    if seq_values.len() == 1 {
+        return build_seq_value(seq_values[0].clone());
     }
 
-    // Simple value
-    let expr = build_expression(exprs[0].clone())?;
-    Ok(SequenceElement::Value(expr))
+    Err(err(&format!("unrecognized sequence_element: {}", text)))
 }
 
 // ---------------------------------------------------------------------------

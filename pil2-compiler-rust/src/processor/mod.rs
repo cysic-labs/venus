@@ -1929,6 +1929,7 @@ mod tests {
                 value: "42".to_string(),
                 radix: NumericRadix::Decimal,
             })),
+            is_multiple: false,
         };
         p.exec_variable_declaration(&vd);
         let val = p.eval_expr(&Expr::Reference(NameId {
@@ -1956,6 +1957,7 @@ mod tests {
                     value: "0".to_string(),
                     radix: NumericRadix::Decimal,
                 })),
+                is_multiple: false,
             })),
             condition: Expr::BinaryOp {
                 op: BinOp::Lt,
@@ -2010,6 +2012,7 @@ mod tests {
                 value: "0".to_string(),
                 radix: NumericRadix::Decimal,
             })),
+            is_multiple: false,
         };
         p.exec_variable_declaration(&vd);
 
@@ -2076,6 +2079,7 @@ mod tests {
                 value: "16".to_string(),
                 radix: NumericRadix::Decimal,
             })),
+            is_multiple: false,
         };
         p.exec_variable_declaration(&vd);
         let result = p.expand_templates("size_${MY_VAR}");

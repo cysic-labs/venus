@@ -334,6 +334,7 @@ pub struct VariableDeclaration {
     pub vtype: TypeKind,
     pub items: Vec<VarDeclItem>,
     pub init: Option<Expr>,
+    pub is_multiple: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -706,7 +707,7 @@ pub struct SequenceDef {
 pub enum SequenceElement {
     Value(Expr),
     Repeat { value: Expr, times: Expr },
-    Range { from: Expr, to: Expr },
+    Range { from: Expr, to: Expr, from_times: Option<Expr>, to_times: Option<Expr> },
     ArithSeq { t1: Box<SequenceElement>, t2: Box<SequenceElement>, tn: Option<Box<SequenceElement>> },
     GeomSeq { t1: Box<SequenceElement>, t2: Box<SequenceElement>, tn: Option<Box<SequenceElement>> },
     Padding(Box<SequenceElement>),

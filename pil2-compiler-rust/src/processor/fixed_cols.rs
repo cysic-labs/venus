@@ -152,15 +152,23 @@ pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
                     }
                 }
             }
-            SequenceElement::Range { from, to } => {
+            SequenceElement::Range { from, to, from_times, to_times } => {
                 if let (Some(f), Some(t)) = (try_const_eval_expr(from), try_const_eval_expr(to)) {
+                    let ft = from_times.as_ref().and_then(|e| try_const_eval_expr(e)).unwrap_or(1);
+                    let tt = to_times.as_ref().and_then(|e| try_const_eval_expr(e)).unwrap_or(ft);
                     if f <= t {
                         for v in f..=t {
-                            base_pattern.push(v);
+                            let rep = if v == f { ft } else if v == t { tt } else { ft.min(tt).max(1) };
+                            for _ in 0..rep {
+                                base_pattern.push(v);
+                            }
                         }
                     } else {
                         for v in (t..=f).rev() {
-                            base_pattern.push(v);
+                            let rep = if v == f { ft } else if v == t { tt } else { ft.min(tt).max(1) };
+                            for _ in 0..rep {
+                                base_pattern.push(v);
+                            }
                         }
                     }
                 }
@@ -278,6 +286,8 @@ mod tests {
             elements: vec![SequenceElement::Range {
                 from: num_expr(0),
                 to: num_expr(3),
+                from_times: None,
+                to_times: None,
             }],
             is_padded: false,
         };

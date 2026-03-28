@@ -119,20 +119,23 @@ function_arg = {
 }
 
 basic_type = {
-    "const"? ~ (
-        "col" ~ ("witness" | "fixed")
-      | "publictable"
-      | "proofval"
-      | "airgroup"
-      | "challenge"
-      | "public"
-      | "function"
-      | "string"
-      | "expr"
-      | "int"
-      | "fe"
-      | "air"
-    )
+    basic_type_const? ~ basic_type_inner
+}
+basic_type_const = @{ "const" ~ !(ASCII_ALPHANUMERIC | "_") }
+basic_type_inner = @{
+    ( "col" ~ WHITESPACE+ ~ ("witness" | "fixed")
+    | "publictable"
+    | "proofval"
+    | "airgroup"
+    | "challenge"
+    | "public"
+    | "function"
+    | "string"
+    | "expr"
+    | "int"
+    | "fe"
+    | "air"
+    ) ~ !(ASCII_ALPHANUMERIC | "_")
 }
 
 // ===================================================================
@@ -146,7 +149,7 @@ col_decl_stmt = {
   | "col" ~ ident ~ col_features? ~ col_decl_list ~ semi?
 }
 
-col_type_kw = { "witness" | "fixed" }
+col_type_kw = @{ ("witness" | "fixed") ~ !(ASCII_ALPHANUMERIC | "_") }
 
 col_features = { col_feature+ }
 col_feature = { col_feature_name ~ "(" ~ multi_expression_list ~ ")" }
@@ -218,19 +221,23 @@ airval_decl_stmt = {
 // ===================================================================
 
 commit_decl_stmt = {
-    "commit" ~ "stage" ~ "(" ~ number ~ ")" ~ ident ~ semi?
+    "commit" ~ "stage" ~ "(" ~ number ~ ")" ~ commit_public_ref? ~ ident ~ semi?
 }
+
+commit_public_ref = { "public" ~ "(" ~ name_id_list ~ ")" }
+name_id_list = { name_id ~ ("," ~ name_id)* }
 
 // ===================================================================
 // Variable declarations
 // ===================================================================
 
 var_decl_stmt = {
-    "const"? ~ var_type_kw ~ var_decl_item ~ "=" ~ ( "[" ~ comma_sep_expr? ~ "]" | expression ) ~ semi?
+    "const"? ~ var_type_kw ~ "[" ~ var_decl_list ~ "]" ~ "=" ~ "[" ~ comma_sep_expr ~ "]" ~ semi?
+  | "const"? ~ var_type_kw ~ var_decl_item ~ "=" ~ ( "[" ~ comma_sep_expr? ~ "]" | expression ) ~ semi?
   | "const"? ~ var_type_kw ~ var_decl_list ~ semi?
 }
 
-var_type_kw = { "int" | "fe" | "expr" | "string" | "function" }
+var_type_kw = @{ ("int" | "fe" | "expr" | "string" | "function") ~ !(ASCII_ALPHANUMERIC | "_") }
 
 var_decl_list = { var_decl_item ~ ("," ~ var_decl_item)* }
 var_decl_item = { name_reference ~ var_decl_array_dims? }
@@ -348,9 +355,10 @@ container_stmt = {
 // Use
 // ===================================================================
 
+use_kw = @{ "use" ~ !(ASCII_ALPHANUMERIC | "_") }
 use_stmt = {
-    "use" ~ name_reference ~ "alias" ~ ident ~ semi?
-  | "use" ~ name_reference ~ semi?
+    use_kw ~ name_reference ~ "alias" ~ ident ~ semi?
+  | use_kw ~ name_reference ~ semi?
 }
 
 // ===================================================================
@@ -451,7 +459,8 @@ unary_expr = {
 
 // Prefix row offset: 'ident, N'ident, (expr)'ident
 prefix_row_offset = {
-    number ~ "'" ~ postfix_expr
+    "(" ~ expression ~ ")" ~ "'" ~ postfix_expr
+  | number ~ "'" ~ postfix_expr
   | "'" ~ postfix_expr
 }
 
@@ -460,7 +469,9 @@ pow_expr = { postfix_expr ~ ("**" ~ unary_expr)? }
 postfix_expr = { atom_expr ~ postfix_suffix* }
 
 postfix_suffix = {
-    "'"
+    "'" ~ "(" ~ expression ~ ")"
+  | "'" ~ number
+  | "'"
   | "[" ~ expression ~ "]"
   | "." ~ template_lit
   | "." ~ ident
@@ -537,15 +548,28 @@ sequence_def = {
 comma_sep_seq_elem = { sequence_element ~ ("," ~ sequence_element)* }
 
 sequence_element = {
-    expression ~ "..+.." ~ expression ~ ("..+.." ~ expression)?
-  | expression ~ "..*.." ~ expression ~ ("..*.." ~ expression)?
-  | expression ~ ".." ~ expression
-  | expression ~ "..."
+    sub_seq_elem ~ ":" ~ expression
+  | sub_seq_elem
+  | seq_value ~ "..+.." ~ seq_value ~ ("..+.." ~ seq_value)?
+  | seq_value ~ "..*.." ~ seq_value ~ ("..*.." ~ seq_value)?
+  | seq_value ~ "..+.."
+  | seq_value ~ "..*.."
+  | seq_value ~ ".." ~ seq_value
+  | seq_value ~ "..."
+  | seq_value
+}
+
+// A sub-sequence: nested [...] used as a sequence element
+sub_seq_elem = { "[" ~ comma_sep_seq_elem ~ "]" }
+
+// A value inside a sequence, optionally with a repeat count (value:count)
+seq_value = {
+    expression ~ ":" ~ expression
   | expression
 }
 
 // keyword.ident references (air.name, airgroup.name, proof.name)
-keyword_dot_ident = { ("air" | "airgroup" | "proof") ~ "." ~ ident }
+keyword_dot_ident = { ("airgroup" | "air" | "proof") ~ "." ~ ident }
 
 // ===================================================================
 // Lexical tokens
