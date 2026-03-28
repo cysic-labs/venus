@@ -135,7 +135,6 @@ extern {
 
 pub Program: Program = {
     <stmts:StatementList> => Program { statements: stmts },
-    => Program { statements: vec![] },
 };
 
 // ===================================================================
@@ -265,19 +264,19 @@ AirTemplateStmt: Statement = {
 // ===================================================================
 
 FunctionDefStmt: Statement = {
-    <vis:FuncVisibility> "function" <name:NameReference> "(" <args:ArgsList> ")" "{" <body:StatementBlock> "}" =>
+    <vis:FuncVisibility?> "function" <name:NameReference> "(" <args:ArgsList> ")" "{" <body:StatementBlock> "}" =>
         Statement::FunctionDef(FunctionDef {
-            name: name, visibility: vis, is_final: None,
+            name: name, visibility: vis.unwrap_or(Visibility::Public), is_final: None,
             args, varargs: false, returns: None, body,
         }),
-    <vis:FuncVisibility> "function" <name:NameReference> "(" <args:ArgsList> "," "..." ")" "{" <body:StatementBlock> "}" =>
+    <vis:FuncVisibility?> "function" <name:NameReference> "(" <args:ArgsList> "," "..." ")" "{" <body:StatementBlock> "}" =>
         Statement::FunctionDef(FunctionDef {
-            name: name, visibility: vis, is_final: None,
+            name: name, visibility: vis.unwrap_or(Visibility::Public), is_final: None,
             args, varargs: true, returns: None, body,
         }),
-    <vis:FuncVisibility> "function" <name:NameReference> "(" <args:ArgsList> ")" ":" <ret:ReturnTypeSpec> "{" <body:StatementBlock> "}" =>
+    <vis:FuncVisibility?> "function" <name:NameReference> "(" <args:ArgsList> ")" ":" <ret:ReturnTypeSpec> "{" <body:StatementBlock> "}" =>
         Statement::FunctionDef(FunctionDef {
-            name: name, visibility: vis, is_final: None,
+            name: name, visibility: vis.unwrap_or(Visibility::Public), is_final: None,
             args, varargs: false, returns: Some(ret), body,
         }),
     "final" "function" <name:NameReference> "(" <args:ArgsList> ")" "{" <body:StatementBlock> "}" =>
@@ -300,7 +299,6 @@ FunctionDefStmt: Statement = {
 FuncVisibility: Visibility = {
     "private" => Visibility::Private,
     "public" => Visibility::Public,
-    => Visibility::Public,
 };
 
 ReturnTypeSpec: Vec<ReturnType> = {
@@ -1134,8 +1132,7 @@ AtomExpr: Expr = {
     // Array literal
     "[" <el:CommaSep<Expression>> "]" => Expr::ArrayLiteral(el),
 
-    // Spread
-    "..." <e:Expression> => Expr::Spread(Box::new(e)),
+    // Spread removed from PrimaryExpr to avoid conflict with postfix "..."
 
     // Simple identifier (could be part of dotted name)
     <name:IDENT> => Expr::Reference(NameId { path: name, indexes: vec![], row_offset: None }),
