@@ -196,7 +196,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             let verkey_json_path = files_dir.join(format!("{}.verkey.json", air_name));
             if const_path.exists() {
                 tracing::info!("Computing Constant Tree...");
-                match run_bctree_binary(
+                match crate::bctree::compute_const_tree(
                     const_path.to_str().unwrap_or(""),
                     starkinfo_path.to_str().unwrap_or(""),
                     verkey_json_path.to_str().unwrap_or(""),
@@ -1446,84 +1446,5 @@ fn log2_usize(n: usize) -> usize {
     (usize::BITS - 1 - n.leading_zeros()) as usize
 }
 
-/// Run the C++ bctree binary as a subprocess to compute the constant tree.
-///
-/// Uses the pre-built binary at `pil2-proofman-js/src/setup/build/bctree`.
-/// This ensures verkey parity with the golden reference which was generated
-/// by the same C++ code.
-fn run_bctree_binary(
-    const_path: &str,
-    starkinfo_path: &str,
-    verkey_path: &str,
-) -> Result<[u64; 4]> {
-    // Resolve bctree binary path relative to the cargo manifest dir,
-    // or fall back to a path relative to the current executable.
-    let bctree_path = resolve_bctree_path();
-
-    tracing::info!("Running bctree binary: {}", bctree_path);
-
-    let output = std::process::Command::new(&bctree_path)
-        .arg("-c").arg(const_path)
-        .arg("-s").arg(starkinfo_path)
-        .arg("-v").arg(verkey_path)
-        .output()
-        .map_err(|e| anyhow::anyhow!(
-            "Failed to execute bctree binary '{}': {}. \
-             Make sure the C++ bctree binary exists.",
-            bctree_path, e
-        ))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!(
-            "bctree binary failed (exit code {:?}):\nstdout: {}\nstderr: {}",
-            output.status.code(),
-            stdout,
-            stderr
-        );
-    }
-
-    // Parse verkey.json to get root
-    let verkey_content = fs::read_to_string(verkey_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read verkey after bctree: {}", e))?;
-    let verkey_values: Vec<serde_json::Value> = serde_json::from_str(&verkey_content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse verkey JSON: {}", e))?;
-
-    let root: [u64; 4] = [
-        verkey_values.get(0).and_then(|v| v.as_u64()).unwrap_or(0),
-        verkey_values.get(1).and_then(|v| v.as_u64()).unwrap_or(0),
-        verkey_values.get(2).and_then(|v| v.as_u64()).unwrap_or(0),
-        verkey_values.get(3).and_then(|v| v.as_u64()).unwrap_or(0),
-    ];
-
-    tracing::info!("Verkey root: {:?}", root);
-    Ok(root)
-}
-
-/// Resolve the path to the C++ bctree binary.
-fn resolve_bctree_path() -> String {
-    // Try relative to the workspace root (assumes running from repo root)
-    let candidates = [
-        "pil2-proofman-js/src/setup/build/bctree",
-        "../pil2-proofman-js/src/setup/build/bctree",
-    ];
-    for candidate in &candidates {
-        if Path::new(candidate).exists() {
-            return candidate.to_string();
-        }
-    }
-    // Try using CARGO_MANIFEST_DIR
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let p = PathBuf::from(&manifest_dir)
-            .parent()
-            .map(|p| p.join("pil2-proofman-js/src/setup/build/bctree"))
-            .unwrap_or_default();
-        if p.exists() {
-            return p.to_string_lossy().to_string();
-        }
-    }
-    // Fall back to the default path
-    "pil2-proofman-js/src/setup/build/bctree".to_string()
-}
+// C++ bctree subprocess removed. Using native Rust bctree::compute_const_tree().
 
