@@ -1166,16 +1166,15 @@ FuncCallExpr: FunctionCall = {
 // ===================================================================
 
 NameReference: String = {
-    <name:IDENT> => name,
-    <first:IDENT> "." <rest:NameReferenceRight> => format!("{}.{}", first, rest),
-    "air" "." <rest:NameReferenceRight> => format!("air.{}", rest),
-    "airgroup" "." <rest:NameReferenceRight> => format!("airgroup.{}", rest),
-    "proof" "." <rest:NameReferenceRight> => format!("proof.{}", rest),
+    <name:NameReferenceBase> => name,
+    <left:NameReference> "." <right:IDENT> => format!("{}.{}", left, right),
 };
 
-NameReferenceRight: String = {
+NameReferenceBase: String = {
     <name:IDENT> => name,
-    <left:NameReferenceRight> "." <name:IDENT> => format!("{}.{}", left, name),
+    "air" => "air".to_string(),
+    "airgroup" => "airgroup".to_string(),
+    "proof" => "proof".to_string(),
 };
 
 NameOptionalIndex: NameRef = {
