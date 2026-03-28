@@ -51,8 +51,13 @@ const MAX_INCLUDE_DEPTH: usize = 64;
 struct IncludeResolver {
     /// `-I` search paths provided on the command line.
     include_paths: Vec<PathBuf>,
-    /// Canonical paths already loaded (used to deduplicate `require`).
-    loaded_requires: HashSet<PathBuf>,
+    /// Raw require strings already loaded (used to deduplicate `require`).
+    /// The JS compiler deduplicates by the raw filename string BEFORE
+    /// resolving, so we must do the same.
+    loaded_require_strings: HashSet<String>,
+    /// Canonical paths already loaded (used only to prevent infinite
+    /// recursion, NOT for require deduplication).
+    loaded_canonical: HashSet<PathBuf>,
     /// Current include nesting depth.
     depth: usize,
     /// Verbose logging.
@@ -63,7 +68,8 @@ impl IncludeResolver {
     fn new(include_paths: &[String], verbose: bool) -> Self {
         Self {
             include_paths: include_paths.iter().map(PathBuf::from).collect(),
-            loaded_requires: HashSet::new(),
+            loaded_require_strings: HashSet::new(),
+            loaded_canonical: HashSet::new(),
             depth: 0,
             verbose,
         }
@@ -135,6 +141,24 @@ impl IncludeResolver {
                 Statement::Include(ref inc) => {
                     let raw_path = &inc.path.value;
 
+                    // `require` deduplication: the JS compiler deduplicates by
+                    // raw require string BEFORE resolving. This means if
+                    // `require "foo.pil"` appears in two different directories,
+                    // the second is silently skipped even if the resolved path
+                    // would differ (or not exist from the second location).
+                    if inc.kind == IncludeKind::Require {
+                        if self.loaded_require_strings.contains(raw_path.as_str()) {
+                            if self.verbose {
+                                eprintln!(
+                                    "  > require '{}' already loaded (by raw string), skipping",
+                                    raw_path
+                                );
+                            }
+                            continue;
+                        }
+                        self.loaded_require_strings.insert(raw_path.clone());
+                    }
+
                     // Resolve the file path.
                     let resolved = self
                         .resolve(current_dir, raw_path)
@@ -153,20 +177,6 @@ impl IncludeResolver {
                             )
                         })?;
 
-                    // `require` deduplication: skip files already loaded.
-                    if inc.kind == IncludeKind::Require {
-                        if self.loaded_requires.contains(&resolved) {
-                            if self.verbose {
-                                eprintln!(
-                                    "  > require '{}' already loaded, skipping",
-                                    raw_path
-                                );
-                            }
-                            continue;
-                        }
-                        self.loaded_requires.insert(resolved.clone());
-                    }
-
                     eprintln!(
                         "  > {} {}",
                         match inc.kind {
@@ -175,6 +185,9 @@ impl IncludeResolver {
                         },
                         resolved.display()
                     );
+
+                    // Track canonical paths for recursion prevention.
+                    self.loaded_canonical.insert(resolved.clone());
 
                     // Recursively parse and expand the included file.
                     let expanded = self.parse_and_expand(&resolved)?;
@@ -280,7 +293,7 @@ pub fn compile(options: &CompileOptions) -> anyhow::Result<()> {
     // Parse the top-level source and recursively expand all includes.
     let mut resolver = IncludeResolver::new(&options.include_paths, options.verbose);
     // Register the main file so a circular require back to it is a no-op.
-    resolver.loaded_requires.insert(source_path.clone());
+    resolver.loaded_canonical.insert(source_path.clone());
     let expanded_stmts = resolver.parse_and_expand(&source_path)?;
 
     let program = Program {
@@ -290,7 +303,7 @@ pub fn compile(options: &CompileOptions) -> anyhow::Result<()> {
     eprintln!(
         "  > Expanded to {} top-level statements (loaded {} files)",
         program.statements.len(),
-        resolver.loaded_requires.len(),
+        resolver.loaded_canonical.len(),
     );
 
     // Build the compiler config from options.

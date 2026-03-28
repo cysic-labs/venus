@@ -456,7 +456,12 @@ impl Processor {
     // -----------------------------------------------------------------------
 
     fn exec_variable_declaration(&mut self, vd: &VariableDeclaration) -> FlowSignal {
-        for item in &vd.items {
+        // Evaluate the RHS once. When `is_multiple` is true (destructuring
+        // like `const int [a, b, c] = [1, 2, 3]`), the init evaluates to an
+        // Array and each element is assigned to the corresponding variable.
+        let full_init = vd.init.as_ref().map(|e| self.eval_expr(e));
+
+        for (index, item) in vd.items.iter().enumerate() {
             let name = &item.name;
             let array_dims: Vec<u32> = item
                 .array_dims
@@ -469,7 +474,19 @@ impl Processor {
                 array_dims.iter().product()
             };
 
-            let init_value = vd.init.as_ref().map(|e| self.eval_expr(e));
+            // Per-element init: for destructuring, extract element `index`
+            // from the array; otherwise use the full init value for all items.
+            let init_value = if vd.is_multiple {
+                full_init.as_ref().and_then(|v| {
+                    if let Value::Array(items) = v {
+                        items.get(index).cloned()
+                    } else {
+                        Some(v.clone())
+                    }
+                })
+            } else {
+                full_init.clone()
+            };
 
             let (ref_type, store_id) = match &vd.vtype {
                 TypeKind::Int => {

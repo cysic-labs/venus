@@ -187,8 +187,106 @@ pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
                 let sub_vals = evaluate_sequence(&sub, num_rows);
                 base_pattern.extend(sub_vals);
             }
-            _ => {
-                // ArithSeq, GeomSeq handled as identity for now.
+            SequenceElement::ArithSeq { t1, t2, tn } => {
+                let (v1, times1) = extract_seq_value_and_times(t1);
+                let (v2, _times2) = extract_seq_value_and_times(t2);
+                if let (Some(t1_val), Some(t2_val)) = (v1, v2) {
+                    let delta = t2_val - t1_val;
+                    let times = times1.unwrap_or(1) as usize;
+                    let tn_val = tn.as_ref().and_then(|e| {
+                        let (v, _) = extract_seq_value_and_times(e);
+                        v
+                    });
+                    // Determine how many distinct values to produce.
+                    let count = if let Some(tn_v) = tn_val {
+                        // Bounded: from t1 to tn (inclusive) stepping by delta.
+                        if delta != 0 {
+                            (((tn_v - t1_val) / delta) + 1) as usize * times
+                        } else {
+                            1
+                        }
+                    } else {
+                        // Open-ended: fill remaining rows (padding_size).
+                        let remaining = num_rows as usize - base_pattern.len();
+                        remaining
+                    };
+                    let mut value = t1_val;
+                    let mut produced = 0usize;
+                    while produced < count {
+                        for _ in 0..times {
+                            if produced >= count { break; }
+                            base_pattern.push(value);
+                            produced += 1;
+                        }
+                        value += delta;
+                    }
+                }
+            }
+            SequenceElement::GeomSeq { t1, t2, tn } => {
+                let (v1, times1) = extract_seq_value_and_times(t1);
+                let (v2, _times2) = extract_seq_value_and_times(t2);
+                if let (Some(t1_val), Some(t2_val)) = (v1, v2) {
+                    let times = times1.unwrap_or(1) as usize;
+                    if t1_val == 0 || t2_val == 0 {
+                        // Degenerate: just push zeros.
+                        let remaining = num_rows as usize - base_pattern.len();
+                        for _ in 0..remaining {
+                            base_pattern.push(0);
+                        }
+                    } else {
+                        let reverse = t1_val > t2_val;
+                        let ratio = if reverse { t1_val / t2_val } else { t2_val / t1_val };
+                        let tn_val = tn.as_ref().and_then(|e| {
+                            let (v, _) = extract_seq_value_and_times(e);
+                            v
+                        });
+                        // Determine count.
+                        let count = if let Some(tn_v) = tn_val {
+                            // Bounded geometric: count values from t1 to tn.
+                            let ti = if reverse { tn_v } else { t1_val };
+                            let tf = if reverse { t1_val } else { tn_v };
+                            let mut n = 0usize;
+                            let mut v = ti;
+                            while v <= tf {
+                                n += 1;
+                                v *= ratio;
+                            }
+                            n * times
+                        } else {
+                            // Open-ended: fill remaining rows.
+                            let remaining = num_rows as usize - base_pattern.len();
+                            remaining
+                        };
+                        // Determine start and end values.
+                        let ti = if reverse {
+                            // For reverse, calculate the smallest value.
+                            let n = if count > 0 { (count / times).saturating_sub(1) } else { 0 };
+                            let mut v = t1_val;
+                            for _ in 0..n {
+                                v /= ratio;
+                            }
+                            v
+                        } else {
+                            t1_val
+                        };
+                        // Build the sequence values.
+                        let mut values_forward = Vec::new();
+                        let mut v = ti;
+                        let target_distinct = if count > 0 { (count + times - 1) / times } else { 0 };
+                        for _ in 0..target_distinct {
+                            for _ in 0..times {
+                                values_forward.push(v);
+                            }
+                            v *= ratio;
+                        }
+                        if reverse {
+                            values_forward.reverse();
+                        }
+                        // Truncate to exact count.
+                        values_forward.truncate(count);
+                        base_pattern.extend(values_forward);
+                    }
+                }
             }
         }
     }
@@ -218,6 +316,18 @@ pub fn evaluate_sequence(seq: &SequenceDef, num_rows: u64) -> Vec<i128> {
 
     result.truncate(num_rows as usize);
     result
+}
+
+/// Extract the constant value and optional repeat times from a SequenceElement
+/// inside an ArithSeq/GeomSeq (which wraps either Value(expr) or Repeat{value, times}).
+fn extract_seq_value_and_times(elem: &SequenceElement) -> (Option<i128>, Option<i128>) {
+    match elem {
+        SequenceElement::Value(expr) => (try_const_eval_expr(expr), None),
+        SequenceElement::Repeat { value, times } => {
+            (try_const_eval_expr(value), try_const_eval_expr(times))
+        }
+        _ => (None, None),
+    }
 }
 
 /// Try to evaluate an expression to a constant integer at compile time.
