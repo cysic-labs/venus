@@ -522,37 +522,45 @@ pub fn write_pilout(processor: &Processor, path: &str) -> anyhow::Result<()> {
 }
 
 /// Write fixed column data to a binary file.
-/// Each column is written as a sequence of 8-byte little-endian u64 values.
+///
+/// The JS compiler writes row-major order: for each row, iterate over all
+/// non-temporal/non-external columns and write one u64 per column.  The
+/// filename follows the pattern `{air_name}.fixed` (matching the JS
+/// `Air.outputFixedFile` default).
 pub fn write_fixed_cols_to_file(
     fixed_cols: &FixedCols,
     num_rows: u64,
     output_dir: &str,
-    air_group_id: u32,
-    air_id: u32,
+    air_name: &str,
 ) -> anyhow::Result<()> {
     let dir = Path::new(output_dir);
     if !dir.exists() {
         fs::create_dir_all(dir)?;
     }
 
-    let filename = dir.join(format!("fixed_{}_{}.bin", air_group_id, air_id));
+    let filename = dir.join(format!("{}.fixed", air_name));
+    eprintln!("  > Saving fixed file {} ...", filename.display());
     let mut file = fs::File::create(&filename)?;
 
-    let mut col_count = 0u32;
-    let mut total_values = 0u64;
-
+    // Collect the IDs of non-temporal, non-external columns that have data.
+    let mut col_ids: Vec<u32> = Vec::new();
     for id in 0..fixed_cols.len() {
-        // Skip temporal and external columns.
         if let Some(data) = fixed_cols.ids.get_data(id) {
             if data.temporal || data.external {
                 continue;
             }
         }
-        if let Some(row_data) = fixed_cols.get_row_data(id) {
-            col_count += 1;
-            for row in 0..num_rows as usize {
-                let val = if row < row_data.len() {
-                    // Reduce modulo Goldilocks to get a u64.
+        col_ids.push(id);
+    }
+
+    let col_count = col_ids.len() as u32;
+    let mut total_values = 0u64;
+
+    // Write in row-major order (matches the JS FixedFile.saveToFile layout).
+    for row in 0..num_rows as usize {
+        for &id in &col_ids {
+            let val = if let Some(row_data) = fixed_cols.get_row_data(id) {
+                if row < row_data.len() {
                     let v = row_data[row];
                     if v < 0 {
                         let neg = ((-v) as u128) % GOLDILOCKS_PRIME;
@@ -562,10 +570,12 @@ pub fn write_fixed_cols_to_file(
                     }
                 } else {
                     0u64
-                };
-                file.write_all(&val.to_le_bytes())?;
-                total_values += 1;
-            }
+                }
+            } else {
+                0u64
+            };
+            file.write_all(&val.to_le_bytes())?;
+            total_values += 1;
         }
     }
 

@@ -118,6 +118,12 @@ pub struct Processor {
 
     // -- Counters --
     execute_counter: u64,
+
+    // -- Error flag --
+    /// Set when `error()` is called. Causes statement execution to
+    /// short-circuit until the enclosing user function returns,
+    /// matching the JS compiler's exception-unwinding behavior.
+    error_raised: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +194,7 @@ impl Processor {
             pragmas_next_fixed: PragmaNextFixed::default(),
             include_stack: Vec::new(),
             execute_counter: 0,
+            error_raised: false,
         };
         processor.scope.mark("proof");
         processor.load_config_defines();
@@ -331,6 +338,11 @@ impl Processor {
     /// Execute a list of statements, returning on the first flow abort.
     fn execute_statements(&mut self, statements: &[Statement]) -> FlowSignal {
         for st in statements {
+            // Short-circuit when an error() call has set the flag,
+            // matching JS exception-unwind semantics.
+            if self.error_raised {
+                return FlowSignal::Return(Value::Void);
+            }
             let signal = self.execute_statement(st);
             if signal.is_abort() {
                 return signal;
@@ -604,10 +616,27 @@ impl Processor {
                 .map(|e| self.eval_expr(e).as_int().unwrap_or(0))
                 .collect();
 
+            // For compound assignments (+=, -=, *=), we need to read the
+            // current value from the correct indexed element, not from the
+            // base reference.  Resolve the effective ID once so all branches
+            // can reuse it.
+            let indexed_id = if !target_indexes.is_empty()
+                && !reference.array_dims.is_empty()
+            {
+                let flat = compute_flat_index(&target_indexes, &reference.array_dims);
+                Some(reference.id + flat)
+            } else {
+                None
+            };
+
             let final_value = match a.op {
                 AssignOp::Assign => value,
                 AssignOp::AddAssign => {
-                    let current = self.get_var_value(&reference);
+                    let current = if let Some(eid) = indexed_id {
+                        self.get_var_value_by_type_and_id(&reference.ref_type, eid)
+                    } else {
+                        self.get_var_value(&reference)
+                    };
                     if let (Some(l), Some(r)) = (current.as_int(), value.as_int()) {
                         Value::Int(l + r)
                     } else {
@@ -615,7 +644,11 @@ impl Processor {
                     }
                 }
                 AssignOp::SubAssign => {
-                    let current = self.get_var_value(&reference);
+                    let current = if let Some(eid) = indexed_id {
+                        self.get_var_value_by_type_and_id(&reference.ref_type, eid)
+                    } else {
+                        self.get_var_value(&reference)
+                    };
                     if let (Some(l), Some(r)) = (current.as_int(), value.as_int()) {
                         Value::Int(l - r)
                     } else {
@@ -623,7 +656,11 @@ impl Processor {
                     }
                 }
                 AssignOp::MulAssign => {
-                    let current = self.get_var_value(&reference);
+                    let current = if let Some(eid) = indexed_id {
+                        self.get_var_value_by_type_and_id(&reference.ref_type, eid)
+                    } else {
+                        self.get_var_value(&reference)
+                    };
                     if let (Some(l), Some(r)) = (current.as_int(), value.as_int()) {
                         Value::Int(l * r)
                     } else {
@@ -1098,21 +1135,41 @@ impl Processor {
     /// Evaluate a function call.
     fn eval_function_call(&mut self, fc: &FunctionCall) -> Value {
         let name = &fc.function.path;
-        let args: Vec<Value> = fc.args.iter().map(|a| self.eval_expr(&a.value)).collect();
 
-        // Check for builtin.
+        // Evaluate all call arguments (values only).
+        let raw_args: Vec<Value> = fc.args.iter().map(|a| self.eval_expr(&a.value)).collect();
+
+        // Check for builtin (builtins don't use named args).
         if let Some(kind) = BuiltinKind::from_name(name) {
-            match builtins::exec_builtin(kind, &args, &self.source_ref, &mut self.tests) {
+            match builtins::exec_builtin(kind, &raw_args, &self.source_ref, &mut self.tests) {
                 Ok(val) => return val,
                 Err(msg) => {
                     eprintln!("error: {} at {}", msg, self.source_ref);
+                    // In the JS compiler, error()/assert()/assert_eq()
+                    // throw exceptions that unwind the call stack. When
+                    // inside a user function, set a flag to short-circuit
+                    // statement execution in the enclosing function. At
+                    // proof level there is no function to unwind so we
+                    // just report and continue.
+                    if self.function_deep > 0 {
+                        self.error_raised = true;
+                    }
                     return Value::Void;
                 }
             }
         }
 
+        // Helper: reorder args if any are named, matching the function
+        // definition's parameter order.
+        let has_named = fc.args.iter().any(|a| a.name.is_some());
+
         // Check for user-defined function.
         if let Some(func_def) = self.functions.get(name).cloned() {
+            let args = if has_named {
+                reorder_named_args(&fc.args, &raw_args, &func_def.args)
+            } else {
+                raw_args
+            };
             return self.execute_user_function(&func_def, &args);
         }
 
@@ -1120,16 +1177,92 @@ impl Processor {
         let names = self.namespace_ctx.get_names(name);
         for qualified_name in &names {
             if let Some(func_def) = self.functions.get(qualified_name).cloned() {
+                let args = if has_named {
+                    reorder_named_args(&fc.args, &raw_args, &func_def.args)
+                } else {
+                    raw_args.clone()
+                };
                 return self.execute_user_function(&func_def, &args);
             }
         }
 
         // Check for airtemplate call (creating an air instance).
         if let Some(tpl) = self.air_templates.get(name).cloned() {
+            let args = if has_named {
+                reorder_named_args(&fc.args, &raw_args, &tpl.args)
+            } else {
+                raw_args
+            };
             return self.execute_air_template_call(&tpl, &args, name, false);
         }
 
         Value::Void
+    }
+
+    /// Evaluate a function call with optional alias and virtual flag.
+    /// Used by exec_expr_stmt and exec_virtual_expr for airtemplate calls.
+    fn eval_function_call_with_alias(
+        &mut self,
+        fc: &FunctionCall,
+        alias: Option<&str>,
+        is_virtual: bool,
+    ) -> FlowSignal {
+        let name = &fc.function.path;
+        let raw_args: Vec<Value> = fc.args.iter().map(|a| self.eval_expr(&a.value)).collect();
+        let has_named = fc.args.iter().any(|a| a.name.is_some());
+
+        // Check for builtin (builtins can't be aliased, but handle for safety).
+        if let Some(kind) = BuiltinKind::from_name(name) {
+            match builtins::exec_builtin(kind, &raw_args, &self.source_ref, &mut self.tests) {
+                Ok(_val) => return FlowSignal::None,
+                Err(msg) => {
+                    eprintln!("error: {} at {}", msg, self.source_ref);
+                    if self.function_deep > 0 {
+                        self.error_raised = true;
+                    }
+                    return FlowSignal::None;
+                }
+            }
+        }
+
+        // Check for user-defined function.
+        if let Some(func_def) = self.functions.get(name).cloned() {
+            let args = if has_named {
+                reorder_named_args(&fc.args, &raw_args, &func_def.args)
+            } else {
+                raw_args
+            };
+            self.execute_user_function(&func_def, &args);
+            return FlowSignal::None;
+        }
+
+        // Check namespace-qualified names.
+        let names = self.namespace_ctx.get_names(name);
+        for qualified_name in &names {
+            if let Some(func_def) = self.functions.get(qualified_name).cloned() {
+                let args = if has_named {
+                    reorder_named_args(&fc.args, &raw_args, &func_def.args)
+                } else {
+                    raw_args.clone()
+                };
+                self.execute_user_function(&func_def, &args);
+                return FlowSignal::None;
+            }
+        }
+
+        // Check for airtemplate call: use alias as instance name if provided.
+        if let Some(tpl) = self.air_templates.get(name).cloned() {
+            let args = if has_named {
+                reorder_named_args(&fc.args, &raw_args, &tpl.args)
+            } else {
+                raw_args
+            };
+            let instance_name = alias.unwrap_or(name);
+            self.execute_air_template_call(&tpl, &args, instance_name, is_virtual);
+            return FlowSignal::None;
+        }
+
+        FlowSignal::None
     }
 
     /// Execute a user-defined function.
@@ -1202,6 +1335,11 @@ impl Processor {
         // Execute body.
         let result = self.execute_statements(&func.body);
 
+        // Clear the error flag so that the caller can continue -- the
+        // error has been handled by unwinding this function, mirroring
+        // what a JS `throw` + `try/catch` would do at the call-site.
+        self.error_raised = false;
+
         self.references.pop_visibility_scope();
         let (to_unset, to_restore) = self.scope.pop();
         self.apply_scope_cleanup(&to_unset, &to_restore);
@@ -1219,12 +1357,25 @@ impl Processor {
     // -----------------------------------------------------------------------
 
     fn exec_expr_stmt(&mut self, es: &ExprStmt) -> FlowSignal {
+        // If this is a function call with an alias, handle airtemplate
+        // aliasing: `Dma(enable: E_DMA_MEMCPY) alias DmaMemCpy` creates
+        // an air instance named "DmaMemCpy" instead of "Dma".
+        if let Expr::FunctionCall(fc) = &es.expr {
+            if es.alias.is_some() || true {
+                // Always go through the alias-aware path so that airtemplate
+                // calls get proper naming.
+                return self.eval_function_call_with_alias(fc, es.alias.as_deref(), false);
+            }
+        }
         self.eval_expr(&es.expr);
         FlowSignal::None
     }
 
     fn exec_virtual_expr(&mut self, ve: &VirtualExprStmt) -> FlowSignal {
-        // Virtual expressions create virtual air instances.
+        // Virtual expressions create virtual air instances with is_virtual=true.
+        if let Expr::FunctionCall(fc) = &ve.expr {
+            return self.eval_function_call_with_alias(fc, ve.alias.as_deref(), true);
+        }
         self.eval_expr(&ve.expr);
         FlowSignal::None
     }
@@ -1768,6 +1919,10 @@ impl Processor {
             self.execute_statements(block);
         }
 
+        // Clear the error flag so that the caller (airgroup) can
+        // continue instantiating more AIRs after this one.
+        self.error_raised = false;
+
         let witness_count = self.witness_cols.len();
         let fixed_count = self.fixed_cols.len();
         let constraint_count = self.constraints.len() as u32;
@@ -1784,8 +1939,7 @@ impl Processor {
                         &self.fixed_cols,
                         air.rows,
                         output_dir,
-                        air.air_group_id,
-                        air.id,
+                        &air.name,
                     ) {
                         eprintln!("  > Warning: failed to write fixed cols: {}", e);
                     }
@@ -1996,6 +2150,48 @@ fn compute_flat_index(indexes: &[i128], dims: &[u32]) -> u32 {
         stride *= dims[i];
     }
     flat
+}
+
+/// Reorder call arguments when some are named so that each value lands at the
+/// position matching the function definition's parameter list.  Positional
+/// arguments stay in their original slots; named arguments are placed at the
+/// parameter index whose name matches.
+fn reorder_named_args(
+    call_args: &[CallArg],
+    raw_values: &[Value],
+    func_params: &[FunctionArg],
+) -> Vec<Value> {
+    let n = func_params.len();
+    let mut result: Vec<Option<Value>> = vec![None; n];
+
+    // First pass: place named arguments by matching parameter name.
+    let mut used_positions: Vec<bool> = vec![false; n];
+    for (i, call_arg) in call_args.iter().enumerate() {
+        if let Some(ref arg_name) = call_arg.name {
+            // Find the parameter position for this name.
+            if let Some(pos) = func_params.iter().position(|p| &p.name == arg_name) {
+                result[pos] = raw_values.get(i).cloned();
+                used_positions[pos] = true;
+            }
+        }
+    }
+
+    // Second pass: fill remaining slots with positional (unnamed) arguments.
+    let mut positional_iter = call_args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.name.is_none());
+    for pos in 0..n {
+        if used_positions[pos] {
+            continue;
+        }
+        if let Some((i, _)) = positional_iter.next() {
+            result[pos] = raw_values.get(i).cloned();
+        }
+    }
+
+    // Convert to final Vec, defaulting to Void for missing slots.
+    result.into_iter().map(|v| v.unwrap_or(Value::Void)).collect()
 }
 
 /// Convert a Value to a RuntimeExpr.
