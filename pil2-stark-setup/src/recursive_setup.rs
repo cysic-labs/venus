@@ -300,52 +300,74 @@ pub fn gen_recursive_setup(
     // For compressor template without a pre-existing starkStruct, use blowupFactor=2
     let need_setup = template != RecursiveTemplate::Recursive1;
 
-    // Compute starkInfo via pil_info for the generated circuit
-    // This is a placeholder: full starkSetup requires the pilout, which needs
-    // the compiler to produce a valid .pilout. For now we produce the
-    // starkinfo/expressionsinfo/verifierinfo files only for non-recursive1 templates.
-
-    // Compute constant tree
-    tracing::info!("Computing Constant Tree...");
+    // Run real starkSetup via pil_info on the compiled pilout
+    tracing::info!("Running starkSetup for recursive circuit...");
     let starkinfo_path = files_dir.join(format!("{}.starkinfo.json", template_str));
 
-    // For recursive1, we skip writing starkinfo/verifierinfo/expressionsinfo files
-    // and only compute the const tree if we can find a valid starkinfo
-    let (setup_stark_info, setup_verifier_info, setup_expressions_info) = if need_setup {
-        // Write placeholder starkinfo for the recursive circuit
-        // In a full implementation, this would come from pil_info::pil_info() on the
-        // compiled pilout. For now we generate a minimal starkinfo suitable for bctree.
-        let stark_struct_json = config.stark_struct.cloned().unwrap_or_else(|| {
-            let blowup = if template == RecursiveTemplate::Compressor { 2 } else { 2 };
-            serde_json::json!({
-                "nBits": plonk_result.n_bits,
-                "nBitsExt": plonk_result.n_bits + blowup,
-                "merkleTreeArity": 2,
-                "nQueries": 8,
-                "powBits": 10,
-                "steps": [
-                    {"nBits": plonk_result.n_bits + blowup}
-                ],
-                "verificationHashType": "GL",
-                "hashCommits": true,
-                "merkleTreeCustom": false
-            })
+    // Load the compiled pilout and run the real pil_info pipeline
+    let pilout_path_str = pilout_path.to_str().unwrap_or("");
+    let (setup_stark_info, setup_verifier_info, setup_expressions_info) = if need_setup && Path::new(pilout_path_str).exists() {
+        // Load pilout to get AIR structure
+        let pilout = pilout::PilOut::new(pilout_path_str);
+        if pilout.air_groups.is_empty() || pilout.air_groups[0].airs.is_empty() {
+            bail!("Compiled pilout has no AIR groups: {}", pilout_path_str);
+        }
+        let air = &pilout.air_groups[0].airs[0];
+        let num_rows_air = air.num_rows.unwrap_or(0) as usize;
+        let n_bits_air = if num_rows_air > 0 { (num_rows_air as f64).log2() as usize } else { plonk_result.n_bits };
+
+        // Generate stark struct for this recursive circuit
+        let stark_struct = config.stark_struct.cloned().unwrap_or_else(|| {
+            let blowup = if template == RecursiveTemplate::Compressor { 2 } else { 3 };
+            crate::stark_struct::generate_stark_struct_json(n_bits_air, blowup, 3, 5)
         });
 
-        let placeholder_si = serde_json::json!({
-            "starkStruct": stark_struct_json,
-            "nConstants": n_fixed,
-            "nStages": 1,
-            "airgroupId": config.airgroup_id,
-            "airId": config.air_id,
-        });
-
-        fs::write(
-            &starkinfo_path,
-            serde_json::to_string_pretty(&placeholder_si)?,
+        // Run pil_info to get real starkinfo/expressionsinfo/verifierinfo
+        let pil_info_result = crate::pil_info::pil_info(
+            &pilout, 0, 0, &stark_struct, &Default::default(),
         )?;
 
-        (Some(placeholder_si.clone()), None, None)
+        // Apply FRI security parameters
+        let si_json = serde_json::to_value(&pil_info_result.stark_info)?;
+
+        // Write all JSON files
+        fs::write(&starkinfo_path, crate::json_output::to_json_string(&pil_info_result.stark_info)?)?;
+        fs::write(
+            files_dir.join(format!("{}.verifierinfo.json", template_str)),
+            crate::json_output::to_json_string(&pil_info_result.verifier_info)?,
+        )?;
+        fs::write(
+            files_dir.join(format!("{}.expressionsinfo.json", template_str)),
+            crate::json_output::to_json_string(&pil_info_result.expressions_info)?,
+        )?;
+
+        // Write binary files using native Rust writer
+        let si_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&starkinfo_path)?
+        )?;
+        let stark_info_loaded = crate::stark_info::StarkInfo::from_json(&si_val)?;
+
+        let expr_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(files_dir.join(format!("{}.expressionsinfo.json", template_str)))?
+        )?;
+        let expressions_loaded = crate::stark_info::ExpressionsInfo::from_json(&expr_val)?;
+        crate::bin_file::write_expressions_bin_file(
+            files_dir.join(format!("{}.bin", template_str)).to_str().unwrap(),
+            &stark_info_loaded, &expressions_loaded,
+        )?;
+
+        let ver_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(files_dir.join(format!("{}.verifierinfo.json", template_str)))?
+        )?;
+        let verifier_loaded = crate::stark_info::VerifierInfo::from_json(&ver_val)?;
+        crate::bin_file::write_verifier_expressions_bin_file(
+            files_dir.join(format!("{}.verifier.bin", template_str)).to_str().unwrap(),
+            &stark_info_loaded, &verifier_loaded,
+        )?;
+
+        (Some(si_json), Some(serde_json::to_value(&pil_info_result.verifier_info)?), Some(serde_json::to_value(&pil_info_result.expressions_info)?))
+    } else if need_setup {
+        bail!("Pilout not found at {}. Cannot run starkSetup for recursive circuit.", pilout_path_str);
     } else {
         (None, None, None)
     };
@@ -379,27 +401,7 @@ pub fn gen_recursive_setup(
         [0u64; 4]
     };
 
-    // Write starkinfo, verifierinfo, expressionsinfo for non-recursive1 templates
-    if need_setup {
-        if let Some(ref si) = setup_stark_info {
-            fs::write(
-                files_dir.join(format!("{}.starkinfo.json", template_str)),
-                serde_json::to_string_pretty(si)?,
-            )?;
-        }
-        if let Some(ref vi) = setup_verifier_info {
-            fs::write(
-                files_dir.join(format!("{}.verifierinfo.json", template_str)),
-                serde_json::to_string_pretty(vi)?,
-            )?;
-        }
-        if let Some(ref ei) = setup_expressions_info {
-            fs::write(
-                files_dir.join(format!("{}.expressionsinfo.json", template_str)),
-                serde_json::to_string_pretty(ei)?,
-            )?;
-        }
-    }
+    // JSON files already written by the real pil_info pipeline above
 
     // For recursive2, write vks.json and verifier.rs
     if template == RecursiveTemplate::Recursive2 {
@@ -412,12 +414,15 @@ pub fn gen_recursive_setup(
             serde_json::to_string_pretty(&vks)?,
         )?;
 
-        // Write verifier Rust file
-        // In a full implementation this calls write_verifier_rust_file from verifier_rs_gen
-        // For now we skip it as it requires full StarkInfo/VerifierInfo types
-        tracing::info!(
-            "Recursive2 verifier.rs generation pending full starkSetup integration"
-        );
+        // Write verifier Rust file using the real starkinfo and verifierinfo
+        if let (Some(ref si), Some(ref vi)) = (&setup_stark_info, &setup_verifier_info) {
+            crate::verifier_rs_gen::write_verifier_rust_file(
+                files_dir.join(format!("{}.verifier.rs", template_str)).to_str().unwrap(),
+                si,
+                vi,
+                &const_root.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+            )?;
+        }
     }
 
     Ok(RecursiveSetupResult {
@@ -564,8 +569,9 @@ pub fn compile_pil(
             bail!("PIL compilation failed: {}", stderr);
         }
     } else {
-        tracing::warn!(
-            "pil2c binary not found, skipping PIL compilation for {}",
+        bail!(
+            "pil2c binary not found. Cannot compile PIL: {}. \
+             Build it with: cargo build --release -p pil2-compiler-rust",
             pil_path
         );
     }

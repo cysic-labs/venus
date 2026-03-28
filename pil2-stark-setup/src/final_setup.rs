@@ -143,14 +143,11 @@ pub fn gen_final_setup(
                 basic_keys_recursive1.push(vec![]);
             }
         } else {
-            tracing::warn!(
-                "Recursive2 artifacts not found for airgroup '{}', using empty stubs",
+            bail!(
+                "Recursive2 artifacts not found for airgroup '{}'. \
+                 Run recursive setup first.",
                 ag_name
             );
-            stark_infos.push(serde_json::json!({}));
-            verifier_infos.push(serde_json::json!({}));
-            agg_keys_recursive2.push(vec![]);
-            basic_keys_recursive1.push(vec![]);
         }
 
         verifier_names.push(format!("{}_recursive2.verifier.circom", ag_name));
@@ -316,40 +313,66 @@ pub fn gen_final_setup(
     let final_stark_struct =
         crate::stark_struct::generate_stark_struct(&final_settings, plonk_result.n_bits);
 
-    // Build starkinfo placeholder
-    let si = serde_json::json!({
-        "starkStruct": {
-            "nBits": final_stark_struct.n_bits,
-            "nBitsExt": final_stark_struct.n_bits_ext,
-            "merkleTreeArity": final_stark_struct.merkle_tree_arity,
-            "nQueries": 8,
-            "powBits": final_stark_struct.pow_bits,
-            "steps": final_stark_struct.steps.iter().map(|s| {
-                serde_json::json!({"nBits": s.n_bits})
-            }).collect::<Vec<_>>(),
-            "verificationHashType": final_stark_struct.verification_hash_type,
-            "hashCommits": final_stark_struct.hash_commits,
-            "merkleTreeCustom": final_stark_struct.merkle_tree_custom,
-        },
-        "nConstants": n_fixed,
-        "nStages": 1,
-        "airgroupId": 0,
-        "airId": 0,
-    });
-
+    // Run real starkSetup via pil_info on the compiled vadcop_final pilout
     let starkinfo_path = files_dir.join("vadcop_final.starkinfo.json");
-    fs::write(&starkinfo_path, serde_json::to_string_pretty(&si)?)?;
 
-    let vi = serde_json::json!({});
-    let ei = serde_json::json!({});
+    let pilout_file_str = pilout_path.to_str().unwrap_or("");
+    if !Path::new(pilout_file_str).exists() {
+        bail!("vadcop_final pilout not found at {}", pilout_file_str);
+    }
+
+    let pilout = pilout::PilOut::new(pilout_file_str);
+    if pilout.air_groups.is_empty() || pilout.air_groups[0].airs.is_empty() {
+        bail!("vadcop_final pilout has no AIR groups");
+    }
+
+    let stark_struct_json = serde_json::to_value(&final_stark_struct)?;
+    let pil_info_result = crate::pil_info::pil_info(
+        &pilout, 0, 0, &stark_struct_json, &Default::default(),
+    )?;
+
+    // Write all JSON files
+    fs::write(&starkinfo_path, crate::json_output::to_json_string(&pil_info_result.stark_info)?)?;
     fs::write(
         files_dir.join("vadcop_final.expressionsinfo.json"),
-        serde_json::to_string_pretty(&ei)?,
+        crate::json_output::to_json_string(&pil_info_result.expressions_info)?,
     )?;
     fs::write(
         files_dir.join("vadcop_final.verifierinfo.json"),
-        serde_json::to_string_pretty(&vi)?,
+        crate::json_output::to_json_string(&pil_info_result.verifier_info)?,
     )?;
+
+    // Write binary files using native Rust writer
+    {
+        let si_val: serde_json::Value = serde_json::from_str(&fs::read_to_string(&starkinfo_path)?)?;
+        let stark_info_loaded = crate::stark_info::StarkInfo::from_json(&si_val)?;
+
+        let expr_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(files_dir.join("vadcop_final.expressionsinfo.json"))?
+        )?;
+        let expressions_loaded = crate::stark_info::ExpressionsInfo::from_json(&expr_val)?;
+        crate::bin_file::write_expressions_bin_file(
+            files_dir.join("vadcop_final.bin").to_str().unwrap(),
+            &stark_info_loaded, &expressions_loaded,
+        )?;
+
+        let ver_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(files_dir.join("vadcop_final.verifierinfo.json"))?
+        )?;
+        let verifier_loaded = crate::stark_info::VerifierInfo::from_json(&ver_val)?;
+        crate::bin_file::write_verifier_expressions_bin_file(
+            files_dir.join("vadcop_final.verifier.bin").to_str().unwrap(),
+            &stark_info_loaded, &verifier_loaded,
+        )?;
+
+        // Write verifier Rust file
+        crate::verifier_rs_gen::write_verifier_rust_file(
+            files_dir.join("vadcop_final.verifier.rs").to_str().unwrap(),
+            &si_val,
+            &serde_json::to_value(&pil_info_result.verifier_info)?,
+            &[0u64; 4].iter().map(|v| v.to_string()).collect::<Vec<_>>(), // will be filled after bctree
+        )?;
+    }
 
     // Compute constant tree
     tracing::info!("Computing Constant Tree for vadcop_final...");

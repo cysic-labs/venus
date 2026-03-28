@@ -231,38 +231,57 @@ pub fn gen_compressed_final_setup(
     let compressed_stark_struct =
         crate::stark_struct::generate_stark_struct(&compressed_settings, plonk_result.n_bits);
 
-    // Build starkinfo
-    let si = serde_json::json!({
-        "starkStruct": {
-            "nBits": compressed_stark_struct.n_bits,
-            "nBitsExt": compressed_stark_struct.n_bits_ext,
-            "merkleTreeArity": compressed_stark_struct.merkle_tree_arity,
-            "nQueries": 8,
-            "powBits": compressed_stark_struct.pow_bits,
-            "steps": compressed_stark_struct.steps.iter().map(|s| {
-                serde_json::json!({"nBits": s.n_bits})
-            }).collect::<Vec<_>>(),
-            "verificationHashType": compressed_stark_struct.verification_hash_type,
-            "hashCommits": compressed_stark_struct.hash_commits,
-            "merkleTreeCustom": compressed_stark_struct.merkle_tree_custom,
-        },
-        "nConstants": n_fixed,
-        "nStages": 1,
-        "airgroupId": 0,
-        "airId": 0,
-    });
-
+    // Run real starkSetup via pil_info on the compiled compressed final pilout
     let starkinfo_path = files_dir.join(format!("{}.starkinfo.json", template));
-    fs::write(&starkinfo_path, serde_json::to_string_pretty(&si)?)?;
 
+    let pilout_file_str = pilout_path.to_str().unwrap_or("");
+    if !Path::new(pilout_file_str).exists() {
+        bail!("Compressed final pilout not found at {}", pilout_file_str);
+    }
+
+    let pilout = pilout::PilOut::new(pilout_file_str);
+    if pilout.air_groups.is_empty() || pilout.air_groups[0].airs.is_empty() {
+        bail!("Compressed final pilout has no AIR groups");
+    }
+
+    let stark_struct_json = serde_json::to_value(&compressed_stark_struct)?;
+    let pil_info_result = crate::pil_info::pil_info(
+        &pilout, 0, 0, &stark_struct_json, &Default::default(),
+    )?;
+
+    fs::write(&starkinfo_path, crate::json_output::to_json_string(&pil_info_result.stark_info)?)?;
     fs::write(
         files_dir.join(format!("{}.verifierinfo.json", template)),
-        serde_json::to_string_pretty(&serde_json::json!({}))?,
+        crate::json_output::to_json_string(&pil_info_result.verifier_info)?,
     )?;
     fs::write(
         files_dir.join(format!("{}.expressionsinfo.json", template)),
-        serde_json::to_string_pretty(&serde_json::json!({}))?,
+        crate::json_output::to_json_string(&pil_info_result.expressions_info)?,
     )?;
+
+    // Write binary files
+    {
+        let si_val: serde_json::Value = serde_json::from_str(&fs::read_to_string(&starkinfo_path)?)?;
+        let si_loaded = crate::stark_info::StarkInfo::from_json(&si_val)?;
+
+        let expr_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(files_dir.join(format!("{}.expressionsinfo.json", template)))?
+        )?;
+        let expr_loaded = crate::stark_info::ExpressionsInfo::from_json(&expr_val)?;
+        crate::bin_file::write_expressions_bin_file(
+            files_dir.join(format!("{}.bin", template)).to_str().unwrap(),
+            &si_loaded, &expr_loaded,
+        )?;
+
+        let ver_val: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(files_dir.join(format!("{}.verifierinfo.json", template)))?
+        )?;
+        let ver_loaded = crate::stark_info::VerifierInfo::from_json(&ver_val)?;
+        crate::bin_file::write_verifier_expressions_bin_file(
+            files_dir.join(format!("{}.verifier.bin", template)).to_str().unwrap(),
+            &si_loaded, &ver_loaded,
+        )?;
+    }
 
     // Compute constant tree
     tracing::info!("Computing Constant Tree for {}...", template);
@@ -302,7 +321,7 @@ mod tests {
     #[test]
     fn test_compressed_final_types() {
         let si = serde_json::json!({"starkStruct": {"nBits": 17}});
-        let vi = serde_json::json!({});
+        let vi = serde_json::json!({"qVerifier": {}, "queryVerifier": {}});
         let root = ["0".to_string(), "0".to_string(), "0".to_string(), "0".to_string()];
 
         let _config = super::CompressedFinalConfig {
