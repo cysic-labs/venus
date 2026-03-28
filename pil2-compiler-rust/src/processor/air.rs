@@ -28,10 +28,18 @@ pub struct Air {
     pub stored_constraints: Vec<ConstraintEntry>,
     /// Per-AIR expressions referenced by constraints.
     pub stored_expressions: Vec<RuntimeExpr>,
+    /// Full AIR expression store: ALL expressions created during AIR
+    /// execution (intermediate column definitions, constraint
+    /// sub-expressions, etc.).  Mirrors the JS `this.expressions` store.
+    pub air_expression_store: Vec<RuntimeExpr>,
     /// Fixed column ID mappings: internal id -> (type char 'F'/'P', proto_index).
     pub fixed_id_map: Vec<(char, u32)>,
     /// Witness column ID mappings: internal id -> (stage, proto_index).
     pub witness_id_map: Vec<(u32, u32)>,
+    /// Number of witness columns per stage (1-based stage index).
+    pub stage_widths: Vec<u32>,
+    /// Custom commit info: (commit_id, stage_widths_vec).
+    pub custom_commits: Vec<(u32, Vec<u32>)>,
 }
 
 /// Summary statistics collected after an air instance completes.
@@ -70,8 +78,11 @@ impl Air {
             info: AirInfo::default(),
             stored_constraints: Vec::new(),
             stored_expressions: Vec::new(),
+            air_expression_store: Vec::new(),
             fixed_id_map: Vec::new(),
             witness_id_map: Vec::new(),
+            stage_widths: Vec::new(),
+            custom_commits: Vec::new(),
         }
     }
 
@@ -84,6 +95,12 @@ impl Air {
     pub fn store_constraints(&mut self, constraints: &Constraints) {
         self.stored_constraints = constraints.iter().cloned().collect();
         self.stored_expressions = constraints.all_expressions().to_vec();
+    }
+
+    /// Capture the full AIR expression store (all expressions created
+    /// during AIR execution, not just those referenced by constraints).
+    pub fn store_air_expressions(&mut self, expressions: &[RuntimeExpr]) {
+        self.air_expression_store = expressions.to_vec();
     }
 }
 

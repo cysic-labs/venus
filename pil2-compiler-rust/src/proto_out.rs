@@ -141,12 +141,23 @@ impl<'a> ProtoOutBuilder<'a> {
 
             // Build airs within this group.
             for air in &ag.airs {
-                // Flatten per-AIR expressions into the protobuf array.
-                // Each stored expression may produce multiple flattened
-                // entries; track the root index for each.
+                // Flatten the FULL AIR expression store into the protobuf
+                // array. This includes ALL expressions created during AIR
+                // execution (intermediate column definitions, constraint
+                // sub-expressions, etc.), matching the JS compiler's
+                // `this.expressions.pack(...)` behavior.
                 let mut proto_expressions: Vec<pilout_proto::Expression> = Vec::new();
                 let mut expr_id_map: Vec<u32> = Vec::new();
-                for expr in &air.stored_expressions {
+
+                // Use the full AIR expression store if available, falling
+                // back to constraint-only expressions for backward compat.
+                let expr_source = if !air.air_expression_store.is_empty() {
+                    &air.air_expression_store
+                } else {
+                    &air.stored_expressions
+                };
+
+                for expr in expr_source {
                     let root_idx = self.flatten_air_expr(
                         expr,
                         &air.fixed_id_map,
@@ -157,11 +168,21 @@ impl<'a> ProtoOutBuilder<'a> {
                 }
 
                 // Build per-AIR constraints, referencing the flattened
-                // expression indices.
+                // expression indices. The constraint expr_id offsets into
+                // the stored_expressions; when using the full expression
+                // store, we need to offset by the number of intermediate
+                // expressions that were prepended.
+                let im_expr_count = if !air.air_expression_store.is_empty() {
+                    air.air_expression_store.len() - air.stored_expressions.len()
+                } else {
+                    0
+                };
                 let mut proto_constraints: Vec<pilout_proto::Constraint> = Vec::new();
                 for entry in &air.stored_constraints {
+                    // Offset the expression ID by the intermediate prefix.
+                    let store_idx = (entry.expr_id as usize) + im_expr_count;
                     let expr_idx = expr_id_map
-                        .get(entry.expr_id as usize)
+                        .get(store_idx)
                         .copied()
                         .unwrap_or(entry.expr_id);
                     let debug_line = Some(entry.source_ref.clone());
@@ -231,7 +252,7 @@ impl<'a> ProtoOutBuilder<'a> {
                     num_rows: Some(air.rows as u32),
                     periodic_cols: proto_periodic,
                     fixed_cols: proto_fixed,
-                    stage_widths: air.info.witness_cols.clone(),
+                    stage_widths: air.stage_widths.clone(),
                     expressions: proto_expressions,
                     constraints: proto_constraints,
                     air_values: Vec::new(),
@@ -267,19 +288,29 @@ impl<'a> ProtoOutBuilder<'a> {
         result
     }
 
-    /// Build global expressions from the processor's global constraints.
+    /// Build global expressions from proof-level intermediates and
+    /// global constraint expressions.
     ///
     /// Expression trees are flattened into a linear array: nested
     /// sub-expressions are emitted first and referenced by index from
     /// their parent expression via `GlobalOperand::Expression { idx }`.
     ///
     /// Returns (flattened_expressions, mapping) where mapping[i] is the
-    /// flattened index of the original expression store entry i.
+    /// flattened index of the original expression store entry i
+    /// (offset by the intermediate expression count for constraint entries).
     fn build_global_expressions(
         &self,
     ) -> (Vec<pilout_proto::GlobalExpression>, Vec<u32>) {
         let mut result = Vec::new();
         let mut id_map = Vec::new();
+
+        // First, flatten proof-level intermediate expressions.
+        for expr in &self.processor.global_expression_store {
+            let idx = self.flatten_expr_to_global(expr, &mut result);
+            id_map.push(idx);
+        }
+
+        // Then flatten constraint expressions.
         for expr in self.processor.global_constraints.all_expressions() {
             let idx = self.flatten_expr_to_global(expr, &mut result);
             id_map.push(idx);
@@ -288,15 +319,18 @@ impl<'a> ProtoOutBuilder<'a> {
     }
 
     /// Build global constraints, remapping expression indices to the
-    /// flattened expression array.
+    /// flattened expression array. Constraint expr_ids are offset by the
+    /// number of proof-level intermediate expressions that were prepended.
     fn build_global_constraints(
         &self,
         expr_id_map: &[u32],
     ) -> Vec<pilout_proto::GlobalConstraint> {
+        let im_count = self.processor.global_expression_store.len();
         let mut result = Vec::new();
         for entry in self.processor.global_constraints.iter() {
+            let store_idx = (entry.expr_id as usize) + im_count;
             let mapped_idx = expr_id_map
-                .get(entry.expr_id as usize)
+                .get(store_idx)
                 .copied()
                 .unwrap_or(entry.expr_id);
             let gc = pilout_proto::GlobalConstraint {
@@ -535,17 +569,23 @@ impl<'a> ProtoOutBuilder<'a> {
             }
             RuntimeExpr::ColRef { col_type, id, .. } => match col_type {
                 ColRefKind::Challenge => {
+                    let stage = self.processor.challenges.get_data(*id)
+                        .and_then(|d| d.stage)
+                        .unwrap_or(1);
                     pilout_proto::global_operand::Operand::Challenge(
                         pilout_proto::global_operand::Challenge {
-                            stage: 0,
+                            stage,
                             idx: *id,
                         },
                     )
                 }
                 ColRefKind::ProofValue => {
+                    let stage = self.processor.proof_values.get_data(*id)
+                        .and_then(|d| d.stage)
+                        .unwrap_or(1);
                     pilout_proto::global_operand::Operand::ProofValue(
                         pilout_proto::global_operand::ProofValue {
-                            stage: 0,
+                            stage,
                             idx: *id,
                         },
                     )
@@ -713,13 +753,19 @@ impl<'a> ProtoOutBuilder<'a> {
                         )
                     }
                     ColRefKind::Challenge => {
+                        let stage = self.processor.challenges.get_data(*id)
+                            .and_then(|d| d.stage)
+                            .unwrap_or(1);
                         pilout_proto::operand::Operand::Challenge(
-                            pilout_proto::operand::Challenge { stage: 0, idx: *id },
+                            pilout_proto::operand::Challenge { stage, idx: *id },
                         )
                     }
                     ColRefKind::ProofValue => {
+                        let stage = self.processor.proof_values.get_data(*id)
+                            .and_then(|d| d.stage)
+                            .unwrap_or(1);
                         pilout_proto::operand::Operand::ProofValue(
-                            pilout_proto::operand::ProofValue { stage: 0, idx: *id },
+                            pilout_proto::operand::ProofValue { stage, idx: *id },
                         )
                     }
                     ColRefKind::AirGroupValue => {
@@ -738,10 +784,13 @@ impl<'a> ProtoOutBuilder<'a> {
                         )
                     }
                     ColRefKind::Custom => {
+                        let stage = self.processor.custom_cols.get_data(*id)
+                            .and_then(|d| d.stage)
+                            .unwrap_or(0);
                         pilout_proto::operand::Operand::CustomCol(
                             pilout_proto::operand::CustomCol {
                                 commit_id: 0,
-                                stage: 0,
+                                stage,
                                 col_idx: *id,
                                 row_offset: offset,
                             },

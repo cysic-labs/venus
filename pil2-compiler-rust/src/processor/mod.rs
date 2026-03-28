@@ -88,6 +88,15 @@ pub struct Processor {
     pub constraints: Constraints,
     pub global_constraints: Constraints,
 
+    // -- AIR expression store: accumulates ALL expressions created during
+    // AIR execution (intermediate columns, constraint sub-exprs, etc.).
+    // Mirrors the JS `this.expressions` store. --
+    pub air_expression_store: Vec<RuntimeExpr>,
+
+    // -- Global (proof-level) expression store: symbolic expressions from
+    // proof-level `expr` variables, mirroring JS `this.globalExpressions`. --
+    pub global_expression_store: Vec<RuntimeExpr>,
+
     // -- Air structures --
     pub air_groups: AirGroups,
     pub air_templates: AirTemplates,
@@ -178,6 +187,8 @@ impl Processor {
             air_values: ids::IdAllocator::new("airvalue"),
             constraints: Constraints::new(),
             global_constraints: Constraints::new(),
+            air_expression_store: Vec::new(),
+            global_expression_store: Vec::new(),
             air_groups: AirGroups::new(),
             air_templates: AirTemplates::new(),
             air_stack: Vec::new(),
@@ -297,6 +308,19 @@ impl Processor {
         self.source_ref = "(airgroup-execution)".to_string();
         self.final_closing_air_groups();
         self.final_proof_scope();
+
+        // Collect proof-level intermediate expressions (expr-typed
+        // variables with symbolic values) for global expression output.
+        // This mirrors the JS `this.globalExpressions.pack(...)`.
+        for eid in 0..self.exprs.len() {
+            if let Some(val) = self.exprs.get(eid) {
+                if is_symbolic(val) {
+                    let rt = value_to_runtime_expr(val);
+                    self.global_expression_store.push(rt);
+                }
+            }
+        }
+
         self.scope.pop_instance_type();
 
         self.test_summary();
@@ -1328,8 +1352,10 @@ impl Processor {
             } else {
                 raw_args
             };
-            let instance_name = alias.unwrap_or(name);
-            self.execute_air_template_call(&tpl, &args, instance_name, is_virtual);
+            let raw_instance_name = alias.unwrap_or(name);
+            // Expand template strings (e.g. `VirtualTable${i}` -> `VirtualTable0`).
+            let instance_name = self.expand_templates(raw_instance_name);
+            self.execute_air_template_call(&tpl, &args, &instance_name, is_virtual);
             return FlowSignal::None;
         }
 
@@ -1974,6 +2000,10 @@ impl Processor {
         let air = air::Air::new(air_id, 0, &tpl.name, name, rows, is_virtual);
         self.air_stack.push(air);
 
+        // Push the expr store so air-level expressions don't mix with
+        // proof-level ones. Matches JS pushAirScope()/popAirScope().
+        self.exprs.push();
+
         self.namespace_ctx.push(name);
         self.scope.push_instance_type("air");
 
@@ -2060,6 +2090,55 @@ impl Processor {
             map
         };
 
+        // Compute stage_widths: count witness columns per stage.
+        let stage_widths: Vec<u32> = {
+            let mut by_stage: HashMap<u32, u32> = HashMap::new();
+            for wid in 0..self.witness_cols.len() {
+                let stage = self.witness_cols.datas.get(wid as usize)
+                    .and_then(|d| d.stage)
+                    .unwrap_or(1);
+                *by_stage.entry(stage).or_insert(0) += 1;
+            }
+            if by_stage.is_empty() {
+                Vec::new()
+            } else {
+                let max_stage = *by_stage.keys().max().unwrap();
+                let mut widths = vec![0u32; max_stage as usize];
+                for (stage, count) in by_stage {
+                    if stage > 0 && (stage as usize) <= widths.len() {
+                        widths[(stage - 1) as usize] = count;
+                    }
+                }
+                widths
+            }
+        };
+
+        // Build the full AIR expression store from intermediate columns
+        // (expr-typed variables) and constraint expressions. This mirrors
+        // the JS `this.expressions` store that holds ALL expressions
+        // created during AIR execution. The exprs store was pushed at
+        // air start, so all entries belong to this AIR.
+        let air_expr_store: Vec<RuntimeExpr> = {
+            let mut store = Vec::new();
+            // Collect intermediate column expressions from this AIR.
+            // Only include entries that hold symbolic values (ColRef or
+            // RuntimeExpr), not compile-time constants.
+            for eid in 0..self.exprs.len() {
+                if let Some(val) = self.exprs.get(eid) {
+                    if is_symbolic(val) {
+                        let rt = value_to_runtime_expr(val);
+                        store.push(rt);
+                    }
+                }
+            }
+            // Also include constraint expressions (which may reference
+            // intermediates by index).
+            for expr in self.constraints.all_expressions() {
+                store.push(expr.clone());
+            }
+            store
+        };
+
         // Store per-AIR data (constraints, expressions, column maps) in the
         // airgroup's air entry before clearing.
         if !is_virtual {
@@ -2068,8 +2147,10 @@ impl Processor {
                 if let Some(ag) = self.air_groups.get_mut(&ag_name) {
                     if let Some(stored_air) = ag.airs.iter_mut().find(|a| a.id == air_id) {
                         stored_air.store_constraints(&self.constraints);
+                        stored_air.store_air_expressions(&air_expr_store);
                         stored_air.fixed_id_map = fixed_id_map;
                         stored_air.witness_id_map = witness_id_map;
+                        stored_air.stage_widths = stage_widths;
                     }
                 }
             }
@@ -2113,6 +2194,9 @@ impl Processor {
         self.apply_scope_cleanup(&to_unset, &to_restore);
         self.callstack.pop();
         self.function_deep -= 1;
+
+        // Pop expr store to restore proof-level expressions.
+        self.exprs.pop();
 
         // Clear air-scoped column stores.
         self.fixed_cols.clear();
