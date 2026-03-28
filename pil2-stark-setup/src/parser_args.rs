@@ -7,7 +7,7 @@ const FIELD_EXTENSION: u64 = 3;
 /// Maps operation names to numeric codes used in the binary encoding.
 fn operation_type_code(op: &str) -> u64 {
     match op {
-        "add" => 0,
+        "add" | "copy" => 0, // copy maps to 0 (same as JS undefined -> 0)
         "sub" => 1,
         "mul" => 2,
         "sub_swap" => 3,
@@ -209,6 +209,13 @@ fn get_operation(r: &CodeOperation, verify: bool) -> (String, u64, Vec<CodeType>
     let _dest_dim = dim_str(r.dest.dim);
 
     let mut srcs = r.src.clone();
+
+    // copy operations have only 1 source - no swapping needed
+    if srcs.len() < 2 {
+        let op_a_key = if !srcs.is_empty() { get_type_key(&srcs[0], verify) } else { String::new() };
+        let src_dim = if !srcs.is_empty() { dim_str(srcs[0].dim) } else { "dim1".to_string() };
+        return (op, 0, srcs, op_a_key, src_dim);
+    }
 
     let op_a_key = get_type_key(&srcs[0], verify);
     let op_b_key = get_type_key(&srcs[1], verify);

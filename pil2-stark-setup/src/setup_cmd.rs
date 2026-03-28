@@ -686,33 +686,35 @@ pub fn build_starkinfo_output(
     // Build evMap from verifier code
     let ev_map: Vec<EvMapEntry> = Vec::new();
 
-    // Build cmPolsMap as nested stages
     let n_stages = setup.n_stages;
-    let mut cm_pols_map: Vec<Vec<PolMapEntry>> = Vec::new();
-    for stage in 0..=(n_stages + 1) {
-        let stage_pols: Vec<PolMapEntry> = setup
-            .cm_pols_map
-            .iter()
-            .filter(|p| p.stage == Some(stage))
-            .map(|p| PolMapEntry {
-                name: p.name.clone(),
-                stage: p.stage.unwrap_or(0),
-                dim: p.dim,
-                im_pol: if p.im_pol { Some(true) } else { None },
-            })
-            .collect();
-        if !stage_pols.is_empty() || stage <= n_stages + 1 {
-            cm_pols_map.push(stage_pols);
-        }
-    }
+
+    // Build cmPolsMap as flat array matching golden schema
+    let cm_pols_map: Vec<PolMapEntry> = setup
+        .cm_pols_map
+        .iter()
+        .enumerate()
+        .map(|(i, p)| PolMapEntry {
+            stage: p.stage.unwrap_or(0),
+            name: p.name.clone(),
+            dim: p.dim,
+            pols_map_id: i,
+            stage_id: p.stage_id.unwrap_or(0),
+            stage_pos: p.stage_pos.unwrap_or(0),
+            im_pol: if p.im_pol { Some(true) } else { None },
+        })
+        .collect();
 
     let const_pols_map: Vec<PolMapEntry> = setup
         .const_pols_map
         .iter()
-        .map(|p| PolMapEntry {
+        .enumerate()
+        .map(|(i, p)| PolMapEntry {
+            stage: 0,
             name: p.name.clone(),
-            stage: p.stage.unwrap_or(0),
             dim: p.dim,
+            pols_map_id: i,
+            stage_id: p.stage_id.unwrap_or(0),
+            stage_pos: p.stage_pos.unwrap_or(0),
             im_pol: None,
         })
         .collect();

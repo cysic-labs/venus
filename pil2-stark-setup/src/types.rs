@@ -14,7 +14,7 @@ pub struct StarkInfoOutput {
     pub opening_points: Vec<i64>,
     pub boundaries: Vec<BoundaryOutput>,
     pub ev_map: Vec<EvMapEntry>,
-    pub cm_pols_map: Vec<Vec<PolMapEntry>>,
+    pub cm_pols_map: Vec<PolMapEntry>,
     pub const_pols_map: Vec<PolMapEntry>,
     pub map_sections_n: IndexMap<String, usize>,
     pub map_offsets: IndexMap<String, usize>,
@@ -69,10 +69,14 @@ pub struct EvMapEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PolMapEntry {
-    pub name: String,
     pub stage: usize,
+    pub name: String,
     pub dim: usize,
+    pub pols_map_id: usize,
+    pub stage_id: usize,
+    pub stage_pos: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "imPol")]
     pub im_pol: Option<bool>,
