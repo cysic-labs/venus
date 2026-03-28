@@ -58,8 +58,7 @@ generate-key:
 	cargo run --release --bin arith_frops_fixed_gen
 	cargo run --release --bin binary_basic_frops_fixed_gen
 	cargo run --release --bin binary_extension_frops_fixed_gen
-	npm install --prefix "$(ROOT)/pil2-compiler" --silent 2>/dev/null || true
-	node --max-old-space-size=16384 "$(ROOT)/pil2-compiler/src/pil.js" "$(ROOT)/pil/zisk.pil" \
+	cargo run --release --bin pil2c -- "$(ROOT)/pil/zisk.pil" \
 		-I "$(ROOT)/pil,$(ROOT)/pil2-proofman/pil2-components/lib/std/pil,$(ROOT)/state-machines,$(ROOT)/precompiles" \
 		-o "$(ROOT)/pil/zisk.pilout" -u "$(FIXED_DIR)" -O fixed-to-file
 	cargo run --release --bin pil2-stark-setup -- \
