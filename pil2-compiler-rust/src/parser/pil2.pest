@@ -1,0 +1,609 @@
+// PEG grammar for PIL2, replacing the LALRPOP grammar.
+// Ordered alternatives eliminate all LR(1) conflicts.
+
+// ===================================================================
+// Whitespace and comments (implicit -- pest skips these between tokens)
+// ===================================================================
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ line_comment | block_comment }
+line_comment = _{ "//" ~ (!"\n" ~ ANY)* }
+block_comment = _{ "/*" ~ (block_comment | (!"*/" ~ ANY))* ~ "*/" }
+
+// ===================================================================
+// Top-level program
+// ===================================================================
+
+program = { SOI ~ statement* ~ EOI }
+
+// ===================================================================
+// Statements
+// ===================================================================
+
+statement = {
+    pragma_stmt
+  | include_stmt
+  | airgroup_stmt
+  | airtemplate_stmt
+  | function_def_stmt
+  | col_decl_stmt
+  | challenge_decl_stmt
+  | public_decl_stmt
+  | public_table_decl_stmt
+  | proofval_decl_stmt
+  | airgroupval_decl_stmt
+  | airval_decl_stmt
+  | commit_decl_stmt
+  | var_decl_stmt
+  | for_stmt
+  | while_stmt
+  | switch_stmt
+  | if_stmt
+  | return_stmt
+  | break_stmt
+  | continue_stmt
+  | deferred_call_stmt
+  | hint_stmt
+  | when_stmt
+  | virtual_func_call_alias_stmt
+  | virtual_expr_stmt
+  | container_stmt
+  | use_stmt
+  | package_stmt
+  | block_stmt
+  | constraint_stmt
+  | witness_constraint_stmt
+  | assignment_stmt
+  | func_call_alias_stmt
+  | expr_stmt
+}
+
+// Optional trailing semicolons
+semi = _{ ";" }
+
+// ===================================================================
+// Pragma
+// ===================================================================
+
+pragma_stmt = { "#pragma" ~ pragma_content ~ NEWLINE? }
+pragma_content = @{ (!NEWLINE ~ ANY)* }
+NEWLINE = _{ "\n" | "\r\n" | "\r" }
+
+// ===================================================================
+// Include / Require
+// ===================================================================
+
+include_stmt = { visibility_kw? ~ include_kind ~ flexible_string ~ semi? }
+include_kind = { "include" | "require" }
+visibility_kw = { "private" | "public" }
+
+flexible_string = { string_lit | template_lit }
+
+// ===================================================================
+// Airgroup
+// ===================================================================
+
+airgroup_stmt = { "airgroup" ~ ident ~ "{" ~ statement* ~ "}" ~ semi? }
+
+// ===================================================================
+// Airtemplate
+// ===================================================================
+
+airtemplate_stmt = {
+    "airtemplate" ~ ident ~ "(" ~ args_list ~ ")" ~ "{" ~ statement* ~ "}" ~ semi?
+  | "airtemplate" ~ ident ~ "{" ~ statement* ~ "}" ~ semi?
+}
+
+// ===================================================================
+// Function definition
+// ===================================================================
+
+function_def_stmt = {
+    final_scope? ~ func_visibility? ~ "function" ~ name_reference ~ "(" ~ args_list_with_varargs ~ ")" ~ return_type_spec? ~ "{" ~ statement* ~ "}" ~ semi?
+}
+
+final_scope = { "final" ~ ("proof" | "airgroup")? }
+func_visibility = { "private" | "public" }
+
+return_type_spec = { ":" ~ ( "[" ~ comma_sep_return_type ~ "]" | single_return_type ) }
+comma_sep_return_type = { single_return_type ~ ("," ~ single_return_type)* }
+single_return_type = { basic_type ~ type_array_dims? }
+type_array_dims = { ("[" ~ "]")+ }
+
+args_list_with_varargs = { function_arg ~ ("," ~ function_arg)* ~ ("," ~ "...")? | "..." | "" }
+args_list = { function_arg ~ ("," ~ function_arg)* | "" }
+function_arg = {
+    basic_type ~ ident ~ type_array_dims? ~ ("=" ~ ( "[" ~ comma_sep_expr? ~ "]" | expression ))?
+}
+
+basic_type = {
+    "const"? ~ (
+        "col" ~ ("witness" | "fixed")
+      | "publictable"
+      | "proofval"
+      | "airgroup"
+      | "challenge"
+      | "public"
+      | "function"
+      | "string"
+      | "expr"
+      | "int"
+      | "fe"
+      | "air"
+    )
+}
+
+// ===================================================================
+// Column declarations
+// ===================================================================
+
+col_decl_stmt = {
+    "col" ~ col_type_kw ~ col_features? ~ col_decl_ident ~ "=" ~ sequence_def ~ semi?
+  | "col" ~ col_type_kw ~ col_features? ~ col_decl_ident ~ "=" ~ expression ~ semi?
+  | "col" ~ col_type_kw ~ col_features? ~ col_decl_list ~ semi?
+  | "col" ~ ident ~ col_features? ~ col_decl_list ~ semi?
+}
+
+col_type_kw = { "witness" | "fixed" }
+
+col_features = { col_feature+ }
+col_feature = { col_feature_name ~ "(" ~ multi_expression_list ~ ")" }
+col_feature_name = { "virtual" | "stage" | ident }
+
+col_decl_list = { col_decl_item ~ ("," ~ col_decl_item)* }
+col_decl_item = { col_decl_ident ~ decl_array_dims? }
+col_decl_ident = { "air" ~ "." ~ ident | template_lit | ident }
+
+decl_array_dims = { ("[" ~ expression? ~ "]")+ }
+
+// ===================================================================
+// Challenge declaration
+// ===================================================================
+
+challenge_decl_stmt = {
+    "challenge" ~ ("stage" ~ "(" ~ number ~ ")")? ~ col_decl_list ~ semi?
+}
+
+// ===================================================================
+// Public declaration
+// ===================================================================
+
+public_decl_stmt = {
+    "public" ~ col_decl_ident ~ "=" ~ expression ~ semi?
+  | "public" ~ col_decl_list ~ semi?
+}
+
+// ===================================================================
+// Public table declaration
+// ===================================================================
+
+public_table_decl_stmt = {
+    "publictable" ~ ident ~ "(" ~ expression ~ ("," ~ expression)* ~ ")" ~ semi?
+}
+
+// ===================================================================
+// Proofval declaration
+// ===================================================================
+
+proofval_decl_stmt = {
+    "proofval" ~ ("stage" ~ "(" ~ number ~ ")")? ~ col_decl_list ~ semi?
+}
+
+// ===================================================================
+// Airgroup value declaration
+// ===================================================================
+
+airgroupval_decl_stmt = {
+    "airgroupval" ~ airgroupval_modifier* ~ col_decl_list ~ semi?
+}
+
+airgroupval_modifier = {
+    "stage" ~ "(" ~ number ~ ")"
+  | "aggregate" ~ "(" ~ ident ~ ")"
+  | "default" ~ "(" ~ expression ~ ")"
+}
+
+// ===================================================================
+// Airval declaration
+// ===================================================================
+
+airval_decl_stmt = {
+    "airval" ~ ("stage" ~ "(" ~ number ~ ")")? ~ col_decl_list ~ semi?
+}
+
+// ===================================================================
+// Commit declaration
+// ===================================================================
+
+commit_decl_stmt = {
+    "commit" ~ "stage" ~ "(" ~ number ~ ")" ~ ident ~ semi?
+}
+
+// ===================================================================
+// Variable declarations
+// ===================================================================
+
+var_decl_stmt = {
+    "const"? ~ var_type_kw ~ var_decl_item ~ "=" ~ ( "[" ~ comma_sep_expr? ~ "]" | expression ) ~ semi?
+  | "const"? ~ var_type_kw ~ var_decl_list ~ semi?
+}
+
+var_type_kw = { "int" | "fe" | "expr" | "string" | "function" }
+
+var_decl_list = { var_decl_item ~ ("," ~ var_decl_item)* }
+var_decl_item = { name_reference ~ var_decl_array_dims? }
+var_decl_array_dims = { ("[" ~ expression? ~ "]")+ }
+
+// ===================================================================
+// Assignment
+// ===================================================================
+
+assignment_stmt = {
+    name_id ~ assign_op ~ ( sequence_def | expression ) ~ semi?
+  | "++" ~ name_id ~ semi?
+  | "--" ~ name_id ~ semi?
+  | name_id ~ "++" ~ semi?
+  | name_id ~ "--" ~ semi?
+}
+
+assign_op = { "+=" | "-=" | "*=" | "=" }
+
+// ===================================================================
+// Constraints
+// ===================================================================
+
+constraint_stmt = { expression ~ "===" ~ expression ~ semi? }
+witness_constraint_stmt = { expression ~ "<==" ~ expression ~ semi? }
+
+// ===================================================================
+// Control flow
+// ===================================================================
+
+if_stmt = {
+    "if" ~ "(" ~ expression ~ ")" ~ "{" ~ statement* ~ "}" ~ else_clause? ~ semi?
+  | "if" ~ "(" ~ expression ~ ")" ~ single_stmt
+}
+
+else_clause = {
+    "else" ~ if_stmt
+  | "else" ~ "{" ~ statement* ~ "}"
+}
+
+single_stmt = { statement_inner_no_block ~ semi }
+
+// Statements that can appear as single-stmt bodies (no bare blocks)
+statement_inner_no_block = {
+    var_decl_stmt
+  | constraint_stmt
+  | witness_constraint_stmt
+  | assignment_stmt
+  | return_stmt
+  | break_stmt
+  | continue_stmt
+  | func_call_alias_stmt
+  | expr_stmt
+}
+
+for_stmt = {
+    "for" ~ "(" ~ for_init ~ ";" ~ expression ~ ";" ~ for_incr_list ~ ")" ~ "{" ~ statement* ~ "}" ~ semi?
+  | "for" ~ "(" ~ for_init ~ ";" ~ expression ~ ";" ~ for_incr_list ~ ")" ~ single_stmt
+}
+
+for_init = { var_decl_inner | col_decl_inner | assignment_inner }
+var_decl_inner = { "const"? ~ var_type_kw ~ var_decl_item ~ ("=" ~ expression)? }
+col_decl_inner = { "col" ~ col_type_kw ~ col_features? ~ col_decl_list }
+assignment_inner = { name_id ~ assign_op ~ expression | "++" ~ name_id | "--" ~ name_id | name_id ~ "++" | name_id ~ "--" }
+
+for_incr_list = { for_incr_item ~ ("," ~ for_incr_item)* }
+for_incr_item = {
+    name_id ~ assign_op ~ expression
+  | "++" ~ name_id
+  | "--" ~ name_id
+  | name_id ~ "++"
+  | name_id ~ "--"
+}
+
+while_stmt = { "while" ~ "(" ~ expression ~ ")" ~ "{" ~ statement* ~ "}" ~ semi? }
+
+switch_stmt = { "switch" ~ "(" ~ expression ~ ")" ~ "{" ~ case_clause* ~ default_clause? ~ "}" ~ semi? }
+case_clause = { "case" ~ case_values ~ ":" ~ statement* }
+case_values = { case_value_item ~ ("," ~ case_value_item)* }
+case_value_item = { expression ~ (".." ~ expression)? }
+default_clause = { "default" ~ ":" ~ statement* }
+
+return_stmt = {
+    "return" ~ "[" ~ comma_sep_expr ~ "]" ~ semi?
+  | "return" ~ expression ~ semi?
+  | "return" ~ semi?
+}
+
+break_stmt = { "break" ~ semi? }
+continue_stmt = { "continue" ~ semi? }
+
+// ===================================================================
+// Virtual expression
+// ===================================================================
+
+virtual_expr_stmt = { "virtual" ~ expression ~ semi? }
+
+// ===================================================================
+// Block statement
+// ===================================================================
+
+block_stmt = { "{" ~ statement* ~ "}" ~ semi? }
+
+// ===================================================================
+// Container
+// ===================================================================
+
+container_stmt = {
+    "container" ~ name_reference ~ "{" ~ statement* ~ "}" ~ semi?
+  | "container" ~ name_reference ~ "alias" ~ ident ~ semi?
+  | "container" ~ name_reference ~ semi?
+}
+
+// ===================================================================
+// Use
+// ===================================================================
+
+use_stmt = {
+    "use" ~ name_reference ~ "alias" ~ ident ~ semi?
+  | "use" ~ name_reference ~ semi?
+}
+
+// ===================================================================
+// Package
+// ===================================================================
+
+package_stmt = { "package" ~ ident ~ "{" ~ statement* ~ "}" ~ semi? }
+
+// ===================================================================
+// Deferred call
+// ===================================================================
+
+deferred_call_stmt = {
+    "on" ~ "final" ~ ("(" ~ expression ~ ")")? ~ defined_scope ~ name_optional_index ~ "(" ~ multi_expression_list ~ ")" ~ semi?
+}
+
+defined_scope = { "air" | "proof" | "airgroup" }
+
+// ===================================================================
+// Hint
+// ===================================================================
+
+hint_stmt = {
+    hint_tok ~ "{" ~ hint_object_pairs ~ "}" ~ semi?
+  | hint_tok ~ "[" ~ comma_sep_expr ~ "]" ~ semi?
+  | hint_tok ~ expression ~ semi
+}
+
+hint_object_pairs = { hint_pair ~ ("," ~ hint_pair)* | "" }
+hint_pair = { ident ~ (":" ~ expression)? }
+
+// ===================================================================
+// When
+// ===================================================================
+
+when_stmt = {
+    "when" ~ "(" ~ expression ~ ")" ~ "{" ~ statement* ~ "}" ~ semi?
+  | "when" ~ ident ~ "{" ~ statement* ~ "}" ~ semi?
+}
+
+// ===================================================================
+// Function call with alias (as statement)
+// ===================================================================
+
+func_call_alias_stmt = {
+    func_call_expr ~ "alias" ~ (flexible_string | ident) ~ semi?
+}
+
+virtual_func_call_alias_stmt = {
+    "virtual" ~ func_call_expr ~ "alias" ~ (flexible_string | ident) ~ semi?
+}
+
+// ===================================================================
+// Expression statement
+// ===================================================================
+
+expr_stmt = { expression ~ semi? }
+
+// ===================================================================
+// Expressions -- PEG precedence climbing (ordered alternatives)
+// ===================================================================
+
+expression = { ternary_expr }
+
+ternary_expr = {
+    or_expr ~ "?" ~ ternary_expr ~ ":" ~ ternary_expr
+  | or_expr
+}
+
+or_expr = { and_expr ~ ("||" ~ and_expr)* }
+and_expr = { bitor_expr ~ ("&&" ~ bitor_expr)* }
+bitor_expr = { bitxor_expr ~ ("|" ~ bitxor_expr)* }
+bitxor_expr = { bitand_expr ~ ("^" ~ bitand_expr)* }
+bitand_expr = { equality_expr ~ ("&" ~ equality_expr)* }
+
+equality_expr = { comparison_expr ~ (equality_op ~ comparison_expr)* }
+equality_op = { "==" | "!=" }
+
+comparison_expr = { shift_expr ~ (comparison_op ~ shift_expr)* }
+comparison_op = { "<=" | ">=" | "<" | ">" }
+
+shift_expr = { add_expr ~ (shift_op ~ add_expr)* }
+shift_op = { "<<" | ">>" }
+
+add_expr = { mul_expr ~ (add_op ~ mul_expr)* }
+add_op = { "+" | "-" }
+
+mul_expr = { unary_expr ~ (mul_op ~ unary_expr)* }
+mul_op = { "*" | "/" | "\\" | "%" }
+
+unary_expr = {
+    "-" ~ unary_expr
+  | "+" ~ unary_expr
+  | "!" ~ unary_expr
+  | pow_expr
+}
+
+pow_expr = { postfix_expr ~ ("**" ~ unary_expr)? }
+
+postfix_expr = { atom_expr ~ postfix_suffix* }
+
+postfix_suffix = {
+    "'"
+  | "[" ~ expression ~ "]"
+  | "." ~ ident
+}
+
+atom_expr = {
+    "(" ~ expression ~ ")"
+  | number
+  | string_lit
+  | template_lit
+  | positional_param
+  | cast_expr
+  | func_call_expr
+  | "[" ~ comma_sep_expr? ~ "]"
+  | "..." ~ expression
+  | keyword_dot_ident
+  | ident
+}
+
+// Type-cast expressions: int(e), fe(e), expr(e), string(e), col(e)
+cast_expr = { cast_type_kw ~ "(" ~ expression ~ ")" }
+cast_type_kw = { "string" | "expr" | "col" | "int" | "fe" }
+
+// Function call expression
+func_call_expr = { name_optional_index ~ "(" ~ multi_expression_list ~ ")" }
+
+// ===================================================================
+// Name references
+// ===================================================================
+
+name_reference = @{ name_ref_base ~ ("." ~ ident_inner)* }
+name_ref_base = _{ "airgroup" | "proof" | "air" | ident_inner }
+
+// Name with optional array indices and optional row-offset for assignment targets
+name_id = {
+    name_optional_index ~ "'" ~ "(" ~ expression ~ ")"
+  | name_optional_index ~ "'" ~ number?
+  | name_optional_index
+}
+
+name_optional_index = { name_reference ~ array_index_list? }
+array_index_list = { ("[" ~ expression ~ "]")+ }
+
+// ===================================================================
+// Multi-expression list (function call arguments, supports named args)
+// ===================================================================
+
+multi_expression_list = { multi_expression_item ~ ("," ~ multi_expression_item)* | "" }
+
+multi_expression_item = {
+    ident ~ ":" ~ "[" ~ comma_sep_expr ~ "]"
+  | ident ~ ":" ~ expression
+  | ident ~ ":"
+  | "[" ~ comma_sep_expr ~ "]"
+  | expression
+}
+
+comma_sep_expr = { expression ~ ("," ~ expression)* }
+
+// ===================================================================
+// Sequence definition (fixed column initializer syntax)
+// ===================================================================
+
+sequence_def = {
+    "[" ~ comma_sep_seq_elem ~ "]" ~ ":" ~ expression ~ "..."
+  | "[" ~ comma_sep_seq_elem ~ "]" ~ ":" ~ expression
+  | "[" ~ comma_sep_seq_elem ~ "]" ~ "..."
+  | "[" ~ comma_sep_seq_elem ~ "]"
+}
+
+comma_sep_seq_elem = { sequence_element ~ ("," ~ sequence_element)* }
+
+sequence_element = {
+    expression ~ "..+.." ~ expression ~ ("..+.." ~ expression)?
+  | expression ~ "..*.." ~ expression ~ ("..*.." ~ expression)?
+  | expression ~ ".." ~ expression
+  | expression ~ "..."
+  | expression
+}
+
+// keyword.ident references (air.name, airgroup.name, proof.name)
+keyword_dot_ident = { ("air" | "airgroup" | "proof") ~ "." ~ ident }
+
+// ===================================================================
+// Lexical tokens
+// ===================================================================
+
+ident = @{ !keyword ~ ident_inner }
+ident_inner = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "$")* }
+
+// PIL2 keywords -- needed for negative lookahead in ident
+keyword = @{
+    ( "airtemplate"
+    | "airgroupval"
+    | "airgroup"
+    | "airval"
+    | "air"
+    | "alias"
+    | "aggregate"
+    | "break"
+    | "case"
+    | "challenge"
+    | "col"
+    | "commit"
+    | "constant"
+    | "const"
+    | "container"
+    | "continue"
+    | "declare"
+    | "default"
+    | "do"
+    | "else"
+    | "elseif"
+    | "expr"
+    | "fe"
+    | "final"
+    | "fixed"
+    | "for"
+    | "function"
+    | "if"
+    | "include"
+    | "in"
+    | "int"
+    | "is"
+    | "on"
+    | "package"
+    | "private"
+    | "proof"
+    | "proofval"
+    | "publictable"
+    | "public"
+    | "require"
+    | "return"
+    | "stage"
+    | "string"
+    | "switch"
+    | "use"
+    | "virtual"
+    | "when"
+    | "while"
+    | "witness"
+    ) ~ !(ASCII_ALPHANUMERIC | "_")
+}
+
+number = @{
+    "0" ~ ("x" | "X") ~ (ASCII_HEX_DIGIT | "_")+
+  | "0" ~ ("b" | "B") ~ ("0" | "1" | "_")+
+  | ASCII_DIGIT ~ (ASCII_DIGIT | "_")*
+}
+
+string_lit = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+template_lit = @{ "`" ~ (!"`" ~ ANY)* ~ "`" }
+
+hint_tok = @{ "@" ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+positional_param = @{ "$" ~ ASCII_DIGIT+ }

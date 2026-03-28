@@ -17,8 +17,8 @@ tracing = { workspace = true }
 tracing-subscriber = "0.3"
 indexmap = { version = "2", features = ["serde"] }
 regex = "1"
-lalrpop-util = "0.22"
+pest = "2"
+pest_derive = "2"
 
 [build-dependencies]
 prost-build = { workspace = true }
-lalrpop = "0.22"
