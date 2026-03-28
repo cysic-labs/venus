@@ -631,7 +631,7 @@ fn resolve_path_env(env_var: &str, fallback: &str) -> String {
 }
 
 /// Build the StarkInfoOutput for JSON serialization from internal types.
-fn build_starkinfo_output(
+pub fn build_starkinfo_output(
     setup: &crate::pilout_info::SetupResult,
     stark_struct: &StarkStruct,
     _pil_code: &crate::generate_pil_code::PilCodeResult,
@@ -769,7 +769,7 @@ fn build_starkinfo_output(
     }
 }
 
-fn collect_opening_points(setup: &crate::pilout_info::SetupResult) -> Vec<i64> {
+pub fn collect_opening_points(setup: &crate::pilout_info::SetupResult) -> Vec<i64> {
     let mut points: Vec<i64> = vec![0];
     for c in &setup.constraints {
         let offsets = &setup.expressions[c.e].rows_offsets;
@@ -783,7 +783,7 @@ fn collect_opening_points(setup: &crate::pilout_info::SetupResult) -> Vec<i64> {
     points
 }
 
-fn compute_folding_factors(stark_struct: &StarkStruct) -> Vec<u64> {
+pub fn compute_folding_factors(stark_struct: &StarkStruct) -> Vec<u64> {
     let steps = &stark_struct.steps;
     let mut factors = Vec::new();
     for i in 0..steps.len() - 1 {
@@ -793,7 +793,7 @@ fn compute_folding_factors(stark_struct: &StarkStruct) -> Vec<u64> {
 }
 
 /// Build the expressionsinfo JSON structure.
-fn build_expressions_info_json(
+pub fn build_expressions_info_json(
     info: &crate::generate_pil_code::ExpressionsInfo,
 ) -> serde_json::Value {
     let expressions_code: Vec<serde_json::Value> = info
@@ -904,7 +904,7 @@ fn build_expressions_info_json(
 }
 
 /// Build the verifierinfo JSON structure.
-fn build_verifier_info_json(
+pub fn build_verifier_info_json(
     info: &crate::generate_pil_code::VerifierInfo,
 ) -> serde_json::Value {
     json!({
@@ -919,7 +919,7 @@ fn build_verifier_info_json(
     })
 }
 
-fn code_entries_to_json(entries: &[crate::types::CodeEntry]) -> serde_json::Value {
+pub fn code_entries_to_json(entries: &[crate::types::CodeEntry]) -> serde_json::Value {
     let arr: Vec<serde_json::Value> = entries
         .iter()
         .map(|e| {
@@ -933,7 +933,7 @@ fn code_entries_to_json(entries: &[crate::types::CodeEntry]) -> serde_json::Valu
     serde_json::Value::Array(arr)
 }
 
-fn code_ref_to_json(r: &crate::types::CodeRef) -> serde_json::Value {
+pub fn code_ref_to_json(r: &crate::types::CodeRef) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("type".to_string(), json!(r.ref_type));
     obj.insert("id".to_string(), json!(r.id));

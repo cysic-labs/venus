@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
+use pilout::pilout_proxy::PilOutProxy;
 use stark_recurser_rust::gencircom::{gen_circom, GenCircomInput, GenCircomOptions};
 use stark_recurser_rust::pil2circom::{pil2circom, Pil2CircomOptions};
 use stark_recurser_rust::plonk2pil::{self, PlonkResult};
@@ -308,7 +309,8 @@ pub fn gen_recursive_setup(
     let pilout_path_str = pilout_path.to_str().unwrap_or("");
     let (setup_stark_info, setup_verifier_info, setup_expressions_info) = if need_setup && Path::new(pilout_path_str).exists() {
         // Load pilout to get AIR structure
-        let pilout = pilout::PilOut::new(pilout_path_str);
+        let proxy = PilOutProxy::new(pilout_path_str).map_err(|e| anyhow::anyhow!("Failed to load pilout: {}", e))?;
+        let pilout = &proxy.pilout;
         if pilout.air_groups.is_empty() || pilout.air_groups[0].airs.is_empty() {
             bail!("Compiled pilout has no AIR groups: {}", pilout_path_str);
         }
@@ -317,28 +319,70 @@ pub fn gen_recursive_setup(
         let n_bits_air = if num_rows_air > 0 { (num_rows_air as f64).log2() as usize } else { plonk_result.n_bits };
 
         // Generate stark struct for this recursive circuit
-        let stark_struct = config.stark_struct.cloned().unwrap_or_else(|| {
+        let stark_struct = if let Some(ss_val) = config.stark_struct {
+            serde_json::from_value::<crate::stark_struct::StarkStruct>(ss_val.clone())
+                .unwrap_or_else(|_| {
+                    let blowup = if template == RecursiveTemplate::Compressor { 2 } else { 3 };
+                    let settings = crate::stark_struct::StarkSettings {
+                        blowup_factor: Some(blowup),
+                        folding_factor: Some(3),
+                        final_degree: Some(5),
+                        ..Default::default()
+                    };
+                    crate::stark_struct::generate_stark_struct(&settings, n_bits_air)
+                })
+        } else {
             let blowup = if template == RecursiveTemplate::Compressor { 2 } else { 3 };
-            crate::stark_struct::generate_stark_struct_json(n_bits_air, blowup, 3, 5)
-        });
+            let settings = crate::stark_struct::StarkSettings {
+                blowup_factor: Some(blowup),
+                folding_factor: Some(3),
+                final_degree: Some(5),
+                ..Default::default()
+            };
+            crate::stark_struct::generate_stark_struct(&settings, n_bits_air)
+        };
 
         // Run pil_info to get real starkinfo/expressionsinfo/verifierinfo
         let pil_info_result = crate::pil_info::pil_info(
             &pilout, 0, 0, &stark_struct, &Default::default(),
-        )?;
+        );
 
-        // Apply FRI security parameters
-        let si_json = serde_json::to_value(&pil_info_result.stark_info)?;
+        // Build JSON representations using the same helpers as the non-recursive path
+        let opening_points = crate::setup_cmd::collect_opening_points(&pil_info_result.setup);
+        let folding_factors = crate::setup_cmd::compute_folding_factors(&stark_struct);
+        let ev_map_len = pil_info_result.pil_code.verifier_info.q_verifier.code.len();
+        let field_size = crate::security::goldilocks_cube_field_size();
+        let fri_params = crate::security::FRISecurityParams {
+            field_size,
+            dimension: 1u64 << stark_struct.n_bits,
+            rate: 1.0 / (1u64 << (stark_struct.n_bits_ext - stark_struct.n_bits)) as f64,
+            n_opening_points: opening_points.len() as u64,
+            n_functions: ev_map_len.max(1) as u64,
+            folding_factors: folding_factors.clone(),
+            max_grinding_bits: stark_struct.pow_bits as u64,
+            use_max_grinding_bits: true,
+            tree_arity: stark_struct.merkle_tree_arity as u64,
+            target_security_bits: 128,
+        };
+        let fri_security = crate::security::get_optimal_fri_query_params("JBR", &fri_params);
+
+        let starkinfo_output = crate::setup_cmd::build_starkinfo_output(
+            &pil_info_result.setup, &stark_struct, &pil_info_result.pil_code,
+            &opening_points, &fri_security, 0, 0,
+        );
+        let verifier_info_json = crate::setup_cmd::build_verifier_info_json(&pil_info_result.pil_code.verifier_info);
+        let expressions_info_json = crate::setup_cmd::build_expressions_info_json(&pil_info_result.pil_code.expressions_info);
+        let si_json = serde_json::to_value(&starkinfo_output)?;
 
         // Write all JSON files
-        fs::write(&starkinfo_path, crate::json_output::to_json_string(&pil_info_result.stark_info)?)?;
+        fs::write(&starkinfo_path, crate::json_output::to_json_string(&starkinfo_output)?)?;
         fs::write(
             files_dir.join(format!("{}.verifierinfo.json", template_str)),
-            crate::json_output::to_json_string(&pil_info_result.verifier_info)?,
+            crate::json_output::to_json_string(&verifier_info_json)?,
         )?;
         fs::write(
             files_dir.join(format!("{}.expressionsinfo.json", template_str)),
-            crate::json_output::to_json_string(&pil_info_result.expressions_info)?,
+            crate::json_output::to_json_string(&expressions_info_json)?,
         )?;
 
         // Write binary files using native Rust writer
@@ -365,7 +409,7 @@ pub fn gen_recursive_setup(
             &stark_info_loaded, &verifier_loaded,
         )?;
 
-        (Some(si_json), Some(serde_json::to_value(&pil_info_result.verifier_info)?), Some(serde_json::to_value(&pil_info_result.expressions_info)?))
+        (Some(si_json), Some(verifier_info_json), Some(expressions_info_json))
     } else if need_setup {
         bail!("Pilout not found at {}. Cannot run starkSetup for recursive circuit.", pilout_path_str);
     } else {
@@ -415,12 +459,13 @@ pub fn gen_recursive_setup(
         )?;
 
         // Write verifier Rust file using the real starkinfo and verifierinfo
-        if let (Some(ref si), Some(ref vi)) = (&setup_stark_info, &setup_verifier_info) {
+        if let (Some(ref si_val), Some(ref vi_val)) = (&setup_stark_info, &setup_verifier_info) {
+            let si_loaded = crate::stark_info::StarkInfo::from_json(si_val)?;
+            let vi_loaded = crate::stark_info::VerifierInfo::from_json(vi_val)?;
             crate::verifier_rs_gen::write_verifier_rust_file(
                 files_dir.join(format!("{}.verifier.rs", template_str)).to_str().unwrap(),
-                si,
-                vi,
-                &const_root.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+                &si_loaded,
+                &vi_loaded,
             )?;
         }
     }

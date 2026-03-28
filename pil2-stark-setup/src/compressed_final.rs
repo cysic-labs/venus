@@ -12,11 +12,12 @@
 //! 8. Writes verifier.rs for the compressed final circuit
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
+use pilout::pilout_proxy::PilOutProxy;
 use stark_recurser_rust::gencircom::{gen_circom, GenCircomInput, GenCircomOptions};
 use stark_recurser_rust::pil2circom::{pil2circom, Pil2CircomOptions};
 use stark_recurser_rust::plonk2pil::{self, PlonkResult};
@@ -239,24 +240,50 @@ pub fn gen_compressed_final_setup(
         bail!("Compressed final pilout not found at {}", pilout_file_str);
     }
 
-    let pilout = pilout::PilOut::new(pilout_file_str);
+    let proxy = PilOutProxy::new(pilout_file_str).map_err(|e| anyhow::anyhow!("Failed to load pilout: {}", e))?;
+    let pilout = &proxy.pilout;
     if pilout.air_groups.is_empty() || pilout.air_groups[0].airs.is_empty() {
         bail!("Compressed final pilout has no AIR groups");
     }
 
-    let stark_struct_json = serde_json::to_value(&compressed_stark_struct)?;
     let pil_info_result = crate::pil_info::pil_info(
-        &pilout, 0, 0, &stark_struct_json, &Default::default(),
-    )?;
+        &pilout, 0, 0, &compressed_stark_struct, &Default::default(),
+    );
 
-    fs::write(&starkinfo_path, crate::json_output::to_json_string(&pil_info_result.stark_info)?)?;
+    // Build JSON representations using the same helpers as the non-recursive path
+    let opening_points = crate::setup_cmd::collect_opening_points(&pil_info_result.setup);
+    let folding_factors = crate::setup_cmd::compute_folding_factors(&compressed_stark_struct);
+    let ev_map_len = pil_info_result.pil_code.verifier_info.q_verifier.code.len();
+    let field_size = crate::security::goldilocks_cube_field_size();
+    let fri_params = crate::security::FRISecurityParams {
+        field_size,
+        dimension: 1u64 << compressed_stark_struct.n_bits,
+        rate: 1.0 / (1u64 << (compressed_stark_struct.n_bits_ext - compressed_stark_struct.n_bits)) as f64,
+        n_opening_points: opening_points.len() as u64,
+        n_functions: ev_map_len.max(1) as u64,
+        folding_factors: folding_factors.clone(),
+        max_grinding_bits: compressed_stark_struct.pow_bits as u64,
+        use_max_grinding_bits: true,
+        tree_arity: compressed_stark_struct.merkle_tree_arity as u64,
+        target_security_bits: 128,
+    };
+    let fri_security = crate::security::get_optimal_fri_query_params("JBR", &fri_params);
+
+    let starkinfo_output = crate::setup_cmd::build_starkinfo_output(
+        &pil_info_result.setup, &compressed_stark_struct, &pil_info_result.pil_code,
+        &opening_points, &fri_security, 0, 0,
+    );
+    let verifier_info_json = crate::setup_cmd::build_verifier_info_json(&pil_info_result.pil_code.verifier_info);
+    let expressions_info_json = crate::setup_cmd::build_expressions_info_json(&pil_info_result.pil_code.expressions_info);
+
+    fs::write(&starkinfo_path, crate::json_output::to_json_string(&starkinfo_output)?)?;
     fs::write(
         files_dir.join(format!("{}.verifierinfo.json", template)),
-        crate::json_output::to_json_string(&pil_info_result.verifier_info)?,
+        crate::json_output::to_json_string(&verifier_info_json)?,
     )?;
     fs::write(
         files_dir.join(format!("{}.expressionsinfo.json", template)),
-        crate::json_output::to_json_string(&pil_info_result.expressions_info)?,
+        crate::json_output::to_json_string(&expressions_info_json)?,
     )?;
 
     // Write binary files
