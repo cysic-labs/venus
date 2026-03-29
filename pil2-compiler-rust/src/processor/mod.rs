@@ -2415,24 +2415,34 @@ impl Processor {
             }
         };
 
-        // Build the AIR expression store from hint-referenced expressions
-        // and constraint expressions. Hint ExprId values reference indices
-        // in self.air_expression_store; we place those first and build a
-        // remap table so hint indices translate correctly to the unified
-        // store. Constraint expressions follow.
+        // Build the full AIR expression store from hint-referenced
+        // expressions, intermediate column expressions (expr-typed
+        // variables), and constraint expressions. This mirrors the JS
+        // `this.expressions` store that holds ALL expressions created
+        // during AIR execution.
         //
-        // Note: unlike the JS compiler, we do not include intermediate
-        // (expr-typed) variable values in the store because Rust inlines
-        // their values into constraints. IM symbol emission therefore
-        // requires future work on expression-reference tracking.
+        // Layout: [hint exprs | intermediate exprs | constraint exprs]
+        // Hint ExprId values reference indices in
+        // self.air_expression_store, which are placed first so that
+        // hint indices remain valid without remapping.
         let air_expr_store: Vec<RuntimeExpr> = {
             let mut store = Vec::new();
-            // Hint-referenced expressions come first (preserving indices
-            // so hint ExprId values remain valid without remapping).
+            // 1. Hint-referenced expressions first (preserving indices).
             for expr in &self.air_expression_store {
                 store.push(expr.clone());
             }
-            // Then constraint expressions.
+            // 2. Intermediate column expressions from this AIR scope.
+            //    Only include symbolic values (ColRef or RuntimeExpr),
+            //    not compile-time constants.
+            for eid in 0..self.exprs.len() {
+                if let Some(val) = self.exprs.get(eid) {
+                    if is_symbolic(val) {
+                        let rt = value_to_runtime_expr(val);
+                        store.push(rt);
+                    }
+                }
+            }
+            // 3. Constraint expressions.
             for expr in self.constraints.all_expressions() {
                 store.push(expr.clone());
             }
@@ -2524,7 +2534,7 @@ impl Processor {
         // calls during `airGroupProtoOut`.
         let air_symbols: Vec<air::SymbolEntry> = {
             let mut syms = Vec::new();
-            let _air_name = self.air_stack.last().map(|a| a.name.clone()).unwrap_or_default();
+            let air_name = self.air_stack.last().map(|a| a.name.clone()).unwrap_or_default();
 
             // Witness symbols from label ranges.
             for lr in self.witness_cols.label_ranges.to_vec() {
@@ -2586,11 +2596,20 @@ impl Processor {
                 });
             }
 
-            // IM symbol emission is deferred: the Rust compiler inlines
-            // expr variable values into constraints, so there's no
-            // direct mapping from named intermediates to packed expression
-            // indices. Full IM symbol support requires expression-reference
-            // tracking during constraint construction.
+            // Intermediate (im) symbols from expression labels. The
+            // internal_id references the expression's position in the
+            // exprs variable store, which maps to the intermediate
+            // section of the full air_expression_store.
+            for lr in self.exprs.ids.label_ranges.to_vec() {
+                syms.push(air::SymbolEntry {
+                    name: format!("{}_{}", air_name, lr.label),
+                    ref_type_str: "im".to_string(),
+                    internal_id: lr.from,
+                    dim: lr.array_dims.len() as u32,
+                    lengths: lr.array_dims.clone(),
+                    source_ref: String::new(),
+                });
+            }
 
             syms
         };
