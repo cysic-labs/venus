@@ -2602,7 +2602,7 @@ impl Processor {
             // section of the full air_expression_store.
             for lr in self.exprs.ids.label_ranges.to_vec() {
                 syms.push(air::SymbolEntry {
-                    name: format!("{}_{}", air_name, lr.label),
+                    name: format!("{}.{}", air_name, lr.label),
                     ref_type_str: "im".to_string(),
                     internal_id: lr.from,
                     dim: lr.array_dims.len() as u32,

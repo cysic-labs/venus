@@ -156,9 +156,13 @@ pub fn generate_fri_polynomial(
     let mut fri_exp: Option<Expression> = None;
 
     for (i, &opening) in opening_points.iter().enumerate() {
-        let opening_expr = fri_exps
-            .remove(&opening)
-            .expect("Opening point not found in fri_exps");
+        // Opening points from kept/hint expressions may not have ev_map
+        // entries (and thus no fri_exps entry). Skip those; they are only
+        // needed by prover code, not the FRI verifier polynomial.
+        let opening_expr = match fri_exps.remove(&opening) {
+            Some(e) => e,
+            None => continue,
+        };
 
         let xdiv_expr = Expression {
             op: "xDivXSubXi".to_string(),

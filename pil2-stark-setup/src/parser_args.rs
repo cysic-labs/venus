@@ -512,7 +512,7 @@ fn push_args(
             }
             let prime_index = stark_info.opening_points.iter()
                 .position(|&p| p == r.prime as i64)
-                .ok_or_else(|| anyhow::anyhow!("opening point not found for const"))?;
+                .ok_or_else(|| anyhow::anyhow!("opening point {} not found for const id={}, opening_points={:?}", r.prime, r.id, stark_info.opening_points))?;
             args.push(0);
             args.push(r.id);
             args.push(prime_index as u64);

@@ -1219,4 +1219,80 @@ mod tests {
             result.hints.len(),
         );
     }
+
+    #[test]
+    fn test_poseidon2_opening_points() {
+        use crate::helpers::add_info_expressions;
+
+        let pilout_path = "/data/eric/venus/pil/zisk.pilout";
+        if !Path::new(pilout_path).exists() {
+            eprintln!("Skipping test: {} not found", pilout_path);
+            return;
+        }
+
+        let data = fs::read(pilout_path).expect("Failed to read pilout");
+        let pilout = PilOut::decode(data.as_slice()).expect("Failed to decode pilout");
+
+        // Find Poseidon2 air
+        for (ag_idx, airgroup) in pilout.air_groups.iter().enumerate() {
+            for (air_idx, _air) in airgroup.airs.iter().enumerate() {
+                let result = get_pilout_info(&pilout, ag_idx, air_idx);
+                if !result.name.contains("Poseidon2") {
+                    continue;
+                }
+
+                let mut expressions = result.expressions;
+                let constraints = result.constraints;
+
+                for expr in expressions.iter_mut() {
+                    if expr.op != "__placeholder__" {
+                        expr.stage = 1;
+                    }
+                }
+
+                for c in &constraints {
+                    add_info_expressions(&mut expressions, c.e);
+                }
+                for i in 0..expressions.len() {
+                    if expressions[i].op != "__placeholder__" {
+                        add_info_expressions(&mut expressions, i);
+                    }
+                }
+
+                let mut opening_points: Vec<i64> = vec![0];
+                for c in &constraints {
+                    for &offset in &expressions[c.e].rows_offsets {
+                        if !opening_points.contains(&offset) {
+                            opening_points.push(offset);
+                        }
+                    }
+                }
+                // Also include offsets from kept expressions
+                for expr in &expressions {
+                    if expr.keep.unwrap_or(false) || expr.im_pol {
+                        for &offset in &expr.rows_offsets {
+                            if !opening_points.contains(&offset) {
+                                opening_points.push(offset);
+                            }
+                        }
+                    }
+                }
+                opening_points.sort();
+
+                // All column offsets in the arena should be covered
+                for expr in &expressions {
+                    if expr.op == "const" || expr.op == "cm" || expr.op == "custom" {
+                        if let Some(ro) = expr.row_offset {
+                            assert!(
+                                opening_points.contains(&ro),
+                                "Column offset {} not in opening_points {:?}",
+                                ro, opening_points
+                            );
+                        }
+                    }
+                }
+                return;
+            }
+        }
+    }
 }

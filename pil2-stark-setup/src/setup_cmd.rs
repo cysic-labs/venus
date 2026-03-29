@@ -947,6 +947,17 @@ pub fn collect_opening_points(setup: &crate::pilout_info::SetupResult) -> Vec<i6
             }
         }
     }
+    // Also collect offsets from kept (hint-referenced) and imPol expressions,
+    // since generate_expressions_code produces code for them too.
+    for expr in &setup.expressions {
+        if expr.keep.unwrap_or(false) || expr.im_pol {
+            for &offset in &expr.rows_offsets {
+                if !points.contains(&offset) {
+                    points.push(offset);
+                }
+            }
+        }
+    }
     points.sort();
     points
 }

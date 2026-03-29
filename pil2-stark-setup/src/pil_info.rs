@@ -108,13 +108,25 @@ pub fn pil_info(
     // Map
     map::map(&mut setup, false);
 
-    // Compute opening points for the params
+    // Compute opening points from ALL expressions that will be code-generated:
+    // constraints, kept expressions (from hints), and imPol expressions.
+    // This mirrors the filter in generate_expressions_code which processes
+    // expressions with keep=true, im_pol=true, or matching c_exp_id/fri_exp_id.
     let mut opening_points: Vec<i64> = vec![0];
     for c in &setup.constraints {
         let offsets = &setup.expressions[c.e].rows_offsets;
         for &offset in offsets {
             if !opening_points.contains(&offset) {
                 opening_points.push(offset);
+            }
+        }
+    }
+    for expr in &setup.expressions {
+        if expr.keep.unwrap_or(false) || expr.im_pol {
+            for &offset in &expr.rows_offsets {
+                if !opening_points.contains(&offset) {
+                    opening_points.push(offset);
+                }
             }
         }
     }
