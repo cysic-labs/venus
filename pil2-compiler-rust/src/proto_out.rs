@@ -483,10 +483,17 @@ impl<'a> ProtoOutBuilder<'a> {
                 for &(stage, _agg_type) in &ag.air_group_values {
                     let global_id = global_agv_offset + agv_relative_id;
                     // Use the label from the air_group_values allocator.
-                    let label = self.processor.air_group_values.label_ranges
+                    let raw_label = self.processor.air_group_values.label_ranges
                         .get_label(global_id)
                         .unwrap_or("")
                         .to_string();
+                    // Prefix with the airgroup name to produce qualified
+                    // names like "Zisk.gsum_result" (matching JS behavior).
+                    let label = if !raw_label.is_empty() {
+                        format!("{}.{}", ag.name, raw_label)
+                    } else {
+                        String::new()
+                    };
                     if !label.is_empty() {
                         let src = self.processor.air_group_values.get_data(global_id)
                             .map(|d| d.source_ref.clone())
@@ -516,8 +523,10 @@ impl<'a> ProtoOutBuilder<'a> {
         // ------------------------------------------------------------------
         for (ag_idx, ag) in self.processor.air_groups.iter().enumerate() {
             let air_group_id = ag_idx as u32;
-            for air in &ag.airs {
-                let air_id = air.id;
+            for (air_pos, air) in ag.airs.iter().enumerate() {
+                // Use position-based air index (protobuf-relative) instead
+                // of the internal air ID, matching JS airValueId2ProtoId.
+                let air_id = air_pos as u32;
                 for sym in &air.symbols {
                     match sym.ref_type_str.as_str() {
                         "witness" => {

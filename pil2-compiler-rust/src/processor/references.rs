@@ -353,15 +353,20 @@ impl References {
     /// Start a container block. Returns false if the container already
     /// exists (matching JS `createContainer` which returns false so the
     /// caller skips the body).
+    ///
+    /// The alias is always installed even when the container already
+    /// exists (matching JS behavior where the alias is set before the
+    /// existence check).
     pub fn create_container(&mut self, name: &str, alias: Option<&str>) -> bool {
+        // Always install the alias first, even on reopen.
+        if let Some(a) = alias {
+            self.use_aliases.insert(a.to_string(), name.to_string());
+        }
         if self.containers.contains_key(name) {
             return false;
         }
         self.containers.insert(name.to_string(), HashMap::new());
         self.current_container = Some(name.to_string());
-        if let Some(a) = alias {
-            self.use_aliases.insert(a.to_string(), name.to_string());
-        }
         true
     }
 
@@ -411,6 +416,11 @@ impl References {
         if let Some(prev) = self.visibility_stack.pop() {
             self.visibility_scope = prev;
         }
+    }
+
+    /// Get the references inside a specific container, if it exists.
+    pub fn get_container_refs(&self, container_name: &str) -> Option<&HashMap<String, Reference>> {
+        self.containers.get(container_name)
     }
 
     /// Iterate over all references.

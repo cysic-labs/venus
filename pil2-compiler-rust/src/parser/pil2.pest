@@ -346,7 +346,8 @@ block_stmt = { "{" ~ statement* ~ "}" ~ semi? }
 // ===================================================================
 
 container_stmt = {
-    "container" ~ name_reference ~ "{" ~ statement* ~ "}" ~ semi?
+    "container" ~ name_reference ~ "alias" ~ ident ~ "{" ~ statement* ~ "}" ~ semi?
+  | "container" ~ name_reference ~ "{" ~ statement* ~ "}" ~ semi?
   | "container" ~ name_reference ~ "alias" ~ ident ~ semi?
   | "container" ~ name_reference ~ semi?
 }
