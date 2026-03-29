@@ -86,6 +86,9 @@ pub struct Air {
     pub air_value_stages: Vec<u32>,
     /// Whether this AIR has external fixed files (skip .fixed output).
     pub has_extern_fixed: bool,
+    /// Loaded extern fixed columns (column name -> (indexes, values)).
+    /// Populated by the `extern_fixed_file` pragma.
+    pub extern_fixed_cols: Vec<super::fixed_cols::ExternFixedCol>,
     /// Per-AIR symbol entries collected from label ranges before scope clear.
     pub symbols: Vec<SymbolEntry>,
     /// Output fixed file name override (from output_fixed_file pragma).
@@ -138,6 +141,7 @@ impl Air {
             custom_id_map: Vec::new(),
             air_value_stages: Vec::new(),
             has_extern_fixed: false,
+            extern_fixed_cols: Vec::new(),
             symbols: Vec::new(),
             output_fixed_file: None,
             hints: Vec::new(),

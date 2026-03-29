@@ -210,6 +210,118 @@ pub fn load_fixed_from_binary(
     Ok(result)
 }
 
+/// Extern fixed file column entry.
+#[derive(Debug, Clone)]
+pub struct ExternFixedCol {
+    /// Column name (e.g. "ArithFrops.OP").
+    pub name: String,
+    /// Array dimension indexes, empty for scalar columns.
+    pub indexes: Vec<u32>,
+    /// Column data: one u64 (stored as i128) per row.
+    pub values: Vec<i128>,
+}
+
+/// Load an extern fixed file (cnst format) and return columns by name.
+///
+/// Format:
+///   - 16-byte header signature: "cnst\x01\0\0\0\x01\0\0\0\x01\0\0\0"
+///   - ULE64 section_size
+///   - null-terminated airgroup name
+///   - null-terminated air name
+///   - ULE64 rows
+///   - ULE32 cols
+///   - For each column:
+///     - null-terminated column name (e.g. "AirName.COL")
+///     - ULE32 dimension count
+///     - For each dimension: ULE32 index
+///     - rows * 8 bytes of ULE64 values
+pub fn load_extern_fixed_file(file_path: &str) -> Result<Vec<ExternFixedCol>, String> {
+    use std::fs;
+    use std::path::Path;
+
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return Err(format!("extern fixed file not found: {}", file_path));
+    }
+    let bytes = fs::read(path).map_err(|e| format!("read error: {}", e))?;
+
+    let expected_sig = b"cnst\x01\0\0\0\x01\0\0\0\x01\0\0\0";
+    if bytes.len() < expected_sig.len() {
+        return Err("file too small for header".to_string());
+    }
+    if &bytes[..expected_sig.len()] != expected_sig.as_slice() {
+        return Err("invalid extern fixed file signature".to_string());
+    }
+    let mut pos = expected_sig.len();
+
+    // Helper closures.
+    let read_ule64 = |pos: &mut usize, data: &[u8]| -> Result<u64, String> {
+        if *pos + 8 > data.len() {
+            return Err("unexpected EOF reading ULE64".to_string());
+        }
+        let val = u64::from_le_bytes([
+            data[*pos], data[*pos+1], data[*pos+2], data[*pos+3],
+            data[*pos+4], data[*pos+5], data[*pos+6], data[*pos+7],
+        ]);
+        *pos += 8;
+        Ok(val)
+    };
+    let read_ule32 = |pos: &mut usize, data: &[u8]| -> Result<u32, String> {
+        if *pos + 4 > data.len() {
+            return Err("unexpected EOF reading ULE32".to_string());
+        }
+        let val = u32::from_le_bytes([
+            data[*pos], data[*pos+1], data[*pos+2], data[*pos+3],
+        ]);
+        *pos += 4;
+        Ok(val)
+    };
+    let read_string = |pos: &mut usize, data: &[u8]| -> Result<String, String> {
+        let start = *pos;
+        while *pos < data.len() && data[*pos] != 0 {
+            *pos += 1;
+        }
+        if *pos >= data.len() {
+            return Err("unexpected EOF reading string".to_string());
+        }
+        let s = String::from_utf8_lossy(&data[start..*pos]).to_string();
+        *pos += 1; // skip null terminator
+        Ok(s)
+    };
+
+    let _section_size = read_ule64(&mut pos, &bytes)?;
+    let _airgroup = read_string(&mut pos, &bytes)?;
+    let _air = read_string(&mut pos, &bytes)?;
+    let rows = read_ule64(&mut pos, &bytes)?;
+    let num_cols = read_ule32(&mut pos, &bytes)?;
+
+    let mut result = Vec::with_capacity(num_cols as usize);
+    for _ in 0..num_cols {
+        let col_name = read_string(&mut pos, &bytes)?;
+        let dim = read_ule32(&mut pos, &bytes)?;
+        let mut indexes = Vec::with_capacity(dim as usize);
+        for _ in 0..dim {
+            indexes.push(read_ule32(&mut pos, &bytes)?);
+        }
+        let data_size = rows as usize * 8;
+        if pos + data_size > bytes.len() {
+            return Err(format!("unexpected EOF reading column data for {}", col_name));
+        }
+        let mut values = Vec::with_capacity(rows as usize);
+        for r in 0..rows as usize {
+            let off = pos + r * 8;
+            let val = u64::from_le_bytes([
+                bytes[off], bytes[off+1], bytes[off+2], bytes[off+3],
+                bytes[off+4], bytes[off+5], bytes[off+6], bytes[off+7],
+            ]);
+            values.push(val as i128);
+        }
+        pos += data_size;
+        result.push(ExternFixedCol { name: col_name, indexes, values });
+    }
+    Ok(result)
+}
+
 /// Evaluate a fixed-column sequence definition into a vector of values.
 ///
 /// Given a sequence like `[1, 0]*` and a target size `num_rows`, this

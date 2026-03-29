@@ -538,6 +538,46 @@ impl Processor {
                 };
                 let expanded = self.expand_templates(inner);
                 eprintln!("  > Loading extern fixed file {} ...", expanded);
+
+                // Resolve file path: try as-is, then relative to the
+                // current source file's directory (mirroring JS behavior).
+                let resolved = {
+                    let p = std::path::Path::new(&expanded);
+                    if p.exists() {
+                        expanded.clone()
+                    } else if let Some(src) = self.include_stack.last()
+                        .or(Some(&self.source_ref))
+                    {
+                        // Try relative to the directory of the current source
+                        // file being compiled (the .pil file that contains the
+                        // pragma).
+                        let src_dir = std::path::Path::new(src).parent();
+                        if let Some(dir) = src_dir {
+                            let candidate = dir.join(&expanded);
+                            if candidate.exists() {
+                                candidate.to_string_lossy().to_string()
+                            } else {
+                                expanded.clone()
+                            }
+                        } else {
+                            expanded.clone()
+                        }
+                    } else {
+                        expanded.clone()
+                    }
+                };
+
+                // Load the extern fixed file and store column data in the AIR.
+                match fixed_cols::load_extern_fixed_file(&resolved) {
+                    Ok(cols) => {
+                        if let Some(air) = self.air_stack.last_mut() {
+                            air.extern_fixed_cols.extend(cols);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("warning: failed to load extern fixed file {}: {}", resolved, e);
+                    }
+                }
             }
             "transpile" => {
                 // Transpile pragma optimizes inner loops. No-op for
@@ -648,7 +688,18 @@ impl Processor {
                         },
                     );
                     if let Some(val) = &init_value {
-                        self.ints.set(id, val.clone());
+                        // Distribute Array values across element IDs.
+                        if !array_dims.is_empty() {
+                            if let Value::Array(items) = val {
+                                for (i, item) in items.iter().enumerate() {
+                                    self.ints.set(id + i as u32, item.clone());
+                                }
+                            } else {
+                                self.ints.set(id, val.clone());
+                            }
+                        } else {
+                            self.ints.set(id, val.clone());
+                        }
                     }
                     (RefType::Int, id)
                 }
@@ -663,7 +714,17 @@ impl Processor {
                         },
                     );
                     if let Some(val) = &init_value {
-                        self.fes.set(id, val.clone());
+                        if !array_dims.is_empty() {
+                            if let Value::Array(items) = val {
+                                for (i, item) in items.iter().enumerate() {
+                                    self.fes.set(id + i as u32, item.clone());
+                                }
+                            } else {
+                                self.fes.set(id, val.clone());
+                            }
+                        } else {
+                            self.fes.set(id, val.clone());
+                        }
                     }
                     (RefType::Fe, id)
                 }
@@ -678,7 +739,17 @@ impl Processor {
                         },
                     );
                     if let Some(val) = &init_value {
-                        self.strings.set(id, val.clone());
+                        if !array_dims.is_empty() {
+                            if let Value::Array(items) = val {
+                                for (i, item) in items.iter().enumerate() {
+                                    self.strings.set(id + i as u32, item.clone());
+                                }
+                            } else {
+                                self.strings.set(id, val.clone());
+                            }
+                        } else {
+                            self.strings.set(id, val.clone());
+                        }
                     }
                     (RefType::Str, id)
                 }
@@ -693,7 +764,17 @@ impl Processor {
                         },
                     );
                     if let Some(val) = &init_value {
-                        self.exprs.set(id, val.clone());
+                        if !array_dims.is_empty() {
+                            if let Value::Array(items) = val {
+                                for (i, item) in items.iter().enumerate() {
+                                    self.exprs.set(id + i as u32, item.clone());
+                                }
+                            } else {
+                                self.exprs.set(id, val.clone());
+                            }
+                        } else {
+                            self.exprs.set(id, val.clone());
+                        }
                     }
                     (RefType::Expr, id)
                 }
@@ -1236,7 +1317,45 @@ impl Processor {
                 }
             }
             Expr::ArrayLiteral(items) => {
-                let values: Vec<Value> = items.iter().map(|e| self.eval_expr(e)).collect();
+                let mut values: Vec<Value> = Vec::new();
+                for item in items {
+                    if let Expr::Spread(inner) = item {
+                        // Evaluate the inner expression and expand it.
+                        let inner_val = self.eval_expr(inner);
+                        match inner_val {
+                            Value::Array(arr) => {
+                                values.extend(arr);
+                            }
+                            Value::ArrayRef { ref_type, base_id, dims } => {
+                                // Expand the first dimension of the array reference.
+                                if let Some(&dim0) = dims.first() {
+                                    let remaining = dims[1..].to_vec();
+                                    for i in 0..dim0 {
+                                        let elem_id = base_id + if remaining.is_empty() {
+                                            i
+                                        } else {
+                                            i * remaining.iter().product::<u32>()
+                                        };
+                                        if remaining.is_empty() {
+                                            values.push(self.get_var_value_by_type_and_id(
+                                                &ref_type, elem_id,
+                                            ));
+                                        } else {
+                                            values.push(Value::ArrayRef {
+                                                ref_type: ref_type.clone(),
+                                                base_id: elem_id,
+                                                dims: remaining.clone(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            _ => values.push(inner_val),
+                        }
+                    } else {
+                        values.push(self.eval_expr(item));
+                    }
+                }
                 Value::Array(values)
             }
             Expr::Cast {
@@ -2014,29 +2133,38 @@ impl Processor {
                         }
                     } else {
                         // Evaluate initialization (sequence or expression).
-                        if let Some(init) = &cd.init {
-                            match init {
-                                ColInit::Sequence(seq) => {
-                                    let num_rows = self
-                                        .ints
-                                        .get(
-                                            self.references
-                                                .get_reference("N")
-                                                .map(|r| r.id)
-                                                .unwrap_or(0),
-                                        )
-                                        .and_then(|v| v.as_int())
-                                        .unwrap_or(0) as u64;
-                                    if num_rows > 0 {
-                                        let resolved = self.resolve_sequence(seq);
-                                        let data =
-                                            fixed_cols::evaluate_sequence(&resolved, num_rows);
-                                        self.fixed_cols.set_row_data(id, data);
+                        let mut loaded_from_extern = false;
+                        if cd.init.is_none() {
+                            // No explicit init: try loading from extern fixed file.
+                            loaded_from_extern = self.try_load_extern_fixed_col(
+                                &full_name, id, &array_dims,
+                            );
+                        }
+                        if !loaded_from_extern {
+                            if let Some(init) = &cd.init {
+                                match init {
+                                    ColInit::Sequence(seq) => {
+                                        let num_rows = self
+                                            .ints
+                                            .get(
+                                                self.references
+                                                    .get_reference("N")
+                                                    .map(|r| r.id)
+                                                    .unwrap_or(0),
+                                            )
+                                            .and_then(|v| v.as_int())
+                                            .unwrap_or(0) as u64;
+                                        if num_rows > 0 {
+                                            let resolved = self.resolve_sequence(seq);
+                                            let data =
+                                                fixed_cols::evaluate_sequence(&resolved, num_rows);
+                                            self.fixed_cols.set_row_data(id, data);
+                                        }
                                     }
-                                }
-                                ColInit::Expression(expr) => {
-                                    let _val = self.eval_expr(expr);
-                                    // Expression init for fixed columns.
+                                    ColInit::Expression(expr) => {
+                                        let _val = self.eval_expr(expr);
+                                        // Expression init for fixed columns.
+                                    }
                                 }
                             }
                         }
@@ -3159,6 +3287,85 @@ impl Processor {
             Value::ArrayRef { .. } => air::HintValue::Int(0),
             Value::Void => air::HintValue::Int(0),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Extern fixed column loading
+    // -----------------------------------------------------------------------
+
+    /// Try to load fixed column data from the current AIR's extern fixed
+    /// files. Returns true if data was loaded for at least one element.
+    ///
+    /// For scalar columns (array_dims empty), looks up `full_name` in the
+    /// extern file and loads data at `base_id`.
+    ///
+    /// For array columns, looks up `full_name` with matching dimension
+    /// indexes and loads each element at the corresponding offset from
+    /// `base_id`.
+    fn try_load_extern_fixed_col(
+        &mut self,
+        full_name: &str,
+        base_id: u32,
+        array_dims: &[u32],
+    ) -> bool {
+        // Collect extern fixed column data from the current AIR.
+        // Clone to avoid borrow issues.
+        let extern_cols: Vec<fixed_cols::ExternFixedCol> = self.air_stack.last()
+            .map(|air| air.extern_fixed_cols.iter().map(|c| {
+                fixed_cols::ExternFixedCol {
+                    name: c.name.clone(),
+                    indexes: c.indexes.clone(),
+                    values: c.values.clone(),
+                }
+            }).collect())
+            .unwrap_or_default();
+
+        if extern_cols.is_empty() {
+            return false;
+        }
+
+        let mut loaded = false;
+
+        if array_dims.is_empty() {
+            // Scalar column: look for exact name match with no indexes.
+            for col in &extern_cols {
+                if col.name == full_name && col.indexes.is_empty() {
+                    self.fixed_cols.set_row_data(base_id, col.values.clone());
+                    loaded = true;
+                    break;
+                }
+            }
+        } else {
+            // Array column: iterate over all matching extern cols with the
+            // same base name and compute the flat offset from their indexes.
+            for col in &extern_cols {
+                if col.name != full_name || col.indexes.is_empty() {
+                    continue;
+                }
+                if col.indexes.len() != array_dims.len() {
+                    continue;
+                }
+                // Compute flat index from the indexes and dims.
+                let mut flat = 0u32;
+                let mut valid = true;
+                for (i, &idx) in col.indexes.iter().enumerate() {
+                    if idx >= array_dims[i] {
+                        valid = false;
+                        break;
+                    }
+                    let stride: u32 = array_dims[i+1..].iter().product();
+                    flat += idx * stride;
+                }
+                if !valid {
+                    continue;
+                }
+                let target_id = base_id + flat;
+                self.fixed_cols.set_row_data(target_id, col.values.clone());
+                loaded = true;
+            }
+        }
+
+        loaded
     }
 
     // -----------------------------------------------------------------------

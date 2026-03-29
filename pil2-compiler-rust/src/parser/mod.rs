@@ -2096,9 +2096,17 @@ fn build_postfix_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, Par
 }
 
 fn build_atom_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, ParseError> {
+    // Detect spread operator: "..." ~ expression.
+    // Pest strips the literal "..." but we can detect it by checking whether
+    // the atom text starts with "...".
+    let is_spread = pair.as_str().starts_with("...");
     let inner = pair.into_inner().next().ok_or_else(|| err("empty atom_expr"))?;
 
     match inner.as_rule() {
+        Rule::expression if is_spread => {
+            let expr = build_expression(inner)?;
+            Ok(Expr::Spread(Box::new(expr)))
+        }
         Rule::expression => build_expression(inner),
         Rule::number => Ok(make_number_expr(inner.as_str())),
         Rule::string_lit => Ok(Expr::StringLit(StringLiteral {
