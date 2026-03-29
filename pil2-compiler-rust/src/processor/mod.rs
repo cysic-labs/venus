@@ -532,8 +532,50 @@ impl Processor {
                 // Transpile pragma optimizes inner loops. No-op for
                 // correctness; only affects performance.
             }
-            "output_fixed_file" | "fixed_load" => {
-                // Fixed file routing pragmas: handled in fixed column logic.
+            "output_fixed_file" => {
+                // Set the output fixed file name for the current AIR.
+                // In JS: Context.air.setOutputFixedFile(param)
+                let file_arg = parts.get(1).copied().unwrap_or("");
+                let trimmed = file_arg.trim();
+                let inner = if (trimmed.starts_with('`') && trimmed.ends_with('`'))
+                    || (trimmed.starts_with('"') && trimmed.ends_with('"'))
+                    || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+                {
+                    &trimmed[1..trimmed.len()-1]
+                } else {
+                    trimmed
+                };
+                let expanded = if inner.is_empty() {
+                    // Default: use air name
+                    let air_name = self.air_stack.last()
+                        .map(|a| a.name.clone())
+                        .unwrap_or_default();
+                    format!("{}.fixed", air_name)
+                } else {
+                    self.expand_templates(inner)
+                };
+                if let Some(air) = self.air_stack.last_mut() {
+                    air.output_fixed_file = Some(expanded);
+                }
+            }
+            "fixed_load" => {
+                // Fixed load pragma: handled during fixed column declaration.
+                // Parse: fixed_load <filename> [col_index]
+                let file_arg = parts.get(1).copied().unwrap_or("");
+                let trimmed = file_arg.trim();
+                let inner = if (trimmed.starts_with('`') && trimmed.ends_with('`'))
+                    || (trimmed.starts_with('"') && trimmed.ends_with('"'))
+                    || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+                {
+                    &trimmed[1..trimmed.len()-1]
+                } else {
+                    trimmed
+                };
+                let expanded = self.expand_templates(inner);
+                let col_idx = parts.get(2)
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                self.pragmas_next_fixed.load_from_file = Some((expanded, col_idx));
             }
             "debugger" | "debug" | "profile" | "exit" | "timer" | "memory" => {
                 // Debug/profiling pragmas: no-op in the Rust compiler.
@@ -2282,6 +2324,94 @@ impl Processor {
             .map(|a| a.has_extern_fixed)
             .unwrap_or(false);
 
+        // Get output_fixed_file from the air stack (set by pragma).
+        let output_fixed_file = self.air_stack.last()
+            .and_then(|a| a.output_fixed_file.clone());
+
+        // Collect per-AIR symbol entries from label ranges before scope
+        // clearing destroys them. This mirrors the JS `setSymbolsFromLabels`
+        // calls during `airGroupProtoOut`.
+        let air_symbols: Vec<air::SymbolEntry> = {
+            let mut syms = Vec::new();
+            let air_name = self.air_stack.last().map(|a| a.name.clone()).unwrap_or_default();
+
+            // Witness symbols from label ranges.
+            for lr in self.witness_cols.label_ranges.to_vec() {
+                let src = self.witness_cols.get_data(lr.from)
+                    .map(|d| d.source_ref.clone())
+                    .unwrap_or_default();
+                syms.push(air::SymbolEntry {
+                    name: lr.label.clone(),
+                    ref_type_str: "witness".to_string(),
+                    internal_id: lr.from,
+                    dim: lr.array_dims.len() as u32,
+                    lengths: lr.array_dims.clone(),
+                    source_ref: src,
+                });
+            }
+
+            // Fixed symbols from non-temporal label ranges.
+            for lr in self.fixed_cols.get_non_temporal_labels() {
+                let src = self.fixed_cols.ids.get_data(lr.from)
+                    .map(|d| d.source_ref.clone())
+                    .unwrap_or_default();
+                syms.push(air::SymbolEntry {
+                    name: lr.label.clone(),
+                    ref_type_str: "fixed".to_string(),
+                    internal_id: lr.from,
+                    dim: lr.array_dims.len() as u32,
+                    lengths: lr.array_dims.clone(),
+                    source_ref: src,
+                });
+            }
+
+            // Custom column symbols from label ranges.
+            for lr in self.custom_cols.label_ranges.to_vec() {
+                let src = self.custom_cols.get_data(lr.from)
+                    .map(|d| d.source_ref.clone())
+                    .unwrap_or_default();
+                syms.push(air::SymbolEntry {
+                    name: lr.label.clone(),
+                    ref_type_str: "customcol".to_string(),
+                    internal_id: lr.from,
+                    dim: lr.array_dims.len() as u32,
+                    lengths: lr.array_dims.clone(),
+                    source_ref: src,
+                });
+            }
+
+            // Air value symbols from label ranges.
+            for lr in self.air_values.label_ranges.to_vec() {
+                let src = self.air_values.get_data(lr.from)
+                    .map(|d| d.source_ref.clone())
+                    .unwrap_or_default();
+                syms.push(air::SymbolEntry {
+                    name: lr.label.clone(),
+                    ref_type_str: "airvalue".to_string(),
+                    internal_id: lr.from,
+                    dim: lr.array_dims.len() as u32,
+                    lengths: lr.array_dims.clone(),
+                    source_ref: src,
+                });
+            }
+
+            // Intermediate (im) symbols from expression labels. In JS,
+            // expression labels are collected from the packed expressions;
+            // here we use the exprs variable store's label ranges.
+            for lr in self.exprs.ids.label_ranges.to_vec() {
+                syms.push(air::SymbolEntry {
+                    name: format!("{}_{}", air_name, lr.label),
+                    ref_type_str: "im".to_string(),
+                    internal_id: lr.from,
+                    dim: lr.array_dims.len() as u32,
+                    lengths: lr.array_dims.clone(),
+                    source_ref: String::new(),
+                });
+            }
+
+            syms
+        };
+
         // Store per-AIR data (constraints, expressions, column maps) in the
         // airgroup's air entry before clearing.
         if !is_virtual {
@@ -2298,6 +2428,8 @@ impl Processor {
                         stored_air.custom_commits = custom_commits;
                         stored_air.air_value_stages = air_value_stages;
                         stored_air.has_extern_fixed = has_extern_fixed;
+                        stored_air.symbols = air_symbols;
+                        stored_air.output_fixed_file = output_fixed_file.clone();
                     }
                 }
             }
@@ -2306,6 +2438,8 @@ impl Processor {
         // Write fixed columns to binary file before clearing.
         // Skip if the AIR uses extern_fixed_file (data provided externally)
         // or if it's a virtual AIR (virtual AIRs don't produce fixed output).
+        // Use output_fixed_file pragma filename if set, otherwise default
+        // to "{air_name}.fixed".
         if self.config.fixed_to_file && !has_extern_fixed && !is_virtual {
             if let Some(ref output_dir) = self.config.output_dir.clone() {
                 if let Some(air) = self.air_stack.last() {
@@ -2319,11 +2453,15 @@ impl Processor {
                         }
                     });
                     if has_writable_cols {
+                        // Determine the output filename: use pragma-set name or default.
+                        let default_name = format!("{}.fixed", air.name);
+                        let fixed_filename = output_fixed_file.as_deref()
+                            .unwrap_or(&default_name);
                         if let Err(e) = crate::proto_out::write_fixed_cols_to_file(
                             &self.fixed_cols,
                             air.rows,
                             output_dir,
-                            &air.name,
+                            fixed_filename,
                         ) {
                             eprintln!("  > Warning: failed to write fixed cols: {}", e);
                         }

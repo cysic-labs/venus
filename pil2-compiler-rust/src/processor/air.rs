@@ -10,6 +10,22 @@ use crate::parser::ast::{FunctionArg, Statement};
 use super::constraints::{ConstraintEntry, Constraints};
 use super::expression::RuntimeExpr;
 
+/// A symbol entry collected per-AIR from label ranges and translation maps.
+/// These are stored in the Air struct so they survive AIR scope clearing.
+#[derive(Debug, Clone)]
+pub struct SymbolEntry {
+    pub name: String,
+    pub ref_type_str: String,
+    /// The base internal ID from the label range.
+    pub internal_id: u32,
+    /// Array dimension count.
+    pub dim: u32,
+    /// Array dimension sizes.
+    pub lengths: Vec<u32>,
+    /// Source reference for debug.
+    pub source_ref: String,
+}
+
 /// An Air instance (one concrete instantiation of an air template).
 ///
 /// Mirrors JS `Air`.
@@ -46,6 +62,10 @@ pub struct Air {
     pub air_value_stages: Vec<u32>,
     /// Whether this AIR has external fixed files (skip .fixed output).
     pub has_extern_fixed: bool,
+    /// Per-AIR symbol entries collected from label ranges before scope clear.
+    pub symbols: Vec<SymbolEntry>,
+    /// Output fixed file name override (from output_fixed_file pragma).
+    pub output_fixed_file: Option<String>,
 }
 
 /// Summary statistics collected after an air instance completes.
@@ -92,6 +112,8 @@ impl Air {
             custom_id_map: Vec::new(),
             air_value_stages: Vec::new(),
             has_extern_fixed: false,
+            symbols: Vec::new(),
+            output_fixed_file: None,
         }
     }
 

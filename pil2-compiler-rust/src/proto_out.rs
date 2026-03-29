@@ -12,7 +12,6 @@ use std::path::Path;
 use crate::processor::expression::{ColRefKind, RuntimeExpr, RuntimeOp, RuntimeUnaryOp, Value};
 use crate::processor::fixed_cols::FixedCols;
 use crate::processor::ids::IdAllocator;
-use crate::processor::references::{RefType, Reference};
 use crate::processor::Processor;
 
 /// Generated protobuf types from pilout.proto.
@@ -91,7 +90,13 @@ impl<'a> ProtoOutBuilder<'a> {
             Some(self.processor.config.name.clone())
         };
 
-        let base_field = bigint_to_bytes(GOLDILOCKS_PRIME as i128);
+        // base_field is the raw big-endian bytes of the field prime,
+        // NOT reduced modulo itself. Strip leading zero bytes.
+        let base_field = {
+            let full = (GOLDILOCKS_PRIME as u64).to_be_bytes();
+            let first_nonzero = full.iter().position(|&b| b != 0).unwrap_or(full.len());
+            full[first_nonzero..].to_vec()
+        };
 
         // Build air groups.
         let air_groups = self.build_air_groups();
@@ -373,122 +378,243 @@ impl<'a> ProtoOutBuilder<'a> {
         result
     }
 
-    /// Build the symbols table from the processor's reference store.
+    /// Build the symbols table.
+    ///
+    /// This combines:
+    /// - Global symbols (public, proofvalue, challenge) from the processor's
+    ///   global allocators, using per-stage relative IDs.
+    /// - Air group value symbols from each air group.
+    /// - Per-AIR symbols (witness, fixed, customcol, airvalue, im) from stored
+    ///   symbol entries and translation maps, matching JS `setSymbolsFromLabels`.
     fn build_symbols(&self) -> Vec<pilout_proto::Symbol> {
         let mut result = Vec::new();
 
-        let symbol_types = [
-            RefType::Public,
-            RefType::ProofValue,
-            RefType::Challenge,
-            RefType::Fixed,
-            RefType::Witness,
-            RefType::CustomCol,
-            RefType::AirGroupValue,
-            RefType::AirValue,
-            RefType::Intermediate,
-        ];
+        // ------------------------------------------------------------------
+        // Global symbols: public, proofvalue, challenge
+        // These use relativeId (per-stage sequential index).
+        // ------------------------------------------------------------------
 
-        for (name, reference) in self.processor.references.iter_of_types(&symbol_types) {
-            if let Some(sym) = self.reference_to_symbol(name, reference) {
-                result.push(sym);
+        // Public values: id is absolute (no relativeId needed).
+        for lr in self.processor.publics.label_ranges.to_vec() {
+            let src = self.processor.publics.get_data(lr.from)
+                .map(|d| d.source_ref.clone())
+                .unwrap_or_default();
+            result.push(pilout_proto::Symbol {
+                name: lr.label.clone(),
+                air_group_id: None,
+                air_id: None,
+                r#type: REF_TYPE_PUBLIC_VALUE,
+                id: lr.from,
+                stage: None,
+                dim: lr.array_dims.len() as u32,
+                lengths: lr.array_dims.clone(),
+                commit_id: None,
+                debug_line: Some(src),
+            });
+        }
+
+        // Proof values: use relativeId (per-stage index).
+        {
+            let mut stage_counters: HashMap<u32, u32> = HashMap::new();
+            for data in &self.processor.proof_values.datas {
+                let stage = data.stage.unwrap_or(1);
+                stage_counters.entry(stage).or_insert(0);
+            }
+            // Reset counters before iterating label ranges.
+            stage_counters.values_mut().for_each(|v| *v = 0);
+            for lr in self.processor.proof_values.label_ranges.to_vec() {
+                let data = self.processor.proof_values.get_data(lr.from);
+                let stage = data.and_then(|d| d.stage).unwrap_or(1);
+                let relative_id = *stage_counters.entry(stage).or_insert(0);
+                *stage_counters.get_mut(&stage).unwrap() += lr.count;
+                let src = data.map(|d| d.source_ref.clone()).unwrap_or_default();
+                result.push(pilout_proto::Symbol {
+                    name: lr.label.clone(),
+                    air_group_id: None,
+                    air_id: None,
+                    r#type: REF_TYPE_PROOF_VALUE,
+                    id: relative_id,
+                    stage: Some(stage),
+                    dim: lr.array_dims.len() as u32,
+                    lengths: lr.array_dims.clone(),
+                    commit_id: None,
+                    debug_line: Some(src),
+                });
+            }
+        }
+
+        // Challenges: use relativeId (per-stage index).
+        {
+            let mut stage_counters: HashMap<u32, u32> = HashMap::new();
+            for lr in self.processor.challenges.label_ranges.to_vec() {
+                let data = self.processor.challenges.get_data(lr.from);
+                let stage = data.and_then(|d| d.stage).unwrap_or(2);
+                let relative_id = *stage_counters.entry(stage).or_insert(0);
+                *stage_counters.get_mut(&stage).unwrap() += lr.count;
+                let src = data.map(|d| d.source_ref.clone()).unwrap_or_default();
+                result.push(pilout_proto::Symbol {
+                    name: lr.label.clone(),
+                    air_group_id: None,
+                    air_id: None,
+                    r#type: REF_TYPE_CHALLENGE,
+                    id: relative_id,
+                    stage: Some(stage),
+                    dim: lr.array_dims.len() as u32,
+                    lengths: lr.array_dims.clone(),
+                    commit_id: None,
+                    debug_line: Some(src),
+                });
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Air group values: per-airgroup with relativeId.
+        // ------------------------------------------------------------------
+        {
+            for (ag_idx, ag) in self.processor.air_groups.iter().enumerate() {
+                let air_group_id = ag_idx as u32;
+                let mut agv_relative_id = 0u32;
+                for &(stage, _agg_type) in &ag.air_group_values {
+                    // Use the label from the air_group_values allocator if available.
+                    let label = self.processor.air_group_values.label_ranges
+                        .get_label(agv_relative_id)
+                        .unwrap_or("")
+                        .to_string();
+                    if !label.is_empty() {
+                        let src = self.processor.air_group_values.get_data(agv_relative_id)
+                            .map(|d| d.source_ref.clone())
+                            .unwrap_or_default();
+                        result.push(pilout_proto::Symbol {
+                            name: label,
+                            air_group_id: Some(air_group_id),
+                            air_id: None,
+                            r#type: REF_TYPE_AIR_GROUP_VALUE,
+                            id: agv_relative_id,
+                            stage: Some(stage),
+                            dim: 0,
+                            lengths: Vec::new(),
+                            commit_id: None,
+                            debug_line: Some(src),
+                        });
+                    }
+                    agv_relative_id += 1;
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Per-AIR symbols: witness, fixed, customcol, airvalue, im
+        // Built from stored SymbolEntry + translation maps.
+        // ------------------------------------------------------------------
+        for (ag_idx, ag) in self.processor.air_groups.iter().enumerate() {
+            let air_group_id = ag_idx as u32;
+            for air in &ag.airs {
+                let air_id = air.id;
+                for sym in &air.symbols {
+                    match sym.ref_type_str.as_str() {
+                        "witness" => {
+                            // Remap through witness_id_map: internal_id -> (stage, proto_index)
+                            let (stage, proto_id) = air.witness_id_map
+                                .get(sym.internal_id as usize)
+                                .copied()
+                                .unwrap_or((1, sym.internal_id));
+                            result.push(pilout_proto::Symbol {
+                                name: sym.name.clone(),
+                                air_group_id: Some(air_group_id),
+                                air_id: Some(air_id),
+                                r#type: REF_TYPE_WITNESS_COL,
+                                id: proto_id,
+                                stage: Some(stage),
+                                dim: sym.dim,
+                                lengths: sym.lengths.clone(),
+                                commit_id: None,
+                                debug_line: Some(sym.source_ref.clone()),
+                            });
+                        }
+                        "fixed" => {
+                            // Remap through fixed_id_map: internal_id -> (type, proto_index)
+                            let (ctype, proto_id) = air.fixed_id_map
+                                .get(sym.internal_id as usize)
+                                .copied()
+                                .unwrap_or(('F', sym.internal_id));
+                            let sym_type = if ctype == 'P' {
+                                REF_TYPE_PERIODIC_COL
+                            } else {
+                                REF_TYPE_FIXED_COL
+                            };
+                            result.push(pilout_proto::Symbol {
+                                name: sym.name.clone(),
+                                air_group_id: Some(air_group_id),
+                                air_id: Some(air_id),
+                                r#type: sym_type,
+                                id: proto_id,
+                                stage: if ctype == 'P' { None } else { Some(0) },
+                                dim: sym.dim,
+                                lengths: sym.lengths.clone(),
+                                commit_id: None,
+                                debug_line: Some(sym.source_ref.clone()),
+                            });
+                        }
+                        "customcol" => {
+                            // Remap through custom_id_map: internal_id -> (stage, proto_index, commit_id)
+                            let (stage, proto_id, commit_id) = air.custom_id_map
+                                .get(sym.internal_id as usize)
+                                .copied()
+                                .unwrap_or((0, sym.internal_id, 0));
+                            result.push(pilout_proto::Symbol {
+                                name: sym.name.clone(),
+                                air_group_id: Some(air_group_id),
+                                air_id: Some(air_id),
+                                r#type: REF_TYPE_CUSTOM_COL,
+                                id: proto_id,
+                                stage: Some(stage),
+                                dim: sym.dim,
+                                lengths: sym.lengths.clone(),
+                                commit_id: Some(commit_id),
+                                debug_line: Some(sym.source_ref.clone()),
+                            });
+                        }
+                        "airvalue" => {
+                            // Air values: use sequential index as id, get stage from air_value_stages.
+                            let stage = air.air_value_stages
+                                .get(sym.internal_id as usize)
+                                .copied()
+                                .unwrap_or(1);
+                            result.push(pilout_proto::Symbol {
+                                name: sym.name.clone(),
+                                air_group_id: Some(air_group_id),
+                                air_id: Some(air_id),
+                                r#type: REF_TYPE_AIR_VALUE,
+                                id: sym.internal_id,
+                                stage: Some(stage),
+                                dim: sym.dim,
+                                lengths: sym.lengths.clone(),
+                                commit_id: None,
+                                debug_line: Some(sym.source_ref.clone()),
+                            });
+                        }
+                        "im" => {
+                            // Intermediate expression symbols.
+                            result.push(pilout_proto::Symbol {
+                                name: sym.name.clone(),
+                                air_group_id: Some(air_group_id),
+                                air_id: Some(air_id),
+                                r#type: REF_TYPE_IM_COL,
+                                id: sym.internal_id,
+                                stage: None,
+                                dim: sym.dim,
+                                lengths: sym.lengths.clone(),
+                                commit_id: None,
+                                debug_line: Some(sym.source_ref.clone()),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
         result
-    }
-
-    /// Convert a reference to a protobuf Symbol.
-    fn reference_to_symbol(&self, name: &str, reference: &Reference) -> Option<pilout_proto::Symbol> {
-        let (sym_type, id, stage, air_group_id, air_id, commit_id) =
-            match &reference.ref_type {
-                RefType::Intermediate => (
-                    REF_TYPE_IM_COL,
-                    reference.id,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                RefType::Fixed => (
-                    REF_TYPE_FIXED_COL,
-                    reference.id,
-                    Some(0u32),
-                    None,
-                    None,
-                    None,
-                ),
-                RefType::Witness => (
-                    REF_TYPE_WITNESS_COL,
-                    reference.id,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                RefType::CustomCol => (
-                    REF_TYPE_CUSTOM_COL,
-                    reference.id,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                RefType::Public => (
-                    REF_TYPE_PUBLIC_VALUE,
-                    reference.id,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                RefType::Challenge => (
-                    REF_TYPE_CHALLENGE,
-                    reference.id,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                RefType::ProofValue => (
-                    REF_TYPE_PROOF_VALUE,
-                    reference.id,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                RefType::AirGroupValue => (
-                    REF_TYPE_AIR_GROUP_VALUE,
-                    reference.id,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                RefType::AirValue => (
-                    REF_TYPE_AIR_VALUE,
-                    reference.id,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                _ => return None,
-            };
-
-        Some(pilout_proto::Symbol {
-            name: name.to_string(),
-            air_group_id,
-            air_id,
-            r#type: sym_type,
-            id,
-            stage,
-            dim: reference.array_dims.len() as u32,
-            lengths: reference.array_dims.clone(),
-            commit_id,
-            debug_line: Some(reference.source_ref.clone()),
-        })
     }
 
     /// Flatten a RuntimeExpr tree into the global expressions array.
@@ -914,14 +1040,14 @@ pub fn write_fixed_cols_to_file(
     fixed_cols: &FixedCols,
     num_rows: u64,
     output_dir: &str,
-    air_name: &str,
+    fixed_filename: &str,
 ) -> anyhow::Result<()> {
     let dir = Path::new(output_dir);
     if !dir.exists() {
         fs::create_dir_all(dir)?;
     }
 
-    let filename = dir.join(format!("{}.fixed", air_name));
+    let filename = dir.join(fixed_filename);
     eprintln!("  > Saving fixed file {} ...", filename.display());
     let mut file = fs::File::create(&filename)?;
 
@@ -1001,7 +1127,11 @@ mod tests {
 
     #[test]
     fn test_bigint_to_bytes_large() {
+        // The prime itself reduces to 0 modulo the prime, yielding empty bytes.
         let bytes = bigint_to_bytes(0xFFFFFFFF00000001);
-        assert!(!bytes.is_empty());
+        assert!(bytes.is_empty());
+        // A value just below the prime should be non-empty.
+        let bytes2 = bigint_to_bytes(0xFFFFFFFF00000000);
+        assert!(!bytes2.is_empty());
     }
 }
