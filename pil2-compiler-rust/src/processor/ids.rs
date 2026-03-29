@@ -57,6 +57,8 @@ pub struct IdData {
     pub global: bool,
     pub temporal: bool,
     pub external: bool,
+    /// Commit ID for custom columns (assigned by commit declaration order).
+    pub commit_id: Option<u32>,
     pub extra: HashMap<String, String>,
 }
 

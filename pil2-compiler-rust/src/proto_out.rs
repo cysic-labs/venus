@@ -133,9 +133,18 @@ impl<'a> ProtoOutBuilder<'a> {
     fn build_air_groups(&mut self) -> Vec<pilout_proto::AirGroup> {
         let mut result = Vec::new();
         for ag in self.processor.air_groups.iter() {
+            // Build air group values from stored metadata.
+            let agv: Vec<pilout_proto::AirGroupValue> = ag.air_group_values
+                .iter()
+                .map(|&(stage, agg_type)| pilout_proto::AirGroupValue {
+                    agg_type,
+                    stage,
+                })
+                .collect();
+
             let mut proto_ag = pilout_proto::AirGroup {
                 name: Some(ag.name.clone()),
-                air_group_values: Vec::new(),
+                air_group_values: agv,
                 airs: Vec::new(),
             };
 
@@ -162,6 +171,8 @@ impl<'a> ProtoOutBuilder<'a> {
                         expr,
                         &air.fixed_id_map,
                         &air.witness_id_map,
+                        &air.custom_id_map,
+                        &expr_id_map,
                         &mut proto_expressions,
                     );
                     expr_id_map.push(root_idx);
@@ -247,6 +258,24 @@ impl<'a> ProtoOutBuilder<'a> {
                     }
                 }
 
+                // Build air values from stored per-value stage metadata.
+                let proto_air_values: Vec<pilout_proto::AirValue> = air
+                    .air_value_stages
+                    .iter()
+                    .map(|&stage| pilout_proto::AirValue { stage })
+                    .collect();
+
+                // Build custom commits from stored commit info.
+                let proto_custom_commits: Vec<pilout_proto::CustomCommit> = air
+                    .custom_commits
+                    .iter()
+                    .map(|(name, sw)| pilout_proto::CustomCommit {
+                        name: if name.is_empty() { None } else { Some(name.clone()) },
+                        public_values: Vec::new(),
+                        stage_widths: sw.clone(),
+                    })
+                    .collect();
+
                 let proto_air = pilout_proto::Air {
                     name: Some(air.name.clone()),
                     num_rows: Some(air.rows as u32),
@@ -255,9 +284,9 @@ impl<'a> ProtoOutBuilder<'a> {
                     stage_widths: air.stage_widths.clone(),
                     expressions: proto_expressions,
                     constraints: proto_constraints,
-                    air_values: Vec::new(),
+                    air_values: proto_air_values,
                     aggregable: true,
-                    custom_commits: Vec::new(),
+                    custom_commits: proto_custom_commits,
                 };
                 proto_ag.airs.push(proto_air);
             }
@@ -622,17 +651,26 @@ impl<'a> ProtoOutBuilder<'a> {
 
     /// Flatten a RuntimeExpr tree into the per-AIR expressions array.
     /// Returns the index of the appended expression.
+    ///
+    /// `expr_id_map` translates internal expression-store IDs to packed
+    /// protobuf indices. This is critical for `Intermediate` operands
+    /// which reference expressions by their store ID.
+    ///
+    /// `custom_id_map` translates internal custom column IDs to
+    /// (stage, proto_index, commit_id).
     fn flatten_air_expr(
         &self,
         expr: &RuntimeExpr,
         fixed_map: &[(char, u32)],
         witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        expr_id_map: &[u32],
         out: &mut Vec<pilout_proto::Expression>,
     ) -> u32 {
         let op = match expr {
             RuntimeExpr::BinOp { op, left, right } => {
-                let lhs = self.flatten_air_operand(left, fixed_map, witness_map, out);
-                let rhs = self.flatten_air_operand(right, fixed_map, witness_map, out);
+                let lhs = self.flatten_air_operand(left, fixed_map, witness_map, custom_map, expr_id_map, out);
+                let rhs = self.flatten_air_operand(right, fixed_map, witness_map, custom_map, expr_id_map, out);
                 match op {
                     RuntimeOp::Add => pilout_proto::expression::Operation::Add(
                         pilout_proto::expression::Add { lhs, rhs },
@@ -648,7 +686,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
                     let value =
-                        self.flatten_air_operand(operand, fixed_map, witness_map, out);
+                        self.flatten_air_operand(operand, fixed_map, witness_map, custom_map, expr_id_map, out);
                     pilout_proto::expression::Operation::Neg(
                         pilout_proto::expression::Neg { value },
                     )
@@ -656,7 +694,7 @@ impl<'a> ProtoOutBuilder<'a> {
             },
             // Leaf node: wrap in Add(x, 0).
             _ => {
-                let leaf = self.leaf_to_air_operand(expr, fixed_map, witness_map);
+                let leaf = self.leaf_to_air_operand(expr, fixed_map, witness_map, custom_map, expr_id_map);
                 let zero = Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Constant(
                         pilout_proto::operand::Constant { value: Vec::new() },
@@ -682,18 +720,20 @@ impl<'a> ProtoOutBuilder<'a> {
         expr: &RuntimeExpr,
         fixed_map: &[(char, u32)],
         witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        expr_id_map: &[u32],
         out: &mut Vec<pilout_proto::Expression>,
     ) -> Option<pilout_proto::Operand> {
         match expr {
             RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
-                let idx = self.flatten_air_expr(expr, fixed_map, witness_map, out);
+                let idx = self.flatten_air_expr(expr, fixed_map, witness_map, custom_map, expr_id_map, out);
                 Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Expression(
                         pilout_proto::operand::Expression { idx },
                     )),
                 })
             }
-            _ => self.leaf_to_air_operand(expr, fixed_map, witness_map),
+            _ => self.leaf_to_air_operand(expr, fixed_map, witness_map, custom_map, expr_id_map),
         }
     }
 
@@ -703,6 +743,8 @@ impl<'a> ProtoOutBuilder<'a> {
         expr: &RuntimeExpr,
         fixed_map: &[(char, u32)],
         witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        expr_id_map: &[u32],
     ) -> Option<pilout_proto::Operand> {
         let operand = match expr {
             RuntimeExpr::Value(Value::Int(v)) => {
@@ -784,22 +826,31 @@ impl<'a> ProtoOutBuilder<'a> {
                         )
                     }
                     ColRefKind::Custom => {
-                        let stage = self.processor.custom_cols.get_data(*id)
-                            .and_then(|d| d.stage)
-                            .unwrap_or(0);
+                        // Use per-AIR custom_id_map for remapped stage,
+                        // proto_index, and commit_id.
+                        let (stage, col_idx, commit_id) = custom_map
+                            .get(*id as usize)
+                            .copied()
+                            .unwrap_or((0, *id, 0));
                         pilout_proto::operand::Operand::CustomCol(
                             pilout_proto::operand::CustomCol {
-                                commit_id: 0,
+                                commit_id,
                                 stage,
-                                col_idx: *id,
+                                col_idx,
                                 row_offset: offset,
                             },
                         )
                     }
                     ColRefKind::Intermediate => {
                         // Intermediate columns are expression references.
+                        // Remap from internal expression-store ID to the
+                        // packed protobuf index via expr_id_map.
+                        let proto_idx = expr_id_map
+                            .get(*id as usize)
+                            .copied()
+                            .unwrap_or(*id);
                         pilout_proto::operand::Operand::Expression(
-                            pilout_proto::operand::Expression { idx: *id },
+                            pilout_proto::operand::Expression { idx: proto_idx },
                         )
                     }
                 }

@@ -133,6 +133,16 @@ pub struct Processor {
     /// short-circuit until the enclosing user function returns,
     /// matching the JS compiler's exception-unwinding behavior.
     error_raised: bool,
+
+    // -- Error counting --
+    /// Total number of runtime errors encountered during compilation.
+    pub error_count: u32,
+
+    // -- Commit tracking --
+    /// Maps commit name to its commit_id (within the current AIR).
+    commit_name_to_id: HashMap<String, u32>,
+    /// Next commit_id to assign within the current AIR.
+    next_commit_id: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +216,9 @@ impl Processor {
             include_stack: Vec::new(),
             execute_counter: 0,
             error_raised: false,
+            error_count: 0,
+            commit_name_to_id: HashMap::new(),
+            next_commit_id: 0,
         };
         processor.scope.mark("proof");
         processor.load_config_defines();
@@ -330,10 +343,15 @@ impl Processor {
             "  > Total compilation: {:.2}ms",
             elapsed.as_secs_f64() * 1000.0
         );
+        if self.error_count > 0 {
+            eprintln!("  > Runtime errors: {}", self.error_count);
+        }
 
         if self.tests.active {
             self.tests.fail == 0
         } else {
+            // Match JS behavior: continue even with runtime errors.
+            // The .pilout is still written; errors are warnings.
             true
         }
     }
@@ -488,6 +506,34 @@ impl Processor {
                     let enabled = self.config.defines.contains_key(*feat_name);
                     self.pragmas_next_statement.ignore = !enabled;
                 }
+            }
+            "extern_fixed_file" => {
+                // Mark the current AIR as having external fixed columns.
+                // The fixed data is provided by a pre-generated binary file,
+                // so we should NOT write a .fixed output file for this AIR.
+                if let Some(air) = self.air_stack.last_mut() {
+                    air.has_extern_fixed = true;
+                }
+                let file_arg = parts.get(1).copied().unwrap_or("");
+                // Strip backtick/quote delimiters and expand templates.
+                let trimmed = file_arg.trim();
+                let inner = if (trimmed.starts_with('`') && trimmed.ends_with('`'))
+                    || (trimmed.starts_with('"') && trimmed.ends_with('"'))
+                    || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+                {
+                    &trimmed[1..trimmed.len()-1]
+                } else {
+                    trimmed
+                };
+                let expanded = self.expand_templates(inner);
+                eprintln!("  > Loading extern fixed file {} ...", expanded);
+            }
+            "transpile" => {
+                // Transpile pragma optimizes inner loops. No-op for
+                // correctness; only affects performance.
+            }
+            "output_fixed_file" | "fixed_load" => {
+                // Fixed file routing pragmas: handled in fixed column logic.
             }
             "debugger" | "debug" | "profile" | "exit" | "timer" | "memory" => {
                 // Debug/profiling pragmas: no-op in the Rust compiler.
@@ -1240,6 +1286,7 @@ impl Processor {
                     // statement execution in the enclosing function. At
                     // proof level there is no function to unwind so we
                     // just report and continue.
+                    self.error_count += 1;
                     if self.function_deep > 0 {
                         self.error_raised = true;
                     }
@@ -1312,6 +1359,7 @@ impl Processor {
                 Ok(_val) => return FlowSignal::None,
                 Err(msg) => {
                     eprintln!("error: {} at {}", msg, self.source_ref);
+                    self.error_count += 1;
                     if self.function_deep > 0 {
                         self.error_raised = true;
                     }
@@ -1652,7 +1700,10 @@ impl Processor {
                         &self.source_ref,
                     );
                 }
-                ColType::Custom(_commit_name) => {
+                ColType::Custom(commit_name) => {
+                    // Look up the commit_id for this commit name.
+                    let cid = self.commit_name_to_id.get(commit_name).copied();
+                    data.commit_id = cid;
                     let id = self.custom_cols.reserve(
                         size,
                         Some(&full_name),
@@ -1768,6 +1819,13 @@ impl Processor {
         &mut self,
         agvd: &AirGroupValueDeclaration,
     ) -> FlowSignal {
+        // Determine aggregate type: 0 = SUM, 1 = PROD.
+        let agg_type = match agvd.aggregate_type.as_deref() {
+            Some("prod") => 1i32,
+            _ => 0i32, // default to SUM
+        };
+        let stage = agvd.stage.map(|s| s as u32).unwrap_or(1);
+
         for item in &agvd.items {
             let name = &item.name;
             let id = self.air_group_values.reserve(
@@ -1776,7 +1834,7 @@ impl Processor {
                 &[],
                 IdData {
                     source_ref: self.source_ref.clone(),
-                    stage: agvd.stage.map(|s| s as u32),
+                    stage: Some(stage),
                     ..Default::default()
                 },
             );
@@ -1789,6 +1847,14 @@ impl Processor {
                 self.scope.deep,
                 &self.source_ref,
             );
+
+            // Store metadata in the current airgroup for protobuf output.
+            if let Some(ref ag_name) = self.current_air_group {
+                let ag_name = ag_name.clone();
+                if let Some(ag) = self.air_groups.get_mut(&ag_name) {
+                    ag.air_group_values.push((stage, agg_type));
+                }
+            }
         }
         FlowSignal::None
     }
@@ -1819,8 +1885,14 @@ impl Processor {
         FlowSignal::None
     }
 
-    fn exec_commit_declaration(&mut self, _cd: &CommitDeclaration) -> FlowSignal {
-        // Commit declarations register a commit stage. Simplified for now.
+    fn exec_commit_declaration(&mut self, cd: &CommitDeclaration) -> FlowSignal {
+        // Allocate a commit_id for this commit name if not already assigned.
+        let commit_name = cd.name.clone();
+        if !self.commit_name_to_id.contains_key(&commit_name) {
+            let cid = self.next_commit_id;
+            self.next_commit_id += 1;
+            self.commit_name_to_id.insert(commit_name, cid);
+        }
         FlowSignal::None
     }
 
@@ -2139,6 +2211,77 @@ impl Processor {
             store
         };
 
+        // Build custom column ID mappings and custom_commits.
+        let (custom_id_map, custom_commits) = {
+            let mut cid_map: Vec<(u32, u32, u32)> = Vec::new();
+            let mut commits: Vec<(String, Vec<u32>)> = Vec::new();
+
+            // Group custom columns by commit_id.
+            let mut commits_by_id: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+            let mut commit_names: HashMap<u32, String> = HashMap::new();
+            for col_id in 0..self.custom_cols.len() {
+                if let Some(data) = self.custom_cols.get_data(col_id) {
+                    let cid = data.commit_id.unwrap_or(0);
+                    let stage = data.stage.unwrap_or(0);
+                    commits_by_id.entry(cid).or_default().push((col_id, stage));
+                }
+            }
+            // Map commit_id -> name from the reverse of commit_name_to_id.
+            for (name, &cid) in &self.commit_name_to_id {
+                commit_names.insert(cid, name.clone());
+            }
+
+            let mut sorted_cids: Vec<u32> = commits_by_id.keys().cloned().collect();
+            sorted_cids.sort();
+
+            for cid in sorted_cids {
+                let cols = commits_by_id.get(&cid).unwrap();
+                let commit_name = commit_names.get(&cid).cloned().unwrap_or_default();
+
+                // Group by stage and build stage_widths (0-based stages
+                // for custom commits, matching JS behavior).
+                let mut stages_map: HashMap<u32, Vec<u32>> = HashMap::new();
+                for &(col_id, stage) in cols {
+                    stages_map.entry(stage).or_default().push(col_id);
+                }
+                let max_stage = stages_map.keys().max().copied().unwrap_or(0);
+                let mut sw = Vec::new();
+                let mut sorted_stages: Vec<u32> = stages_map.keys().cloned().collect();
+                sorted_stages.sort();
+                for stage in 0..=max_stage {
+                    let count = stages_map.get(&stage).map(|v| v.len() as u32).unwrap_or(0);
+                    sw.push(count);
+                    if let Some(ids) = stages_map.get(&stage) {
+                        for (idx, &col_id) in ids.iter().enumerate() {
+                            while cid_map.len() <= col_id as usize {
+                                cid_map.push((0, 0, 0));
+                            }
+                            cid_map[col_id as usize] = (stage, idx as u32, cid);
+                        }
+                    }
+                }
+                commits.push((commit_name, sw));
+            }
+            (cid_map, commits)
+        };
+
+        // Build air value stages.
+        let air_value_stages: Vec<u32> = {
+            let mut stages = Vec::new();
+            for avid in 0..self.air_values.len() {
+                let stage = self.air_values.get_data(avid)
+                    .and_then(|d| d.stage)
+                    .unwrap_or(1);
+                stages.push(stage);
+            }
+            stages
+        };
+
+        // Check if AIR has external fixed files (set by extern_fixed_file pragma).
+        let has_extern_fixed = self.air_stack.last()
+            .map(|a| a.has_extern_fixed)
+            .unwrap_or(false);
+
         // Store per-AIR data (constraints, expressions, column maps) in the
         // airgroup's air entry before clearing.
         if !is_virtual {
@@ -2151,22 +2294,39 @@ impl Processor {
                         stored_air.fixed_id_map = fixed_id_map;
                         stored_air.witness_id_map = witness_id_map;
                         stored_air.stage_widths = stage_widths;
+                        stored_air.custom_id_map = custom_id_map;
+                        stored_air.custom_commits = custom_commits;
+                        stored_air.air_value_stages = air_value_stages;
+                        stored_air.has_extern_fixed = has_extern_fixed;
                     }
                 }
             }
         }
 
         // Write fixed columns to binary file before clearing.
-        if self.config.fixed_to_file {
+        // Skip if the AIR uses extern_fixed_file (data provided externally)
+        // or if it's a virtual AIR (virtual AIRs don't produce fixed output).
+        if self.config.fixed_to_file && !has_extern_fixed && !is_virtual {
             if let Some(ref output_dir) = self.config.output_dir.clone() {
                 if let Some(air) = self.air_stack.last() {
-                    if let Err(e) = crate::proto_out::write_fixed_cols_to_file(
-                        &self.fixed_cols,
-                        air.rows,
-                        output_dir,
-                        &air.name,
-                    ) {
-                        eprintln!("  > Warning: failed to write fixed cols: {}", e);
+                    // Only write if there are non-temporal, non-external fixed
+                    // columns with actual data.
+                    let has_writable_cols = (0..self.fixed_cols.len()).any(|id| {
+                        if let Some(data) = self.fixed_cols.ids.get_data(id) {
+                            !data.temporal && !data.external
+                        } else {
+                            true
+                        }
+                    });
+                    if has_writable_cols {
+                        if let Err(e) = crate::proto_out::write_fixed_cols_to_file(
+                            &self.fixed_cols,
+                            air.rows,
+                            output_dir,
+                            &air.name,
+                        ) {
+                            eprintln!("  > Warning: failed to write fixed cols: {}", e);
+                        }
                     }
                 }
             }
@@ -2203,6 +2363,8 @@ impl Processor {
         self.witness_cols.clear();
         self.custom_cols.clear();
         self.air_values.clear();
+        self.commit_name_to_id.clear();
+        self.next_commit_id = 0;
 
         Value::Int(0)
     }

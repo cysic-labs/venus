@@ -38,8 +38,14 @@ pub struct Air {
     pub witness_id_map: Vec<(u32, u32)>,
     /// Number of witness columns per stage (1-based stage index).
     pub stage_widths: Vec<u32>,
-    /// Custom commit info: (commit_id, stage_widths_vec).
-    pub custom_commits: Vec<(u32, Vec<u32>)>,
+    /// Custom commit info: (commit_name, stage_widths_vec).
+    pub custom_commits: Vec<(String, Vec<u32>)>,
+    /// Custom column ID mappings: internal id -> (stage, proto_index, commit_id).
+    pub custom_id_map: Vec<(u32, u32, u32)>,
+    /// Air value metadata: per-value stage.
+    pub air_value_stages: Vec<u32>,
+    /// Whether this AIR has external fixed files (skip .fixed output).
+    pub has_extern_fixed: bool,
 }
 
 /// Summary statistics collected after an air instance completes.
@@ -83,6 +89,9 @@ impl Air {
             witness_id_map: Vec::new(),
             stage_widths: Vec::new(),
             custom_commits: Vec::new(),
+            custom_id_map: Vec::new(),
+            air_value_stages: Vec::new(),
+            has_extern_fixed: false,
         }
     }
 
@@ -113,6 +122,9 @@ pub struct AirGroup {
     id: Option<u32>,
     pub airs: Vec<Air>,
     pub ended: bool,
+    /// Air group value metadata: (stage, aggregate_type).
+    /// aggregate_type: 0 = SUM, 1 = PROD.
+    pub air_group_values: Vec<(u32, i32)>,
 }
 
 impl AirGroup {
@@ -122,6 +134,7 @@ impl AirGroup {
             id: None,
             airs: Vec::new(),
             ended: false,
+            air_group_values: Vec::new(),
         }
     }
 
