@@ -205,7 +205,26 @@ pub fn generate_constraint_polynomial(
         }
     }
 
-    let c_exp_id = c_exp_id.expect("At least one constraint is required");
+    let c_exp_id = match c_exp_id {
+        Some(id) => id,
+        None => {
+            // Zero-constraint AIRs (e.g., VirtualTable lookup tables) have no
+            // constraint polynomial. Return a dummy expression with dim=1.
+            let dummy = Expression {
+                op: "number".to_string(),
+                value: Some("0".to_string()),
+                dim: 1,
+                ..Default::default()
+            };
+            let c_exp_id = expressions.len();
+            expressions.push(dummy);
+            return ConstraintPolyResult {
+                c_exp_id,
+                q_dim: 1,
+                initial_q_degree: 0,
+            };
+        }
+    };
     let q_dim = get_exp_dim(expressions, c_exp_id);
 
     // Create std_xi challenge for evaluation

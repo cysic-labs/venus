@@ -7,6 +7,10 @@ keywords = { workspace = true }
 repository = { workspace = true }
 categories = { workspace = true }
 
+[[bin]]
+name = "venus-setup"
+path = "src/main.rs"
+
 [dependencies]
 fields = { workspace = true, features = ["verify"] }
 pilout = { workspace = true }
