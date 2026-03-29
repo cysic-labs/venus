@@ -1926,8 +1926,53 @@ fn build_unary_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, Parse
         return Err(err(format!("empty unary_expr: '{}'", text)));
     }
 
+    // In pest, unary operator literals ("-", "!", "+") are not captured
+    // as separate children. When the grammar matches "-" ~ unary_expr,
+    // we get a single child (the inner unary_expr) and the operator is
+    // only visible in the outer pair's text. Detect operators by checking
+    // whether the text starts with the operator character AND the single
+    // child's text is shorter (i.e., the operator is not part of the child).
     if children.len() == 1 {
         let child = children.remove(0);
+        let child_text = child.as_str().trim();
+
+        // Check if there's a unary prefix operator by comparing the
+        // outer text with the child text. If the outer text starts with
+        // an operator and the child text doesn't include it, we have a
+        // unary op.
+        if text.starts_with('-') && !child_text.starts_with('-')
+            || (text.starts_with('-') && text.len() > child_text.len())
+        {
+            let inner_expr = match child.as_rule() {
+                Rule::unary_expr => build_unary_expr(child)?,
+                Rule::pow_expr => build_pow_expr(child)?,
+                Rule::prefix_row_offset => build_prefix_row_offset(child)?,
+                _ => build_pow_expr(child)?,
+            };
+            return Ok(Expr::UnaryOp { op: UnaryOp::Neg, operand: Box::new(inner_expr) });
+        }
+        if text.starts_with('!') && !child_text.starts_with('!')
+            || (text.starts_with('!') && text.len() > child_text.len())
+        {
+            let inner_expr = match child.as_rule() {
+                Rule::unary_expr => build_unary_expr(child)?,
+                Rule::pow_expr => build_pow_expr(child)?,
+                Rule::prefix_row_offset => build_prefix_row_offset(child)?,
+                _ => build_pow_expr(child)?,
+            };
+            return Ok(Expr::UnaryOp { op: UnaryOp::Not, operand: Box::new(inner_expr) });
+        }
+        if text.starts_with('+') && !child_text.starts_with('+')
+            || (text.starts_with('+') && text.len() > child_text.len())
+        {
+            return match child.as_rule() {
+                Rule::unary_expr => build_unary_expr(child),
+                Rule::pow_expr => build_pow_expr(child),
+                Rule::prefix_row_offset => build_prefix_row_offset(child),
+                _ => build_pow_expr(child),
+            };
+        }
+
         return match child.as_rule() {
             Rule::unary_expr => build_unary_expr(child),
             Rule::pow_expr => build_pow_expr(child),
@@ -1936,7 +1981,8 @@ fn build_unary_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, Parse
         };
     }
 
-    // Two children: operator + operand (last child is the operand)
+    // Two or more children: operator tokens may appear as children in
+    // some pest configurations. Handle similarly.
     let operand = children.pop().unwrap();
     if text.starts_with('-') {
         let inner_expr = build_unary_expr(operand)?;

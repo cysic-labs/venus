@@ -321,10 +321,21 @@ fn exec_degree(args: &[Value]) -> Result<Value, String> {
 /// Compute the polynomial degree of a Value.
 /// 0 = constant, 1 = linear (single column ref), n = product of n
 /// column-bearing sub-expressions, etc.
+///
+/// Matches the JS compiler's per-type `.degree` getters:
+///   witness_col, fixed_col => 1
+///   public, challenge, proof_value, air_group_value, air_value, custom_col,
+///   int_value, fe_value => 0
 fn compute_value_degree(val: &Value) -> i128 {
+    use super::expression::ColRefKind;
     match val {
         Value::Int(_) | Value::Fe(_) | Value::Bool(_) | Value::Str(_) => 0,
-        Value::ColRef { .. } => 1,
+        Value::ColRef { col_type, .. } => match col_type {
+            ColRefKind::Witness | ColRefKind::Fixed => 1,
+            // Public, Challenge, ProofValue, AirGroupValue, AirValue, Custom,
+            // Intermediate all have degree 0 in the JS compiler.
+            _ => 0,
+        },
         Value::RuntimeExpr(expr) => compute_runtime_expr_degree(expr),
         Value::Void => 0,
         _ => 0,
@@ -332,10 +343,13 @@ fn compute_value_degree(val: &Value) -> i128 {
 }
 
 fn compute_runtime_expr_degree(expr: &super::expression::RuntimeExpr) -> i128 {
-    use super::expression::{RuntimeExpr, RuntimeOp, RuntimeUnaryOp};
+    use super::expression::{ColRefKind, RuntimeExpr, RuntimeOp, RuntimeUnaryOp};
     match expr {
         RuntimeExpr::Value(v) => compute_value_degree(v),
-        RuntimeExpr::ColRef { .. } => 1,
+        RuntimeExpr::ColRef { col_type, .. } => match col_type {
+            ColRefKind::Witness | ColRefKind::Fixed => 1,
+            _ => 0,
+        },
         RuntimeExpr::BinOp { op, left, right } => {
             let ld = compute_runtime_expr_degree(left);
             let rd = compute_runtime_expr_degree(right);

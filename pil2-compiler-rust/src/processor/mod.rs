@@ -1467,6 +1467,7 @@ impl Processor {
             let value = args
                 .get(i)
                 .cloned()
+                .and_then(|v| if matches!(v, Value::Void) { None } else { Some(v) })
                 .or_else(|| {
                     arg_def
                         .default_value
@@ -2076,6 +2077,7 @@ impl Processor {
             let value = args
                 .get(i)
                 .cloned()
+                .and_then(|v| if matches!(v, Value::Void) { None } else { Some(v) })
                 .or_else(|| arg_def.default_value.as_ref().map(|e| self.eval_expr(e)))
                 .unwrap_or(Value::Void);
 
