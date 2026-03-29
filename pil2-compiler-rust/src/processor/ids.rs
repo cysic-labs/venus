@@ -73,7 +73,10 @@ pub struct IdAllocator {
     pub datas: Vec<IdData>,
     pub label_ranges: LabelRanges,
     /// Stack for push/pop (nested air scopes).
-    stack: Vec<(u32, Vec<IdData>, LabelRanges)>,
+    stack: Vec<(u32, Vec<IdData>, LabelRanges, u32)>,
+    /// Base ID: datas[0] corresponds to this ID. Used by
+    /// `clear_metadata_only` to keep IDs globally unique.
+    base_id: u32,
 }
 
 impl IdAllocator {
@@ -84,6 +87,7 @@ impl IdAllocator {
             datas: Vec::new(),
             label_ranges: LabelRanges::default(),
             stack: Vec::new(),
+            base_id: 0,
         }
     }
 
@@ -121,16 +125,35 @@ impl IdAllocator {
     }
 
     pub fn get_data(&self, id: u32) -> Option<&IdData> {
-        self.datas.get(id as usize)
+        if id < self.base_id {
+            return None;
+        }
+        self.datas.get((id - self.base_id) as usize)
     }
 
     pub fn is_defined(&self, id: u32) -> bool {
-        id < self.next_id
+        id >= self.base_id && id < self.next_id
     }
 
     /// Clear all allocations (used when switching air contexts).
     pub fn clear(&mut self) {
         self.next_id = 0;
+        self.base_id = 0;
+        self.datas.clear();
+        self.label_ranges = LabelRanges::default();
+    }
+
+    /// Return the next ID that would be allocated (but don't allocate it).
+    pub fn peek_next_id(&self) -> u32 {
+        self.next_id
+    }
+
+    /// Clear metadata (datas, label_ranges) but preserve the ID counter
+    /// at `start_id` so subsequent allocations get globally unique IDs.
+    /// The base_id is set to start_id so get_data(new_id) works correctly.
+    pub fn clear_metadata_only(&mut self, start_id: u32) {
+        self.next_id = start_id;
+        self.base_id = start_id;
         self.datas.clear();
         self.label_ranges = LabelRanges::default();
     }
@@ -141,16 +164,19 @@ impl IdAllocator {
             self.next_id,
             std::mem::take(&mut self.datas),
             std::mem::take(&mut self.label_ranges),
+            self.base_id,
         ));
         self.next_id = 0;
+        self.base_id = 0;
     }
 
     /// Restore previously pushed state.
     pub fn pop(&mut self) {
-        if let Some((id, datas, lr)) = self.stack.pop() {
+        if let Some((id, datas, lr, base)) = self.stack.pop() {
             self.next_id = id;
             self.datas = datas;
             self.label_ranges = lr;
+            self.base_id = base;
         }
     }
 }

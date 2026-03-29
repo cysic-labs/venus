@@ -153,8 +153,10 @@ impl<'a> ProtoOutBuilder<'a> {
                 airs: Vec::new(),
             };
 
-            // Build airs within this group.
-            for air in &ag.airs {
+            // Build airs within this group (skip virtual airs, which live
+            // in a separate namespace in the JS compiler and are never
+            // included in the protobuf output).
+            for air in ag.airs.iter().filter(|a| !a.is_virtual) {
                 // Flatten the FULL AIR expression store into the protobuf
                 // array. This includes ALL expressions created during AIR
                 // execution (intermediate column definitions, constraint
@@ -523,10 +525,16 @@ impl<'a> ProtoOutBuilder<'a> {
         // ------------------------------------------------------------------
         for (ag_idx, ag) in self.processor.air_groups.iter().enumerate() {
             let air_group_id = ag_idx as u32;
-            for (air_pos, air) in ag.airs.iter().enumerate() {
-                // Use position-based air index (protobuf-relative) instead
-                // of the internal air ID, matching JS airValueId2ProtoId.
-                let air_id = air_pos as u32;
+            // Use only non-virtual airs for proto output, matching JS which
+            // keeps virtual airs in a separate list and never serializes them.
+            let mut non_virtual_pos = 0u32;
+            for air in &ag.airs {
+                if air.is_virtual {
+                    continue;
+                }
+                let air_id = non_virtual_pos;
+                non_virtual_pos += 1;
+                let mut air_value_counter = 0u32;
                 for sym in &air.symbols {
                     match sym.ref_type_str.as_str() {
                         "witness" => {
@@ -592,17 +600,22 @@ impl<'a> ProtoOutBuilder<'a> {
                             });
                         }
                         "airvalue" => {
-                            // Air values: use sequential index as id, get stage from air_value_stages.
+                            // Air values: use position-relative index as id
+                            // (matching JS getRelative which assigns sequential
+                            // 0-based indices), and get stage from
+                            // air_value_stages.
                             let stage = air.air_value_stages
                                 .get(sym.internal_id as usize)
                                 .copied()
                                 .unwrap_or(1);
+                            let av_proto_id = air_value_counter;
+                            air_value_counter += 1;
                             result.push(pilout_proto::Symbol {
                                 name: sym.name.clone(),
                                 air_group_id: Some(air_group_id),
                                 air_id: Some(air_id),
                                 r#type: REF_TYPE_AIR_VALUE,
-                                id: sym.internal_id,
+                                id: av_proto_id,
                                 stage: Some(stage),
                                 dim: sym.dim,
                                 lengths: sym.lengths.clone(),
@@ -1076,7 +1089,9 @@ pub fn write_fixed_cols_to_file(
 
     // Collect the IDs of non-temporal, non-external columns that have data.
     let mut col_ids: Vec<u32> = Vec::new();
-    for id in 0..fixed_cols.len() {
+    let fc_start = fixed_cols.current_start();
+    let fc_end = fc_start + fixed_cols.len();
+    for id in fc_start..fc_end {
         if let Some(data) = fixed_cols.ids.get_data(id) {
             if data.temporal || data.external {
                 continue;

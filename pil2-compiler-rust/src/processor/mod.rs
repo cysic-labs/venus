@@ -1417,6 +1417,14 @@ impl Processor {
             return self.execute_air_template_call(&tpl, &args, name, false);
         }
 
+        // Tables.* built-in functions for fixed column manipulation.
+        match name.as_str() {
+            "Tables.num_rows" => return self.tables_num_rows(&raw_args),
+            "Tables.fill" => return self.tables_fill(&raw_args),
+            "Tables.copy" => return self.tables_copy(&raw_args),
+            _ => {}
+        }
+
         Value::Void
     }
 
@@ -1942,10 +1950,20 @@ impl Processor {
             Some("prod") => 1i32,
             _ => 0i32, // default to SUM
         };
-        let stage = agvd.stage.map(|s| s as u32).unwrap_or(1);
+        // Default stage is 2 for air group values (matches JS compiler's
+        // DEFAULT_AIR_GROUP_VALUE_STAGE = 2 in pil_parser.jison).
+        let stage = agvd.stage.map(|s| s as u32).unwrap_or(2);
 
         for item in &agvd.items {
             let name = &item.name;
+
+            // Deduplicate: if this AGV name already exists in the current
+            // airgroup, reuse the existing reference (matching JS
+            // AirGroup.declareAirGroupValue which skips re-declaration).
+            if self.references.get_reference(name).is_some() {
+                continue;
+            }
+
             let id = self.air_group_values.reserve(
                 1,
                 Some(name),
@@ -2255,7 +2273,9 @@ impl Processor {
             let num_rows = self.air_stack.last().map(|a| a.rows).unwrap_or(0);
             let mut fixed_proto_idx = 0u32;
             let mut periodic_proto_idx = 0u32;
-            for col_id in 0..self.fixed_cols.len() {
+            let fc_start = self.fixed_cols.current_start();
+            let fc_end = fc_start + self.fixed_cols.len();
+            for col_id in fc_start..fc_end {
                 if let Some(data) = self.fixed_cols.ids.get_data(col_id) {
                     if data.temporal {
                         continue;
@@ -2555,7 +2575,9 @@ impl Processor {
                 if let Some(air) = self.air_stack.last() {
                     // Only write if there are non-temporal, non-external fixed
                     // columns with actual data.
-                    let has_writable_cols = (0..self.fixed_cols.len()).any(|id| {
+                    let fc_s = self.fixed_cols.current_start();
+                    let fc_e = fc_s + self.fixed_cols.len();
+                    let has_writable_cols = (fc_s..fc_e).any(|id| {
                         if let Some(data) = self.fixed_cols.ids.get_data(id) {
                             !data.temporal && !data.external
                         } else {
@@ -2815,6 +2837,118 @@ impl Processor {
     fn exec_hint(&mut self, _h: &HintStmt) -> FlowSignal {
         // Hints are collected for protobuf output. Simplified here.
         FlowSignal::None
+    }
+
+    // -----------------------------------------------------------------------
+    // Tables.* built-in functions for fixed column manipulation
+    // -----------------------------------------------------------------------
+
+    /// Extract the fixed column ID from a Value (ColRef or RuntimeExpr wrapping
+    /// a ColRef). Returns None if the value is not a fixed column reference.
+    fn extract_fixed_col_id(val: &Value) -> Option<u32> {
+        use expression::ColRefKind;
+        match val {
+            Value::ColRef { col_type: ColRefKind::Fixed, id, .. } => Some(*id),
+            Value::RuntimeExpr(expr) => {
+                use expression::RuntimeExpr;
+                match expr.as_ref() {
+                    RuntimeExpr::ColRef { col_type: ColRefKind::Fixed, id, .. } => Some(*id),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Tables.num_rows(col): returns the number of rows written to a fixed column.
+    fn tables_num_rows(&self, args: &[Value]) -> Value {
+        if args.len() != 1 {
+            eprintln!("error: Tables.num_rows: expected 1 argument at {}", self.source_ref);
+            return Value::Void;
+        }
+        if let Some(col_id) = Self::extract_fixed_col_id(&args[0]) {
+            let count = self.fixed_cols.get_row_data(col_id)
+                .map(|d| d.len() as i128)
+                .unwrap_or(0);
+            Value::Int(count)
+        } else {
+            eprintln!("error: Tables.num_rows: argument must be a fixed column at {}", self.source_ref);
+            Value::Void
+        }
+    }
+
+    /// Tables.fill(value, dst, offset, count): fills a fixed column with a constant value.
+    fn tables_fill(&mut self, args: &[Value]) -> Value {
+        if args.len() != 4 {
+            eprintln!("error: Tables.fill: expected 4 arguments at {}", self.source_ref);
+            return Value::Void;
+        }
+        let fill_value = match args[0].as_int() {
+            Some(v) => v,
+            None => {
+                eprintln!("error: Tables.fill: value must be integer at {}", self.source_ref);
+                return Value::Void;
+            }
+        };
+        let col_id = match Self::extract_fixed_col_id(&args[1]) {
+            Some(id) => id,
+            None => {
+                eprintln!("error: Tables.fill: dst must be a fixed column at {}", self.source_ref);
+                return Value::Void;
+            }
+        };
+        let offset = args[2].as_int().unwrap_or(0) as usize;
+        let count = args[3].as_int().unwrap_or(0) as usize;
+
+        for i in 0..count {
+            self.fixed_cols.set_row_value(col_id, offset + i, fill_value);
+        }
+        Value::Int(count as i128)
+    }
+
+    /// Tables.copy(src, src_offset, dst, dst_offset, count): copies rows between fixed columns.
+    fn tables_copy(&mut self, args: &[Value]) -> Value {
+        if args.len() < 4 || args.len() > 5 {
+            eprintln!("error: Tables.copy: expected 4-5 arguments at {}", self.source_ref);
+            return Value::Void;
+        }
+        let src_id = match Self::extract_fixed_col_id(&args[0]) {
+            Some(id) => id,
+            None => {
+                eprintln!("error: Tables.copy: src must be a fixed column at {}", self.source_ref);
+                return Value::Void;
+            }
+        };
+        let src_offset = args[1].as_int().unwrap_or(0) as usize;
+        let dst_id = match Self::extract_fixed_col_id(&args[2]) {
+            Some(id) => id,
+            None => {
+                eprintln!("error: Tables.copy: dst must be a fixed column at {}", self.source_ref);
+                return Value::Void;
+            }
+        };
+        let dst_offset = args[3].as_int().unwrap_or(0) as usize;
+        let count = if args.len() > 4 {
+            args[4].as_int().unwrap_or(0) as usize
+        } else {
+            // Default: copy all remaining source rows
+            self.fixed_cols.get_row_data(src_id)
+                .map(|d| d.len().saturating_sub(src_offset))
+                .unwrap_or(0)
+        };
+
+        // Read source data first to avoid borrow issues.
+        let src_values: Vec<i128> = (0..count)
+            .map(|i| {
+                self.fixed_cols.get_row_value(src_id, src_offset + i).unwrap_or(0)
+            })
+            .collect();
+
+        // Write to destination.
+        for (i, val) in src_values.into_iter().enumerate() {
+            self.fixed_cols.set_row_value(dst_id, dst_offset + i, val);
+        }
+        Value::Int(count as i128)
     }
 
     // -----------------------------------------------------------------------

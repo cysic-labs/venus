@@ -9,13 +9,21 @@ use super::ids::{IdAllocator, IdData};
 
 /// Extended fixed column storage: wraps an `IdAllocator` and stores per-column
 /// row data (the evaluated sequence values).
+///
+/// Column IDs are globally unique across all AIR executions within a
+/// compilation run. The allocator's counter never resets, ensuring that
+/// container-stashed column references from earlier AIRs remain valid for
+/// Tables.copy/Tables.num_rows in VirtualTable packing.
 #[derive(Debug, Clone)]
 pub struct FixedCols {
     pub ids: IdAllocator,
-    /// Per-column row data. Indexed by column ID.
+    /// Per-column row data. Indexed by globally unique column ID.
+    /// Never cleared; grows across all AIR executions.
     row_data: Vec<Option<Vec<i128>>>,
     /// Stack for push/pop across nested air scopes.
     stack: Vec<Vec<Option<Vec<i128>>>>,
+    /// ID at which the current AIR's columns start.
+    current_air_start: u32,
 }
 
 impl FixedCols {
@@ -24,15 +32,18 @@ impl FixedCols {
             ids: IdAllocator::new("fixed"),
             row_data: Vec::new(),
             stack: Vec::new(),
+            current_air_start: 0,
         }
     }
 
+    /// Number of columns in the current AIR (not including archived columns
+    /// from previous AIRs).
     pub fn len(&self) -> u32 {
-        self.ids.len()
+        self.ids.len() - self.current_air_start
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ids.is_empty()
+        self.len() == 0
     }
 
     /// Reserve a new fixed column, returning its ID.
@@ -83,7 +94,7 @@ impl FixedCols {
         }
     }
 
-    /// Get a single row value.
+    /// Get a single row value from the current AIR's columns.
     pub fn get_row_value(&self, id: u32, row: usize) -> Option<i128> {
         self.row_data
             .get(id as usize)
@@ -91,10 +102,19 @@ impl FixedCols {
             .and_then(|v| v.get(row).copied())
     }
 
-    /// Clear all columns (between air instances).
+
+    /// Clear allocator metadata but keep the ID counter growing and preserve
+    /// row data. This ensures container-stashed column references from prior
+    /// AIRs remain valid for Tables.copy/Tables.num_rows.
     pub fn clear(&mut self) {
-        self.ids.clear();
-        self.row_data.clear();
+        self.current_air_start = self.ids.peek_next_id();
+        self.ids.clear_metadata_only(self.current_air_start);
+        // row_data is NOT cleared: old columns remain accessible by ID.
+    }
+
+    /// Returns the first column ID of the current AIR.
+    pub fn current_start(&self) -> u32 {
+        self.current_air_start
     }
 
     /// Push state for nested air scope.
@@ -370,8 +390,17 @@ where
 
     let mut result = Vec::with_capacity(num_rows as usize);
 
-    if seq.is_padded || padding_value.is_some() {
-        // Repeat the base pattern to fill num_rows.
+    if padding_value.is_some() {
+        // Explicit Padding element (e.g. `[1,0...]`): use the base pattern
+        // for the first elements, then fill remaining rows with the padding
+        // value.  This differs from `is_padded` (cyclic repeat of `[1,0]*`).
+        result.extend_from_slice(&base_pattern);
+        let pad = padding_value.unwrap_or(0);
+        while result.len() < num_rows as usize {
+            result.push(pad);
+        }
+    } else if seq.is_padded {
+        // Cyclic repeat of the entire base pattern (e.g. `[1,0]*`).
         let pattern_len = base_pattern.len();
         for i in 0..num_rows as usize {
             result.push(base_pattern[i % pattern_len]);
@@ -380,7 +409,7 @@ where
         // Non-padded: just use the base pattern as-is, zero-extending.
         result.extend_from_slice(&base_pattern);
         while result.len() < num_rows as usize {
-            result.push(padding_value.unwrap_or(0));
+            result.push(0);
         }
     }
 
