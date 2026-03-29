@@ -129,6 +129,67 @@ impl FixedCols {
     }
 }
 
+/// Load a single column of fixed data from a binary file.
+///
+/// The binary format stores columns interleaved: each row has all columns
+/// laid out as consecutive u64 values in little-endian format. The `col_idx`
+/// parameter selects which column to extract.
+///
+/// This supports the `fixed_load` pragma used to load pre-generated fixed data.
+pub fn load_fixed_from_binary(
+    file_path: &str,
+    col_idx: u32,
+    num_rows: u64,
+) -> Result<Vec<i128>, String> {
+    use std::fs;
+    use std::path::Path;
+
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return Err(format!("file not found: {}", file_path));
+    }
+
+    let bytes = fs::read(path).map_err(|e| format!("read error: {}", e))?;
+
+    // Determine number of columns from file size.
+    // File is num_rows * num_cols * 8 bytes (u64 LE per value).
+    let total_u64s = bytes.len() / 8;
+    if total_u64s == 0 || num_rows == 0 {
+        return Err("empty file or zero rows".to_string());
+    }
+    let num_cols = total_u64s as u64 / num_rows;
+    if num_cols == 0 {
+        return Err("cannot determine column count from file size".to_string());
+    }
+    if (col_idx as u64) >= num_cols {
+        return Err(format!(
+            "col_idx {} >= num_cols {} in file",
+            col_idx, num_cols
+        ));
+    }
+
+    let mut result = Vec::with_capacity(num_rows as usize);
+    for row in 0..num_rows as usize {
+        let offset = (row * num_cols as usize + col_idx as usize) * 8;
+        if offset + 8 > bytes.len() {
+            result.push(0);
+        } else {
+            let val = u64::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+                bytes[offset + 4],
+                bytes[offset + 5],
+                bytes[offset + 6],
+                bytes[offset + 7],
+            ]);
+            result.push(val as i128);
+        }
+    }
+    Ok(result)
+}
+
 /// Evaluate a fixed-column sequence definition into a vector of values.
 ///
 /// Given a sequence like `[1, 0]*` and a target size `num_rows`, this

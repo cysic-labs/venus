@@ -236,6 +236,17 @@ impl References {
                 if let Some(r) = self.refs.get(&resolved) {
                     return Some(r);
                 }
+                // Also try the resolved name as a container lookup.
+                let resolved_parts: Vec<&str> = resolved.split('.').collect();
+                if resolved_parts.len() > 1 {
+                    let rc = resolved_parts[..resolved_parts.len() - 1].join(".");
+                    let rn = resolved_parts[resolved_parts.len() - 1];
+                    if let Some(container) = self.containers.get(&rc) {
+                        if let Some(r) = container.get(rn) {
+                            return Some(r);
+                        }
+                    }
+                }
             }
 
             // Check explicit containers.
@@ -271,6 +282,31 @@ impl References {
     /// Remove a reference by name.
     pub fn unset(&mut self, name: &str) {
         self.refs.remove(name);
+    }
+
+    /// Remove all references of a given type (for clearing air-scoped columns).
+    /// Also clears matching entries from containers.
+    pub fn clear_type(&mut self, ref_type: &RefType) {
+        self.refs.retain(|_, r| &r.ref_type != ref_type);
+        for container in self.containers.values_mut() {
+            container.retain(|_, r| &r.ref_type != ref_type);
+        }
+    }
+
+    /// Remove air-scoped containers (names starting with "air.") and
+    /// use-aliases pointing to them. Mirrors JS `references.clearScope('air')`.
+    pub fn clear_air_containers(&mut self) {
+        let air_keys: Vec<String> = self.containers.keys()
+            .filter(|k| k.starts_with("air.") || *k == "air")
+            .cloned()
+            .collect();
+        for key in &air_keys {
+            self.containers.remove(key);
+        }
+        // Remove use-aliases that point to removed containers.
+        self.use_aliases.retain(|_, v| {
+            !v.starts_with("air.") && v != "air"
+        });
     }
 
     /// Restore a previously saved reference binding.

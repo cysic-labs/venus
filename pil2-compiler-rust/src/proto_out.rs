@@ -274,9 +274,11 @@ impl<'a> ProtoOutBuilder<'a> {
                 let proto_custom_commits: Vec<pilout_proto::CustomCommit> = air
                     .custom_commits
                     .iter()
-                    .map(|(name, sw)| pilout_proto::CustomCommit {
+                    .map(|(name, sw, pub_ids)| pilout_proto::CustomCommit {
                         name: if name.is_empty() { None } else { Some(name.clone()) },
-                        public_values: Vec::new(),
+                        public_values: pub_ids.iter().map(|&idx| {
+                            pilout_proto::global_operand::PublicValue { idx }
+                        }).collect(),
                         stage_widths: sw.clone(),
                     })
                     .collect();
@@ -469,19 +471,24 @@ impl<'a> ProtoOutBuilder<'a> {
 
         // ------------------------------------------------------------------
         // Air group values: per-airgroup with relativeId.
+        // The global air_group_values allocator accumulates IDs across all
+        // airgroups, so we track a cumulative offset to look up the correct
+        // global ID for each airgroup's values.
         // ------------------------------------------------------------------
         {
+            let mut global_agv_offset = 0u32;
             for (ag_idx, ag) in self.processor.air_groups.iter().enumerate() {
                 let air_group_id = ag_idx as u32;
                 let mut agv_relative_id = 0u32;
                 for &(stage, _agg_type) in &ag.air_group_values {
-                    // Use the label from the air_group_values allocator if available.
+                    let global_id = global_agv_offset + agv_relative_id;
+                    // Use the label from the air_group_values allocator.
                     let label = self.processor.air_group_values.label_ranges
-                        .get_label(agv_relative_id)
+                        .get_label(global_id)
                         .unwrap_or("")
                         .to_string();
                     if !label.is_empty() {
-                        let src = self.processor.air_group_values.get_data(agv_relative_id)
+                        let src = self.processor.air_group_values.get_data(global_id)
                             .map(|d| d.source_ref.clone())
                             .unwrap_or_default();
                         result.push(pilout_proto::Symbol {
@@ -499,6 +506,7 @@ impl<'a> ProtoOutBuilder<'a> {
                     }
                     agv_relative_id += 1;
                 }
+                global_agv_offset += ag.air_group_values.len() as u32;
             }
         }
 

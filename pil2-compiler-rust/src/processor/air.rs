@@ -54,8 +54,8 @@ pub struct Air {
     pub witness_id_map: Vec<(u32, u32)>,
     /// Number of witness columns per stage (1-based stage index).
     pub stage_widths: Vec<u32>,
-    /// Custom commit info: (commit_name, stage_widths_vec).
-    pub custom_commits: Vec<(String, Vec<u32>)>,
+    /// Custom commit info: (commit_name, stage_widths_vec, public_ids).
+    pub custom_commits: Vec<(String, Vec<u32>, Vec<u32>)>,
     /// Custom column ID mappings: internal id -> (stage, proto_index, commit_id).
     pub custom_id_map: Vec<(u32, u32, u32)>,
     /// Air value metadata: per-value stage.

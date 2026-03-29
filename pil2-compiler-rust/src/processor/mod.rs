@@ -143,6 +143,8 @@ pub struct Processor {
     commit_name_to_id: HashMap<String, u32>,
     /// Next commit_id to assign within the current AIR.
     next_commit_id: u32,
+    /// Maps commit name to resolved public column IDs.
+    commit_publics: HashMap<String, Vec<u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +221,7 @@ impl Processor {
             error_count: 0,
             commit_name_to_id: HashMap::new(),
             next_commit_id: 0,
+            commit_publics: HashMap::new(),
         };
         processor.scope.mark("proof");
         processor.load_config_defines();
@@ -1221,10 +1224,26 @@ impl Processor {
                 }
             }
             Expr::MemberAccess { base, member } => {
-                // Member access: a.b  -- treated as dotted name.
-                let base_val = self.eval_expr(base);
-                let _ = member;
-                base_val
+                // Member access: a.b -- build dotted name for reference lookup.
+                // This supports container-scoped references like `air.__L1__`
+                // and `air.std.connect`.
+                let dotted = self.build_dotted_name(base, member);
+                if let Some(dotted_name) = dotted {
+                    // Try reference lookup with the dotted name.
+                    let reference_opt = self.references.get_reference(&dotted_name).cloned().or_else(|| {
+                        let names = self.namespace_ctx.get_names(&dotted_name);
+                        self.references.get_reference_multi(&names).cloned()
+                    });
+                    if let Some(reference) = reference_opt {
+                        return self.get_var_value(&reference);
+                    }
+                    // If it's a container name (not a reference), return a
+                    // sentinel so that `defined(container_name)` returns true.
+                    if self.references.is_container_defined(&dotted_name) {
+                        return Value::Int(1);
+                    }
+                }
+                Value::Void
             }
             Expr::Sequence(_seq) => {
                 // Sequence expressions are typically used in fixed column init.
@@ -1294,6 +1313,20 @@ impl Processor {
             },
             _ => Value::Void,
         }
+    }
+
+    /// Recursively build a dotted name from a MemberAccess chain.
+    /// E.g. `air.std.connect` from nested MemberAccess nodes.
+    fn build_dotted_name(&self, base: &Expr, member: &str) -> Option<String> {
+        let base_name = match base {
+            Expr::Reference(name_id) => Some(name_id.path.clone()),
+            Expr::MemberAccess {
+                base: inner_base,
+                member: inner_member,
+            } => self.build_dotted_name(inner_base, inner_member),
+            _ => None,
+        };
+        base_name.map(|b| format!("{}.{}", b, member))
     }
 
     /// Evaluate an expression into a RuntimeExpr (for constraints).
@@ -1698,6 +1731,9 @@ impl Processor {
                         data.external = true;
                         self.pragmas_next_fixed.external = false;
                     }
+                    // Consume fixed_load pragma if set.
+                    let load_from_file = self.pragmas_next_fixed.load_from_file.take();
+
                     let id = self.fixed_cols.reserve(
                         size,
                         Some(&full_name),
@@ -1705,30 +1741,59 @@ impl Processor {
                         data,
                     );
 
-                    // Evaluate initialization (sequence or expression).
-                    if let Some(init) = &cd.init {
-                        match init {
-                            ColInit::Sequence(seq) => {
-                                let num_rows = self
-                                    .ints
-                                    .get(
-                                        self.references
-                                            .get_reference("N")
-                                            .map(|r| r.id)
-                                            .unwrap_or(0),
-                                    )
-                                    .and_then(|v| v.as_int())
-                                    .unwrap_or(0) as u64;
-                                if num_rows > 0 {
-                                    let resolved = self.resolve_sequence(seq);
-                                    let data =
-                                        fixed_cols::evaluate_sequence(&resolved, num_rows);
+                    if let Some((file_path, col_idx)) = load_from_file {
+                        // Load fixed column data from external binary file.
+                        let num_rows = self
+                            .ints
+                            .get(
+                                self.references
+                                    .get_reference("N")
+                                    .map(|r| r.id)
+                                    .unwrap_or(0),
+                            )
+                            .and_then(|v| v.as_int())
+                            .unwrap_or(0) as u64;
+                        if num_rows > 0 {
+                            match fixed_cols::load_fixed_from_binary(
+                                &file_path, col_idx, num_rows,
+                            ) {
+                                Ok(data) => {
                                     self.fixed_cols.set_row_data(id, data);
                                 }
+                                Err(e) => {
+                                    eprintln!(
+                                        "warning: failed to load fixed col from {}: {}",
+                                        file_path, e
+                                    );
+                                }
                             }
-                            ColInit::Expression(expr) => {
-                                let _val = self.eval_expr(expr);
-                                // Expression init for fixed columns.
+                        }
+                    } else {
+                        // Evaluate initialization (sequence or expression).
+                        if let Some(init) = &cd.init {
+                            match init {
+                                ColInit::Sequence(seq) => {
+                                    let num_rows = self
+                                        .ints
+                                        .get(
+                                            self.references
+                                                .get_reference("N")
+                                                .map(|r| r.id)
+                                                .unwrap_or(0),
+                                        )
+                                        .and_then(|v| v.as_int())
+                                        .unwrap_or(0) as u64;
+                                    if num_rows > 0 {
+                                        let resolved = self.resolve_sequence(seq);
+                                        let data =
+                                            fixed_cols::evaluate_sequence(&resolved, num_rows);
+                                        self.fixed_cols.set_row_data(id, data);
+                                    }
+                                }
+                                ColInit::Expression(expr) => {
+                                    let _val = self.eval_expr(expr);
+                                    // Expression init for fixed columns.
+                                }
                             }
                         }
                     }
@@ -1934,7 +1999,30 @@ impl Processor {
         if !self.commit_name_to_id.contains_key(&commit_name) {
             let cid = self.next_commit_id;
             self.next_commit_id += 1;
-            self.commit_name_to_id.insert(commit_name, cid);
+            self.commit_name_to_id.insert(commit_name.clone(), cid);
+        }
+
+        // Resolve public column references and store their IDs.
+        let mut pub_ids = Vec::new();
+        for pub_name in &cd.publics {
+            let reference_opt = self.references.get_reference(pub_name).cloned().or_else(|| {
+                let names = self.namespace_ctx.get_names(pub_name);
+                self.references.get_reference_multi(&names).cloned()
+            });
+            if let Some(reference) = reference_opt {
+                if reference.ref_type == RefType::Public {
+                    let total = reference.total_size();
+                    for i in 0..total {
+                        pub_ids.push(reference.id + i);
+                    }
+                }
+            }
+        }
+        if !pub_ids.is_empty() {
+            self.commit_publics
+                .entry(commit_name)
+                .or_insert_with(Vec::new)
+                .extend(pub_ids);
         }
         FlowSignal::None
     }
@@ -2138,6 +2226,11 @@ impl Processor {
             self.execute_statements(block);
         }
 
+        // Execute deferred air-scoped calls (like piop_gprod_air,
+        // piop_gsum_air) before capturing constraints/columns.
+        // Mirrors JS `finalAirScope()`.
+        self.call_deferred_functions("air", "final");
+
         let witness_count = self.witness_cols.len();
         let fixed_count = self.fixed_cols.len();
         let constraint_count = self.constraints.len() as u32;
@@ -2258,7 +2351,7 @@ impl Processor {
         // Build custom column ID mappings and custom_commits.
         let (custom_id_map, custom_commits) = {
             let mut cid_map: Vec<(u32, u32, u32)> = Vec::new();
-            let mut commits: Vec<(String, Vec<u32>)> = Vec::new();
+            let mut commits: Vec<(String, Vec<u32>, Vec<u32>)> = Vec::new();
 
             // Group custom columns by commit_id.
             let mut commits_by_id: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
@@ -2304,7 +2397,12 @@ impl Processor {
                         }
                     }
                 }
-                commits.push((commit_name, sw));
+                // Get public IDs for this commit.
+                let pub_ids = self.commit_publics
+                    .get(&commit_name)
+                    .cloned()
+                    .unwrap_or_default();
+                commits.push((commit_name, sw, pub_ids));
             }
             (cid_map, commits)
         };
@@ -2498,13 +2596,21 @@ impl Processor {
         // Pop expr store to restore proof-level expressions.
         self.exprs.pop();
 
-        // Clear air-scoped column stores.
+        // Clear air-scoped column stores and their references.
+        // Mirrors JS clearAirScope() which calls clearType for each column type.
         self.fixed_cols.clear();
         self.witness_cols.clear();
         self.custom_cols.clear();
         self.air_values.clear();
+        self.references.clear_type(&RefType::Fixed);
+        self.references.clear_type(&RefType::Witness);
+        self.references.clear_type(&RefType::CustomCol);
+        self.references.clear_type(&RefType::AirValue);
+        // Clear air-scoped containers (names starting with "air.").
+        self.references.clear_air_containers();
         self.commit_name_to_id.clear();
         self.next_commit_id = 0;
+        self.commit_publics.clear();
 
         Value::Int(0)
     }
