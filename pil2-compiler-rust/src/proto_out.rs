@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use crate::processor::air::HintValue;
 use crate::processor::expression::{ColRefKind, RuntimeExpr, RuntimeOp, RuntimeUnaryOp, Value};
 use crate::processor::fixed_cols::FixedCols;
 use crate::processor::ids::IdAllocator;
@@ -119,6 +120,9 @@ impl<'a> ProtoOutBuilder<'a> {
         // Build symbols.
         let symbols = self.build_symbols();
 
+        // Build hints (per-AIR and global).
+        let hints = self.build_hints();
+
         pilout_proto::PilOut {
             name,
             base_field,
@@ -129,7 +133,7 @@ impl<'a> ProtoOutBuilder<'a> {
             public_tables: Vec::new(),
             expressions,
             constraints,
-            hints: Vec::new(),
+            hints,
             symbols,
         }
     }
@@ -520,13 +524,16 @@ impl<'a> ProtoOutBuilder<'a> {
         }
 
         // ------------------------------------------------------------------
-        // Per-AIR symbols: witness, fixed, customcol, airvalue, im
+        // Per-AIR symbols: witness, fixed, customcol, airvalue
         // Built from stored SymbolEntry + translation maps.
+        //
+        // Intermediate (im) symbols are omitted: the Rust compiler collects
+        // all expr variable label ranges, which is a superset of what the
+        // JS packed-expression labeling produces. Until expression packing
+        // is implemented, skipping IM avoids emitting ~30k spurious symbols.
         // ------------------------------------------------------------------
         for (ag_idx, ag) in self.processor.air_groups.iter().enumerate() {
             let air_group_id = ag_idx as u32;
-            // Use only non-virtual airs for proto output, matching JS which
-            // keeps virtual airs in a separate list and never serializes them.
             let mut non_virtual_pos = 0u32;
             for air in &ag.airs {
                 if air.is_virtual {
@@ -600,10 +607,6 @@ impl<'a> ProtoOutBuilder<'a> {
                             });
                         }
                         "airvalue" => {
-                            // Air values: use position-relative index as id
-                            // (matching JS getRelative which assigns sequential
-                            // 0-based indices), and get stage from
-                            // air_value_stages.
                             let stage = air.air_value_stages
                                 .get(sym.internal_id as usize)
                                 .copied()
@@ -623,21 +626,11 @@ impl<'a> ProtoOutBuilder<'a> {
                                 debug_line: Some(sym.source_ref.clone()),
                             });
                         }
-                        "im" => {
-                            // Intermediate expression symbols.
-                            result.push(pilout_proto::Symbol {
-                                name: sym.name.clone(),
-                                air_group_id: Some(air_group_id),
-                                air_id: Some(air_id),
-                                r#type: REF_TYPE_IM_COL,
-                                id: sym.internal_id,
-                                stage: None,
-                                dim: sym.dim,
-                                lengths: sym.lengths.clone(),
-                                commit_id: None,
-                                debug_line: Some(sym.source_ref.clone()),
-                            });
-                        }
+                        // Skip "im" (intermediate) symbols: the Rust compiler
+                        // does not yet implement expression packing, so it
+                        // collects all expr variable labels rather than just
+                        // the packed subset. Omitting these avoids emitting a
+                        // large number of spurious symbols.
                         _ => {}
                     }
                 }
@@ -645,6 +638,339 @@ impl<'a> ProtoOutBuilder<'a> {
         }
 
         result
+    }
+
+    /// Build the hints section of the PilOut.
+    ///
+    /// Collects per-AIR hints (with air_group_id/air_id) and global hints
+    /// (without air/airgroup scope), converting HintValue trees into
+    /// protobuf HintField messages.
+    fn build_hints(&self) -> Vec<pilout_proto::Hint> {
+        let mut result = Vec::new();
+
+        // Per-AIR hints: iterate airgroups -> airs, using stored hints.
+        for (ag_idx, ag) in self.processor.air_groups.iter().enumerate() {
+            let air_group_id = ag_idx as u32;
+            let mut non_virtual_pos = 0u32;
+            for air in &ag.airs {
+                if air.is_virtual {
+                    continue;
+                }
+                let air_id = non_virtual_pos;
+                non_virtual_pos += 1;
+
+                for hint in &air.hints {
+                    let hint_fields = self.hint_value_to_fields(
+                        &hint.data,
+                        &air.fixed_id_map,
+                        &air.witness_id_map,
+                        &air.custom_id_map,
+                        &air.air_expression_store,
+                    );
+                    result.push(pilout_proto::Hint {
+                        name: hint.name.clone(),
+                        hint_fields: if hint_fields.len() == 1 {
+                            hint_fields
+                        } else {
+                            hint_fields
+                        },
+                        air_group_id: Some(air_group_id),
+                        air_id: Some(air_id),
+                    });
+                }
+            }
+        }
+
+        // Global hints (proof-scope).
+        for hint in &self.processor.global_hints {
+            let hint_fields = self.hint_value_to_fields_global(&hint.data);
+            result.push(pilout_proto::Hint {
+                name: hint.name.clone(),
+                hint_fields,
+                air_group_id: None,
+                air_id: None,
+            });
+        }
+
+        result
+    }
+
+    /// Convert a HintValue to a list of HintField messages (per-AIR context).
+    /// For objects, each key-value pair becomes a named HintField.
+    /// For other values, a single unnamed HintField is returned.
+    fn hint_value_to_fields(
+        &self,
+        value: &HintValue,
+        fixed_map: &[(char, u32)],
+        witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        expr_store: &[RuntimeExpr],
+    ) -> Vec<pilout_proto::HintField> {
+        match value {
+            HintValue::Object(pairs) => {
+                let fields: Vec<pilout_proto::HintField> = pairs.iter().map(|(k, v)| {
+                    let mut field = self.hint_value_to_single_field(v, fixed_map, witness_map, custom_map, expr_store);
+                    field.name = Some(k.clone());
+                    field
+                }).collect();
+                // Wrap named fields in a HintFieldArray (matching JS behavior).
+                vec![pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::HintFieldArray(
+                        pilout_proto::HintFieldArray { hint_fields: fields },
+                    )),
+                }]
+            }
+            _ => vec![self.hint_value_to_single_field(value, fixed_map, witness_map, custom_map, expr_store)],
+        }
+    }
+
+    /// Convert a single HintValue to a HintField (per-AIR context).
+    fn hint_value_to_single_field(
+        &self,
+        value: &HintValue,
+        fixed_map: &[(char, u32)],
+        witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        expr_store: &[RuntimeExpr],
+    ) -> pilout_proto::HintField {
+        match value {
+            HintValue::Int(v) => pilout_proto::HintField {
+                name: None,
+                value: Some(pilout_proto::hint_field::Value::Operand(
+                    pilout_proto::Operand {
+                        operand: Some(pilout_proto::operand::Operand::Constant(
+                            pilout_proto::operand::Constant {
+                                value: bigint_to_bytes(*v),
+                            },
+                        )),
+                    },
+                )),
+            },
+            HintValue::Str(s) => pilout_proto::HintField {
+                name: None,
+                value: Some(pilout_proto::hint_field::Value::StringValue(s.clone())),
+            },
+            HintValue::ExprId(expr_id) => {
+                // Look up the expression and try to convert it to a direct
+                // operand (single column ref or constant). If it's a complex
+                // expression, reference it by packed expression index.
+                if let Some(expr) = expr_store.get(*expr_id as usize) {
+                    // Build a temporary expr_id_map by packing all expressions
+                    // to get the proto index for this expression. Since we
+                    // don't have the full packed map here, we use the expr_id
+                    // directly as the operand expression index. This works
+                    // because the air expression store is serialized in order.
+                    let operand = self.expr_to_hint_operand(expr, fixed_map, witness_map, custom_map, *expr_id);
+                    pilout_proto::HintField {
+                        name: None,
+                        value: Some(pilout_proto::hint_field::Value::Operand(operand)),
+                    }
+                } else {
+                    // Fallback: reference by expression index.
+                    pilout_proto::HintField {
+                        name: None,
+                        value: Some(pilout_proto::hint_field::Value::Operand(
+                            pilout_proto::Operand {
+                                operand: Some(pilout_proto::operand::Operand::Expression(
+                                    pilout_proto::operand::Expression { idx: *expr_id },
+                                )),
+                            },
+                        )),
+                    }
+                }
+            }
+            HintValue::Array(items) => {
+                let fields: Vec<pilout_proto::HintField> = items.iter()
+                    .map(|v| self.hint_value_to_single_field(v, fixed_map, witness_map, custom_map, expr_store))
+                    .collect();
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::HintFieldArray(
+                        pilout_proto::HintFieldArray { hint_fields: fields },
+                    )),
+                }
+            }
+            HintValue::Object(pairs) => {
+                let fields: Vec<pilout_proto::HintField> = pairs.iter().map(|(k, v)| {
+                    let mut field = self.hint_value_to_single_field(v, fixed_map, witness_map, custom_map, expr_store);
+                    field.name = Some(k.clone());
+                    field
+                }).collect();
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::HintFieldArray(
+                        pilout_proto::HintFieldArray { hint_fields: fields },
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Convert a RuntimeExpr to a per-AIR Operand for hint fields.
+    /// For simple column references, produces the direct operand.
+    /// For complex expressions, falls back to Expression { idx }.
+    fn expr_to_hint_operand(
+        &self,
+        expr: &RuntimeExpr,
+        fixed_map: &[(char, u32)],
+        witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        expr_idx: u32,
+    ) -> pilout_proto::Operand {
+        match expr {
+            RuntimeExpr::Value(Value::Int(v)) => pilout_proto::Operand {
+                operand: Some(pilout_proto::operand::Operand::Constant(
+                    pilout_proto::operand::Constant {
+                        value: bigint_to_bytes(*v),
+                    },
+                )),
+            },
+            RuntimeExpr::Value(Value::Fe(v)) => pilout_proto::Operand {
+                operand: Some(pilout_proto::operand::Operand::Constant(
+                    pilout_proto::operand::Constant {
+                        value: bigint_to_bytes(*v as i128),
+                    },
+                )),
+            },
+            RuntimeExpr::ColRef { col_type, id, row_offset } => {
+                let offset = row_offset.unwrap_or(0) as i32;
+                let op = match col_type {
+                    ColRefKind::Fixed => {
+                        let (ctype, proto_idx) = fixed_map.get(*id as usize).copied().unwrap_or(('F', *id));
+                        if ctype == 'P' {
+                            pilout_proto::operand::Operand::PeriodicCol(
+                                pilout_proto::operand::PeriodicCol { idx: proto_idx, row_offset: offset },
+                            )
+                        } else {
+                            pilout_proto::operand::Operand::FixedCol(
+                                pilout_proto::operand::FixedCol { idx: proto_idx, row_offset: offset },
+                            )
+                        }
+                    }
+                    ColRefKind::Witness => {
+                        let (stage, col_idx) = witness_map.get(*id as usize).copied().unwrap_or((1, *id));
+                        pilout_proto::operand::Operand::WitnessCol(
+                            pilout_proto::operand::WitnessCol { stage, col_idx, row_offset: offset },
+                        )
+                    }
+                    ColRefKind::Custom => {
+                        let (stage, col_idx, commit_id) = custom_map.get(*id as usize).copied().unwrap_or((0, *id, 0));
+                        pilout_proto::operand::Operand::CustomCol(
+                            pilout_proto::operand::CustomCol { commit_id, stage, col_idx, row_offset: offset },
+                        )
+                    }
+                    ColRefKind::AirValue => {
+                        pilout_proto::operand::Operand::AirValue(
+                            pilout_proto::operand::AirValue { idx: *id },
+                        )
+                    }
+                    ColRefKind::AirGroupValue => {
+                        pilout_proto::operand::Operand::AirGroupValue(
+                            pilout_proto::operand::AirGroupValue { idx: *id },
+                        )
+                    }
+                    _ => {
+                        // For other reference types, fall back to expression ref.
+                        pilout_proto::operand::Operand::Expression(
+                            pilout_proto::operand::Expression { idx: expr_idx },
+                        )
+                    }
+                };
+                pilout_proto::Operand { operand: Some(op) }
+            }
+            // Complex expression: reference by packed expression index.
+            _ => pilout_proto::Operand {
+                operand: Some(pilout_proto::operand::Operand::Expression(
+                    pilout_proto::operand::Expression { idx: expr_idx },
+                )),
+            },
+        }
+    }
+
+    /// Convert hint value to fields in global (proof) context.
+    fn hint_value_to_fields_global(
+        &self,
+        value: &HintValue,
+    ) -> Vec<pilout_proto::HintField> {
+        match value {
+            HintValue::Object(pairs) => {
+                let fields: Vec<pilout_proto::HintField> = pairs.iter().map(|(k, v)| {
+                    let mut field = self.hint_value_to_single_field_global(v);
+                    field.name = Some(k.clone());
+                    field
+                }).collect();
+                vec![pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::HintFieldArray(
+                        pilout_proto::HintFieldArray { hint_fields: fields },
+                    )),
+                }]
+            }
+            _ => vec![self.hint_value_to_single_field_global(value)],
+        }
+    }
+
+    /// Convert a single HintValue to a HintField (global context).
+    fn hint_value_to_single_field_global(
+        &self,
+        value: &HintValue,
+    ) -> pilout_proto::HintField {
+        match value {
+            HintValue::Int(v) => pilout_proto::HintField {
+                name: None,
+                value: Some(pilout_proto::hint_field::Value::Operand(
+                    pilout_proto::Operand {
+                        operand: Some(pilout_proto::operand::Operand::Constant(
+                            pilout_proto::operand::Constant {
+                                value: bigint_to_bytes(*v),
+                            },
+                        )),
+                    },
+                )),
+            },
+            HintValue::Str(s) => pilout_proto::HintField {
+                name: None,
+                value: Some(pilout_proto::hint_field::Value::StringValue(s.clone())),
+            },
+            HintValue::ExprId(expr_id) => {
+                // Global expressions: reference by index into global expression store.
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::Operand(
+                        pilout_proto::Operand {
+                            operand: Some(pilout_proto::operand::Operand::Expression(
+                                pilout_proto::operand::Expression { idx: *expr_id },
+                            )),
+                        },
+                    )),
+                }
+            }
+            HintValue::Array(items) => {
+                let fields: Vec<pilout_proto::HintField> = items.iter()
+                    .map(|v| self.hint_value_to_single_field_global(v))
+                    .collect();
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::HintFieldArray(
+                        pilout_proto::HintFieldArray { hint_fields: fields },
+                    )),
+                }
+            }
+            HintValue::Object(pairs) => {
+                let fields: Vec<pilout_proto::HintField> = pairs.iter().map(|(k, v)| {
+                    let mut field = self.hint_value_to_single_field_global(v);
+                    field.name = Some(k.clone());
+                    field
+                }).collect();
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::HintFieldArray(
+                        pilout_proto::HintFieldArray { hint_fields: fields },
+                    )),
+                }
+            }
+        }
     }
 
     /// Flatten a RuntimeExpr tree into the global expressions array.

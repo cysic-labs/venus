@@ -145,6 +145,12 @@ pub struct Processor {
     next_commit_id: u32,
     /// Maps commit name to resolved public column IDs.
     commit_publics: HashMap<String, Vec<u32>>,
+
+    // -- Hints --
+    /// Per-AIR hints collected during air scope execution.
+    pub air_hints: Vec<air::HintEntry>,
+    /// Global (proof-level) hints.
+    pub global_hints: Vec<air::HintEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +228,8 @@ impl Processor {
             commit_name_to_id: HashMap::new(),
             next_commit_id: 0,
             commit_publics: HashMap::new(),
+            air_hints: Vec::new(),
+            global_hints: Vec::new(),
         };
         processor.scope.mark("proof");
         processor.load_config_defines();
@@ -906,8 +914,24 @@ impl Processor {
         let left = self.eval_expr_to_runtime(&c.left);
         let right = self.eval_expr_to_runtime(&c.right);
 
-        let scope_type = self.scope.get_instance_type();
+        let scope_type = self.scope.get_instance_type().to_string();
         let is_global = scope_type == "proof";
+
+        // Generate witness_calc hint for `<==` constraints (matching JS behavior).
+        if c.is_witness && !is_global {
+            let left_idx = self.air_expression_store.len() as u32;
+            self.air_expression_store.push(left.clone());
+            let right_idx = self.air_expression_store.len() as u32;
+            self.air_expression_store.push(right.clone());
+            let hint_data = air::HintValue::Object(vec![
+                ("reference".to_string(), air::HintValue::ExprId(left_idx)),
+                ("expression".to_string(), air::HintValue::ExprId(right_idx)),
+            ]);
+            self.air_hints.push(air::HintEntry {
+                name: "witness_calc".to_string(),
+                data: hint_data,
+            });
+        }
 
         if is_global {
             self.global_constraints
@@ -2560,6 +2584,7 @@ impl Processor {
                         stored_air.has_extern_fixed = has_extern_fixed;
                         stored_air.symbols = air_symbols;
                         stored_air.output_fixed_file = output_fixed_file.clone();
+                        stored_air.hints = std::mem::take(&mut self.air_hints);
                     }
                 }
             }
@@ -2603,6 +2628,7 @@ impl Processor {
         }
 
         // Clean up air scope.
+        self.air_hints.clear();
         self.constraints.clear();
         self.scope.pop_instance_type();
         self.namespace_ctx.pop();
@@ -2834,9 +2860,70 @@ impl Processor {
     // Hint handling
     // -----------------------------------------------------------------------
 
-    fn exec_hint(&mut self, _h: &HintStmt) -> FlowSignal {
-        // Hints are collected for protobuf output. Simplified here.
+    fn exec_hint(&mut self, h: &HintStmt) -> FlowSignal {
+        let name = h.name.clone();
+        let data = self.process_hint_data(&h.data);
+        let scope_type = self.scope.get_instance_type().to_string();
+        if scope_type == "proof" {
+            self.global_hints.push(air::HintEntry { name, data });
+        } else if scope_type == "air" {
+            self.air_hints.push(air::HintEntry { name, data });
+        }
         FlowSignal::None
+    }
+
+    /// Recursively evaluate hint data AST into HintValue, inserting
+    /// expression references into the current expression store.
+    fn process_hint_data(&mut self, hdata: &HintData) -> air::HintValue {
+        match hdata {
+            HintData::Expr(expr) => {
+                let val = self.eval_expr(expr);
+                self.value_to_hint_value(&val)
+            }
+            HintData::Array(items) => {
+                let vals: Vec<air::HintValue> = items.iter()
+                    .map(|e| {
+                        let val = self.eval_expr(e);
+                        self.value_to_hint_value(&val)
+                    })
+                    .collect();
+                air::HintValue::Array(vals)
+            }
+            HintData::Object(fields) => {
+                let pairs: Vec<(String, air::HintValue)> = fields.iter()
+                    .map(|(k, e)| {
+                        let val = self.eval_expr(e);
+                        (k.clone(), self.value_to_hint_value(&val))
+                    })
+                    .collect();
+                air::HintValue::Object(pairs)
+            }
+        }
+    }
+
+    /// Convert a compile-time Value to a HintValue. Symbolic values
+    /// (column references, runtime expressions) are inserted into the
+    /// air expression store and referenced by index.
+    fn value_to_hint_value(&mut self, val: &Value) -> air::HintValue {
+        match val {
+            Value::Int(v) => air::HintValue::Int(*v),
+            Value::Fe(v) => air::HintValue::Int(*v as i128),
+            Value::Str(s) => air::HintValue::Str(s.clone()),
+            Value::Bool(b) => air::HintValue::Int(if *b { 1 } else { 0 }),
+            Value::Array(arr) => {
+                let vals: Vec<air::HintValue> = arr.iter()
+                    .map(|v| self.value_to_hint_value(v))
+                    .collect();
+                air::HintValue::Array(vals)
+            }
+            Value::ColRef { .. } | Value::RuntimeExpr(_) => {
+                let rt = value_to_runtime_expr(val);
+                let idx = self.air_expression_store.len() as u32;
+                self.air_expression_store.push(rt);
+                air::HintValue::ExprId(idx)
+            }
+            Value::Void => air::HintValue::Int(0),
+        }
     }
 
     // -----------------------------------------------------------------------

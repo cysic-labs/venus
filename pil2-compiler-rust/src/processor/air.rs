@@ -10,6 +10,30 @@ use crate::parser::ast::{FunctionArg, Statement};
 use super::constraints::{ConstraintEntry, Constraints};
 use super::expression::RuntimeExpr;
 
+/// Hint data value that can appear inside a hint field.
+/// Mirrors the JS hint data model: expressions become expression-store IDs,
+/// integers/strings are kept as-is, arrays and objects are recursive.
+#[derive(Debug, Clone)]
+pub enum HintValue {
+    /// An integer constant.
+    Int(i128),
+    /// A string literal.
+    Str(String),
+    /// An expression stored in the AIR expression store, referenced by index.
+    ExprId(u32),
+    /// An array of hint values.
+    Array(Vec<HintValue>),
+    /// An object (ordered key-value pairs) of hint values.
+    Object(Vec<(String, HintValue)>),
+}
+
+/// A collected hint entry, corresponding to a `@name { ... }` statement.
+#[derive(Debug, Clone)]
+pub struct HintEntry {
+    pub name: String,
+    pub data: HintValue,
+}
+
 /// A symbol entry collected per-AIR from label ranges and translation maps.
 /// These are stored in the Air struct so they survive AIR scope clearing.
 #[derive(Debug, Clone)]
@@ -66,6 +90,8 @@ pub struct Air {
     pub symbols: Vec<SymbolEntry>,
     /// Output fixed file name override (from output_fixed_file pragma).
     pub output_fixed_file: Option<String>,
+    /// Per-AIR hint entries collected during execution.
+    pub hints: Vec<HintEntry>,
 }
 
 /// Summary statistics collected after an air instance completes.
@@ -114,6 +140,7 @@ impl Air {
             has_extern_fixed: false,
             symbols: Vec::new(),
             output_fixed_file: None,
+            hints: Vec::new(),
         }
     }
 
