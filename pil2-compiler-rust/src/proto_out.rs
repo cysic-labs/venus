@@ -162,6 +162,7 @@ impl<'a> ProtoOutBuilder<'a> {
                 // `this.expressions.pack(...)` behavior.
                 let mut proto_expressions: Vec<pilout_proto::Expression> = Vec::new();
                 let mut expr_id_map: Vec<u32> = Vec::new();
+                let mut dedup: HashMap<Vec<u8>, u32> = HashMap::new();
 
                 // Use the full AIR expression store if available, falling
                 // back to constraint-only expressions for backward compat.
@@ -179,6 +180,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         &air.custom_id_map,
                         &expr_id_map,
                         &mut proto_expressions,
+                        &mut dedup,
                     );
                     expr_id_map.push(root_idx);
                 }
@@ -339,16 +341,17 @@ impl<'a> ProtoOutBuilder<'a> {
     ) -> (Vec<pilout_proto::GlobalExpression>, Vec<u32>) {
         let mut result = Vec::new();
         let mut id_map = Vec::new();
+        let mut dedup: HashMap<Vec<u8>, u32> = HashMap::new();
 
         // First, flatten proof-level intermediate expressions.
         for expr in &self.processor.global_expression_store {
-            let idx = self.flatten_expr_to_global(expr, &mut result);
+            let idx = self.flatten_expr_to_global(expr, &mut result, &mut dedup);
             id_map.push(idx);
         }
 
         // Then flatten constraint expressions.
         for expr in self.processor.global_constraints.all_expressions() {
-            let idx = self.flatten_expr_to_global(expr, &mut result);
+            let idx = self.flatten_expr_to_global(expr, &mut result, &mut dedup);
             id_map.push(idx);
         }
         (result, id_map)
@@ -630,15 +633,19 @@ impl<'a> ProtoOutBuilder<'a> {
     /// Returns the index of the newly appended expression within `out`.
     /// Sub-expressions (nested BinOp / UnaryOp) are recursively
     /// flattened first so their indices are available as operands.
+    ///
+    /// `dedup` caches already-flattened expressions to avoid duplicating
+    /// identical sub-trees in the protobuf output.
     fn flatten_expr_to_global(
         &self,
         expr: &RuntimeExpr,
         out: &mut Vec<pilout_proto::GlobalExpression>,
+        dedup: &mut HashMap<Vec<u8>, u32>,
     ) -> u32 {
         let op = match expr {
             RuntimeExpr::BinOp { op, left, right } => {
-                let lhs = self.flatten_operand_to_global(left, out);
-                let rhs = self.flatten_operand_to_global(right, out);
+                let lhs = self.flatten_operand_to_global(left, out, dedup);
+                let rhs = self.flatten_operand_to_global(right, out, dedup);
                 match op {
                     RuntimeOp::Add => {
                         pilout_proto::global_expression::Operation::Add(
@@ -659,7 +666,7 @@ impl<'a> ProtoOutBuilder<'a> {
             }
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
-                    let value = self.flatten_operand_to_global(operand, out);
+                    let value = self.flatten_operand_to_global(operand, out, dedup);
                     pilout_proto::global_expression::Operation::Neg(
                         pilout_proto::global_expression::Neg { value },
                     )
@@ -681,10 +688,19 @@ impl<'a> ProtoOutBuilder<'a> {
             }
         };
 
-        let idx = out.len() as u32;
-        out.push(pilout_proto::GlobalExpression {
+        let proto_expr = pilout_proto::GlobalExpression {
             operation: Some(op),
-        });
+        };
+
+        // Deduplicate: serialize and check cache.
+        let key = proto_expr.encode_to_vec();
+        if let Some(&existing_idx) = dedup.get(&key) {
+            return existing_idx;
+        }
+
+        let idx = out.len() as u32;
+        out.push(proto_expr);
+        dedup.insert(key, idx);
         idx
     }
 
@@ -694,11 +710,12 @@ impl<'a> ProtoOutBuilder<'a> {
         &self,
         expr: &RuntimeExpr,
         out: &mut Vec<pilout_proto::GlobalExpression>,
+        dedup: &mut HashMap<Vec<u8>, u32>,
     ) -> Option<pilout_proto::GlobalOperand> {
         match expr {
             // Nested expression: flatten recursively and reference by index.
             RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
-                let idx = self.flatten_expr_to_global(expr, out);
+                let idx = self.flatten_expr_to_global(expr, out, dedup);
                 Some(pilout_proto::GlobalOperand {
                     operand: Some(pilout_proto::global_operand::Operand::Expression(
                         pilout_proto::global_operand::Expression { idx },
@@ -792,6 +809,10 @@ impl<'a> ProtoOutBuilder<'a> {
     ///
     /// `custom_id_map` translates internal custom column IDs to
     /// (stage, proto_index, commit_id).
+    ///
+    /// `dedup` caches already-flattened expressions to avoid duplicating
+    /// identical sub-trees in the protobuf output. Keyed by the
+    /// serialized bytes of the protobuf Expression.
     fn flatten_air_expr(
         &self,
         expr: &RuntimeExpr,
@@ -800,11 +821,12 @@ impl<'a> ProtoOutBuilder<'a> {
         custom_map: &[(u32, u32, u32)],
         expr_id_map: &[u32],
         out: &mut Vec<pilout_proto::Expression>,
+        dedup: &mut HashMap<Vec<u8>, u32>,
     ) -> u32 {
         let op = match expr {
             RuntimeExpr::BinOp { op, left, right } => {
-                let lhs = self.flatten_air_operand(left, fixed_map, witness_map, custom_map, expr_id_map, out);
-                let rhs = self.flatten_air_operand(right, fixed_map, witness_map, custom_map, expr_id_map, out);
+                let lhs = self.flatten_air_operand(left, fixed_map, witness_map, custom_map, expr_id_map, out, dedup);
+                let rhs = self.flatten_air_operand(right, fixed_map, witness_map, custom_map, expr_id_map, out, dedup);
                 match op {
                     RuntimeOp::Add => pilout_proto::expression::Operation::Add(
                         pilout_proto::expression::Add { lhs, rhs },
@@ -820,7 +842,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
                     let value =
-                        self.flatten_air_operand(operand, fixed_map, witness_map, custom_map, expr_id_map, out);
+                        self.flatten_air_operand(operand, fixed_map, witness_map, custom_map, expr_id_map, out, dedup);
                     pilout_proto::expression::Operation::Neg(
                         pilout_proto::expression::Neg { value },
                     )
@@ -841,10 +863,20 @@ impl<'a> ProtoOutBuilder<'a> {
             }
         };
 
-        let idx = out.len() as u32;
-        out.push(pilout_proto::Expression {
+        let proto_expr = pilout_proto::Expression {
             operation: Some(op),
-        });
+        };
+
+        // Deduplicate: serialize the expression and check if we already
+        // have an identical one.
+        let key = proto_expr.encode_to_vec();
+        if let Some(&existing_idx) = dedup.get(&key) {
+            return existing_idx;
+        }
+
+        let idx = out.len() as u32;
+        out.push(proto_expr);
+        dedup.insert(key, idx);
         idx
     }
 
@@ -857,10 +889,11 @@ impl<'a> ProtoOutBuilder<'a> {
         custom_map: &[(u32, u32, u32)],
         expr_id_map: &[u32],
         out: &mut Vec<pilout_proto::Expression>,
+        dedup: &mut HashMap<Vec<u8>, u32>,
     ) -> Option<pilout_proto::Operand> {
         match expr {
             RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
-                let idx = self.flatten_air_expr(expr, fixed_map, witness_map, custom_map, expr_id_map, out);
+                let idx = self.flatten_air_expr(expr, fixed_map, witness_map, custom_map, expr_id_map, out, dedup);
                 Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Expression(
                         pilout_proto::operand::Expression { idx },

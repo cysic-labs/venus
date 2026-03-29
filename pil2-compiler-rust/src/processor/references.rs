@@ -192,13 +192,48 @@ impl References {
         if self.refs.contains_key(name) {
             return self.refs.get_mut(name);
         }
-        // Search containers.
-        let parts: Vec<&str> = name.split('.').collect();
-        if parts.len() > 1 {
-            let container_name = parts[..parts.len() - 1].join(".");
-            let inner_name = parts[parts.len() - 1];
-            if let Some(container) = self.containers.get_mut(&container_name) {
-                return container.get_mut(inner_name);
+
+        // Find which container holds this name and do the mutable lookup
+        // in a single step to satisfy the borrow checker.
+        let container_key = self.find_container_for_mut(name);
+        if let Some(key) = container_key {
+            return self.containers.get_mut(&key)
+                .and_then(|c| c.get_mut(name));
+        }
+
+        // Search dotted containers.
+        if name.contains('.') {
+            let parts: Vec<&str> = name.split('.').collect();
+            if parts.len() > 1 {
+                let container_name = parts[..parts.len() - 1].join(".");
+                let inner_name = parts.last().unwrap().to_string();
+                return self.containers.get_mut(&container_name)
+                    .and_then(|c| c.get_mut(&inner_name));
+            }
+        }
+        None
+    }
+
+    /// Helper: find which container holds an unqualified name.
+    /// Returns the container key, or None. Used by get_reference_mut.
+    fn find_container_for_mut(&self, name: &str) -> Option<String> {
+        // Check current container first.
+        if let Some(cname) = &self.current_container {
+            if let Some(container) = self.containers.get(cname) {
+                if container.contains_key(name) {
+                    return Some(cname.clone());
+                }
+            }
+        }
+
+        // For unqualified names, check use-aliased containers.
+        if !name.contains('.') {
+            for target in self.use_aliases.values() {
+                if let Some(container) = self.containers.get(target) {
+                    if container.contains_key(name) {
+                        return Some(target.clone());
+                    }
+                }
             }
         }
         None
@@ -211,11 +246,21 @@ impl References {
             return Some(r);
         }
 
-        // Fast path: no dots means no container resolution needed.
+        // Check current container for unqualified names.
+        if let Some(container_name) = &self.current_container {
+            if let Some(container) = self.containers.get(container_name) {
+                if let Some(r) = container.get(name) {
+                    return Some(r);
+                }
+            }
+        }
+
         if !name.contains('.') {
-            // Only check current container.
-            if let Some(container_name) = &self.current_container {
-                if let Some(container) = self.containers.get(container_name) {
+            // For unqualified names, also check all use-aliased containers.
+            // `use proof.std.rc` makes inner names of `proof.std.rc` directly
+            // accessible without qualification.
+            for (_alias, target) in &self.use_aliases {
+                if let Some(container) = self.containers.get(target) {
                     if let Some(r) = container.get(name) {
                         return Some(r);
                     }
@@ -252,15 +297,6 @@ impl References {
             // Check explicit containers.
             if let Some(container) = self.containers.get(&container_candidate) {
                 if let Some(r) = container.get(inner_name) {
-                    return Some(r);
-                }
-            }
-        }
-
-        // Search inside the current container.
-        if let Some(container_name) = &self.current_container {
-            if let Some(container) = self.containers.get(container_name) {
-                if let Some(r) = container.get(name) {
                     return Some(r);
                 }
             }
@@ -351,6 +387,17 @@ impl References {
     /// Check if a container is defined.
     pub fn is_container_defined(&self, name: &str) -> bool {
         self.containers.contains_key(name)
+    }
+
+    /// Check if the current container already has a variable by name.
+    /// Used to avoid re-initializing container variables on re-open.
+    pub fn container_has_var(&self, name: &str) -> bool {
+        if let Some(container_name) = &self.current_container {
+            if let Some(container) = self.containers.get(container_name) {
+                return container.contains_key(name);
+            }
+        }
+        false
     }
 
     /// Push visibility scope (for function calls).

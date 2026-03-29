@@ -332,7 +332,7 @@ pub fn compile(options: &CompileOptions) -> anyhow::Result<()> {
     // failures but always proceed to write the output, matching JS
     // behavior. Only test-mode failures are fatal (after output).
     if !success {
-        eprintln!("  > Warning: tests reported failures (will still write output)");
+        eprintln!("  > Warning: compilation reported errors (will still write output)");
     }
 
     // Determine output file path.
@@ -360,5 +360,12 @@ pub fn compile(options: &CompileOptions) -> anyhow::Result<()> {
     }
 
     eprintln!("  > Compilation complete: {}", output_path);
+
+    // Return error after writing output so the process exits nonzero
+    // when compilation encountered runtime errors or test failures.
+    if !success {
+        anyhow::bail!("Compilation completed with errors");
+    }
+
     Ok(())
 }

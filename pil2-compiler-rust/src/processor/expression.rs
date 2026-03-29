@@ -12,7 +12,7 @@ use crate::parser::ast::{BinOp, Expr, NumericLiteral, NumericRadix, UnaryOp};
 /// The JS implementation uses a class hierarchy rooted at `ExpressionItem`
 /// with subclasses `IntValue`, `FeValue`, `StringValue`, etc. We flatten
 /// these into an enum for ergonomic Rust usage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Value {
     Int(i128),
     Fe(u64),
@@ -47,7 +47,7 @@ pub enum ColRefKind {
 
 /// An expression node that cannot be fully folded at compile time.
 /// Preserved for protobuf serialization.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RuntimeExpr {
     Value(Value),
     BinOp {
@@ -66,14 +66,14 @@ pub enum RuntimeExpr {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeOp {
     Add,
     Sub,
     Mul,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeUnaryOp {
     Neg,
 }

@@ -353,9 +353,9 @@ impl Processor {
         if self.tests.active {
             self.tests.fail == 0
         } else {
-            // Match JS behavior: continue even with runtime errors.
-            // The .pilout is still written; errors are warnings.
-            true
+            // Return false when runtime errors occurred so the caller
+            // can signal failure after writing the pilout.
+            self.error_count == 0
         }
     }
 
@@ -694,6 +694,16 @@ impl Processor {
                     return FlowSignal::None;
                 }
             };
+
+            // When inside a re-opened container, skip re-declaration of
+            // variables that already exist. This matches the JS behavior
+            // where container variable initializers only run the first
+            // time the container is created.
+            if self.references.inside_container() {
+                if self.references.container_has_var(name) {
+                    continue;
+                }
+            }
 
             // Check for an existing binding to save for scope restore.
             let previous = self.references.get_reference(name).cloned();
@@ -2822,35 +2832,66 @@ impl Processor {
     }
 
     /// Expand template strings (e.g. `${N}` inside backtick strings).
-    fn expand_templates(&self, text: &str) -> String {
+    ///
+    /// Supports both simple references (`${NAME}`) and arbitrary
+    /// expressions (`${log2(N)}`, `${a + b}`).  Simple references
+    /// are resolved via the reference table first (fast path); if
+    /// that fails, the expression inside `${}` is parsed and evaluated.
+    fn expand_templates(&mut self, text: &str) -> String {
         use std::sync::OnceLock;
         static RE: OnceLock<regex::Regex> = OnceLock::new();
 
         if !text.contains("${") {
             return text.to_string();
         }
-        // Simple template expansion: replace ${NAME} with the value.
-        let mut result = text.to_string();
+
         let re = RE.get_or_init(|| regex::Regex::new(r"\$\{([^}]*)\}").unwrap());
-        let captures: Vec<(String, String)> = re
+
+        // Collect all matches first to avoid borrow issues.
+        let matches: Vec<(String, String)> = re
             .captures_iter(text)
-            .map(|cap| {
-                let full = cap[0].to_string();
-                let name = cap[1].to_string();
-                let value = self
-                    .references
-                    .get_reference(&name)
-                    .and_then(|r| match r.ref_type {
-                        RefType::Int => self.ints.get(r.id).map(|v| v.to_display_string()),
-                        RefType::Str => self.strings.get(r.id).map(|v| v.to_display_string()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                (full, value)
-            })
+            .map(|cap| (cap[0].to_string(), cap[1].to_string()))
             .collect();
-        for (pattern, replacement) in captures {
-            result = result.replace(&pattern, &replacement);
+
+        let mut result = text.to_string();
+        for (full_match, expr_str) in matches {
+            // Fast path: try as a simple reference name.
+            let value = self
+                .references
+                .get_reference(&expr_str)
+                .and_then(|r| match r.ref_type {
+                    RefType::Int => self.ints.get(r.id).map(|v| v.to_display_string()),
+                    RefType::Str => self.strings.get(r.id).map(|v| v.to_display_string()),
+                    _ => None,
+                });
+
+            let replacement = if let Some(v) = value {
+                v
+            } else {
+                // Fall back to parsing and evaluating as an expression.
+                // Wrap in a dummy program to satisfy the parser.
+                let dummy_src = format!("int _tmpl_ = {};", expr_str);
+                match crate::parser::parse(&dummy_src) {
+                    Ok(prog) => {
+                        // Extract the initializer expression from the
+                        // variable declaration.
+                        if let Some(Statement::VariableDeclaration(vd)) =
+                            prog.statements.first()
+                        {
+                            if let Some(init) = vd.init.as_ref() {
+                                let val = self.eval_expr(init);
+                                val.to_display_string()
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        }
+                    }
+                    Err(_) => String::new(),
+                }
+            };
+            result = result.replace(&full_match, &replacement);
         }
         result
     }
