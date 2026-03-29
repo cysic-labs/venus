@@ -2643,7 +2643,11 @@ impl Processor {
     fn exec_container(&mut self, cd: &ContainerDef) -> FlowSignal {
         let name = self.expand_templates(&cd.name);
         let alias = cd.alias.as_deref();
-        self.references.create_container(&name, alias);
+        // JS skips the body entirely when a container already exists
+        // (containers.js createContainer returns false, processor.js returns).
+        if !self.references.create_container(&name, alias) {
+            return FlowSignal::None;
+        }
         if let Some(body) = &cd.body {
             self.execute_statements(body);
         }

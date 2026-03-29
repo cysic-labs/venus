@@ -349,9 +349,6 @@ pub fn compile(options: &CompileOptions) -> anyhow::Result<()> {
             .to_string()
     });
 
-    // Write protobuf output.
-    proto_out::write_pilout(&processor, &output_path)?;
-
     // Fixed column binary files are written per-AIR during execution
     // (inside the processor) when fixed_to_file is enabled, using each
     // AIR's real row count. No post-execution write is needed here.
@@ -359,13 +356,17 @@ pub fn compile(options: &CompileOptions) -> anyhow::Result<()> {
         eprintln!("  > Warning: fixed-to-file requested but no output directory specified (-u)");
     }
 
-    eprintln!("  > Compilation complete: {}", output_path);
-
     // Return error after writing output so the process exits nonzero
     // when compilation encountered runtime errors or test failures.
     if !success {
-        anyhow::bail!("Compilation completed with errors");
+        eprintln!("Warning: compilation reported errors");
+        // Still write pilout for debugging.
+        proto_out::write_pilout(&processor, &output_path)?;
+        anyhow::bail!("Compilation failed with runtime errors");
     }
+
+    eprintln!("  > Compilation complete: {}", output_path);
+    proto_out::write_pilout(&processor, &output_path)?;
 
     Ok(())
 }

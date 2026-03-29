@@ -350,12 +350,12 @@ impl References {
         self.refs.insert(name.to_string(), reference);
     }
 
-    /// Start a container block.
+    /// Start a container block. Returns false if the container already
+    /// exists (matching JS `createContainer` which returns false so the
+    /// caller skips the body).
     pub fn create_container(&mut self, name: &str, alias: Option<&str>) -> bool {
         if self.containers.contains_key(name) {
-            // Container already exists, reopen.
-            self.current_container = Some(name.to_string());
-            return true;
+            return false;
         }
         self.containers.insert(name.to_string(), HashMap::new());
         self.current_container = Some(name.to_string());
