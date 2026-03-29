@@ -1185,6 +1185,16 @@ impl Processor {
             }
             Expr::FunctionCall(fc) => self.eval_function_call(fc),
             Expr::ArrayIndex { base, index } => {
+                // Try to resolve Reference/MemberAccess+ArrayIndex chains as
+                // a single reference lookup with array indexing.  In
+                // expression context, the parser produces ArrayIndex nodes
+                // wrapping a bare Reference (or MemberAccess) that has no
+                // index info.  Without this, evaluating the inner node
+                // returns only the scalar at the base ID, and the
+                // surrounding ArrayIndex falls through to Void.
+                if let Some(val) = self.try_resolve_indexed_reference(expr) {
+                    return val;
+                }
                 let base_val = self.eval_expr(base);
                 let idx_val = self.eval_expr(index);
                 match (&base_val, idx_val.as_int()) {
@@ -1213,6 +1223,14 @@ impl Processor {
                                 }
                             }
                         }
+                    }
+                    (Value::ArrayRef { ref_type, base_id, dims }, Some(i)) => {
+                        self.resolve_partial_array(
+                            ref_type,
+                            *base_id,
+                            dims,
+                            &[i],
+                        )
                     }
                     _ => Value::Void,
                 }
@@ -1269,6 +1287,16 @@ impl Processor {
                         self.references.get_reference_multi(&names).cloned()
                     });
                     if let Some(reference) = reference_opt {
+                        // If the reference is an array, return an ArrayRef
+                        // so that subsequent ArrayIndex operations can
+                        // resolve individual elements.
+                        if !reference.array_dims.is_empty() {
+                            return Value::ArrayRef {
+                                ref_type: reference.ref_type.clone(),
+                                base_id: reference.id,
+                                dims: reference.array_dims.clone(),
+                            };
+                        }
                         return self.get_var_value(&reference);
                     }
                     // If it's a container name (not a reference), return a
@@ -1304,9 +1332,29 @@ impl Processor {
                     .iter()
                     .map(|e| self.eval_expr(e).as_int().unwrap_or(0))
                     .collect();
+                if indexes.len() < reference.array_dims.len() {
+                    // Partial indexing: return ArrayRef for the sub-array.
+                    let flat_idx = compute_flat_index_partial(&indexes, &reference.array_dims);
+                    let remaining = reference.array_dims[indexes.len()..].to_vec();
+                    return Value::ArrayRef {
+                        ref_type: reference.ref_type.clone(),
+                        base_id: reference.id + flat_idx,
+                        dims: remaining,
+                    };
+                }
                 let flat_idx = compute_flat_index(&indexes, &reference.array_dims);
                 let id = reference.id + flat_idx;
                 return self.get_var_value_by_type_and_id(&reference.ref_type, id);
+            }
+            // Bare reference to an array (no indexes): return ArrayRef so
+            // that callers (function/airtemplate argument binding, further
+            // ArrayIndex operations) can index into it.
+            if name_id.indexes.is_empty() && !reference.array_dims.is_empty() {
+                return Value::ArrayRef {
+                    ref_type: reference.ref_type.clone(),
+                    base_id: reference.id,
+                    dims: reference.array_dims.clone(),
+                };
             }
             self.get_var_value(&reference)
         } else {
@@ -1361,6 +1409,104 @@ impl Processor {
             _ => None,
         };
         base_name.map(|b| format!("{}.{}", b, member))
+    }
+
+    /// Try to resolve a chain of ArrayIndex nodes whose innermost base is
+    /// either a Reference or a MemberAccess that resolves to an array
+    /// variable.  Returns Some(value) when successfully resolved, None
+    /// when the pattern does not apply (caller should fall through to the
+    /// normal ArrayIndex evaluation).
+    ///
+    /// In expression context the parser produces
+    ///   `ArrayIndex(ArrayIndex(Reference("name"), idx0), idx1)`
+    /// for `name[idx0][idx1]`, and
+    ///   `ArrayIndex(MemberAccess(Ref("alias"), "field"), idx)`
+    /// for `alias.field[idx]`.
+    ///
+    /// Without this helper, evaluating the innermost Reference/MemberAccess
+    /// returns only the scalar at the base ID, losing array dimension info,
+    /// so subsequent ArrayIndex operations return Void.
+    fn try_resolve_indexed_reference(&mut self, expr: &Expr) -> Option<Value> {
+        // Peel off ArrayIndex layers, collecting indexes outermost-first.
+        let mut indexes_rev: Vec<i128> = Vec::new();
+        let mut current = expr;
+        loop {
+            match current {
+                Expr::ArrayIndex { base, index } => {
+                    let idx = self.eval_expr(index).as_int()?;
+                    indexes_rev.push(idx);
+                    current = base;
+                }
+                Expr::MemberAccess { base, member } => {
+                    let dotted = self.build_dotted_name(base, member)?;
+                    let reference = self.references.get_reference(&dotted).cloned().or_else(|| {
+                        let names = self.namespace_ctx.get_names(&dotted);
+                        self.references.get_reference_multi(&names).cloned()
+                    })?;
+                    if reference.array_dims.is_empty() {
+                        return None;
+                    }
+                    indexes_rev.reverse();
+                    if indexes_rev.len() > reference.array_dims.len() {
+                        return None;
+                    }
+                    return Some(self.resolve_partial_array(
+                        &reference.ref_type,
+                        reference.id,
+                        &reference.array_dims,
+                        &indexes_rev,
+                    ));
+                }
+                Expr::Reference(name_id) if name_id.indexes.is_empty() => {
+                    let name = &name_id.path;
+                    let reference = self.references.get_reference(name).cloned().or_else(|| {
+                        let names = self.namespace_ctx.get_names(name);
+                        self.references.get_reference_multi(&names).cloned()
+                    })?;
+                    if reference.array_dims.is_empty() {
+                        return None;
+                    }
+                    indexes_rev.reverse();
+                    if indexes_rev.len() > reference.array_dims.len() {
+                        return None;
+                    }
+                    return Some(self.resolve_partial_array(
+                        &reference.ref_type,
+                        reference.id,
+                        &reference.array_dims,
+                        &indexes_rev,
+                    ));
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Resolve a (possibly partial) array index.
+    ///
+    /// When fully indexed (`indexes.len() == dims.len()`), returns the
+    /// scalar element.  When partially indexed, returns an `ArrayRef`
+    /// carrying the sub-array's base ID and remaining dimensions so that
+    /// further ArrayIndex operations or parameter binding can continue.
+    fn resolve_partial_array(
+        &self,
+        ref_type: &RefType,
+        base_id: u32,
+        dims: &[u32],
+        indexes: &[i128],
+    ) -> Value {
+        let flat_idx = compute_flat_index_partial(indexes, dims);
+        let id = base_id + flat_idx;
+        if indexes.len() == dims.len() {
+            self.get_var_value_by_type_and_id(ref_type, id)
+        } else {
+            let remaining_dims = dims[indexes.len()..].to_vec();
+            Value::ArrayRef {
+                ref_type: ref_type.clone(),
+                base_id: id,
+                dims: remaining_dims,
+            }
+        }
     }
 
     /// Evaluate an expression into a RuntimeExpr (for constraints).
@@ -1550,6 +1696,23 @@ impl Processor {
                         .map(|e| self.eval_expr(e))
                 })
                 .unwrap_or(Value::Void);
+
+            // Array reference arguments: bind the parameter directly to
+            // the same storage as the original array.
+            if let Value::ArrayRef { ref_type, base_id, dims } = &value {
+                let previous = self.references.get_reference(&arg_def.name).cloned();
+                self.references.declare(
+                    &arg_def.name,
+                    ref_type.clone(),
+                    *base_id,
+                    &dims.iter().copied().collect::<Vec<u32>>(),
+                    arg_def.type_info.is_const,
+                    self.scope.deep,
+                    &self.source_ref,
+                );
+                self.scope.declare(&arg_def.name, previous);
+                continue;
+            }
 
             let ref_type = match &arg_def.type_info.kind {
                 TypeKind::Int => RefType::Int,
@@ -2243,7 +2406,6 @@ impl Processor {
             name,
             ag_name
         );
-
         // Push function scope and bind arguments.
         self.function_deep += 1;
         self.callstack.push(CallStackEntry {
@@ -2259,6 +2421,25 @@ impl Processor {
                 .and_then(|v| if matches!(v, Value::Void) { None } else { Some(v) })
                 .or_else(|| arg_def.default_value.as_ref().map(|e| self.eval_expr(e)))
                 .unwrap_or(Value::Void);
+
+            // Array parameters: when the argument is an ArrayRef (from a
+            // partially-indexed array or a bare array reference), bind the
+            // parameter directly to the same storage location so that
+            // indexed access inside the template body works.
+            if let Value::ArrayRef { ref_type, base_id, dims } = &value {
+                let previous = self.references.get_reference(&arg_def.name).cloned();
+                self.references.declare(
+                    &arg_def.name,
+                    ref_type.clone(),
+                    *base_id,
+                    &dims.iter().map(|d| *d).collect::<Vec<u32>>(),
+                    arg_def.type_info.is_const,
+                    self.scope.deep,
+                    &self.source_ref,
+                );
+                self.scope.declare(&arg_def.name, previous);
+                continue;
+            }
 
             let store_id = self
                 .ints
@@ -2975,6 +3156,7 @@ impl Processor {
                 self.air_expression_store.push(rt);
                 air::HintValue::ExprId(idx)
             }
+            Value::ArrayRef { .. } => air::HintValue::Int(0),
             Value::Void => air::HintValue::Int(0),
         }
     }
@@ -3185,6 +3367,28 @@ fn compute_flat_index(indexes: &[i128], dims: &[u32]) -> u32 {
     for i in (0..indexes.len().min(dims.len())).rev() {
         flat += (indexes[i] as u32) * stride;
         stride *= dims[i];
+    }
+    flat
+}
+
+/// Compute a flat index for partial indexing (fewer indexes than dimensions).
+///
+/// When `indexes.len() < dims.len()`, the result is the offset to the first
+/// element of the sub-array selected by the provided indexes.  For example,
+/// with dims `[A, B, C]` and indexes `[a, b]`, the result is
+/// `a * B * C + b * C`.
+fn compute_flat_index_partial(indexes: &[i128], dims: &[u32]) -> u32 {
+    if indexes.is_empty() || dims.is_empty() {
+        return 0;
+    }
+    let n = indexes.len().min(dims.len());
+    let mut flat = 0u32;
+    for i in 0..n {
+        let mut stride = 1u32;
+        for j in (i + 1)..dims.len() {
+            stride *= dims[j];
+        }
+        flat += (indexes[i] as u32) * stride;
     }
     flat
 }

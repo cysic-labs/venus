@@ -235,6 +235,9 @@ fn exec_length(args: &[Value]) -> Result<Value, String> {
     let len = match &args[0] {
         Value::Str(s) => s.len() as i128,
         Value::Array(items) => items.len() as i128,
+        Value::ArrayRef { dims, .. } => {
+            dims.first().copied().unwrap_or(0) as i128
+        }
         _ => 0,
     };
     Ok(Value::Int(len))

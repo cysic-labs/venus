@@ -28,6 +28,18 @@ pub enum Value {
     /// Expression that cannot be fully evaluated at compile time.
     /// Stored as a tree of operations for later protobuf emission.
     RuntimeExpr(Box<RuntimeExpr>),
+    /// A reference to a (sub-)array in a VariableStore.
+    ///
+    /// Produced when a multi-dimensional array is partially indexed in
+    /// expression context.  Carries the base ID in the store, the
+    /// remaining dimensions, and the reference type so that further
+    /// ArrayIndex operations (or function parameter binding) can resolve
+    /// individual elements.
+    ArrayRef {
+        ref_type: super::references::RefType,
+        base_id: u32,
+        dims: Vec<u32>,
+    },
     /// Void / no value (e.g. from a function returning nothing).
     Void,
 }
@@ -145,6 +157,10 @@ impl Value {
                 format!("{:?}@{}{}", col_type, id, offset_str)
             }
             Value::RuntimeExpr(_) => "<runtime-expr>".to_string(),
+            Value::ArrayRef { ref_type, base_id, dims } => {
+                let dims_str: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
+                format!("{:?}@{}[{}]", ref_type, base_id, dims_str.join(","))
+            }
             Value::Void => "void".to_string(),
         }
     }
