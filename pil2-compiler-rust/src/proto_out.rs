@@ -626,11 +626,22 @@ impl<'a> ProtoOutBuilder<'a> {
                                 debug_line: Some(sym.source_ref.clone()),
                             });
                         }
-                        // Skip "im" (intermediate) symbols: the Rust compiler
-                        // does not yet implement expression packing, so it
-                        // collects all expr variable labels rather than just
-                        // the packed subset. Omitting these avoids emitting a
-                        // large number of spurious symbols.
+                        "im" => {
+                            // Emit IM symbols: internal_id is the packed
+                            // expression index in the air_expression_store.
+                            result.push(pilout_proto::Symbol {
+                                name: sym.name.clone(),
+                                air_group_id: Some(air_group_id),
+                                air_id: Some(air_id),
+                                r#type: REF_TYPE_IM_COL,
+                                id: sym.internal_id,
+                                stage: None,
+                                dim: sym.dim,
+                                lengths: sym.lengths.clone(),
+                                commit_id: None,
+                                debug_line: Some(sym.source_ref.clone()),
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -1366,9 +1377,10 @@ pub fn write_pilout(processor: &Processor, path: &str) -> anyhow::Result<()> {
         .map(|a| a.constraints.len())
         .sum();
     eprintln!(
-        "  > Proto: {} air groups, {} symbols, {} global expressions, {} global constraints, {} air expressions, {} air constraints",
+        "  > Proto: {} air groups, {} symbols, {} hints, {} global expressions, {} global constraints, {} air expressions, {} air constraints",
         pilout.air_groups.len(),
         pilout.symbols.len(),
+        pilout.hints.len(),
         pilout.expressions.len(),
         pilout.constraints.len(),
         total_air_exprs,

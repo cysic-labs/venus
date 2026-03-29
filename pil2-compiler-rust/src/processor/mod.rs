@@ -1763,6 +1763,45 @@ impl Processor {
                         self.scope.deep,
                         &self.source_ref,
                     );
+
+                    // Generate witness_bits hints for columns with bits(N)
+                    // or bits(N, signed) features (matching JS behavior).
+                    // One hint per declared column item (not per array element).
+                    if let Some(bits_feature) = cd.features.iter().find(|f| f.name == "bits") {
+                        let bits_val = bits_feature.args.first()
+                            .and_then(|a| self.eval_expr(&a.value).as_int());
+                        if let Some(bits) = bits_val {
+                            // Check for signed/unsigned option (2nd arg).
+                            // The option is a bare identifier, not an
+                            // expression, so extract the name from the AST
+                            // directly rather than evaluating it.
+                            let is_signed = bits_feature.args.get(1)
+                                .map(|a| {
+                                    if let Expr::Reference(ref name_id) = a.value {
+                                        name_id.path == "signed"
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false);
+                            // Use the short name (after last dot), matching JS behavior.
+                            let short_name = full_name.rfind('.')
+                                .map(|pos| &full_name[pos + 1..])
+                                .unwrap_or(&full_name)
+                                .to_string();
+                            let mut pairs = vec![
+                                ("name".to_string(), air::HintValue::Str(short_name)),
+                                ("bits".to_string(), air::HintValue::Int(bits)),
+                            ];
+                            if is_signed {
+                                pairs.push(("signed".to_string(), air::HintValue::Int(1)));
+                            }
+                            self.air_hints.push(air::HintEntry {
+                                name: "witness_bits".to_string(),
+                                data: air::HintValue::Object(pairs),
+                            });
+                        }
+                    }
                 }
                 ColType::Fixed => {
                     if self.pragmas_next_fixed.temporal {
@@ -2376,26 +2415,24 @@ impl Processor {
             }
         };
 
-        // Build the full AIR expression store from intermediate columns
-        // (expr-typed variables) and constraint expressions. This mirrors
-        // the JS `this.expressions` store that holds ALL expressions
-        // created during AIR execution. The exprs store was pushed at
-        // air start, so all entries belong to this AIR.
+        // Build the AIR expression store from hint-referenced expressions
+        // and constraint expressions. Hint ExprId values reference indices
+        // in self.air_expression_store; we place those first and build a
+        // remap table so hint indices translate correctly to the unified
+        // store. Constraint expressions follow.
+        //
+        // Note: unlike the JS compiler, we do not include intermediate
+        // (expr-typed) variable values in the store because Rust inlines
+        // their values into constraints. IM symbol emission therefore
+        // requires future work on expression-reference tracking.
         let air_expr_store: Vec<RuntimeExpr> = {
             let mut store = Vec::new();
-            // Collect intermediate column expressions from this AIR.
-            // Only include entries that hold symbolic values (ColRef or
-            // RuntimeExpr), not compile-time constants.
-            for eid in 0..self.exprs.len() {
-                if let Some(val) = self.exprs.get(eid) {
-                    if is_symbolic(val) {
-                        let rt = value_to_runtime_expr(val);
-                        store.push(rt);
-                    }
-                }
+            // Hint-referenced expressions come first (preserving indices
+            // so hint ExprId values remain valid without remapping).
+            for expr in &self.air_expression_store {
+                store.push(expr.clone());
             }
-            // Also include constraint expressions (which may reference
-            // intermediates by index).
+            // Then constraint expressions.
             for expr in self.constraints.all_expressions() {
                 store.push(expr.clone());
             }
@@ -2487,7 +2524,7 @@ impl Processor {
         // calls during `airGroupProtoOut`.
         let air_symbols: Vec<air::SymbolEntry> = {
             let mut syms = Vec::new();
-            let air_name = self.air_stack.last().map(|a| a.name.clone()).unwrap_or_default();
+            let _air_name = self.air_stack.last().map(|a| a.name.clone()).unwrap_or_default();
 
             // Witness symbols from label ranges.
             for lr in self.witness_cols.label_ranges.to_vec() {
@@ -2549,19 +2586,11 @@ impl Processor {
                 });
             }
 
-            // Intermediate (im) symbols from expression labels. In JS,
-            // expression labels are collected from the packed expressions;
-            // here we use the exprs variable store's label ranges.
-            for lr in self.exprs.ids.label_ranges.to_vec() {
-                syms.push(air::SymbolEntry {
-                    name: format!("{}_{}", air_name, lr.label),
-                    ref_type_str: "im".to_string(),
-                    internal_id: lr.from,
-                    dim: lr.array_dims.len() as u32,
-                    lengths: lr.array_dims.clone(),
-                    source_ref: String::new(),
-                });
-            }
+            // IM symbol emission is deferred: the Rust compiler inlines
+            // expr variable values into constraints, so there's no
+            // direct mapping from named intermediates to packed expression
+            // indices. Full IM symbol support requires expression-reference
+            // tracking during constraint construction.
 
             syms
         };
@@ -2584,6 +2613,10 @@ impl Processor {
                         stored_air.has_extern_fixed = has_extern_fixed;
                         stored_air.symbols = air_symbols;
                         stored_air.output_fixed_file = output_fixed_file.clone();
+                        // Hint ExprId values reference indices in
+                        // self.air_expression_store; since those expressions
+                        // are placed first in air_expr_store, the indices
+                        // are preserved and no remapping is needed.
                         stored_air.hints = std::mem::take(&mut self.air_hints);
                     }
                 }
@@ -2629,6 +2662,7 @@ impl Processor {
 
         // Clean up air scope.
         self.air_hints.clear();
+        self.air_expression_store.clear();
         self.constraints.clear();
         self.scope.pop_instance_type();
         self.namespace_ctx.pop();
@@ -3198,6 +3232,30 @@ fn value_to_runtime_expr(val: &Value) -> RuntimeExpr {
         },
         Value::RuntimeExpr(expr) => *expr.clone(),
         _ => RuntimeExpr::Value(val.clone()),
+    }
+}
+
+/// Recursively remap ExprId values in hint data using the given remap table.
+/// Retained for future use when expression stores require index remapping.
+#[allow(dead_code)]
+fn remap_hint_expr_ids(data: &mut air::HintValue, remap: &HashMap<u32, u32>) {
+    match data {
+        air::HintValue::ExprId(ref mut id) => {
+            if let Some(&new_id) = remap.get(id) {
+                *id = new_id;
+            }
+        }
+        air::HintValue::Array(items) => {
+            for item in items.iter_mut() {
+                remap_hint_expr_ids(item, remap);
+            }
+        }
+        air::HintValue::Object(pairs) => {
+            for (_k, v) in pairs.iter_mut() {
+                remap_hint_expr_ids(v, remap);
+            }
+        }
+        _ => {}
     }
 }
 
