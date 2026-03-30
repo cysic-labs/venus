@@ -77,7 +77,7 @@ impl OpType {
 pub struct CodeType {
     pub op_type: OpType,
     pub id: u64,
-    pub prime: u64,
+    pub prime: i64,
     pub dim: u64,
     pub value: u64,
     pub commit_id: u64,
@@ -280,7 +280,7 @@ fn parse_code_type(v: &Value) -> Result<CodeType> {
     Ok(CodeType {
         op_type,
         id: get_u64(v, "id"),
-        prime: get_u64(v, "prime"),
+        prime: get_i64(v, "prime"),
         dim: get_u64(v, "dim"),
         value,
         commit_id: get_u64(v, "commitId"),

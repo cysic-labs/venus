@@ -2190,11 +2190,9 @@ mod tests_global_info {
         let _ = std::fs::remove_dir_all(build_dir);
     }
 
-    /// Test that the binary writer produces byte-identical .bin output from golden JSON inputs.
-    /// Currently fails with 2-byte differences at positions 30054 and 45946 in Dma.bin.
-    /// Root cause: parser_args.rs encodes a source dimension flag differently from JS binfile.
+    /// Test that the binary writer produces byte-identical .bin and .verifier.bin
+    /// output from golden JSON inputs.
     #[test]
-    #[ignore] // known 2-byte regression in parser_args encoding, needs investigation
     fn test_bin_file_byte_identical_to_golden() {
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let golden_dir = base.join("golden_reference/zisk/Zisk/airs/Dma/air");

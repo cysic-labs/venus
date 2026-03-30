@@ -155,6 +155,7 @@ fn prepare_verifier_expressions_bin(
     )?;
     let mut q_code = q_result.exps_info;
     q_code.exp_id = stark_info.c_exp_id;
+    q_code.stage = stark_info.n_stages as u64 + 1;
     q_code.line = String::new();
 
     if q_code.n_temp1 > max_tmp1 { max_tmp1 = q_code.n_temp1; }
@@ -172,6 +173,7 @@ fn prepare_verifier_expressions_bin(
     )?;
     let mut query_code = query_result.exps_info;
     query_code.exp_id = stark_info.fri_exp_id;
+    query_code.stage = stark_info.n_stages as u64 + 2;
     query_code.line = String::new();
 
     if query_code.n_temp1 > max_tmp1 { max_tmp1 = query_code.n_temp1; }
