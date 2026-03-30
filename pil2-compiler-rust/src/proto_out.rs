@@ -181,6 +181,7 @@ impl<'a> ProtoOutBuilder<'a> {
                     let root_idx = self.flatten_air_expr(
                         expr,
                         &air.fixed_id_map,
+                        air.fixed_col_start,
                         &air.witness_id_map,
                         &air.custom_id_map,
                         &expr_id_map,
@@ -564,9 +565,12 @@ impl<'a> ProtoOutBuilder<'a> {
                             });
                         }
                         "fixed" => {
-                            // Remap through fixed_id_map: internal_id -> (type, proto_index)
+                            // Remap through fixed_id_map: internal_id -> (type, proto_index).
+                            // The map is dense (relative to fixed_col_start).
+                            let rel_idx = sym.internal_id.checked_sub(air.fixed_col_start)
+                                .unwrap_or(sym.internal_id) as usize;
                             let (ctype, proto_id) = air.fixed_id_map
-                                .get(sym.internal_id as usize)
+                                .get(rel_idx)
                                 .copied()
                                 .unwrap_or(('F', sym.internal_id));
                             let sym_type = if ctype == 'P' {
@@ -674,6 +678,7 @@ impl<'a> ProtoOutBuilder<'a> {
                     let hint_fields = self.hint_value_to_fields(
                         &hint.data,
                         &air.fixed_id_map,
+                        air.fixed_col_start,
                         &air.witness_id_map,
                         &air.custom_id_map,
                         &air.air_expression_store,
@@ -713,6 +718,7 @@ impl<'a> ProtoOutBuilder<'a> {
         &self,
         value: &HintValue,
         fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
         expr_store: &[RuntimeExpr],
@@ -720,7 +726,7 @@ impl<'a> ProtoOutBuilder<'a> {
         match value {
             HintValue::Object(pairs) => {
                 let fields: Vec<pilout_proto::HintField> = pairs.iter().map(|(k, v)| {
-                    let mut field = self.hint_value_to_single_field(v, fixed_map, witness_map, custom_map, expr_store);
+                    let mut field = self.hint_value_to_single_field(v, fixed_map, fixed_col_start, witness_map, custom_map, expr_store);
                     field.name = Some(k.clone());
                     field
                 }).collect();
@@ -732,7 +738,7 @@ impl<'a> ProtoOutBuilder<'a> {
                     )),
                 }]
             }
-            _ => vec![self.hint_value_to_single_field(value, fixed_map, witness_map, custom_map, expr_store)],
+            _ => vec![self.hint_value_to_single_field(value, fixed_map, fixed_col_start, witness_map, custom_map, expr_store)],
         }
     }
 
@@ -741,6 +747,7 @@ impl<'a> ProtoOutBuilder<'a> {
         &self,
         value: &HintValue,
         fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
         expr_store: &[RuntimeExpr],
@@ -772,7 +779,7 @@ impl<'a> ProtoOutBuilder<'a> {
                     // don't have the full packed map here, we use the expr_id
                     // directly as the operand expression index. This works
                     // because the air expression store is serialized in order.
-                    let operand = self.expr_to_hint_operand(expr, fixed_map, witness_map, custom_map, *expr_id);
+                    let operand = self.expr_to_hint_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, *expr_id);
                     pilout_proto::HintField {
                         name: None,
                         value: Some(pilout_proto::hint_field::Value::Operand(operand)),
@@ -793,7 +800,7 @@ impl<'a> ProtoOutBuilder<'a> {
             }
             HintValue::Array(items) => {
                 let fields: Vec<pilout_proto::HintField> = items.iter()
-                    .map(|v| self.hint_value_to_single_field(v, fixed_map, witness_map, custom_map, expr_store))
+                    .map(|v| self.hint_value_to_single_field(v, fixed_map, fixed_col_start, witness_map, custom_map, expr_store))
                     .collect();
                 pilout_proto::HintField {
                     name: None,
@@ -804,7 +811,7 @@ impl<'a> ProtoOutBuilder<'a> {
             }
             HintValue::Object(pairs) => {
                 let fields: Vec<pilout_proto::HintField> = pairs.iter().map(|(k, v)| {
-                    let mut field = self.hint_value_to_single_field(v, fixed_map, witness_map, custom_map, expr_store);
+                    let mut field = self.hint_value_to_single_field(v, fixed_map, fixed_col_start, witness_map, custom_map, expr_store);
                     field.name = Some(k.clone());
                     field
                 }).collect();
@@ -825,6 +832,7 @@ impl<'a> ProtoOutBuilder<'a> {
         &self,
         expr: &RuntimeExpr,
         fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
         expr_idx: u32,
@@ -848,7 +856,8 @@ impl<'a> ProtoOutBuilder<'a> {
                 let offset = row_offset.unwrap_or(0) as i32;
                 let op = match col_type {
                     ColRefKind::Fixed => {
-                        let (ctype, proto_idx) = fixed_map.get(*id as usize).copied().unwrap_or(('F', *id));
+                        let rel_idx = (*id).checked_sub(fixed_col_start).unwrap_or(*id) as usize;
+                        let (ctype, proto_idx) = fixed_map.get(rel_idx).copied().unwrap_or(('F', *id));
                         if ctype == 'P' {
                             pilout_proto::operand::Operand::PeriodicCol(
                                 pilout_proto::operand::PeriodicCol { idx: proto_idx, row_offset: offset },
@@ -1159,6 +1168,7 @@ impl<'a> ProtoOutBuilder<'a> {
         &self,
         expr: &RuntimeExpr,
         fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
         expr_id_map: &[u32],
@@ -1166,8 +1176,8 @@ impl<'a> ProtoOutBuilder<'a> {
     ) -> u32 {
         let op = match expr {
             RuntimeExpr::BinOp { op, left, right } => {
-                let lhs = self.flatten_air_operand(left, fixed_map, witness_map, custom_map, expr_id_map, out);
-                let rhs = self.flatten_air_operand(right, fixed_map, witness_map, custom_map, expr_id_map, out);
+                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out);
+                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out);
                 match op {
                     RuntimeOp::Add => pilout_proto::expression::Operation::Add(
                         pilout_proto::expression::Add { lhs, rhs },
@@ -1183,7 +1193,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
                     let value =
-                        self.flatten_air_operand(operand, fixed_map, witness_map, custom_map, expr_id_map, out);
+                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out);
                     pilout_proto::expression::Operation::Neg(
                         pilout_proto::expression::Neg { value },
                     )
@@ -1191,7 +1201,7 @@ impl<'a> ProtoOutBuilder<'a> {
             },
             // Leaf node: wrap in Add(x, 0).
             _ => {
-                let leaf = self.leaf_to_air_operand(expr, fixed_map, witness_map, custom_map, expr_id_map);
+                let leaf = self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map);
                 let zero = Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Constant(
                         pilout_proto::operand::Constant { value: Vec::new() },
@@ -1218,6 +1228,7 @@ impl<'a> ProtoOutBuilder<'a> {
         &self,
         expr: &RuntimeExpr,
         fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
         expr_id_map: &[u32],
@@ -1225,14 +1236,14 @@ impl<'a> ProtoOutBuilder<'a> {
     ) -> Option<pilout_proto::Operand> {
         match expr {
             RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
-                let idx = self.flatten_air_expr(expr, fixed_map, witness_map, custom_map, expr_id_map, out);
+                let idx = self.flatten_air_expr(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out);
                 Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Expression(
                         pilout_proto::operand::Expression { idx },
                     )),
                 })
             }
-            _ => self.leaf_to_air_operand(expr, fixed_map, witness_map, custom_map, expr_id_map),
+            _ => self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map),
         }
     }
 
@@ -1241,6 +1252,7 @@ impl<'a> ProtoOutBuilder<'a> {
         &self,
         expr: &RuntimeExpr,
         fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
         expr_id_map: &[u32],
@@ -1264,8 +1276,9 @@ impl<'a> ProtoOutBuilder<'a> {
                 let offset = row_offset.unwrap_or(0) as i32;
                 match col_type {
                     ColRefKind::Fixed => {
+                        let rel_idx = (*id).checked_sub(fixed_col_start).unwrap_or(*id) as usize;
                         let (ctype, proto_idx) =
-                            fixed_map.get(*id as usize).copied().unwrap_or(('F', *id));
+                            fixed_map.get(rel_idx).copied().unwrap_or(('F', *id));
                         if ctype == 'P' {
                             pilout_proto::operand::Operand::PeriodicCol(
                                 pilout_proto::operand::PeriodicCol {

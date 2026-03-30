@@ -72,8 +72,12 @@ pub struct Air {
     /// execution (intermediate column definitions, constraint
     /// sub-expressions, etc.).  Mirrors the JS `this.expressions` store.
     pub air_expression_store: Vec<RuntimeExpr>,
-    /// Fixed column ID mappings: internal id -> (type char 'F'/'P', proto_index).
+    /// Fixed column ID mappings: dense per-AIR, indexed relative to
+    /// `fixed_col_start`.  Entry i corresponds to absolute col ID
+    /// `fixed_col_start + i` -> (type char 'F'/'P', proto_index).
     pub fixed_id_map: Vec<(char, u32)>,
+    /// First absolute fixed-column ID belonging to this AIR.
+    pub fixed_col_start: u32,
     /// Witness column ID mappings: internal id -> (stage, proto_index).
     pub witness_id_map: Vec<(u32, u32)>,
     /// Number of witness columns per stage (1-based stage index).
@@ -135,6 +139,7 @@ impl Air {
             stored_expressions: Vec::new(),
             air_expression_store: Vec::new(),
             fixed_id_map: Vec::new(),
+            fixed_col_start: 0,
             witness_id_map: Vec::new(),
             stage_widths: Vec::new(),
             custom_commits: Vec::new(),

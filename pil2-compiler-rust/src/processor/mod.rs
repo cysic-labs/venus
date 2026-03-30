@@ -2640,16 +2640,23 @@ impl Processor {
         eprintln!("  > Constraints: {}", constraint_count);
 
         // Build fixed column ID mappings for this AIR.
+        // The map is dense: indexed relative to fc_start so that entry i
+        // corresponds to absolute column ID (fc_start + i).  Temporal
+        // columns get a placeholder entry to keep relative indexing
+        // aligned; they are skipped during protobuf serialization.
+        let fc_start = self.fixed_cols.current_start();
         let mut fixed_id_map: Vec<(char, u32)> = Vec::new();
         {
             let num_rows = self.air_stack.last().map(|a| a.rows).unwrap_or(0);
             let mut fixed_proto_idx = 0u32;
             let mut periodic_proto_idx = 0u32;
-            let fc_start = self.fixed_cols.current_start();
             let fc_end = fc_start + self.fixed_cols.len();
             for col_id in fc_start..fc_end {
                 if let Some(data) = self.fixed_cols.ids.get_data(col_id) {
                     if data.temporal {
+                        // Placeholder for temporal columns to keep
+                        // relative indexing aligned.
+                        fixed_id_map.push(('T', 0));
                         continue;
                     }
                 }
@@ -2660,16 +2667,10 @@ impl Processor {
                     false
                 };
                 if is_periodic {
-                    while fixed_id_map.len() <= col_id as usize {
-                        fixed_id_map.push(('F', 0));
-                    }
-                    fixed_id_map[col_id as usize] = ('P', periodic_proto_idx);
+                    fixed_id_map.push(('P', periodic_proto_idx));
                     periodic_proto_idx += 1;
                 } else {
-                    while fixed_id_map.len() <= col_id as usize {
-                        fixed_id_map.push(('F', 0));
-                    }
-                    fixed_id_map[col_id as usize] = ('F', fixed_proto_idx);
+                    fixed_id_map.push(('F', fixed_proto_idx));
                     fixed_proto_idx += 1;
                 }
             }
@@ -2933,6 +2934,7 @@ impl Processor {
                         stored_air.store_constraints(&self.constraints);
                         stored_air.store_air_expressions(&air_expr_store);
                         stored_air.fixed_id_map = fixed_id_map;
+                        stored_air.fixed_col_start = fc_start;
                         stored_air.witness_id_map = witness_id_map;
                         stored_air.stage_widths = stage_widths;
                         stored_air.custom_id_map = custom_id_map;
