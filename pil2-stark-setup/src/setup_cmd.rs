@@ -2461,6 +2461,70 @@ mod tests_global_info {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
+    /// Test the run_setup failure-path contract: global files survive when
+    /// run_setup returns Err.
+    ///
+    /// Uses a name-collision trick: PilOut.name = "pilout.globalInfo.json"
+    /// so write_global_info creates a FILE at provingKey/pilout.globalInfo.json,
+    /// then the AIR loop tries to create a DIRECTORY under that same path
+    /// (provingKey/pilout.globalInfo.json/<airgroup>/airs/<air>/air/),
+    /// which fails because a file already occupies that path.
+    #[test]
+    fn test_run_setup_err_with_global_files_surviving() {
+        use pilout::pilout as pb;
+        use prost::Message;
+
+        // PilOut.name collides with the globalInfo.json file path
+        let pilout_proto = pb::PilOut {
+            name: Some("pilout.globalInfo.json".to_string()),
+            air_groups: vec![pb::AirGroup {
+                name: Some("G".to_string()),
+                airs: vec![pb::Air {
+                    name: Some("A".to_string()),
+                    num_rows: Some(4), // non-zero so the AIR loop processes it
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let tmp_dir = std::env::temp_dir().join("pil2_err_global_survive");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let build_dir = tmp_dir.join("build");
+        std::fs::create_dir_all(&build_dir).unwrap();
+
+        let pilout_path = tmp_dir.join("collision.pilout");
+        let mut buf = Vec::new();
+        pilout_proto.encode(&mut buf).unwrap();
+        std::fs::write(&pilout_path, &buf).unwrap();
+
+        let opts = SetupOptions {
+            airout_path: pilout_path.to_str().unwrap().to_string(),
+            build_dir: build_dir.to_str().unwrap().to_string(),
+            fixed_dir: None,
+            stark_structs_path: None,
+            recursive: false,
+        };
+
+        let result = run_setup(&opts);
+
+        // run_setup must return Err (AIR dir creation collides with the file)
+        assert!(result.is_err(),
+            "run_setup should fail due to dir/file collision, got Ok");
+
+        // All three global files must still exist on disk
+        let pk_dir = build_dir.join("provingKey");
+        assert!(pk_dir.join("pilout.globalInfo.json").exists(),
+            "globalInfo.json must survive after run_setup Err");
+        assert!(pk_dir.join("pilout.globalConstraints.json").exists(),
+            "globalConstraints.json must survive after run_setup Err");
+        assert!(pk_dir.join("pilout.globalConstraints.bin").exists(),
+            "globalConstraints.bin must survive after run_setup Err");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
     #[test]
     fn test_parse_verkey_json_valid() {
         let tmp = std::env::temp_dir().join("pil2_vk_valid");
