@@ -13,6 +13,12 @@ export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib
 After compiling the PIL files, generate the setup:
 
 ```bash
+# Note: test.pilout must be generated first by compiling the test PIL files.
+# The recursive setup (-r) requires circom and circuit library files.
+cargo run --release --bin pil2c -- ./examples/test-recursive/test.pil \
+     -I pil2-components/lib/std/pil \
+     -o ./examples/test-recursive/test.pilout
+
 cargo run --release --bin venus-setup -- \
      -a ./examples/test-recursive/test.pilout \
      -b ./examples/test-recursive/build \
@@ -53,6 +59,9 @@ Finally, generate the proof using the following command:
 
 ```bash
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
+&& cargo run --release --bin pil2c -- ./examples/test-recursive/test.pil \
+     -I pil2-components/lib/std/pil \
+     -o ./examples/test-recursive/test.pilout \
 && cargo run --release --bin venus-setup -- \
      -a ./examples/test-recursive/test.pilout \
      -b ./examples/test-recursive/build \

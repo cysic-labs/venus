@@ -2189,5 +2189,57 @@ mod tests_global_info {
         // Cleanup
         let _ = std::fs::remove_dir_all(build_dir);
     }
+
+    /// Test that the binary writer produces byte-identical .bin output from golden JSON inputs.
+    /// Currently fails with 2-byte differences at positions 30054 and 45946 in Dma.bin.
+    /// Root cause: parser_args.rs encodes a source dimension flag differently from JS binfile.
+    #[test]
+    #[ignore] // known 2-byte regression in parser_args encoding, needs investigation
+    fn test_bin_file_byte_identical_to_golden() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let golden_dir = base.join("golden_reference/zisk/Zisk/airs/Dma/air");
+        let si_path = golden_dir.join("Dma.starkinfo.json");
+        let ei_path = golden_dir.join("Dma.expressionsinfo.json");
+        let vi_path = golden_dir.join("Dma.verifierinfo.json");
+        let golden_bin = golden_dir.join("Dma.bin");
+        let golden_vbin = golden_dir.join("Dma.verifier.bin");
+
+        if !si_path.exists() || !golden_bin.exists() {
+            eprintln!("Skipping test: golden Dma files not found");
+            return;
+        }
+
+        let tmp_dir = std::env::temp_dir().join("pil2_bin_regression");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let out_bin = tmp_dir.join("Dma.bin");
+        let out_vbin = tmp_dir.join("Dma.verifier.bin");
+
+        write_bin_files_native(
+            &si_path, &ei_path, &vi_path, &out_bin, &out_vbin,
+        ).expect("write_bin_files_native failed");
+
+        let golden_data = std::fs::read(&golden_bin).unwrap();
+        let actual_data = std::fs::read(&out_bin).unwrap();
+        assert_eq!(
+            golden_data.len(), actual_data.len(),
+            "Dma.bin size mismatch: golden={} actual={}",
+            golden_data.len(), actual_data.len()
+        );
+        assert_eq!(
+            golden_data, actual_data,
+            "Dma.bin content mismatch (first diff at byte {})",
+            golden_data.iter().zip(actual_data.iter())
+                .position(|(a, b)| a != b).unwrap_or(0)
+        );
+
+        let golden_vdata = std::fs::read(&golden_vbin).unwrap();
+        let actual_vdata = std::fs::read(&out_vbin).unwrap();
+        assert_eq!(
+            golden_vdata, actual_vdata,
+            "Dma.verifier.bin content mismatch"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }
 
