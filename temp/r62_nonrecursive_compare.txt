@@ -1,0 +1,89 @@
+# Fresh Non-Recursive Setup Compare (Round 62)
+# Date: 2026-03-30
+# Command: venus-setup -a pil/zisk.pilout -b <clean>/build -u tmp/fixed -s starkstructs.json
+# Timeout: 300s (34/35 AIRs complete, Poseidon2 times out)
+# Compare: scripts/compare_proving_key.sh golden_reference <fresh>/provingKey
+
+## Full compare result:
+# scripts/compare_proving_key.sh exits with FAIL (diffs exist + missing recursive files)
+
+## 7-file local-AIR subset (starkinfo/expressionsinfo/verifierinfo/bin/verifier.bin/verkey.json/verkey.bin):
+=== 7-FILE SUBSET COMPARE ===
+FULL_MATCH Add256 (7 files)
+FULL_MATCH Arith (7 files)
+PARTIAL ArithEq (match=2 differ=5 missing=0)
+PARTIAL ArithEq384 (match=2 differ=5 missing=0)
+FULL_MATCH Binary (7 files)
+FULL_MATCH BinaryAdd (7 files)
+FULL_MATCH BinaryExtension (7 files)
+PARTIAL Blake2br (match=2 differ=5 missing=0)
+FULL_MATCH Dma (7 files)
+FULL_MATCH Dma64Aligned (7 files)
+FULL_MATCH Dma64AlignedInputCpy (7 files)
+FULL_MATCH Dma64AlignedMem (7 files)
+FULL_MATCH Dma64AlignedMemCpy (7 files)
+FULL_MATCH Dma64AlignedMemSet (7 files)
+FULL_MATCH DmaInputCpy (7 files)
+FULL_MATCH DmaMemCpy (7 files)
+FULL_MATCH DmaPrePost (7 files)
+FULL_MATCH DmaPrePostInputCpy (7 files)
+FULL_MATCH DmaPrePostMemCpy (7 files)
+FULL_MATCH DmaUnaligned (7 files)
+FULL_MATCH InputData (7 files)
+PARTIAL Keccakf (match=0 differ=7 missing=0)
+FULL_MATCH Main (7 files)
+FULL_MATCH Mem (7 files)
+FULL_MATCH MemAlign (7 files)
+FULL_MATCH MemAlignByte (7 files)
+FULL_MATCH MemAlignReadByte (7 files)
+FULL_MATCH MemAlignWriteByte (7 files)
+PARTIAL Poseidon2 (match=0 differ=0 missing=7)
+PARTIAL Rom (match=5 differ=2 missing=0)
+FULL_MATCH RomData (7 files)
+PARTIAL Sha256f (match=2 differ=5 missing=0)
+PARTIAL SpecifiedRanges (match=6 differ=1 missing=0)
+PARTIAL VirtualTable0 (match=6 differ=1 missing=0)
+PARTIAL VirtualTable1 (match=6 differ=1 missing=0)
+---
+TOTAL: match=206 differ=32 missing=7
+FULL_MATCH_COUNT: 25
+PARTIAL_COUNT: 10
+
+## Full compare script output (DIFFER lines only):
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.bin
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.starkinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.verifier.bin
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.verifierinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.bin
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.starkinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.verifier.bin
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.bin
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.starkinfo.json
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.verifier.bin
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.bin
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.const
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.starkinfo.json
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.verifier.bin
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.verkey.bin
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.verkey.json
+DIFFER: zisk/Zisk/airs/Rom/air/Rom.starkinfo.json
+DIFFER: zisk/Zisk/airs/Rom/air/Rom.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.bin
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.starkinfo.json
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.verifier.bin
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.verifierinfo.json
+DIFFER: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.starkinfo.json
+DIFFER: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.starkinfo.json
+DIFFER: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.starkinfo.json
+
+## Full compare script counts:
+DIFFER: 33
+MISSING: 566

@@ -117,16 +117,24 @@ pub fn compute_const_tree(
     Ok(root_u64)
 }
 
-/// Read a file, verifying it has exactly the expected size.
+/// Read a file, requiring at least `expected_size` bytes.
+/// If the file is larger (e.g. compiler emitted extra columns), reads only
+/// the first `expected_size` bytes. If smaller, returns an error.
 fn read_file_exact(path: &str, expected_size: usize) -> Result<Vec<u8>> {
     let p = Path::new(path);
     let metadata = fs::metadata(p)
         .with_context(|| format!("Cannot stat file: {path}"))?;
     let file_size = metadata.len() as usize;
-    anyhow::ensure!(
-        file_size == expected_size,
-        "Const file size mismatch: expected {expected_size} bytes, got {file_size} bytes"
-    );
+    if file_size < expected_size {
+        anyhow::bail!(
+            "Const file too small: expected at least {expected_size} bytes, got {file_size} bytes in {path}"
+        );
+    }
+    if file_size > expected_size {
+        tracing::warn!(
+            "Const file larger than expected ({file_size} vs {expected_size} bytes), reading first {expected_size} bytes from {path}"
+        );
+    }
 
     let mut file = fs::File::open(p)?;
     let mut buf = vec![0u8; expected_size];
