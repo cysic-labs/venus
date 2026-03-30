@@ -98,14 +98,14 @@ rm -rf ./pil2-components/test/direct_update/build/ \
      -a ./pil2-components/test/direct_update/build/direct_update.pilout \
      -u ./pil2-components/test/direct_update/build/fixed \
      -b ./pil2-components/test/direct_update/build \
-&& cargo run --bin proofman-cli pil-helpers \
+&& cargo run --bin proofman-cli -- pil-helpers \
      --pilout ./pil2-components/test/direct_update/build/direct_update.pilout \
      --path ./pil2-components/test/direct_update/rs/src -o \
 && cargo build --workspace \
-&& cargo run --bin proofman-cli verify-constraints \
+&& cargo run --bin proofman-cli -- verify-constraints \
      --witness-lib ./target/debug/libdirect_update.so \
      --proving-key ./pil2-components/test/direct_update/build/provingKey \
-&& cargo run --bin proofman-cli prove \
+&& cargo run --bin proofman-cli -- prove \
      --witness-lib ./target/debug/libdirect_update.so \
      --proving-key ./pil2-components/test/direct_update/build/provingKey \
      --output-dir ./pil2-components/test/direct_update/build/proofs -y

@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rayon::prelude::*;
 // IndexMap used in some helper functions below
 #[allow(unused_imports)]
@@ -325,8 +325,7 @@ fn run_recursive_setup(
     let global_info: serde_json::Value = if global_info_path.exists() {
         serde_json::from_str(&fs::read_to_string(&global_info_path)?)?
     } else {
-        tracing::warn!("globalInfo.json not found, cannot run recursive setup");
-        return Ok(());
+        anyhow::bail!("globalInfo.json not found at {:?}, cannot run recursive setup", global_info_path);
     };
 
     let global_constraints_path = proving_key_dir.join("pilout.globalConstraints.json");
@@ -373,11 +372,10 @@ fn run_recursive_setup(
             let vk_path = files_dir.join(format!("{}.verkey.json", air_name));
 
             if !si_path.exists() || !vi_path.exists() {
-                tracing::warn!(
-                    "Skipping recursive setup for air '{}': starkinfo/verifierinfo not found",
-                    air_name
+                anyhow::bail!(
+                    "Recursive setup failed for air '{}': starkinfo/verifierinfo not found at {:?}",
+                    air_name, files_dir
                 );
-                continue;
             }
 
             let stark_info: serde_json::Value =
@@ -409,12 +407,9 @@ fn run_recursive_setup(
             ) {
                 Ok(result) => result.needed,
                 Err(e) => {
-                    tracing::warn!(
-                        "Compressor check failed for air '{}': {:#}, assuming not needed",
-                        air_name,
-                        e
-                    );
-                    false
+                    return Err(e.context(format!(
+                        "Compressor check failed for air '{}'", air_name
+                    )));
                 }
             };
 
@@ -449,7 +444,9 @@ fn run_recursive_setup(
                         tracing::info!("Compressor setup complete for air '{}'", air_name);
                     }
                     Err(e) => {
-                        tracing::error!("Compressor setup failed for air '{}': {:#}", air_name, e);
+                        return Err(e.context(format!(
+                            "Compressor setup failed for air '{}'", air_name
+                        )));
                     }
                 }
             }
@@ -486,7 +483,9 @@ fn run_recursive_setup(
                     tracing::info!("Recursive1 setup complete for air '{}'", air_name);
                 }
                 Err(e) => {
-                    tracing::error!("Recursive1 setup failed for air '{}': {:#}", air_name, e);
+                    return Err(e.context(format!(
+                        "Recursive1 setup failed for air '{}'", air_name
+                    )));
                 }
             }
         }
@@ -588,11 +587,9 @@ fn run_recursive_setup(
                 tracing::info!("Recursive2 setup complete for airgroup '{}'", airgroup_name);
             }
             Err(e) => {
-                tracing::error!(
-                    "Recursive2 setup failed for airgroup '{}': {:#}",
-                    airgroup_name,
-                    e
-                );
+                return Err(e.context(format!(
+                    "Recursive2 setup failed for airgroup '{}'", airgroup_name
+                )));
             }
         }
     }
@@ -611,19 +608,13 @@ fn run_recursive_setup(
         circom_helpers_dir: &circom_helpers_dir,
     };
 
-    let final_result = match final_setup::gen_final_setup(&final_config, &witness_tracker) {
-        Ok(result) => {
-            tracing::info!("Final setup complete");
-            Some(result)
-        }
-        Err(e) => {
-            tracing::error!("Final setup failed: {:#}", e);
-            None
-        }
-    };
+    let final_result = final_setup::gen_final_setup(&final_config, &witness_tracker)
+        .context("Final setup failed")?;
+    tracing::info!("Final setup complete");
 
     // Run compressed final setup
-    if let Some(ref fr) = final_result {
+    {
+        let fr = &final_result;
         tracing::info!("Running compressed final setup...");
         let const_root_str: [String; 4] = [
             fr.const_root[0].to_string(),
@@ -647,10 +638,9 @@ fn run_recursive_setup(
             circom_helpers_dir: &circom_helpers_dir,
         };
 
-        match compressed_final::gen_compressed_final_setup(&compressed_config, &witness_tracker) {
-            Ok(()) => tracing::info!("Compressed final setup complete"),
-            Err(e) => tracing::error!("Compressed final setup failed: {:#}", e),
-        }
+        compressed_final::gen_compressed_final_setup(&compressed_config, &witness_tracker)
+            .context("Compressed final setup failed")?;
+        tracing::info!("Compressed final setup complete");
     }
 
     // Wait for all witness library builds

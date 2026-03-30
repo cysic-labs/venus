@@ -39,18 +39,18 @@ test_pipeline() {
             -b "$BUILD"
 
         if [ "$SETUP_ONLY" != "true" ]; then
-            cargo run --bin proofman-cli pil-helpers \
+            cargo run --bin proofman-cli -- pil-helpers \
                 --pilout "$PILOUT_FILE" \
                 --path "$SRC" -o
 
             # Compile in debug mode
             cargo build --workspace
 
-            cargo run --bin proofman-cli verify-constraints \
+            cargo run --bin proofman-cli -- verify-constraints \
                 --witness-lib "$LIB" \
                 --proving-key "$PROVING_KEY"
 
-            cargo run --bin proofman-cli prove \
+            cargo run --bin proofman-cli -- prove \
                 --witness-lib "$LIB" \
                 --proving-key "$PROVING_KEY" \
                 --verify-proofs \

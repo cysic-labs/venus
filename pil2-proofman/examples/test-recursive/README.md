@@ -22,7 +22,7 @@ cargo build --workspace
 ### Verify Constraints
 
 ```bash
-cargo run --bin proofman-cli verify-constraints \
+cargo run --bin proofman-cli -- verify-constraints \
      --witness-lib ./target/debug/libtest_recursive$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
      --proving-key examples/test-recursive/build/provingKey/
 ```
@@ -30,7 +30,7 @@ cargo run --bin proofman-cli verify-constraints \
 ### Generate Proof
 
 ```bash
-cargo run --bin proofman-cli prove \
+cargo run --bin proofman-cli -- prove \
      --witness-lib ./target/debug/libtest_recursive$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
      --proving-key examples/test-recursive/build/provingKey/ \
      --output-dir examples/test-recursive/build/proofs -y -vv
