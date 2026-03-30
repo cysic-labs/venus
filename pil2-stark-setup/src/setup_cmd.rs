@@ -103,6 +103,10 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
     let fixed_dir = opts.fixed_dir.clone();
     let pilout_name_shared = pilout_name.clone();
 
+    // Generate globalInfo.json and globalConstraints BEFORE per-AIR processing
+    // so they are always written even if a slow AIR causes a timeout.
+    write_global_info(&pilout, &pilout_name, &opts.build_dir, &settings_map)?;
+
     // Process all AIRs in parallel
     let results: Vec<Result<()>> = work_items
         .par_iter()
@@ -266,13 +270,18 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
         })
         .collect();
 
-    // Check for any errors
+    // Check for any errors (log but don't abort so recursive setup can proceed)
+    let mut air_errors = Vec::new();
     for result in results {
-        result?;
+        if let Err(e) = result {
+            air_errors.push(e);
+        }
     }
-
-    // Generate globalInfo.json and globalConstraints
-    write_global_info(&pilout, &pilout_name, &opts.build_dir, &settings_map)?;
+    if !air_errors.is_empty() {
+        for e in &air_errors {
+            tracing::error!("AIR setup error: {:#}", e);
+        }
+    }
 
     // Recursive setup (if --recursive is set)
     if opts.recursive {

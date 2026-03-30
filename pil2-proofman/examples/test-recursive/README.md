@@ -1,5 +1,6 @@
 ## Execute the Recursive Example
 
+All commands should be run from the **repository root** directory.
 
 ## Platform Compatibility
 
@@ -8,72 +9,64 @@ Detect your platform and set the appropriate library extension:
 ```bash
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi)
 ```
-### Generate Setup
 
-All commands below should be run from the `pil2-proofman/` directory:
+### Compile PIL
 
 ```bash
-cd pil2-proofman
+cargo run --release --bin pil2c -- pil2-proofman/examples/test-recursive/test.pil \
+     -I pil2-proofman/pil2-components/lib/std/pil \
+     -o pil2-proofman/examples/test-recursive/test.pilout
+```
 
-cargo run --release --bin pil2c -- ./examples/test-recursive/test.pil \
-     -I pil2-components/lib/std/pil \
-     -o ./examples/test-recursive/test.pilout
+### Generate Setup
 
+```bash
 cargo run --release --bin venus-setup -- \
-     -a ./examples/test-recursive/test.pilout \
-     -b ./examples/test-recursive/build \
-     -t pil2-components/lib/std/pil
+     -a pil2-proofman/examples/test-recursive/test.pilout \
+     -b pil2-proofman/examples/test-recursive/build \
+     -t pil2-proofman/pil2-components/lib/std/pil
 ```
 
 ### Build the Project
 
-Build the project with the following command:
-
 ```bash
-cargo build --workspace
+cargo build -p test-recursive
 ```
 
 ### Verify Constraints
 
-Verify the constraints by executing this command:
-
 ```bash
 cargo run --bin proofman-cli verify-constraints \
      --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \
-     --proving-key examples/test-recursive/build/provingKey/
+     --proving-key pil2-proofman/examples/test-recursive/build/provingKey/
 ```
 
 ### Generate Proof
 
-Finally, generate the proof using the following command:
-
 ```bash
-     cargo run --bin proofman-cli --features gpu prove \
-     --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT}\
-     --proving-key examples/test-recursive/build/provingKey/ \
-     --output-dir examples/test-recursive/build/proofs -y -vv
+cargo run --bin proofman-cli prove \
+     --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \
+     --proving-key pil2-proofman/examples/test-recursive/build/provingKey/ \
+     --output-dir pil2-proofman/examples/test-recursive/build/proofs -y -vv
 ```
 
 ### All at once
 
-Run from the `pil2-proofman/` directory:
-
 ```bash
-cd pil2-proofman
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
-&& cargo run --release --bin pil2c -- ./examples/test-recursive/test.pil \
-     -I pil2-components/lib/std/pil \
-     -o ./examples/test-recursive/test.pilout \
+&& cargo run --release --bin pil2c -- pil2-proofman/examples/test-recursive/test.pil \
+     -I pil2-proofman/pil2-components/lib/std/pil \
+     -o pil2-proofman/examples/test-recursive/test.pilout \
 && cargo run --release --bin venus-setup -- \
-     -a ./examples/test-recursive/test.pilout \
-     -b ./examples/test-recursive/build \
-     -t pil2-components/lib/std/pil \
-&& cargo build --workspace \
+     -a pil2-proofman/examples/test-recursive/test.pilout \
+     -b pil2-proofman/examples/test-recursive/build \
+     -t pil2-proofman/pil2-components/lib/std/pil \
+&& cargo build -p test-recursive \
 && cargo run --bin proofman-cli verify-constraints \
      --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \
-     --proving-key examples/test-recursive/build/provingKey/ \
+     --proving-key pil2-proofman/examples/test-recursive/build/provingKey/ \
 && cargo run --bin proofman-cli prove \
-     --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT}\
-     --proving-key examples/test-recursive/build/provingKey/ \
-     --output-dir examples/test-recursive/build/proofs -y -vv
+     --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \
+     --proving-key pil2-proofman/examples/test-recursive/build/provingKey/ \
+     --output-dir pil2-proofman/examples/test-recursive/build/proofs -y -vv
 ```
