@@ -299,7 +299,7 @@ pub fn gen_recursive_setup(
 
     // Generate stark struct if not provided
     // For compressor template without a pre-existing starkStruct, use blowupFactor=2
-    let need_setup = template != RecursiveTemplate::Recursive1;
+    let need_setup = true;
 
     // Run real starkSetup via pil_info on the compiled pilout
     tracing::info!("Running starkSetup for recursive circuit...");
@@ -414,10 +414,8 @@ pub fn gen_recursive_setup(
         )?;
 
         (Some(si_json), Some(verifier_info_json), Some(expressions_info_json))
-    } else if need_setup {
-        bail!("Pilout not found at {}. Cannot run starkSetup for recursive circuit.", pilout_path_str);
     } else {
-        (None, None, None)
+        bail!("Pilout not found at {}. Cannot run starkSetup for recursive circuit.", pilout_path_str);
     };
 
     // Compute const tree and verkey
@@ -441,12 +439,11 @@ pub fn gen_recursive_setup(
 
         root
     } else {
-        tracing::warn!(
-            "Skipping const tree: const={} starkinfo={}",
+        bail!(
+            "Cannot compute const tree: const file ({}) or starkinfo ({}) missing",
             const_path.display(),
             starkinfo_path.display()
         );
-        [0u64; 4]
     };
 
     // JSON files already written by the real pil_info pipeline above

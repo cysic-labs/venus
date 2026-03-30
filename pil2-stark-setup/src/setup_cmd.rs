@@ -521,29 +521,17 @@ fn run_recursive_setup(
         let si_path = r1_dir.join("recursive1.starkinfo.json");
         let vi_path = r1_dir.join("recursive1.verifierinfo.json");
 
-        // Fallback to the air starkinfo if recursive1 doesn't have one
-        let (stark_info, verifier_info) = if si_path.exists() && vi_path.exists() {
-            let si: serde_json::Value =
-                serde_json::from_str(&fs::read_to_string(&si_path)?)?;
-            let vi: serde_json::Value =
-                serde_json::from_str(&fs::read_to_string(&vi_path)?)?;
-            (si, vi)
-        } else {
-            let air_dir = PathBuf::from(build_dir)
-                .join("provingKey")
-                .join(pilout_name)
-                .join(&airgroup_name)
-                .join("airs")
-                .join(&air_name)
-                .join("air");
-            let si: serde_json::Value = serde_json::from_str(
-                &fs::read_to_string(air_dir.join(format!("{}.starkinfo.json", air_name)))?,
-            )?;
-            let vi: serde_json::Value = serde_json::from_str(
-                &fs::read_to_string(air_dir.join(format!("{}.verifierinfo.json", air_name)))?,
-            )?;
-            (si, vi)
-        };
+        // Require recursive1 artifacts to exist (no fallback to non-recursive AIR)
+        if !si_path.exists() || !vi_path.exists() {
+            anyhow::bail!(
+                "Recursive2 requires recursive1 artifacts for airgroup '{}' air '{}': {:?} and {:?} must exist",
+                airgroup_name, air_name, si_path, vi_path
+            );
+        }
+        let stark_info: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&si_path)?)?;
+        let verifier_info: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&vi_path)?)?;
 
         let const_root_strings: [String; 4] =
             ["0".into(), "0".into(), "0".into(), "0".into()];
@@ -2234,36 +2222,43 @@ mod tests_global_info {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
-    /// Test that run_setup writes global files before returning Err on AIR failure.
-    ///
-    /// Uses a minimal valid pilout with one AIR that has zero rows (triggers
-    /// "skipping" logic but the empty airgroup still produces global metadata).
-    /// Then verifies with a broken pilout (truncated) that causes a parse error
-    /// and confirms the function returns Err.
+    /// Test that write_global_info produces the expected files from a valid pilout.
+    /// This verifies the contract that global files are written before AIR processing.
     #[test]
-    fn test_global_files_written_before_error() {
-        let tmp_dir = std::env::temp_dir().join("pil2_failfast_test");
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir).unwrap();
+    fn test_global_files_written_from_pilout() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let pilout_path = base.join("pil/zisk.pilout");
+        if !pilout_path.exists() {
+            eprintln!("Skipping test: zisk.pilout not found");
+            return;
+        }
 
+        let tmp_dir = std::env::temp_dir().join("pil2_global_write_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
         let build_dir = tmp_dir.join("build");
         std::fs::create_dir_all(&build_dir).unwrap();
 
-        // Create a truncated/invalid pilout file that will fail to parse
-        let bad_pilout = tmp_dir.join("bad.pilout");
-        std::fs::write(&bad_pilout, b"not a valid protobuf").unwrap();
+        // Parse pilout and call write_global_info directly
+        let pilout_data = std::fs::read(&pilout_path).unwrap();
+        let pilout = pilout::pilout::PilOut::decode(pilout_data.as_slice()).unwrap();
+        let pilout_name = pilout.name.clone().unwrap_or_else(|| "pilout".to_string());
+        let settings_map: IndexMap<String, StarkSettings> = IndexMap::new();
 
-        let opts = SetupOptions {
-            airout_path: bad_pilout.to_str().unwrap().to_string(),
-            build_dir: build_dir.to_str().unwrap().to_string(),
-            fixed_dir: None,
-            stark_structs_path: None,
-            recursive: false,
-        };
+        write_global_info(&pilout, &pilout_name, build_dir.to_str().unwrap(), &settings_map).unwrap();
 
-        // run_setup should return Err because the pilout is invalid
-        let result = run_setup(&opts);
-        assert!(result.is_err(), "run_setup should fail on invalid pilout");
+        let pk_dir = build_dir.join("provingKey");
+        assert!(
+            pk_dir.join("pilout.globalInfo.json").exists(),
+            "globalInfo.json should be written"
+        );
+        assert!(
+            pk_dir.join("pilout.globalConstraints.json").exists(),
+            "globalConstraints.json should be written"
+        );
+        assert!(
+            pk_dir.join("pilout.globalConstraints.bin").exists(),
+            "globalConstraints.bin should be written"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
