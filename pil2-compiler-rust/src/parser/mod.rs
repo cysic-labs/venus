@@ -1108,7 +1108,13 @@ fn build_else_clause(pair: pest::iterators::Pair<'_, Rule>) -> Result<Vec<Statem
 
 fn build_single_stmt(pair: pest::iterators::Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let inner = pair.into_inner().next().ok_or_else(|| err("empty single_stmt"))?;
-    build_statement_inner(inner)
+    // single_stmt wraps statement_inner_no_block; unwrap one level.
+    if inner.as_rule() == Rule::statement_inner_no_block {
+        let actual = inner.into_inner().next().ok_or_else(|| err("empty statement_inner_no_block"))?;
+        build_statement_inner(actual)
+    } else {
+        build_statement_inner(inner)
+    }
 }
 
 fn build_for(pair: pest::iterators::Pair<'_, Rule>) -> Result<Statement, ParseError> {

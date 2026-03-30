@@ -278,7 +278,7 @@ else_clause = {
   | "else" ~ "{" ~ statement* ~ "}"
 }
 
-single_stmt = { statement_inner_no_block ~ semi }
+single_stmt = { statement_inner_no_block }
 
 // Statements that can appear as single-stmt bodies (no bare blocks)
 statement_inner_no_block = {
