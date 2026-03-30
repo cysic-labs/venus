@@ -10,52 +10,31 @@ Detect your platform and set the appropriate library extension:
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi)
 ```
 
-## 1. Download and Set Up Required Repositories
+## 1. Set Up Build Environment
 
-### 1.2 Install `pil2-compiler`
+### 1.1 Install system packages
 
-Next, clone the `pil2-compiler` repository and install its dependencies:
-
-```bash
-git clone https://github.com/0xPolygonHermez/pil2-compiler.git
-cd pil2-compiler
-npm install
-cd ..
-```
-
-### 1.3 Install `pil2-proofman-js`
-
-Clone the `pil2-proofman-js` repository, switch to the `develop` branch, and install the dependencies:
+Update package lists and install required system packages:
 
 ```bash
-git clone https://github.com/0xPolygonHermez/pil2-proofman-js
-cd pil2-proofman-js
-git checkout develop
-
-# TODO: Verify if the Stark Recurser raises any issues during this process
-
-npm install
-cd ..
-```
-# Update package lists and install required system packages
 sudo apt update
 sudo apt install -y build-essential libbenchmark-dev libomp-dev libgmp-dev nlohmann-json3-dev nasm libsodium-dev cmake
+```
 
-### 1.4 Compile the PIL2 Stark C++ Library
+### 1.2 Build Rust tools
+
+Build the PIL2 compiler and setup tool:
+
+```bash
+cargo build --release --bin pil2c --bin venus-setup
+```
+
+### 1.3 Compile the PIL2 Stark C++ Library
 
 Compile the PIL2 Stark C++ Library (run only once):
 
 ```bash
 (cd ../pil2-proofman/pil2-stark && make clean && make -j starks_lib && make -j bctree)
-```
-
-### 1.5 Install `pil2-proofman`
-
-Finally, clone the `pil2-proofman` repository:
-
-```bash
-git clone https://github.com/0xPolygonHermez/pil2-proofman.git
-cd pil2-proofman
 ```
 
 ---
@@ -68,7 +47,7 @@ cd pil2-proofman
 To begin, compile the PIL files:
 
 ```bash
-node ../pil2-compiler/src/pil.js ./examples/fibonacci-square/pil/build.pil \
+cargo run --release --bin pil2c -- ./examples/fibonacci-square/pil/build.pil \
      -I ./pil2-components/lib/std/pil \
      -o ./examples/fibonacci-square/pil/build.pilout -u ./examples/fibonacci-square/build/fixed -O fixed-to-file
 ```
@@ -78,7 +57,7 @@ node ../pil2-compiler/src/pil.js ./examples/fibonacci-square/pil/build.pil \
 After compiling the PIL files, generate the setup:
 
 ```bash
-node ../pil2-proofman-js/src/main_setup.js \
+cargo run --release --bin venus-setup -- \
      -a ./examples/fibonacci-square/pil/build.pilout -t ./pil2-components/lib/std/pil \
      -b ./examples/fibonacci-square/build -r -u ./examples/fibonacci-square/build/fixed
 ```
@@ -86,7 +65,7 @@ node ../pil2-proofman-js/src/main_setup.js \
 Additionally, to run the snark setup:
 
 ```bash
-node ../pil2-proofman-js/src/main_setup_snark.js \
+cargo run --release --bin venus-setup -- --snark \
      -b ./examples/fibonacci-square/build -t ./pil2-components/lib/std/pil \
      -n plonk -p examples/fibonacci-square/src/publics_info.json -w <powers_of_tau>
 ```
@@ -94,7 +73,7 @@ node ../pil2-proofman-js/src/main_setup_snark.js \
 If only wants to generate the recursive final for debugging purposes, run:
 
 ```bash
-node ../pil2-proofman-js/src/main_setup_snark.js \
+cargo run --release --bin venus-setup -- --snark \
      -b ./examples/fibonacci-square/build -t ./pil2-components/lib/std/pil -o
 ```
 
@@ -181,13 +160,13 @@ cargo build --features gpu --workspace \
 
 ```bash
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
-&& node --max-old-space-size=65536 ../pil2-compiler/src/pil.js ./examples/fibonacci-square/pil/build.pil \
+&& cargo run --release --bin pil2c -- ./examples/fibonacci-square/pil/build.pil \
      -I ./pil2-components/lib/std/pil \
      -o ./examples/fibonacci-square/pil/build.pilout \
-&& node --max-old-space-size=65536 ../pil2-proofman-js/src/main_setup.js \
+&& cargo run --release --bin venus-setup -- \
      -a ./examples/fibonacci-square/pil/build.pilout \
      -b ./examples/fibonacci-square/build -t pil2-components/lib/std/pil \
-&& node ../pil2-proofman-js/src/main_stats.js \
+&& cargo run --release --bin venus-setup -- --stats \
      -a ./examples/fibonacci-square/pil/build.pilout \
      -o ./examples/fibonacci-square/build/build.stats \
 && cargo run --bin proofman-cli pil-helpers \
@@ -215,14 +194,14 @@ export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib
 
 ```bash
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
-&& node --max-old-space-size=65536 ../pil2-compiler/src/pil.js ./examples/fibonacci-square/pil/build.pil \
+&& cargo run --release --bin pil2c -- ./examples/fibonacci-square/pil/build.pil \
      -I ./pil2-components/lib/std/pil \
      -o ./examples/fibonacci-square/pil/build.pilout \
-&& node --max-old-space-size=65536 ../pil2-proofman-js/src/main_setup.js \
+&& cargo run --release --bin venus-setup -- \
      -a ./examples/fibonacci-square/pil/build.pilout \
      -b ./examples/fibonacci-square/build -t pil2-components/lib/std/pil \
      -r \
-&& node ../pil2-proofman-js/src/main_stats.js \
+&& cargo run --release --bin venus-setup -- --stats \
      -a ./examples/fibonacci-square/pil/build.pilout \
      -o ./examples/fibonacci-square/build/build.stats \
 && cargo run --bin proofman-cli pil-helpers \

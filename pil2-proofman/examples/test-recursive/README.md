@@ -13,11 +13,9 @@ export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib
 After compiling the PIL files, generate the setup:
 
 ```bash
-node ../pil2-proofman-js/src/main_setup_recursive.js \
+cargo run --release --bin venus-setup -- -r \
      -b ./examples/test-recursive/build -c ./examples/test-recursive/test.circom -n test -p pil2-components/lib/std/pil
 ```
-
-To run the aggregated proof, need to add -r to the previous command
 
 ### Build the Project
 
@@ -52,7 +50,7 @@ Finally, generate the proof using the following command:
 
 ```bash
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
-&& node ../pil2-proofman-js/src/main_setup_recursive.js \
+&& cargo run --release --bin venus-setup -- -r \
      -b ./examples/test-recursive/build -c ./examples/test-recursive/test.circom -n test -p pil2-components/lib/std/pil \
 && cargo build --workspace \
 && cargo run --bin proofman-cli verify-constraints \

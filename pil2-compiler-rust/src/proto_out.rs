@@ -1523,4 +1523,57 @@ mod tests {
         let bytes2 = bigint_to_bytes(0xFFFFFFFF00000000);
         assert!(!bytes2.is_empty());
     }
+
+    /// Decode the golden `zisk.pilout` and assert structural invariants.
+    ///
+    /// The reference values come from the JS-compiled golden pilout. If the
+    /// pilout file is not present (e.g. CI without large test artifacts), the
+    /// test is skipped rather than failed.
+    #[test]
+    fn test_decoded_pilout_parity() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pil/zisk.pilout");
+        if !path.exists() {
+            eprintln!("Skipping test_decoded_pilout_parity: {:?} not found", path);
+            return;
+        }
+        let data = std::fs::read(&path).expect("failed to read zisk.pilout");
+        let pilout = pilout_proto::PilOut::decode(data.as_slice())
+            .expect("failed to decode zisk.pilout as PilOut");
+
+        // -- Top-level structure --
+        assert_eq!(pilout.air_groups.len(), 1, "expected 1 air group");
+        assert_eq!(pilout.symbols.len(), 4910, "total symbol count mismatch");
+        assert_eq!(pilout.hints.len(), 2552, "total hint count mismatch");
+
+        let ag = &pilout.air_groups[0];
+        assert_eq!(ag.name.as_deref(), Some("Zisk"), "air group name mismatch");
+        assert_eq!(ag.airs.len(), 35, "expected 35 AIRs in the Zisk air group");
+
+        // Helper: find an AIR by name within the single air group.
+        let find_air = |name: &str| -> &pilout_proto::Air {
+            ag.airs
+                .iter()
+                .find(|a| a.name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("AIR {:?} not found in pilout", name))
+        };
+
+        // -- Per-AIR constraint and expression counts --
+        let dma = find_air("Dma");
+        assert_eq!(dma.constraints.len(), 49, "Dma constraint count");
+        assert_eq!(dma.expressions.len(), 536, "Dma expression count");
+
+        let binary = find_air("Binary");
+        assert_eq!(binary.constraints.len(), 14, "Binary constraint count");
+        assert_eq!(binary.expressions.len(), 453, "Binary expression count");
+
+        let arith = find_air("Arith");
+        assert_eq!(arith.constraints.len(), 65, "Arith constraint count");
+        assert_eq!(arith.expressions.len(), 892, "Arith expression count");
+
+        let main = find_air("Main");
+        assert_eq!(main.constraints.len(), 144, "Main constraint count");
+        assert_eq!(main.expressions.len(), 2469, "Main expression count");
+
+        eprintln!("test_decoded_pilout_parity: all assertions passed");
+    }
 }

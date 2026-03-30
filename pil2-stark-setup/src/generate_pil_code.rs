@@ -10,6 +10,8 @@
 //! - Verifier evaluations
 //! - Hint computations
 
+use std::collections::HashMap;
+
 use crate::codegen::{build_code, pil_code_gen, CalcEntry, CodeGenCtx, EvMapRef};
 use crate::expression::Expression;
 use crate::fri_poly::{self, ChallengeMapEntry};
@@ -18,6 +20,27 @@ use crate::pilout_info::{
     ConstraintInfo, HintFieldValue, HintInfo, SymbolInfo, FIELD_EXTENSION,
 };
 use crate::print_expression::{self, PrintCtx};
+
+/// Build a HashMap from (exp_id, air_id, airgroup_id) -> symbol index
+/// for witness symbols. Used by fix_commit_pol for O(1) lookups.
+fn build_witness_index(
+    symbols: &[SymbolInfo],
+    air_id: usize,
+    airgroup_id: usize,
+) -> HashMap<(usize, usize, usize), usize> {
+    let mut index = HashMap::new();
+    for (i, s) in symbols.iter().enumerate() {
+        if s.sym_type == "witness"
+            && s.air_id == Some(air_id)
+            && s.airgroup_id == Some(airgroup_id)
+        {
+            if let Some(exp_id) = s.exp_id {
+                index.insert((exp_id, air_id, airgroup_id), i);
+            }
+        }
+    }
+    index
+}
 use crate::types::CodeRef;
 
 // ---------------------------------------------------------------------------
@@ -153,6 +176,9 @@ pub fn generate_pil_code(
     let mut ev_map_items: Vec<EvMapRef> = Vec::new();
     let mut challenges_map: Vec<ChallengeMapEntry> = Vec::new();
 
+    // Pre-compute witness symbol index for O(1) lookups in fix_commit_pol
+    let witness_index = build_witness_index(symbols, params.air_id, params.airgroup_id);
+
     // In non-debug mode: generate verifier code, then FRI polynomial
     let q_verifier = if !debug {
         let qv = generate_constraint_polynomial_verifier_code(
@@ -160,6 +186,7 @@ pub fn generate_pil_code(
             symbols,
             expressions,
             &mut ev_map_items,
+            &witness_index,
         );
 
         // Generate FRI polynomial (mirrors JS: generateFRIPolynomial(res, symbols, expressions))
@@ -197,7 +224,7 @@ pub fn generate_pil_code(
 
     let hints_info = add_hints_info(params, expressions, hints, false, print_ctx);
 
-    let mut expressions_code = generate_expressions_code(params, symbols, expressions);
+    let mut expressions_code = generate_expressions_code(params, symbols, expressions, &witness_index);
 
     // Build query_verifier from the FRI expression code entry.
     // In JS, `find` returns a reference, so modifying the found element also
@@ -231,7 +258,7 @@ pub fn generate_pil_code(
 
     let query_verifier = expressions_code[fri_entry_idx].clone();
 
-    let constraints_code = generate_constraints_debug_code(params, symbols, constraints, expressions);
+    let constraints_code = generate_constraints_debug_code(params, symbols, constraints, expressions, &witness_index);
 
     let fri_exp_id = params.fri_exp_id;
 
@@ -262,6 +289,7 @@ fn generate_expressions_code(
     params: &CodeGenParams,
     symbols: &[SymbolInfo],
     expressions: &[Expression],
+    witness_index: &HashMap<(usize, usize, usize), usize>,
 ) -> Vec<ExpressionCodeEntry> {
     let mut result = Vec::new();
 
@@ -290,6 +318,7 @@ fn generate_expressions_code(
             Vec::new(),
             Vec::new(),
         );
+        ctx.witness_by_exp_id = witness_index.clone();
 
         if j == params.fri_exp_id {
             ctx.opening_points = params.opening_points.clone();
@@ -399,6 +428,7 @@ fn generate_constraints_debug_code(
     symbols: &[SymbolInfo],
     constraints: &[ConstraintInfo],
     expressions: &[Expression],
+    witness_index: &HashMap<(usize, usize, usize), usize>,
 ) -> Vec<ConstraintCodeEntry> {
     let mut result = Vec::new();
 
@@ -412,6 +442,7 @@ fn generate_constraints_debug_code(
             Vec::new(),
             Vec::new(),
         );
+        ctx.witness_by_exp_id = witness_index.clone();
 
         // Pre-mark imPol expressions as calculated
         for sym in symbols.iter() {
@@ -469,6 +500,7 @@ fn generate_constraint_polynomial_verifier_code(
     symbols: &[SymbolInfo],
     expressions: &[Expression],
     ev_map_out: &mut Vec<EvMapRef>,
+    witness_index: &HashMap<(usize, usize, usize), usize>,
 ) -> ExpressionCodeEntry {
     let mut ctx = CodeGenCtx::new(
         params.air_id,
@@ -479,6 +511,7 @@ fn generate_constraint_polynomial_verifier_code(
         params.opening_points.clone(),
         Vec::new(),
     );
+    ctx.witness_by_exp_id = witness_index.clone();
 
     // Pre-mark imPol expressions as calculated
     for sym in symbols.iter() {
@@ -824,7 +857,8 @@ mod tests {
             custom_commits_count: 0,
         };
 
-        let code = generate_expressions_code(&params, &symbols, &expressions);
+        let wi = build_witness_index(&symbols, 0, 0);
+        let code = generate_expressions_code(&params, &symbols, &expressions, &wi);
         // Only expression[2] has keep=true, so we should get 1 entry
         assert_eq!(code.len(), 1);
         assert_eq!(code[0].exp_id, 2);
@@ -892,7 +926,8 @@ mod tests {
             custom_commits_count: 0,
         };
 
-        let result = generate_constraints_debug_code(&params, &symbols, &constraints, &expressions);
+        let wi2 = build_witness_index(&symbols, 0, 0);
+        let result = generate_constraints_debug_code(&params, &symbols, &constraints, &expressions, &wi2);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].boundary, "everyRow");
         assert_eq!(result[0].stage, 1);

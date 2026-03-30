@@ -61,10 +61,10 @@ Turns out we don't define the values for the witness columns during the PIL2 des
 
 ## Generate the PILOUT file
 
-Once the PIL2 code is ready, you can generate the PILOUT file using the [PIL2 compiler repository](https://github.com/0xPolygonHermez/pil2-compiler.git). Clone the repository and compile the PIL2 compiler by running the following commands:
+Once the PIL2 code is ready, you can generate the PILOUT file using the PIL2 compiler (`pil2c`):
 
 ```bash
-node ./pil2-compiler/src/pil.js fibonacci.pil
+cargo run --release --bin pil2c -- fibonacci.pil -o fibonacci.pilout
 ```
 
 This command will generate a `fibonacci.pilout` file that contains the arithmetization, public inputs, constraints, constant values, and other proof-generation-specific details described by the PIL2 project.

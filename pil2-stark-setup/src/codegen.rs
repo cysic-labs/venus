@@ -40,6 +40,9 @@ pub struct CodeGenCtx {
     /// Used by `build_code` to resolve expression refs to temporaries.
     /// Keyed by prime (can be negative, e.g. -1) then by expression id.
     exp_map: HashMap<i64, HashMap<usize, usize>>,
+    /// Pre-computed symbol index: exp_id -> symbol index for witness imPol lookups.
+    /// Avoids O(N) linear scan of symbols on every fix_commit_pol call.
+    pub witness_by_exp_id: HashMap<(usize, usize, usize), usize>,
 }
 
 /// An entry in the evaluation map built during verifier code generation.
@@ -75,6 +78,7 @@ impl CodeGenCtx {
             code: Vec::new(),
             calculated: HashMap::new(),
             exp_map: HashMap::new(),
+            witness_by_exp_id: HashMap::new(),
         }
     }
 }
@@ -425,16 +429,10 @@ fn calculate_deps(
 /// intermediate polynomial and meets the promotion criteria, rewrite the
 /// reference to point to the committed polynomial column.
 fn fix_commit_pol(r: &mut CodeRef, ctx: &CodeGenCtx, symbols: &[SymbolInfo]) {
-    // Find the witness symbol matching this expression id for this air
-    let symbol = symbols.iter().find(|s| {
-        s.sym_type == "witness"
-            && s.exp_id == Some(r.id)
-            && s.air_id == Some(ctx.air_id)
-            && s.airgroup_id == Some(ctx.airgroup_id)
-    });
-
-    let symbol = match symbol {
-        Some(s) => s,
+    // Use pre-computed index for O(1) symbol lookup instead of O(N) linear scan
+    let key = (r.id, ctx.air_id, ctx.airgroup_id);
+    let symbol = match ctx.witness_by_exp_id.get(&key) {
+        Some(&idx) => &symbols[idx],
         None => return,
     };
 
