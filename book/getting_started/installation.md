@@ -173,58 +173,31 @@ To install the PLONK proving key (provingKeySnark), run:
 
 #### Build Setup
 
-Please note that the process can be long, taking approximately 45-60 minutes depending on the machine used.
+The setup process uses native Rust tools and typically completes in under 30 minutes.
 
-[NodeJS](https://nodejs.org/en/download) version 20.x or higher is required to build the setup files.
-
-1. Clone the following repositories in the parent folder of the `zisk` folder created in the previous section:
+1. Clone the pil2-proofman repository in the parent folder of the `zisk` folder:
     ```bash
-    git clone https://github.com/0xPolygonHermez/pil2-compiler.git
     git clone https://github.com/0xPolygonHermez/pil2-proofman.git
-    git clone https://github.com/0xPolygonHermez/pil2-proofman-js
-    ```
-2. Install packages:
-    ```bash
-    (cd pil2-compiler && npm i)
-    (cd pil2-proofman-js && npm i)
     ```
 
-3. All subsequent commands must be executed from the `zisk` folder created in the previous section:
+2. All subsequent commands must be executed from the `zisk` folder created in the previous section:
     ```bash
     cd zisk
     ```
 
-4. Generate fixed data:
+3. Generate proving keys (includes PIL compilation, fixed data generation, and setup):
     ```bash
-    cargo run --release --bin arith_frops_fixed_gen
-    cargo run --release --bin binary_basic_frops_fixed_gen
-    cargo run --release --bin binary_extension_frops_fixed_gen
+    make generate-key
     ```
 
-5. Compile ZisK PIL:
-    ```bash
-    node --max-old-space-size=16384 ../pil2-compiler/src/pil.js pil/zisk.pil -I pil,../pil2-proofman/pil2-components/lib/std/pil,state-machines,precompiles -o pil/zisk.pilout -u tmp/fixed -O fixed-to-file
-    ```
+    This runs the full pipeline:
+    - Fixed column generators (arith, binary_basic, binary_extension)
+    - PIL compiler (`pil2c`): compiles `pil/zisk.pil` to `pil/zisk.pilout`
+    - Setup tool (`venus-setup`): generates proving keys with parallelized per-AIR processing
 
-    This command will create the `pil/zisk.pilout` file
+    The `build/provingKey` directory is created with all necessary files.
 
-6. Generate setup data: (this step may take 30-45 minutes):
-    ```bash
-    node --max-old-space-size=16384 --stack-size=8192 ../pil2-proofman-js/src/main_setup.js -a ./pil/zisk.pilout -b build -t ../pil2-proofman/pil2-components/lib/std/pil -u tmp/fixed -r -s ./state-machines/starkstructs.json
-    ```
-
-    This command generates the `build/provingKey` directory.
-
-    Additionally, to generate the snark wrapper:
-
-    ```bash
-    node  ../pil2-proofman-js/src/main_setup_snark.js -b build -t ../pil2-proofman/pil2-components/lib/std/pil -f -w ../powersOfTau28_hez_final_27.ptau -p ./state-machines/publics.json -n plonk
-    ```
-
-    It is stored under the `build/provingKeySnark` directory.
-    
-
-7. Copy (or move) the `build/provingKey` directory to `$HOME/.zisk` directory:
+4. Copy (or move) the `build/provingKey` directory to `$HOME/.zisk` directory:
 
     ```bash
     cp -R build/provingKey $HOME/.zisk

@@ -1,9 +1,0 @@
-airtemplate FixedOutOfBounds(int N = 2**16) {
-    col fixed F1 = [0..N];
-    col witness sel;
-    sel * (1 - sel) === 0;
-}
-
-airgroup FixedOutOfBoundsGroup {
-    FixedOutOfBounds();
-}
