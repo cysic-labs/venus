@@ -2241,6 +2241,51 @@ mod tests_global_info {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
+    /// Test Binary .bin byte-identity (has negative primes).
+    /// Currently fails with 4-byte diff at positions 25790/25794/32773/32777.
+    /// Root cause under investigation: tmp ID compaction or hint encoding diff.
+    #[test]
+    #[ignore] // known 4-byte parity gap, investigating
+    fn test_binary_bin_byte_identical_to_golden() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let golden_dir = base.join("golden_reference/zisk/Zisk/airs/Binary/air");
+        let si_path = golden_dir.join("Binary.starkinfo.json");
+        let ei_path = golden_dir.join("Binary.expressionsinfo.json");
+        let vi_path = golden_dir.join("Binary.verifierinfo.json");
+        let golden_bin = golden_dir.join("Binary.bin");
+        let golden_vbin = golden_dir.join("Binary.verifier.bin");
+
+        if !si_path.exists() || !golden_bin.exists() {
+            eprintln!("Skipping: golden Binary files not found");
+            return;
+        }
+
+        let tmp_dir = std::env::temp_dir().join("pil2_binary_bin_regression");
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let out_bin = tmp_dir.join("Binary.bin");
+        let out_vbin = tmp_dir.join("Binary.verifier.bin");
+
+        write_bin_files_native(&si_path, &ei_path, &vi_path, &out_bin, &out_vbin)
+            .expect("write_bin_files_native failed for Binary");
+
+        let golden_data = std::fs::read(&golden_bin).unwrap();
+        let actual_data = std::fs::read(&out_bin).unwrap();
+        assert_eq!(golden_data.len(), actual_data.len(),
+            "Binary.bin size mismatch: golden={} actual={}", golden_data.len(), actual_data.len());
+        if golden_data != actual_data {
+            let diff_pos = golden_data.iter().zip(actual_data.iter())
+                .position(|(a, b)| a != b).unwrap_or(0);
+            panic!("Binary.bin content mismatch at byte {} (golden=0x{:02x} actual=0x{:02x})",
+                diff_pos, golden_data[diff_pos], actual_data[diff_pos]);
+        }
+
+        let golden_vdata = std::fs::read(&golden_vbin).unwrap();
+        let actual_vdata = std::fs::read(&out_vbin).unwrap();
+        assert_eq!(golden_vdata, actual_vdata, "Binary.verifier.bin content mismatch");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
     /// Test the run_setup contract: global files are written before per-AIR work.
     ///
     /// Part 1: Verifies that run_setup with a zero-row PilOut writes all three
