@@ -1,72 +1,37 @@
-## Execute the Recursive Example
+## Recursive Example
 
-All commands should be run from the **repository root** directory.
+This example demonstrates the recursive proof composition flow using circom verifier circuits.
 
-## Platform Compatibility
+> **Note**: This example requires prerequisite setup files (pilout, proving key) to be generated before running. The circom-based recursive setup flow generates these files during the `venus-setup -r` pipeline.
 
-Detect your platform and set the appropriate library extension:
+### Prerequisites
 
-```bash
-export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi)
-```
+The following files must exist before running:
+- A compiled `.pilout` file for the recursive test
+- Proving keys generated via the setup pipeline
+- The `proof.bin` witness file (included in this directory)
 
-### Compile PIL
+### Build and Run
 
-```bash
-cargo run --release --bin pil2c -- pil2-proofman/examples/test-recursive/test.pil \
-     -I pil2-proofman/pil2-components/lib/std/pil \
-     -o pil2-proofman/examples/test-recursive/test.pilout
-```
-
-### Generate Setup
+From the `pil2-proofman/` directory:
 
 ```bash
-cargo run --release --bin venus-setup -- \
-     -a pil2-proofman/examples/test-recursive/test.pilout \
-     -b pil2-proofman/examples/test-recursive/build \
-     -t pil2-proofman/pil2-components/lib/std/pil
-```
-
-### Build the Project
-
-```bash
-cargo build -p test-recursive
+cargo build --workspace
 ```
 
 ### Verify Constraints
 
 ```bash
 cargo run --bin proofman-cli verify-constraints \
-     --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \
-     --proving-key pil2-proofman/examples/test-recursive/build/provingKey/
+     --witness-lib ./target/debug/libtest_recursive$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
+     --proving-key examples/test-recursive/build/provingKey/
 ```
 
 ### Generate Proof
 
 ```bash
 cargo run --bin proofman-cli prove \
-     --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \
-     --proving-key pil2-proofman/examples/test-recursive/build/provingKey/ \
-     --output-dir pil2-proofman/examples/test-recursive/build/proofs -y -vv
-```
-
-### All at once
-
-```bash
-export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
-&& cargo run --release --bin pil2c -- pil2-proofman/examples/test-recursive/test.pil \
-     -I pil2-proofman/pil2-components/lib/std/pil \
-     -o pil2-proofman/examples/test-recursive/test.pilout \
-&& cargo run --release --bin venus-setup -- \
-     -a pil2-proofman/examples/test-recursive/test.pilout \
-     -b pil2-proofman/examples/test-recursive/build \
-     -t pil2-proofman/pil2-components/lib/std/pil \
-&& cargo build -p test-recursive \
-&& cargo run --bin proofman-cli verify-constraints \
-     --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \
-     --proving-key pil2-proofman/examples/test-recursive/build/provingKey/ \
-&& cargo run --bin proofman-cli prove \
-     --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \
-     --proving-key pil2-proofman/examples/test-recursive/build/provingKey/ \
-     --output-dir pil2-proofman/examples/test-recursive/build/proofs -y -vv
+     --witness-lib ./target/debug/libtest_recursive$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
+     --proving-key examples/test-recursive/build/provingKey/ \
+     --output-dir examples/test-recursive/build/proofs -y -vv
 ```

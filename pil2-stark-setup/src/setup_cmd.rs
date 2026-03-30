@@ -270,17 +270,9 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
         })
         .collect();
 
-    // Check for any errors (log but don't abort so recursive setup can proceed)
-    let mut air_errors = Vec::new();
+    // Check for any errors and propagate them
     for result in results {
-        if let Err(e) = result {
-            air_errors.push(e);
-        }
-    }
-    if !air_errors.is_empty() {
-        for e in &air_errors {
-            tracing::error!("AIR setup error: {:#}", e);
-        }
+        result?;
     }
 
     // Recursive setup (if --recursive is set)
