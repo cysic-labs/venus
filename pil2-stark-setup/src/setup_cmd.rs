@@ -2208,7 +2208,7 @@ mod tests_global_info {
             return;
         }
 
-        let tmp_dir = std::env::temp_dir().join("pil2_bin_regression");
+        let tmp_dir = std::env::temp_dir().join(format!("pil2_bin_regression_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp_dir);
         let out_bin = tmp_dir.join("Dma.bin");
         let out_vbin = tmp_dir.join("Dma.verifier.bin");
@@ -2257,7 +2257,7 @@ mod tests_global_info {
             return;
         }
 
-        let tmp_dir = std::env::temp_dir().join("pil2_binary_bin_regression");
+        let tmp_dir = std::env::temp_dir().join(format!("pil2_binary_bin_regression_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp_dir);
         let out_bin = tmp_dir.join("Binary.bin");
         let out_vbin = tmp_dir.join("Binary.verifier.bin");
@@ -2283,14 +2283,46 @@ mod tests_global_info {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
+    /// Test Arith .bin byte-identity (exercises Goldilocks number encoding).
+    #[test]
+    fn test_arith_bin_byte_identical_to_golden() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let golden_dir = base.join("golden_reference/zisk/Zisk/airs/Arith/air");
+        let si = golden_dir.join("Arith.starkinfo.json");
+        let ei = golden_dir.join("Arith.expressionsinfo.json");
+        let vi = golden_dir.join("Arith.verifierinfo.json");
+        let golden_bin = golden_dir.join("Arith.bin");
+        let golden_vbin = golden_dir.join("Arith.verifier.bin");
+
+        if !si.exists() || !golden_bin.exists() {
+            eprintln!("Skipping: golden Arith files not found");
+            return;
+        }
+
+        let tmp_dir = std::env::temp_dir().join(format!("pil2_arith_bin_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let out_bin = tmp_dir.join("Arith.bin");
+        let out_vbin = tmp_dir.join("Arith.verifier.bin");
+
+        write_bin_files_native(&si, &ei, &vi, &out_bin, &out_vbin)
+            .expect("write_bin_files_native failed for Arith");
+
+        let golden_data = std::fs::read(&golden_bin).unwrap();
+        let actual_data = std::fs::read(&out_bin).unwrap();
+        assert_eq!(golden_data, actual_data, "Arith.bin content mismatch at byte {}",
+            golden_data.iter().zip(actual_data.iter()).position(|(a, b)| a != b).unwrap_or(0));
+
+        let golden_vdata = std::fs::read(&golden_vbin).unwrap();
+        let actual_vdata = std::fs::read(&out_vbin).unwrap();
+        assert_eq!(golden_vdata, actual_vdata, "Arith.verifier.bin content mismatch");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
     /// Test the run_setup contract: global files are written before per-AIR work.
     ///
-    /// Part 1: Verifies that run_setup with a zero-row PilOut writes all three
-    /// global files and returns Ok (structural proof that write_global_info runs
-    /// before the AIR loop, since the AIR loop is a no-op with zero rows).
-    ///
-    /// Part 2: Verifies the code ordering by checking that write_global_info is
-    /// called at line ~108 (before par_iter at line ~112) in run_setup source.
+    /// Verifies that run_setup with a zero-row PilOut writes all three
+    /// global files and returns Ok.
     #[test]
     fn test_run_setup_writes_global_files_before_airs() {
         use pilout::pilout as pb;
@@ -2310,7 +2342,7 @@ mod tests_global_info {
             ..Default::default()
         };
 
-        let tmp_dir = std::env::temp_dir().join("pil2_run_setup_global");
+        let tmp_dir = std::env::temp_dir().join(format!("pil2_run_setup_global_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         let build_dir = tmp_dir.join("build");
         std::fs::create_dir_all(&build_dir).unwrap();
@@ -2353,7 +2385,7 @@ mod tests_global_info {
             return;
         }
 
-        let tmp_dir = std::env::temp_dir().join("pil2_recursive_failfast");
+        let tmp_dir = std::env::temp_dir().join(format!("pil2_recursive_failfast_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         let build_dir = tmp_dir.join("build");
         let pk_dir = build_dir.join("provingKey");
@@ -2401,7 +2433,7 @@ mod tests_global_info {
             return;
         }
 
-        let tmp_dir = std::env::temp_dir().join("pil2_verkey_failfast");
+        let tmp_dir = std::env::temp_dir().join(format!("pil2_verkey_failfast_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         let build_dir = tmp_dir.join("build");
         let pk_dir = build_dir.join("provingKey").join("zisk").join("Zisk").join("airs").join("Dma").join("air");
@@ -2464,7 +2496,7 @@ mod tests_global_info {
             ..Default::default()
         };
 
-        let tmp_dir = std::env::temp_dir().join("pil2_r2_prereq_test");
+        let tmp_dir = std::env::temp_dir().join(format!("pil2_r2_prereq_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         let build_dir = tmp_dir.join("build");
         let pk_dir = build_dir.join("provingKey");
@@ -2531,7 +2563,7 @@ mod tests_global_info {
             ..Default::default()
         };
 
-        let tmp_dir = std::env::temp_dir().join("pil2_err_global_survive");
+        let tmp_dir = std::env::temp_dir().join(format!("pil2_err_global_survive_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         let build_dir = tmp_dir.join("build");
         std::fs::create_dir_all(&build_dir).unwrap();
@@ -2569,7 +2601,7 @@ mod tests_global_info {
 
     #[test]
     fn test_parse_verkey_json_valid() {
-        let tmp = std::env::temp_dir().join("pil2_vk_valid");
+        let tmp = std::env::temp_dir().join(format!("pil2_vk_valid_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let p = tmp.join("vk.json");
@@ -2581,7 +2613,7 @@ mod tests_global_info {
 
     #[test]
     fn test_parse_verkey_json_rejects_5_entries() {
-        let tmp = std::env::temp_dir().join("pil2_vk_5");
+        let tmp = std::env::temp_dir().join(format!("pil2_vk_5_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let p = tmp.join("vk.json");
@@ -2592,7 +2624,7 @@ mod tests_global_info {
 
     #[test]
     fn test_parse_verkey_json_rejects_short_array() {
-        let tmp = std::env::temp_dir().join("pil2_vk_short");
+        let tmp = std::env::temp_dir().join(format!("pil2_vk_short_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let p = tmp.join("vk.json");
@@ -2603,7 +2635,7 @@ mod tests_global_info {
 
     #[test]
     fn test_parse_verkey_json_rejects_non_numeric() {
-        let tmp = std::env::temp_dir().join("pil2_vk_nan");
+        let tmp = std::env::temp_dir().join(format!("pil2_vk_nan_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let p = tmp.join("vk.json");
@@ -2614,7 +2646,7 @@ mod tests_global_info {
 
     #[test]
     fn test_parse_verkey_json_rejects_non_array() {
-        let tmp = std::env::temp_dir().join("pil2_vk_obj");
+        let tmp = std::env::temp_dir().join(format!("pil2_vk_obj_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let p = tmp.join("vk.json");
