@@ -4,6 +4,8 @@ use pilout::pilout::{
     self as pb,
     constraint,
     expression as expr_mod,
+    global_expression as gexpr_mod,
+    global_operand,
     hint_field,
     operand,
     SymbolType,
@@ -455,6 +457,791 @@ pub fn format_expressions(
     }
 
     ctx.arena
+}
+
+// ---------------------------------------------------------------------------
+// format_global_expressions
+// ---------------------------------------------------------------------------
+
+/// Context for converting global protobuf expressions into Expressions.
+struct GlobalFormatCtx<'a> {
+    global_expressions: &'a [pb::GlobalExpression],
+    num_challenges: &'a [u32],
+    air_groups: &'a [pb::AirGroup],
+    arena: Vec<Expression>,
+}
+
+impl<'a> GlobalFormatCtx<'a> {
+    /// Format a GlobalOperand into an inline Expression.
+    fn format_global_operand_inline(&mut self, op: &global_operand::Operand) -> Expression {
+        match op {
+            global_operand::Operand::Expression(expr_ref) => {
+                let id = expr_ref.idx as usize;
+                // Optimization: unwrap add/sub(X, 0) where LHS is not an expression ref
+                if let Some(inner_expr) = self.global_expressions.get(id) {
+                    if let Some(ref operation) = inner_expr.operation {
+                        if let Some(unwrapped) = self.try_unwrap_zero_rhs_global(operation) {
+                            return unwrapped;
+                        }
+                    }
+                }
+                Expression {
+                    op: "exp".to_string(),
+                    id: Some(id),
+                    ..Default::default()
+                }
+            }
+            global_operand::Operand::Constant(c) => {
+                let value = buf_to_bigint_string(&c.value);
+                Expression {
+                    op: "number".to_string(),
+                    value: Some(value),
+                    ..Default::default()
+                }
+            }
+            global_operand::Operand::PublicValue(pv) => {
+                let id = pv.idx as usize;
+                Expression {
+                    op: "public".to_string(),
+                    id: Some(id),
+                    stage: 1,
+                    ..Default::default()
+                }
+            }
+            global_operand::Operand::AirGroupValue(agv) => {
+                let id = agv.idx as usize;
+                let air_group_id = agv.air_group_id as usize;
+                // In global mode, look up stage from the airgroup's airGroupValues
+                let stage = self.air_groups
+                    .get(air_group_id)
+                    .and_then(|ag| ag.air_group_values.get(id))
+                    .map(|v| v.stage as usize)
+                    .unwrap_or(0);
+                let dim = if stage == 1 { 1 } else { FIELD_EXTENSION };
+                Expression {
+                    op: "airgroupvalue".to_string(),
+                    id: Some(id),
+                    airgroup_id: Some(air_group_id),
+                    dim,
+                    stage,
+                    ..Default::default()
+                }
+            }
+            global_operand::Operand::Challenge(ch) => {
+                let stage_id_val = ch.idx as usize;
+                let stage = ch.stage as usize;
+                let id = stage_id_val
+                    + self.num_challenges
+                        .iter()
+                        .take(stage.saturating_sub(1))
+                        .map(|c| *c as usize)
+                        .sum::<usize>();
+                Expression {
+                    op: "challenge".to_string(),
+                    stage,
+                    stage_id: Some(stage_id_val),
+                    id: Some(id),
+                    ..Default::default()
+                }
+            }
+            global_operand::Operand::ProofValue(pv) => {
+                let id = pv.idx as usize;
+                let stage = pv.stage as usize;
+                let dim = if stage == 1 { 1 } else { FIELD_EXTENSION };
+                Expression {
+                    op: "proofvalue".to_string(),
+                    id: Some(id),
+                    stage,
+                    dim,
+                    ..Default::default()
+                }
+            }
+            global_operand::Operand::PublicTableAggregatedValue(ptav) => {
+                let id = ptav.idx as usize;
+                Expression {
+                    op: "public".to_string(),
+                    id: Some(id),
+                    stage: 1,
+                    ..Default::default()
+                }
+            }
+            global_operand::Operand::PublicTableColumn(ptc) => {
+                let id = ptc.idx as usize;
+                Expression {
+                    op: "public".to_string(),
+                    id: Some(id),
+                    stage: 1,
+                    ..Default::default()
+                }
+            }
+        }
+    }
+
+    /// Format an `Option<&GlobalOperand>` into an inline ExprChild.
+    fn format_global_operand_child(&mut self, operand: Option<&pb::GlobalOperand>) -> ExprChild {
+        match operand.and_then(|o| o.operand.as_ref()) {
+            Some(op) => ExprChild::Inline(Box::new(self.format_global_operand_inline(op))),
+            None => ExprChild::Inline(Box::new(Expression {
+                op: "number".to_string(),
+                value: Some("0".to_string()),
+                ..Default::default()
+            })),
+        }
+    }
+
+    /// Try to unwrap add/sub(X, const(0)) for global expressions.
+    fn try_unwrap_zero_rhs_global(
+        &mut self,
+        operation: &gexpr_mod::Operation,
+    ) -> Option<Expression> {
+        let (lhs_operand, rhs_operand) = match operation {
+            gexpr_mod::Operation::Add(add) => (add.lhs.as_ref()?, add.rhs.as_ref()?),
+            gexpr_mod::Operation::Sub(sub) => (sub.lhs.as_ref()?, sub.rhs.as_ref()?),
+            _ => return None,
+        };
+
+        let lhs_op = lhs_operand.operand.as_ref()?;
+        let rhs_op = rhs_operand.operand.as_ref()?;
+
+        if matches!(lhs_op, global_operand::Operand::Expression(_)) {
+            return None;
+        }
+
+        if let global_operand::Operand::Constant(c) = rhs_op {
+            let val = buf_to_bigint_string(&c.value);
+            if val == "0" {
+                return Some(self.format_global_operand_inline(lhs_op));
+            }
+        }
+
+        None
+    }
+
+    /// Format a single top-level GlobalExpression.
+    fn format_global_expression_node(&mut self, expr: &pb::GlobalExpression) -> Expression {
+        let operation = match &expr.operation {
+            Some(op) => op,
+            None => {
+                return Expression {
+                    op: "number".to_string(),
+                    value: Some("0".to_string()),
+                    ..Default::default()
+                };
+            }
+        };
+
+        match operation {
+            gexpr_mod::Operation::Add(add) => {
+                let lhs = self.format_global_operand_child(add.lhs.as_ref());
+                let rhs = self.format_global_operand_child(add.rhs.as_ref());
+                Expression {
+                    op: "add".to_string(),
+                    values: vec![lhs, rhs],
+                    ..Default::default()
+                }
+            }
+            gexpr_mod::Operation::Sub(sub) => {
+                let lhs = self.format_global_operand_child(sub.lhs.as_ref());
+                let rhs = self.format_global_operand_child(sub.rhs.as_ref());
+                Expression {
+                    op: "sub".to_string(),
+                    values: vec![lhs, rhs],
+                    ..Default::default()
+                }
+            }
+            gexpr_mod::Operation::Mul(mul) => {
+                let lhs = self.format_global_operand_child(mul.lhs.as_ref());
+                let rhs = self.format_global_operand_child(mul.rhs.as_ref());
+                Expression {
+                    op: "mul".to_string(),
+                    values: vec![lhs, rhs],
+                    ..Default::default()
+                }
+            }
+            gexpr_mod::Operation::Neg(neg) => {
+                let val = self.format_global_operand_child(neg.value.as_ref());
+                Expression {
+                    op: "neg".to_string(),
+                    values: vec![val],
+                    ..Default::default()
+                }
+            }
+        }
+    }
+}
+
+/// Format all pilout-level global expressions into a flat `Vec<Expression>`.
+///
+/// Mirrors JS `formatExpressions(pilout, true)` for global mode.
+pub fn format_global_expressions(
+    global_expressions: &[pb::GlobalExpression],
+    num_challenges: &[u32],
+    air_groups: &[pb::AirGroup],
+) -> Vec<Expression> {
+    let n = global_expressions.len();
+
+    let mut ctx = GlobalFormatCtx {
+        global_expressions,
+        num_challenges,
+        air_groups,
+        arena: Vec::with_capacity(n),
+    };
+
+    // Reserve the first N slots with placeholders.
+    for _ in 0..n {
+        ctx.arena.push(Expression {
+            op: "__placeholder__".to_string(),
+            ..Default::default()
+        });
+    }
+
+    // Now format each top-level expression.
+    for (i, gexpr) in global_expressions.iter().enumerate() {
+        let formatted = ctx.format_global_expression_node(gexpr);
+        ctx.arena[i] = formatted;
+    }
+
+    ctx.arena
+}
+
+/// Format global constraints from pilout.
+///
+/// Each global constraint has an expression index and a debug line.
+/// Boundary is always "finalProof" for global constraints.
+pub fn format_global_constraints(constraints: &[pb::GlobalConstraint]) -> Vec<ConstraintInfo> {
+    constraints
+        .iter()
+        .filter_map(|c| {
+            let expr_idx = c.expression_idx.as_ref()?.idx as usize;
+            Some(ConstraintInfo {
+                boundary: "finalProof".to_string(),
+                e: expr_idx,
+                line: c.debug_line.clone(),
+                offset_min: None,
+                offset_max: None,
+                stage: None,
+                im_pol: false,
+            })
+        })
+        .collect()
+}
+
+/// Format global symbols (symbols not tied to a specific air).
+///
+/// In global mode, filters out AIR_VALUE, CUSTOM_COL, FIXED_COL, WITNESS_COL.
+pub fn format_global_symbols(
+    all_symbols: &[pb::Symbol],
+    _num_challenges: &[u32],
+) -> Vec<SymbolInfo> {
+    let mut result = Vec::new();
+
+    for s in all_symbols {
+        let stype = s.r#type;
+        // Skip IM_COL (type 0) and air-specific types in global mode
+        if stype == SymbolType::ImCol as i32
+            || stype == SymbolType::AirValue as i32
+            || stype == SymbolType::CustomCol as i32
+            || stype == SymbolType::FixedCol as i32
+            || stype == SymbolType::WitnessCol as i32
+        {
+            continue;
+        }
+
+        if stype == SymbolType::ProofValue as i32 {
+            let stage = s.stage.unwrap_or(1) as usize;
+            let dim = if stage == 1 { 1 } else { FIELD_EXTENSION };
+            if s.dim == 0 {
+                result.push(SymbolInfo {
+                    name: s.name.clone(),
+                    sym_type: "proofvalue".to_string(),
+                    stage: Some(stage),
+                    dim,
+                    id: Some(s.id as usize),
+                    pol_id: None,
+                    stage_id: None,
+                    air_id: None,
+                    airgroup_id: None,
+                    commit_id: None,
+                    lengths: None,
+                    idx: None,
+                    stage_pos: None,
+                    im_pol: false,
+                    exp_id: None,
+                });
+            } else {
+                generate_multi_array_symbols(
+                    &mut result, &[], s, "proofvalue", stage, dim, s.id as usize, 0,
+                );
+            }
+        } else if stype == SymbolType::Challenge as i32 {
+            let stage = s.stage.unwrap_or(1) as usize;
+            // Challenge ID: count preceding challenge symbols
+            let id = all_symbols.iter()
+                .filter(|si| {
+                    si.r#type == SymbolType::Challenge as i32
+                        && (si.stage.unwrap_or(1) < s.stage.unwrap_or(1)
+                            || (si.stage == s.stage && si.id < s.id))
+                })
+                .count();
+            result.push(SymbolInfo {
+                name: s.name.clone(),
+                sym_type: "challenge".to_string(),
+                stage: Some(stage),
+                dim: FIELD_EXTENSION,
+                id: Some(id),
+                pol_id: None,
+                stage_id: Some(s.id as usize),
+                air_id: None,
+                airgroup_id: None,
+                commit_id: None,
+                lengths: None,
+                idx: None,
+                stage_pos: None,
+                im_pol: false,
+                exp_id: None,
+            });
+        } else if stype == SymbolType::PublicValue as i32 {
+            if s.dim == 0 || s.lengths.is_empty() {
+                result.push(SymbolInfo {
+                    name: s.name.clone(),
+                    sym_type: "public".to_string(),
+                    stage: Some(1),
+                    dim: 1,
+                    id: Some(s.id as usize),
+                    pol_id: None,
+                    stage_id: None,
+                    air_id: None,
+                    airgroup_id: None,
+                    commit_id: None,
+                    lengths: None,
+                    idx: None,
+                    stage_pos: None,
+                    im_pol: false,
+                    exp_id: None,
+                });
+            } else {
+                generate_multi_array_symbols(
+                    &mut result, &[], s, "public", 1, 1, s.id as usize, 0,
+                );
+            }
+        } else if stype == SymbolType::AirGroupValue as i32 {
+            // In global mode, stage is undefined (not set from airGroupValues)
+            let dim = FIELD_EXTENSION;
+            if s.dim == 0 {
+                result.push(SymbolInfo {
+                    name: s.name.clone(),
+                    sym_type: "airgroupvalue".to_string(),
+                    stage: None,
+                    dim,
+                    id: Some(s.id as usize),
+                    pol_id: None,
+                    stage_id: None,
+                    air_id: None,
+                    airgroup_id: s.air_group_id.map(|v| v as usize),
+                    commit_id: None,
+                    lengths: None,
+                    idx: None,
+                    stage_pos: None,
+                    im_pol: false,
+                    exp_id: None,
+                });
+            } else {
+                generate_multi_array_symbols(
+                    &mut result, &[], s, "airgroupvalue", 0, dim, s.id as usize, 0,
+                );
+            }
+        } else if stype == SymbolType::PeriodicCol as i32 {
+            // Skip periodic cols in global mode
+            continue;
+        } else if stype == SymbolType::PublicTable as i32 {
+            // Skip public tables in global mode
+            continue;
+        }
+    }
+
+    result
+}
+
+/// Format global hints (hints without air_id and airgroup_id).
+///
+/// Uses the same hint formatting as air-level hints but processes only
+/// global hints from the pilout.
+pub fn format_global_hints(
+    pilout: &pb::PilOut,
+    expressions: &mut [Expression],
+) -> Vec<HintInfo> {
+    // Filter hints that are global (no airGroupId and no airId)
+    let global_hints: Vec<&pb::Hint> = pilout.hints.iter()
+        .filter(|h| h.air_group_id.is_none() && h.air_id.is_none())
+        .collect();
+
+    let mut hints = Vec::new();
+
+    for raw_hint in &global_hints {
+        let hint_name = raw_hint.name.clone();
+
+        // JS: rawHints[i].hintFields[0].hintFieldArray.hintFields
+        let inner_fields = if let Some(first_hf) = raw_hint.hint_fields.first() {
+            if let Some(hint_field::Value::HintFieldArray(arr)) = &first_hf.value {
+                &arr.hint_fields[..]
+            } else {
+                &raw_hint.hint_fields[..]
+            }
+        } else {
+            continue;
+        };
+
+        let mut fields = Vec::new();
+        for field in inner_fields {
+            let name = field.name.clone().unwrap_or_default();
+            let (values, lengths) = process_global_hint_field(
+                field,
+                pilout,
+                expressions,
+            );
+            let entry = if lengths.is_none() {
+                HintFieldEntry {
+                    name,
+                    values: vec![values],
+                    lengths: None,
+                }
+            } else {
+                HintFieldEntry {
+                    name,
+                    values: match values {
+                        HintFieldValue::Array(arr) => arr,
+                        single => vec![single],
+                    },
+                    lengths,
+                }
+            };
+            fields.push(entry);
+        }
+        hints.push(HintInfo {
+            name: hint_name,
+            fields,
+        });
+    }
+
+    hints
+}
+
+/// Recursively process a global hint field.
+///
+/// Global hint fields use regular Operand types (not GlobalOperand),
+/// but with global-mode resolution for airGroupValue.
+fn process_global_hint_field(
+    hint_field: &pb::HintField,
+    pilout: &pb::PilOut,
+    expressions: &mut [Expression],
+) -> (HintFieldValue, Option<Vec<usize>>) {
+    match &hint_field.value {
+        Some(hint_field::Value::HintFieldArray(arr)) => {
+            let fields = &arr.hint_fields;
+            let mut result_fields = Vec::new();
+            let mut lengths: Vec<usize> = Vec::new();
+
+            for field in fields {
+                let (values, sub_lengths) = process_global_hint_field(
+                    field,
+                    pilout,
+                    expressions,
+                );
+                result_fields.push(values);
+
+                if lengths.is_empty() {
+                    lengths.push(fields.len());
+                }
+
+                if let Some(sub) = sub_lengths {
+                    for (k, &sub_len) in sub.iter().enumerate() {
+                        if k + 1 >= lengths.len() {
+                            lengths.resize(k + 2, 0);
+                        }
+                        if lengths[k + 1] == 0 {
+                            lengths[k + 1] = sub_len;
+                        }
+                    }
+                }
+            }
+
+            (HintFieldValue::Array(result_fields), Some(lengths))
+        }
+        Some(hint_field::Value::Operand(op_msg)) => {
+            if let Some(ref op) = op_msg.operand {
+                let value = format_global_hint_operand(op, pilout);
+                // If the value is an "exp" reference, mark keep=true
+                if value.op == "exp" {
+                    if let Some(id) = value.id {
+                        if id < expressions.len() {
+                            expressions[id].keep = Some(true);
+                        }
+                    }
+                }
+                (HintFieldValue::Single(value), None)
+            } else {
+                (
+                    HintFieldValue::Single(Expression {
+                        op: "number".to_string(),
+                        value: Some("0".to_string()),
+                        ..Default::default()
+                    }),
+                    None,
+                )
+            }
+        }
+        Some(hint_field::Value::StringValue(s)) => (
+            HintFieldValue::Single(Expression {
+                op: "string".to_string(),
+                value: Some(s.clone()),
+                ..Default::default()
+            }),
+            None,
+        ),
+        None => panic!("Unknown hint field"),
+    }
+}
+
+/// Format a regular Operand in global hint context.
+///
+/// Global hints use the regular Operand type but some fields
+/// (like airGroupValue) need global-mode resolution.
+fn format_global_hint_operand(op: &operand::Operand, pilout: &pb::PilOut) -> Expression {
+    match op {
+        operand::Operand::Expression(expr_ref) => {
+            let id = expr_ref.idx as usize;
+            // Optimization: unwrap add/sub(X, 0) where LHS is not an expression ref
+            // Mirrors JS formatExpression behavior for expression references
+            if let Some(gexpr) = pilout.expressions.get(id) {
+                if let Some(ref operation) = gexpr.operation {
+                    if let Some(unwrapped) = try_unwrap_global_hint_zero_rhs(operation, pilout) {
+                        return unwrapped;
+                    }
+                }
+            }
+            Expression {
+                op: "exp".to_string(),
+                id: Some(id),
+                ..Default::default()
+            }
+        }
+        operand::Operand::Constant(c) => {
+            let value = buf_to_bigint_string(&c.value);
+            Expression {
+                op: "number".to_string(),
+                value: Some(value),
+                ..Default::default()
+            }
+        }
+        operand::Operand::PublicValue(pv) => {
+            let id = pv.idx as usize;
+            Expression {
+                op: "public".to_string(),
+                id: Some(id),
+                stage: 1,
+                ..Default::default()
+            }
+        }
+        operand::Operand::AirGroupValue(agv) => {
+            let id = agv.idx as usize;
+            // In global mode for hints, airGroupValue doesn't have airGroupId
+            // in the Operand type (only GlobalOperand has it).
+            // The stage comes from the expression context.
+            Expression {
+                op: "airgroupvalue".to_string(),
+                id: Some(id),
+                dim: FIELD_EXTENSION,
+                ..Default::default()
+            }
+        }
+        operand::Operand::Challenge(ch) => {
+            let stage_id_val = ch.idx as usize;
+            let stage = ch.stage as usize;
+            let id = stage_id_val
+                + pilout.num_challenges
+                    .iter()
+                    .take(stage.saturating_sub(1))
+                    .map(|c| *c as usize)
+                    .sum::<usize>();
+            Expression {
+                op: "challenge".to_string(),
+                stage,
+                stage_id: Some(stage_id_val),
+                id: Some(id),
+                ..Default::default()
+            }
+        }
+        operand::Operand::ProofValue(pv) => {
+            let id = pv.idx as usize;
+            let stage = pv.stage as usize;
+            let dim = if stage == 1 { 1 } else { FIELD_EXTENSION };
+            Expression {
+                op: "proofvalue".to_string(),
+                id: Some(id),
+                stage,
+                dim,
+                ..Default::default()
+            }
+        }
+        operand::Operand::AirValue(av) => {
+            let id = av.idx as usize;
+            Expression {
+                op: "airvalue".to_string(),
+                id: Some(id),
+                ..Default::default()
+            }
+        }
+        operand::Operand::WitnessCol(_) | operand::Operand::FixedCol(_)
+        | operand::Operand::PeriodicCol(_) | operand::Operand::CustomCol(_) => {
+            // These should not appear in global hints
+            Expression {
+                op: "number".to_string(),
+                value: Some("0".to_string()),
+                ..Default::default()
+            }
+        }
+    }
+}
+
+/// Try to unwrap add/sub(X, const(0)) for global expression references in hints.
+///
+/// When a hint field operand is an expression reference, and the referenced
+/// global expression is add/sub(LHS, 0) where LHS is not an expression ref,
+/// return the LHS operand directly instead of the expression reference.
+fn try_unwrap_global_hint_zero_rhs(
+    operation: &gexpr_mod::Operation,
+    pilout: &pb::PilOut,
+) -> Option<Expression> {
+    let (lhs_operand, rhs_operand) = match operation {
+        gexpr_mod::Operation::Add(add) => (add.lhs.as_ref()?, add.rhs.as_ref()?),
+        gexpr_mod::Operation::Sub(sub) => (sub.lhs.as_ref()?, sub.rhs.as_ref()?),
+        _ => return None,
+    };
+
+    let lhs_op = lhs_operand.operand.as_ref()?;
+    let rhs_op = rhs_operand.operand.as_ref()?;
+
+    // Don't unwrap if LHS is itself an expression reference
+    if matches!(lhs_op, global_operand::Operand::Expression(_)) {
+        return None;
+    }
+
+    if let global_operand::Operand::Constant(c) = rhs_op {
+        let val = buf_to_bigint_string(&c.value);
+        if val == "0" {
+            // Convert the GlobalOperand LHS to an Expression
+            return Some(convert_global_operand_to_expression(lhs_op, pilout));
+        }
+    }
+
+    None
+}
+
+/// Convert a GlobalOperand to an Expression for hint field processing.
+fn convert_global_operand_to_expression(
+    op: &global_operand::Operand,
+    pilout: &pb::PilOut,
+) -> Expression {
+    match op {
+        global_operand::Operand::Expression(expr_ref) => {
+            let id = expr_ref.idx as usize;
+            // Recursively try to unwrap
+            if let Some(gexpr) = pilout.expressions.get(id) {
+                if let Some(ref operation) = gexpr.operation {
+                    if let Some(unwrapped) = try_unwrap_global_hint_zero_rhs(operation, pilout) {
+                        return unwrapped;
+                    }
+                }
+            }
+            Expression {
+                op: "exp".to_string(),
+                id: Some(id),
+                ..Default::default()
+            }
+        }
+        global_operand::Operand::Constant(c) => {
+            let value = buf_to_bigint_string(&c.value);
+            Expression {
+                op: "number".to_string(),
+                value: Some(value),
+                ..Default::default()
+            }
+        }
+        global_operand::Operand::PublicValue(pv) => {
+            let id = pv.idx as usize;
+            Expression {
+                op: "public".to_string(),
+                id: Some(id),
+                stage: 1,
+                ..Default::default()
+            }
+        }
+        global_operand::Operand::AirGroupValue(agv) => {
+            let id = agv.idx as usize;
+            let air_group_id = agv.air_group_id as usize;
+            let stage = pilout.air_groups
+                .get(air_group_id)
+                .and_then(|ag| ag.air_group_values.get(id))
+                .map(|v| v.stage as usize)
+                .unwrap_or(0);
+            let dim = if stage == 1 { 1 } else { FIELD_EXTENSION };
+            Expression {
+                op: "airgroupvalue".to_string(),
+                id: Some(id),
+                airgroup_id: Some(air_group_id),
+                dim,
+                stage,
+                ..Default::default()
+            }
+        }
+        global_operand::Operand::Challenge(ch) => {
+            let stage_id_val = ch.idx as usize;
+            let stage = ch.stage as usize;
+            let id = stage_id_val
+                + pilout.num_challenges
+                    .iter()
+                    .take(stage.saturating_sub(1))
+                    .map(|c| *c as usize)
+                    .sum::<usize>();
+            Expression {
+                op: "challenge".to_string(),
+                stage,
+                stage_id: Some(stage_id_val),
+                id: Some(id),
+                ..Default::default()
+            }
+        }
+        global_operand::Operand::ProofValue(pv) => {
+            let id = pv.idx as usize;
+            let stage = pv.stage as usize;
+            let dim = if stage == 1 { 1 } else { FIELD_EXTENSION };
+            Expression {
+                op: "proofvalue".to_string(),
+                id: Some(id),
+                stage,
+                dim,
+                ..Default::default()
+            }
+        }
+        global_operand::Operand::PublicTableAggregatedValue(ptav) => {
+            let id = ptav.idx as usize;
+            Expression {
+                op: "public".to_string(),
+                id: Some(id),
+                stage: 1,
+                ..Default::default()
+            }
+        }
+        global_operand::Operand::PublicTableColumn(ptc) => {
+            let id = ptc.idx as usize;
+            Expression {
+                op: "public".to_string(),
+                id: Some(id),
+                stage: 1,
+                ..Default::default()
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

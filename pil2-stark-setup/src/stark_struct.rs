@@ -25,6 +25,8 @@ pub struct StarkSettings {
     pub last_level_verification: Option<usize>,
     #[serde(default)]
     pub pow_bits: Option<usize>,
+    #[serde(default)]
+    pub has_compressor: Option<bool>,
 }
 
 /// A generated stark struct describing FRI parameters for a given air.
