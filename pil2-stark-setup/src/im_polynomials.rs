@@ -197,9 +197,8 @@ fn calculate_added_cols(
 // Inner recursive search (mirrors JS `_calculateImPols`)
 // ---------------------------------------------------------------------------
 
-/// Memoization key: (expression_id, absolute_max, sorted list of current im_pol IDs).
-/// Bug fix: include expression_id in the key so per-expression caching works
-/// correctly (matching JS `exp.res[absoluteMax][JSON.stringify(imPols)]`).
+/// Memoization key: (expression_id, max_deg, sorted list of current im_pol IDs).
+/// Caches ALL arena-level expressions, matching JS `exp.res[absoluteMax][JSON.stringify(imPols)]`.
 type MemoKey = (usize, usize, Vec<usize>);
 /// Memoization value: (Option<im_pols_vec>, degree).
 /// `None` means the search failed for this sub-tree.
@@ -215,6 +214,11 @@ fn calculate_im_pols(
     let mut abs_max_d: i64 = 0;
     let mut memo: HashMap<MemoKey, MemoVal> = HashMap::new();
 
+    // For very large expression trees, use a timeout to prevent exponential search.
+    // If the search takes too long, we fall back to no intermediate polynomials
+    // (the prover handles higher qDeg correctly, it just uses more memory).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+
     let (result_pols, rd) = calc_im_pols_inner(
         expressions,
         _root_id,
@@ -223,6 +227,7 @@ fn calculate_im_pols(
         absolute_max,
         &mut abs_max_d,
         &mut memo,
+        &deadline,
     );
 
     match result_pols {
@@ -244,9 +249,25 @@ fn calc_im_pols_inner(
     absolute_max: usize,
     abs_max_d: &mut i64,
     memo: &mut HashMap<MemoKey, MemoVal>,
+    deadline: &std::time::Instant,
 ) -> (Option<Vec<usize>>, i64) {
+    // Check timeout on every call
+    if std::time::Instant::now() > *deadline {
+        return (None, -1);
+    }
+
+    // Memoize ALL arena-level expressions
+    let mut sorted_pols = im_pols.to_vec();
+    sorted_pols.sort_unstable();
+    let memo_key = (idx, max_deg, sorted_pols);
+    if let Some(cached) = memo.get(&memo_key) {
+        return cached.clone();
+    }
+
     let exp = &expressions[idx];
-    calc_im_pols_expr(expressions, exp, idx, im_pols, max_deg, absolute_max, abs_max_d, memo)
+    let result = calc_im_pols_expr(expressions, exp, idx, im_pols, max_deg, absolute_max, abs_max_d, memo, deadline);
+    memo.insert(memo_key, result.clone());
+    result
 }
 
 /// Inner recursive search that works on any expression (arena or inline).
@@ -261,7 +282,13 @@ fn calc_im_pols_expr(
     absolute_max: usize,
     abs_max_d: &mut i64,
     memo: &mut HashMap<MemoKey, MemoVal>,
+    deadline: &std::time::Instant,
 ) -> (Option<Vec<usize>>, i64) {
+    // Check timeout
+    if std::time::Instant::now() > *deadline {
+        return (None, -1);
+    }
+
     let op = exp.op.as_str();
 
     match op {
@@ -271,10 +298,10 @@ fn calc_im_pols_expr(
             for child in &exp.values {
                 let (child_pols, d) = match child {
                     ExprChild::Id(id) => calc_im_pols_inner(
-                        expressions, *id, &current_pols, max_deg, absolute_max, abs_max_d, memo,
+                        expressions, *id, &current_pols, max_deg, absolute_max, abs_max_d, memo, deadline,
                     ),
                     ExprChild::Inline(e) => calc_im_pols_expr(
-                        expressions, e, expr_id, &current_pols, max_deg, absolute_max, abs_max_d, memo,
+                        expressions, e, expr_id, &current_pols, max_deg, absolute_max, abs_max_d, memo, deadline,
                     ),
                 };
                 match child_pols {
@@ -295,10 +322,10 @@ fn calc_im_pols_expr(
             if !["add", "mul", "sub", "exp"].contains(&lhs_expr.op.as_str()) && lhs_expr.exp_deg == 0 {
                 return match &exp.values[1] {
                     ExprChild::Id(id) => calc_im_pols_inner(
-                        expressions, *id, im_pols, max_deg, absolute_max, abs_max_d, memo,
+                        expressions, *id, im_pols, max_deg, absolute_max, abs_max_d, memo, deadline,
                     ),
                     ExprChild::Inline(e) => calc_im_pols_expr(
-                        expressions, e, expr_id, im_pols, max_deg, absolute_max, abs_max_d, memo,
+                        expressions, e, expr_id, im_pols, max_deg, absolute_max, abs_max_d, memo, deadline,
                     ),
                 };
             }
@@ -306,10 +333,10 @@ fn calc_im_pols_expr(
             if !["add", "mul", "sub", "exp"].contains(&rhs_expr.op.as_str()) && rhs_expr.exp_deg == 0 {
                 return match &exp.values[0] {
                     ExprChild::Id(id) => calc_im_pols_inner(
-                        expressions, *id, im_pols, max_deg, absolute_max, abs_max_d, memo,
+                        expressions, *id, im_pols, max_deg, absolute_max, abs_max_d, memo, deadline,
                     ),
                     ExprChild::Inline(e) => calc_im_pols_expr(
-                        expressions, e, expr_id, im_pols, max_deg, absolute_max, abs_max_d, memo,
+                        expressions, e, expr_id, im_pols, max_deg, absolute_max, abs_max_d, memo, deadline,
                     ),
                 };
             }
@@ -326,10 +353,10 @@ fn calc_im_pols_expr(
                 let r = max_deg - l;
                 let (e1, d1) = match &exp.values[0] {
                     ExprChild::Id(id) => calc_im_pols_inner(
-                        expressions, *id, im_pols, l, absolute_max, abs_max_d, memo,
+                        expressions, *id, im_pols, l, absolute_max, abs_max_d, memo, deadline,
                     ),
                     ExprChild::Inline(e) => calc_im_pols_expr(
-                        expressions, e, expr_id, im_pols, l, absolute_max, abs_max_d, memo,
+                        expressions, e, expr_id, im_pols, l, absolute_max, abs_max_d, memo, deadline,
                     ),
                 };
                 if e1.is_none() {
@@ -338,10 +365,10 @@ fn calc_im_pols_expr(
                 let e1_vec = e1.unwrap();
                 let (e2, d2) = match &exp.values[1] {
                     ExprChild::Id(id) => calc_im_pols_inner(
-                        expressions, *id, &e1_vec, r, absolute_max, abs_max_d, memo,
+                        expressions, *id, &e1_vec, r, absolute_max, abs_max_d, memo, deadline,
                     ),
                     ExprChild::Inline(e) => calc_im_pols_expr(
-                        expressions, e, expr_id, &e1_vec, r, absolute_max, abs_max_d, memo,
+                        expressions, e, expr_id, &e1_vec, r, absolute_max, abs_max_d, memo, deadline,
                     ),
                 };
                 if let Some(ref e2_vec) = e2 {
@@ -386,6 +413,7 @@ fn calc_im_pols_expr(
                     absolute_max,
                     abs_max_d,
                     memo,
+                    deadline,
                 )
             };
 

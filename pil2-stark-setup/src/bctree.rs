@@ -7,6 +7,7 @@ use fields::{
     Field, Goldilocks, Poseidon16, Poseidon2Constants, Poseidon8, PrimeField64,
     linear_hash_seq, poseidon2_hash,
 };
+use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::ntt::extend_pol;
@@ -154,14 +155,17 @@ fn merkle_tree_gl<C: Poseidon2Constants<W>, const W: usize>(
 
     let mut nodes = vec![Goldilocks::ZERO; num_nodes * HASH_SIZE];
 
-    // Hash each row to produce leaf digests
-    for i in 0..height {
-        let row_start = i * width;
-        let row = &source[row_start..row_start + width];
-        let leaf_hash = linear_hash_seq::<Goldilocks, C, W>(row);
-        let dest_start = i * HASH_SIZE;
-        nodes[dest_start..dest_start + HASH_SIZE].copy_from_slice(&leaf_hash[..HASH_SIZE]);
-    }
+    // Hash each row to produce leaf digests (parallel)
+    let leaf_area = &mut nodes[..height * HASH_SIZE];
+    leaf_area
+        .par_chunks_mut(HASH_SIZE)
+        .enumerate()
+        .for_each(|(i, dest)| {
+            let row_start = i * width;
+            let row = &source[row_start..row_start + width];
+            let leaf_hash = linear_hash_seq::<Goldilocks, C, W>(row);
+            dest.copy_from_slice(&leaf_hash[..HASH_SIZE]);
+        });
 
     // Build tree bottom-up
     let mut pending = height as u64;

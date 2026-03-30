@@ -3068,6 +3068,7 @@ dependencies = [
  "pil2-compiler-rust",
  "pilout",
  "prost 0.13.5",
+ "rayon",
  "rug",
  "serde",
  "serde_json",

@@ -4,8 +4,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
+use rayon::prelude::*;
 // IndexMap used in some helper functions below
 #[allow(unused_imports)]
 use indexmap::IndexMap;
@@ -51,7 +53,16 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
         };
 
 
-    // Process each airgroup / air
+    // Collect all AIR work items for parallel processing
+    struct AirWorkItem {
+        ag_idx: usize,
+        air_idx: usize,
+        airgroup_name: String,
+        air_name: String,
+        num_rows: usize,
+    }
+
+    let mut work_items = Vec::new();
     for (ag_idx, airgroup) in pilout.air_groups.iter().enumerate() {
         let airgroup_name = airgroup
             .name
@@ -70,17 +81,40 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 continue;
             }
 
-            // num_rows is the actual row count (a power of 2).
-            // We need log2(num_rows) for the stark struct.
-            let n_bits = log2_usize(num_rows);
+            work_items.push(AirWorkItem {
+                ag_idx,
+                air_idx,
+                airgroup_name: airgroup_name.clone(),
+                air_name,
+                num_rows,
+            });
+        }
+    }
 
-            tracing::info!("Computing setup for air '{}'", air_name);
+    tracing::info!(
+        "Processing {} AIRs in parallel using rayon",
+        work_items.len()
+    );
 
-            // Resolve settings for this air.
-            // Match JS setup_cmd behavior: default powBits to 16 when not set.
+    // Share pilout and settings across threads
+    let pilout = Arc::new(pilout);
+    let settings_map = Arc::new(settings_map);
+    let build_dir = opts.build_dir.clone();
+    let fixed_dir = opts.fixed_dir.clone();
+    let pilout_name_shared = pilout_name.clone();
+
+    // Process all AIRs in parallel
+    let results: Vec<Result<()>> = work_items
+        .par_iter()
+        .map(|item| {
+            let n_bits = log2_usize(item.num_rows);
+
+            tracing::info!("Computing setup for air '{}'", item.air_name);
+
+            // Resolve settings for this air
             let air_settings = {
                 let mut s = settings_map
-                    .get(&air_name)
+                    .get(&item.air_name)
                     .or_else(|| settings_map.get("default"))
                     .cloned()
                     .unwrap_or_default();
@@ -90,28 +124,22 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 s
             };
 
-            // Generate stark struct
-            let stark_struct = if let Some(ref _existing) = None::<StarkStruct> {
-                // Not used: would be for pre-existing starkStruct in settings
-                unreachable!()
-            } else {
-                generate_stark_struct(&air_settings, n_bits)
-            };
+            let stark_struct = generate_stark_struct(&air_settings, n_bits);
 
             // Prepare output directory
-            let files_dir = PathBuf::from(&opts.build_dir)
+            let files_dir = PathBuf::from(&build_dir)
                 .join("provingKey")
-                .join(&pilout_name)
-                .join(&airgroup_name)
+                .join(&pilout_name_shared)
+                .join(&item.airgroup_name)
                 .join("airs")
-                .join(&air_name)
+                .join(&item.air_name)
                 .join("air");
             fs::create_dir_all(&files_dir)?;
 
             // Copy fixed columns from --fixed-dir or skip
-            let const_path = files_dir.join(format!("{}.const", air_name));
-            if let Some(ref fixed_dir) = opts.fixed_dir {
-                let src = Path::new(fixed_dir).join(format!("{}.fixed", air_name));
+            let const_path = files_dir.join(format!("{}.const", item.air_name));
+            if let Some(ref fd) = fixed_dir {
+                let src = Path::new(fd).join(format!("{}.fixed", item.air_name));
                 if src.exists() {
                     fs::copy(&src, &const_path)?;
                 } else {
@@ -129,9 +157,8 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             };
 
             let pil_result =
-                pil_info::pil_info(&pilout, ag_idx, air_idx, &stark_struct, &prepare_opts);
+                pil_info::pil_info(&pilout, item.ag_idx, item.air_idx, &stark_struct, &prepare_opts);
 
-            // Build starkinfo output
             let setup_result = &pil_result.setup;
             let pil_code = &pil_result.pil_code;
 
@@ -156,16 +183,15 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
 
             let fri_security = security::get_optimal_fri_query_params("JBR", &fri_params);
 
-            // Build StarkInfoOutput for JSON serialization
             let starkinfo_output = build_starkinfo_output(
                 setup_result,
                 &stark_struct,
                 pil_code,
                 &opening_points,
                 &fri_security,
-                ag_idx,
-                air_idx,
-                &air_name,
+                item.ag_idx,
+                item.air_idx,
+                &item.air_name,
                 pil_result.c_exp_id,
                 pil_result.fri_exp_id,
                 pil_result.q_deg,
@@ -173,14 +199,14 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
 
             // Write starkinfo.json
             let starkinfo_json = json_output::to_json_string(&starkinfo_output)?;
-            let starkinfo_path = files_dir.join(format!("{}.starkinfo.json", air_name));
+            let starkinfo_path = files_dir.join(format!("{}.starkinfo.json", item.air_name));
             fs::write(&starkinfo_path, &starkinfo_json)?;
 
             // Write expressionsinfo.json
             let expr_info_json = build_expressions_info_json(&pil_code.expressions_info);
             let expr_info_str = json_output::to_json_string(&expr_info_json)?;
             fs::write(
-                files_dir.join(format!("{}.expressionsinfo.json", air_name)),
+                files_dir.join(format!("{}.expressionsinfo.json", item.air_name)),
                 &expr_info_str,
             )?;
 
@@ -188,27 +214,26 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             let verifier_info_json = build_verifier_info_json(&pil_code.verifier_info);
             let verifier_info_str = json_output::to_json_string(&verifier_info_json)?;
             fs::write(
-                files_dir.join(format!("{}.verifierinfo.json", air_name)),
+                files_dir.join(format!("{}.verifierinfo.json", item.air_name)),
                 &verifier_info_str,
             )?;
 
             // Compute constant polynomial Merkle tree -> verkey.json / verkey.bin
-            let verkey_json_path = files_dir.join(format!("{}.verkey.json", air_name));
+            let verkey_json_path = files_dir.join(format!("{}.verkey.json", item.air_name));
             if const_path.exists() {
-                tracing::info!("Computing Constant Tree...");
+                tracing::info!("Computing Constant Tree for '{}'...", item.air_name);
                 match crate::bctree::compute_const_tree(
                     const_path.to_str().unwrap_or(""),
                     starkinfo_path.to_str().unwrap_or(""),
                     verkey_json_path.to_str().unwrap_or(""),
                 ) {
                     Ok(const_root) => {
-                        // Write verkey.bin from the returned root values
                         let mut verkey_bin = Vec::with_capacity(32);
                         for &val in const_root.iter() {
                             verkey_bin.extend_from_slice(&val.to_le_bytes());
                         }
                         fs::write(
-                            files_dir.join(format!("{}.verkey.bin", air_name)),
+                            files_dir.join(format!("{}.verkey.bin", item.air_name)),
                             &verkey_bin,
                         )?;
                     }
@@ -216,7 +241,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                         tracing::warn!(
                             "bctree failed for air '{}': {:#}. \
                              Skipping verkey generation.",
-                            air_name, e
+                            item.air_name, e
                         );
                     }
                 }
@@ -227,17 +252,23 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 );
             }
 
-            // Write binary files using native Rust implementation
+            // Write binary files
             write_bin_files_native(
                 &starkinfo_path,
-                &files_dir.join(format!("{}.expressionsinfo.json", air_name)),
-                &files_dir.join(format!("{}.verifierinfo.json", air_name)),
-                &files_dir.join(format!("{}.bin", air_name)),
-                &files_dir.join(format!("{}.verifier.bin", air_name)),
+                &files_dir.join(format!("{}.expressionsinfo.json", item.air_name)),
+                &files_dir.join(format!("{}.verifierinfo.json", item.air_name)),
+                &files_dir.join(format!("{}.bin", item.air_name)),
+                &files_dir.join(format!("{}.verifier.bin", item.air_name)),
             )?;
 
-            tracing::info!("Setup for air '{}' complete", air_name);
-        }
+            tracing::info!("Setup for air '{}' complete", item.air_name);
+            Ok(())
+        })
+        .collect();
+
+    // Check for any errors
+    for result in results {
+        result?;
     }
 
     // Generate globalInfo.json and globalConstraints
@@ -630,6 +661,12 @@ fn run_recursive_setup(
 
 /// Resolve circom executable path.
 fn resolve_circom_exec() -> String {
+    // Check env variable first
+    if let Ok(path) = std::env::var("CIRCOM_EXEC") {
+        if Path::new(&path).exists() {
+            return path;
+        }
+    }
     let candidates = if cfg!(target_os = "macos") {
         vec!["circom_mac", "circom"]
     } else {
@@ -638,6 +675,15 @@ fn resolve_circom_exec() -> String {
     for path in &candidates {
         if Path::new(path).exists() {
             return path.to_string();
+        }
+    }
+    // Try which to find circom in PATH
+    if let Ok(output) = std::process::Command::new("which").arg("circom").output() {
+        if output.status.success() {
+            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !p.is_empty() {
+                return p;
+            }
         }
     }
     "circom".to_string()

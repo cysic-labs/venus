@@ -1,4 +1,6 @@
 use fields::{Field, Goldilocks};
+use rayon::prelude::*;
+
 
 /// Roots of unity (forward): W[i] is a primitive 2^i-th root of unity in the
 /// Goldilocks field.
@@ -93,16 +95,26 @@ fn ntt_core(data: &mut [Goldilocks], n_bits: usize, n_cols: usize, inverse: bool
     let n = 1usize << n_bits;
     assert_eq!(data.len(), n * n_cols);
 
-    // Bit-reverse permutation
+    // Bit-reverse permutation (parallel via chunks)
     let mut buf = vec![Goldilocks::ZERO; n * n_cols];
+    // Parallel: compute rev-index per source row, then copy
+    // Build destination-indexed mapping: for each dest slot r, what source i maps to it
+    let mut src_for_dst = vec![0usize; n];
     for i in 0..n {
         let r = bit_reverse(i as u32, n_bits) as usize;
-        buf[r * n_cols..(r + 1) * n_cols].copy_from_slice(&data[i * n_cols..(i + 1) * n_cols]);
+        src_for_dst[r] = i;
     }
+    buf.par_chunks_mut(n_cols)
+        .enumerate()
+        .for_each(|(r, dst_chunk)| {
+            let i = src_for_dst[r];
+            let src_start = i * n_cols;
+            dst_chunk.copy_from_slice(&data[src_start..src_start + n_cols]);
+        });
 
     let omega_table = if inverse { &OMEGAS_INV } else { &OMEGAS };
 
-    // Cooley-Tukey stages
+    // Cooley-Tukey stages with rayon parallelism on large stages
     for stage in 0..n_bits {
         let m = 1usize << (stage + 1);
         let half_m = m >> 1;
@@ -115,15 +127,34 @@ fn ntt_core(data: &mut [Goldilocks], n_bits: usize, n_cols: usize, inverse: bool
             twiddles.push(twiddles[j - 1] * omega_base);
         }
 
-        for k in (0..n).step_by(m) {
-            for (j, w) in twiddles.iter().enumerate().take(half_m) {
-                for c in 0..n_cols {
-                    let idx1 = (k + j) * n_cols + c;
-                    let idx2 = (k + j + half_m) * n_cols + c;
-                    let u = buf[idx1];
-                    let t = buf[idx2] * *w;
-                    buf[idx1] = u + t;
-                    buf[idx2] = u - t;
+        let n_groups = n / m;
+        // Parallelize when there are enough independent groups
+        if n_groups >= 64 {
+            // Each chunk of size `m * n_cols` in buf is independent
+            let chunk_size = m * n_cols;
+            buf.par_chunks_mut(chunk_size).for_each(|chunk| {
+                for (j, w) in twiddles.iter().enumerate().take(half_m) {
+                    for c in 0..n_cols {
+                        let idx1 = j * n_cols + c;
+                        let idx2 = (j + half_m) * n_cols + c;
+                        let u = chunk[idx1];
+                        let t = chunk[idx2] * *w;
+                        chunk[idx1] = u + t;
+                        chunk[idx2] = u - t;
+                    }
+                }
+            });
+        } else {
+            for k in (0..n).step_by(m) {
+                for (j, w) in twiddles.iter().enumerate().take(half_m) {
+                    for c in 0..n_cols {
+                        let idx1 = (k + j) * n_cols + c;
+                        let idx2 = (k + j + half_m) * n_cols + c;
+                        let u = buf[idx1];
+                        let t = buf[idx2] * *w;
+                        buf[idx1] = u + t;
+                        buf[idx2] = u - t;
+                    }
                 }
             }
         }
@@ -171,16 +202,19 @@ pub fn extend_pol(
 
     // Apply coset shift: multiply row i coefficients by shift^i
     // C++ uses Goldilocks::SHIFT = 7
+    // Precompute all shift powers, then apply in parallel
     let shift = Goldilocks::new(7);
-    let mut shift_pow = Goldilocks::ONE; // shift^0 = 1
-    for row in 0..n {
-        if row > 0 {
-            shift_pow = shift_pow * shift;
-        }
-        for col in 0..n_cols {
-            coeffs[row * n_cols + col] = coeffs[row * n_cols + col] * shift_pow;
-        }
+    let mut shift_pows = Vec::with_capacity(n);
+    shift_pows.push(Goldilocks::ONE);
+    for row in 1..n {
+        shift_pows.push(shift_pows[row - 1] * shift);
     }
+    coeffs.par_chunks_mut(n_cols).enumerate().for_each(|(row, chunk)| {
+        let sp = shift_pows[row];
+        for val in chunk.iter_mut() {
+            *val = *val * sp;
+        }
+    });
 
     // Zero-pad to extended size
     let mut extended = vec![Goldilocks::ZERO; n_ext * n_cols];

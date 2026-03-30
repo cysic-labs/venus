@@ -77,6 +77,21 @@ impl FixedCols {
             .and_then(|d| d.as_deref())
     }
 
+    /// Pre-allocate row data for a fixed column to avoid repeated resizing.
+    pub fn preallocate_rows(&mut self, id: u32, num_rows: usize) {
+        let idx = id as usize;
+        if idx >= self.row_data.len() {
+            self.row_data.resize(idx + 1, None);
+        }
+        if self.row_data[idx].is_none() {
+            self.row_data[idx] = Some(vec![0i128; num_rows]);
+        } else if let Some(data) = &mut self.row_data[idx] {
+            if data.len() < num_rows {
+                data.resize(num_rows, 0);
+            }
+        }
+    }
+
     /// Set a single row value.
     pub fn set_row_value(&mut self, id: u32, row: usize, value: i128) {
         let idx = id as usize;
@@ -92,6 +107,20 @@ impl FixedCols {
             }
             data[row] = value;
         }
+    }
+
+    /// Fast path for setting a row value when column is known to be pre-allocated.
+    #[inline(always)]
+    pub fn set_row_value_fast(&mut self, id: u32, row: usize, value: i128) {
+        // Safety: caller must ensure preallocate_rows was called for this id/row
+        if let Some(Some(data)) = self.row_data.get_mut(id as usize) {
+            if let Some(slot) = data.get_mut(row) {
+                *slot = value;
+                return;
+            }
+        }
+        // Fallback to slow path
+        self.set_row_value(id, row, value);
     }
 
     /// Get a single row value from the current AIR's columns.

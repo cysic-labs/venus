@@ -253,8 +253,13 @@ pub fn generate_constraint_polynomial(
         exp_id: None,
     });
 
-    // Calculate initial constraint degree
-    let initial_q_degree = calculate_exp_deg(expressions, c_exp_id, &[], true);
+    // Use pre-computed exp_deg when available (set by add_info_expressions).
+    // Fall back to local calculation for tests where add_info_expressions hasn't run.
+    let initial_q_degree = if expressions[c_exp_id].exp_deg > 0 {
+        expressions[c_exp_id].exp_deg as i64
+    } else {
+        calculate_exp_deg(expressions, c_exp_id, &[], true)
+    };
 
     tracing::info!(
         "The maximum constraint degree is {} (without intermediate polynomials)",

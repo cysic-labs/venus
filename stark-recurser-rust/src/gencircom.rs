@@ -715,7 +715,7 @@ fn render_assign_vadcop_inputs(
 
     let num_proof_values = vadcop_info
         .get("numProofValues")
-        .and_then(|v| v.as_u64())
+        .and_then(|v| v.as_u64().or_else(|| v.as_array().and_then(|a| a.first()).and_then(|e| e.as_u64())))
         .unwrap_or(0) as usize;
     if num_proof_values > 0 {
         out.push_str(&format!(
@@ -849,11 +849,7 @@ fn render_init_vadcop_inputs(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let has_stage1_air_values = air_values_map
-        .iter()
-        .any(|a| a.get("stage").and_then(|v| v.as_u64()).unwrap_or(0) == 1);
-
-    if has_stage1_air_values {
+    if !air_values_map.is_empty() {
         out.push_str(&format!(
             "    {}stage1Hash <== CalculateStage1Hash()({}.rootC, {}root1, {}airvalues);\n",
             p, component_name, ps, ps
@@ -916,10 +912,36 @@ fn render_agg_vadcop_inputs(
         .unwrap_or(64);
 
     out.push_str(&format!(
-        "    {}_circuitType <== {} ? 1 : 0;\n",
+        "    {}_circuitType <== {};\n",
         prefix,
-        if is_multi { "1" } else { "0" }
+        if is_multi { 1 } else { 0 }
     ));
+
+    // Declare aggregationTypes assignment and local aggTypes signal,
+    // matching the JS agg_vadcop_inputs.circom.ejs template.
+    if ag_agg_len > 0 {
+        out.push_str(&format!(
+            "    {}_aggregationTypes <== aggregationTypes;\n",
+            prefix
+        ));
+        out.push_str(&format!(
+            "    signal {{binary}} aggTypes[{}];\n",
+            ag_agg_len
+        ));
+        out.push_str(&format!(
+            "    for (var i = 0; i < {}; i++) {{\n",
+            ag_agg_len
+        ));
+        out.push_str(&format!(
+            "        {}_aggregationTypes[i] * ({}_aggregationTypes[i] - 1) === 0;\n",
+            prefix, prefix
+        ));
+        out.push_str(&format!(
+            "        aggTypes[i] <== {}_aggregationTypes[i];\n",
+            prefix
+        ));
+        out.push_str("    }\n\n");
+    }
 
     if is_multi {
         out.push_str(&format!(
@@ -1047,7 +1069,7 @@ fn render_calculate_hashes(si: &Value, vadcop_info: &Value) -> String {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let has_stage1 = air_values_map
+    let _has_stage1 = air_values_map
         .iter()
         .any(|a| a.get("stage").and_then(|v| v.as_u64()).unwrap_or(0) == 1);
 
@@ -1055,7 +1077,10 @@ fn render_calculate_hashes(si: &Value, vadcop_info: &Value) -> String {
     out.push_str("    signal input rootC[4];\n");
     out.push_str("    signal input root1[4];\n");
 
-    if has_stage1 {
+    // Declare airValues whenever airValuesMap is non-empty, matching the JS
+    // template which references airValues[j] for all entries (both stage-1
+    // and non-stage-1 entries that get assigned to _ as unused).
+    if !air_values_map.is_empty() {
         out.push_str(&format!(
             "    signal input airValues[{}][3];\n",
             air_values_map.len()
@@ -1558,7 +1583,7 @@ fn render_verify_global_constraints(vadcop_info: &Value, si: &Value) -> String {
         .unwrap_or(0);
     let num_proof_values = vadcop_info
         .get("numProofValues")
-        .and_then(|v| v.as_u64())
+        .and_then(|v| v.as_u64().or_else(|| v.as_array().and_then(|a| a.first()).and_then(|e| e.as_u64())))
         .unwrap_or(0);
     let agg_types = vadcop_info
         .get("aggTypes")
@@ -2052,7 +2077,11 @@ pub fn gen_circom(input: &GenCircomInput<'_>) -> Result<String> {
     ctx.insert("vadcopInfo_nPublics", &n_publics);
     let num_proof_values = vadcop_info
         .get("numProofValues")
-        .and_then(|v| v.as_u64())
+        .and_then(|v| {
+            // numProofValues can be a scalar or an array (per-airgroup).
+            // Use the first element if array, scalar otherwise.
+            v.as_u64().or_else(|| v.as_array().and_then(|a| a.first()).and_then(|e| e.as_u64()))
+        })
         .unwrap_or(0);
     ctx.insert("vadcopInfo_numProofValues", &num_proof_values);
 

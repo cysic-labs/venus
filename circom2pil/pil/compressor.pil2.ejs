@@ -1,0 +1,11 @@
+require "<%-templateFile%>.pil";
+
+set_std_mode(STD_MODE_ONE_INSTANCE);
+
+set_max_constraint_degree(<%- maxConstraintDegree %>);
+
+public publics[<%- nPublics %>];
+
+airgroup <%- namespaceName %>  {
+    <%- templateName %> (N: 2**<%- nBits %>, nPlonkRows: <%- nPlonkRows %>, nPoseidonCompressor: <%- nPoseidonCompressor %>, nPoseidonSponge: <%- nPoseidonSponge %>, nCMulRows: <%- nCMulRows %>, nEvPol4: <%- nEvPol4 %>, nFFT4: <%- nFFT4 %>, nTreeSelector4: <%- nTreeSelector4 %>, nSelectVal1: <%- nSelectVal1 %>) alias <%- namespaceName %>;
+}

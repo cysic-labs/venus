@@ -98,7 +98,6 @@ pub fn prepare_pil(
     }
 
     // Run add_info_expressions on remaining expressions that have not been processed.
-    // The info_computed flag inside add_info_expressions guards against re-processing.
     for i in 0..expressions.len() {
         if expressions[i].op != "__placeholder__" {
             add_info_expressions(&mut expressions, i);

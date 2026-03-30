@@ -32,6 +32,13 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt::init();
+
+    // Configure rayon with larger stack size for deep expression evaluation
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(64 * 1024 * 1024) // 64 MB per thread
+        .build_global()
+        .ok(); // Ignore error if already initialized
+
     tracing::info!("venus-setup: starting");
     tracing::info!("  airout: {}", cli.airout);
     tracing::info!("  build_dir: {}", cli.build_dir);
