@@ -332,7 +332,10 @@ fn run_recursive_setup(
     let global_constraints: serde_json::Value = if global_constraints_path.exists() {
         serde_json::from_str(&fs::read_to_string(&global_constraints_path)?)?
     } else {
-        serde_json::json!({"constraints": [], "hints": []})
+        anyhow::bail!(
+            "globalConstraints.json not found at {:?}, cannot run recursive setup",
+            global_constraints_path
+        );
     };
 
     // Per-airgroup, per-air: check compressor and run recursive1
@@ -2226,6 +2229,88 @@ mod tests_global_info {
         assert_eq!(
             golden_vdata, actual_vdata,
             "Dma.verifier.bin content mismatch"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Test that run_setup writes global files before returning Err on AIR failure.
+    ///
+    /// Uses a minimal valid pilout with one AIR that has zero rows (triggers
+    /// "skipping" logic but the empty airgroup still produces global metadata).
+    /// Then verifies with a broken pilout (truncated) that causes a parse error
+    /// and confirms the function returns Err.
+    #[test]
+    fn test_global_files_written_before_error() {
+        let tmp_dir = std::env::temp_dir().join("pil2_failfast_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let build_dir = tmp_dir.join("build");
+        std::fs::create_dir_all(&build_dir).unwrap();
+
+        // Create a truncated/invalid pilout file that will fail to parse
+        let bad_pilout = tmp_dir.join("bad.pilout");
+        std::fs::write(&bad_pilout, b"not a valid protobuf").unwrap();
+
+        let opts = SetupOptions {
+            airout_path: bad_pilout.to_str().unwrap().to_string(),
+            build_dir: build_dir.to_str().unwrap().to_string(),
+            fixed_dir: None,
+            stark_structs_path: None,
+            recursive: false,
+        };
+
+        // run_setup should return Err because the pilout is invalid
+        let result = run_setup(&opts);
+        assert!(result.is_err(), "run_setup should fail on invalid pilout");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Test that run_recursive_setup fails when globalConstraints.json is missing.
+    #[test]
+    fn test_recursive_fails_on_missing_global_constraints() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let pilout_path = base.join("pil/zisk.pilout");
+        if !pilout_path.exists() {
+            eprintln!("Skipping test: zisk.pilout not found");
+            return;
+        }
+
+        let tmp_dir = std::env::temp_dir().join("pil2_recursive_failfast");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let build_dir = tmp_dir.join("build");
+        let pk_dir = build_dir.join("provingKey");
+        std::fs::create_dir_all(&pk_dir).unwrap();
+
+        // Write globalInfo but NOT globalConstraints
+        std::fs::write(
+            pk_dir.join("pilout.globalInfo.json"),
+            r#"{"name":"zisk","nPublics":68}"#,
+        ).unwrap();
+
+        // Call run_recursive_setup directly (avoids expensive AIR processing)
+        let pilout_data = std::fs::read(&pilout_path).unwrap();
+        let pilout = pilout::pilout::PilOut::decode(pilout_data.as_slice()).unwrap();
+        let opts = SetupOptions {
+            airout_path: pilout_path.to_str().unwrap().to_string(),
+            build_dir: build_dir.to_str().unwrap().to_string(),
+            fixed_dir: None,
+            stark_structs_path: None,
+            recursive: true,
+        };
+
+        let result = run_recursive_setup(&pilout, "zisk", &opts);
+        assert!(
+            result.is_err(),
+            "recursive setup should fail when globalConstraints.json is missing"
+        );
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            err_msg.contains("globalConstraints.json not found"),
+            "error should mention missing globalConstraints: {}",
+            err_msg
         );
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
