@@ -9,7 +9,7 @@ use anyhow::Result;
 // IndexMap used in some helper functions below
 #[allow(unused_imports)]
 use indexmap::IndexMap;
-use pilout::pilout as pb;
+use pilout::pilout::{self as pb, SymbolType};
 use prost::Message;
 use serde_json::json;
 
@@ -1379,6 +1379,12 @@ fn write_global_info(
         pilout.num_challenges.clone()
     };
 
+    // Extract proofValuesMap from pilout symbols
+    let proof_values_map = build_global_proof_values_map(&pilout.symbols);
+
+    // Extract publicsMap from pilout symbols
+    let publics_map = build_global_publics_map(&pilout.symbols);
+
     let global_info = json!({
         "name": pilout_name,
         "airs": airs,
@@ -1390,6 +1396,8 @@ fn write_global_info(
         "nPublics": pilout.num_public_values,
         "numChallenges": num_challenges,
         "numProofValues": pilout.num_proof_values,
+        "proofValuesMap": proof_values_map,
+        "publicsMap": publics_map,
     });
 
     let global_info_str = json_output::to_json_string(&global_info)?;
@@ -1411,6 +1419,86 @@ fn write_global_info(
 
     tracing::info!("Global info and constraints written");
     Ok(())
+}
+
+/// Build the `proofValuesMap` array from pilout symbols (sorted by id).
+///
+/// Each proof-value symbol produces one entry: `{"name": ..., "stage": ...}`.
+/// Array symbols are expanded into one entry per element with the same name/stage.
+fn build_global_proof_values_map(symbols: &[pb::Symbol]) -> Vec<serde_json::Value> {
+    let mut entries: Vec<(u32, serde_json::Value)> = Vec::new();
+
+    for s in symbols {
+        if s.r#type != SymbolType::ProofValue as i32 {
+            continue;
+        }
+        let stage = s.stage.unwrap_or(1);
+        if s.dim == 0 {
+            entries.push((s.id, json!({"name": s.name, "stage": stage})));
+        } else {
+            // Array proof value: expand each element
+            let total: u32 = s.lengths.iter().product::<u32>().max(1);
+            for offset in 0..total {
+                entries.push((
+                    s.id + offset,
+                    json!({"name": s.name, "stage": stage}),
+                ));
+            }
+        }
+    }
+
+    entries.sort_by_key(|(id, _)| *id);
+    entries.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Build the `publicsMap` array from pilout symbols (sorted by id).
+///
+/// Each scalar public produces `{"name": ..., "stage": 1}`.
+/// Array publics are expanded and include `{"name": ..., "stage": 1, "lengths": [i, j, ...]}`.
+fn build_global_publics_map(symbols: &[pb::Symbol]) -> Vec<serde_json::Value> {
+    let mut entries: Vec<(u32, serde_json::Value)> = Vec::new();
+
+    for s in symbols {
+        if s.r#type != SymbolType::PublicValue as i32 {
+            continue;
+        }
+        if s.dim == 0 || s.lengths.is_empty() {
+            entries.push((s.id, json!({"name": s.name, "stage": 1})));
+        } else {
+            expand_public_array_entries(&mut entries, s, &[], 0);
+        }
+    }
+
+    entries.sort_by_key(|(id, _)| *id);
+    entries.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Recursively expand a multi-dimensional public array symbol into individual entries.
+fn expand_public_array_entries(
+    entries: &mut Vec<(u32, serde_json::Value)>,
+    sym: &pb::Symbol,
+    indexes: &[u32],
+    shift: u32,
+) -> u32 {
+    if indexes.len() == sym.lengths.len() {
+        let idx_vec: Vec<serde_json::Value> =
+            indexes.iter().map(|&i| serde_json::Value::from(i)).collect();
+        entries.push((
+            sym.id + shift,
+            json!({"name": sym.name, "stage": 1, "lengths": idx_vec}),
+        ));
+        return shift + 1;
+    }
+
+    let len = sym.lengths[indexes.len()];
+    let mut current_shift = shift;
+    for i in 0..len {
+        let mut new_indexes = indexes.to_vec();
+        new_indexes.push(i);
+        current_shift =
+            expand_public_array_entries(entries, sym, &new_indexes, current_shift);
+    }
+    current_shift
 }
 
 /// Write binary files using native Rust implementation.
