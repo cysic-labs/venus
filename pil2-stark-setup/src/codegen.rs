@@ -133,12 +133,25 @@ pub fn pil_code_gen(
 
     let e = &expressions[exp_id];
 
-    // Save parent state, process in-place to avoid expensive clone of `calculated`
-    let saved_code_len = ctx.code.len();
-    let saved_tmp_used = ctx.tmp_used;
-    let saved_exp_map = std::mem::take(&mut ctx.exp_map);
+    // Create a sub-context for this expression.
+    // Share `calculated` and `witness_by_exp_id` (Arc) to avoid expensive clones.
+    // Only clone code/ev_map/exp_map which are small or need isolation.
+    let mut code_ctx = CodeGenCtx {
+        air_id: ctx.air_id,
+        airgroup_id: ctx.airgroup_id,
+        stage: ctx.stage,
+        dom: ctx.dom.clone(),
+        verifier_evaluations: ctx.verifier_evaluations,
+        opening_points: ctx.opening_points.clone(),
+        ev_map: ctx.ev_map.clone(),
+        tmp_used: ctx.tmp_used,
+        code: Vec::new(),
+        calculated: std::mem::take(&mut ctx.calculated),
+        exp_map: HashMap::new(),
+        witness_by_exp_id: std::sync::Arc::clone(&ctx.witness_by_exp_id),
+    };
 
-    let ret_ref = eval_exp(ctx, symbols, expressions, e, prime);
+    let ret_ref = eval_exp(&mut code_ctx, symbols, expressions, e, prime);
 
     let mut r = CodeRef {
         ref_type: "exp".to_string(),
@@ -156,28 +169,33 @@ pub fn pil_code_gen(
     };
 
     if ret_ref.ref_type == "tmp" {
-        fix_commit_pol(&mut r, ctx, symbols);
-        let last_idx = ctx.code.len() - 1;
-        ctx.code[last_idx].dest = r.clone();
+        fix_commit_pol(&mut r, &code_ctx, symbols);
+        let last_idx = code_ctx.code.len() - 1;
+        code_ctx.code[last_idx].dest = r.clone();
         if r.ref_type == "cm" {
-            ctx.tmp_used -= 1;
+            code_ctx.tmp_used -= 1;
         }
     } else {
-        fix_commit_pol(&mut r, ctx, symbols);
-        ctx.code.push(CodeEntry {
+        fix_commit_pol(&mut r, &code_ctx, symbols);
+        code_ctx.code.push(CodeEntry {
             op: "copy".to_string(),
             dest: r.clone(),
             src: vec![ret_ref],
         });
     }
 
-    // Restore exp_map (sub-expression-level mappings are local)
-    ctx.exp_map = saved_exp_map;
+    ctx.code.extend(code_ctx.code);
+    // Restore calculated (was moved into sub-context)
+    ctx.calculated = code_ctx.calculated;
 
     ctx.calculated
         .entry(exp_id)
         .or_default()
-        .insert(prime, CalcEntry { cm: false, tmp_id: Some(ctx.tmp_used) });
+        .insert(prime, CalcEntry { cm: false, tmp_id: Some(code_ctx.tmp_used) });
+
+    if code_ctx.tmp_used > ctx.tmp_used {
+        ctx.tmp_used = code_ctx.tmp_used;
+    }
 }
 
 // ---------------------------------------------------------------------------

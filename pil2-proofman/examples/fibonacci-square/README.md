@@ -62,8 +62,6 @@ cargo run --release --bin venus-setup -- \
      -b ./examples/fibonacci-square/build -r -u ./examples/fibonacci-square/build/fixed
 ```
 
-<!-- TODO: snark setup is not yet available in venus-setup -->
-
 ### 2.3 Generate PIL Helpers
 
 Generate the corresponding PIL helpers by running the following command:
