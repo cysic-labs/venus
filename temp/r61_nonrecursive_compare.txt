@@ -1,0 +1,34 @@
+# Fresh non-recursive setup compare (Round 61)
+# Date: 2026-03-30
+# Command: venus-setup -a pil/zisk.pilout -b <clean>/build -u tmp/fixed -s starkstructs.json
+# Timeout: 300s (Poseidon2 stalls, 34/35 AIRs complete)
+
+## Summary
+- Files matching golden: 206
+- Files differing: 30
+- AIRs fully matching (all 7 files): 24/35
+
+## Fully matching AIRs (all 7 files byte-identical to golden):
+Add256, Arith, Binary, BinaryAdd, BinaryExtension, Dma, Dma64Aligned,
+Dma64AlignedInputCpy, Dma64AlignedMem, Dma64AlignedMemCpy,
+Dma64AlignedMemSet, DmaInputCpy, DmaMemCpy, DmaPrePost,
+DmaPrePostInputCpy, DmaPrePostMemCpy, DmaUnaligned, InputData,
+Main, Mem, MemAlign, MemAlignByte, MemAlignReadByte, MemAlignWriteByte
+
+## Differing AIRs:
+ArithEq - different starkinfo (JS pilout expression structure differs)
+ArithEq384 - different starkinfo (JS pilout mismatch set)
+Blake2br - different starkinfo (JS pilout mismatch set)
+Keccakf - const file size mismatch (Rust compiler emits 4 fixed cols, JS 2)
+Poseidon2 - codegen stall (34/35 AIRs, Poseidon2 times out)
+Rom - different starkinfo
+Sha256f - different starkinfo (JS pilout mismatch set)
+SpecifiedRanges - different starkinfo (JS pilout mismatch set)
+VirtualTable0 - different starkinfo (JS pilout mismatch set)
+VirtualTable1 - different starkinfo (JS pilout mismatch set)
+
+## Root causes for remaining diffs:
+1. 8 AIRs have different starkinfo because the JS pilout produces different
+   expression structure for these AIRs (AC4/T18 compiler parity issue)
+2. Keccakf has wrong const file size from Rust compiler (AC4/T18)
+3. Poseidon2 stalls in codegen due to 54 opening points (performance issue)
