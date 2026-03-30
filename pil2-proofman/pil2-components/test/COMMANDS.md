@@ -289,12 +289,12 @@ rm -rf ./pil2-components/test/special/build/ \
      -a ./pil2-components/test/special/build/array_size.pilout \
      -u ./pil2-components/test/special/build/fixed_array_size \
      -b ./pil2-components/test/special/build \
-     -t ./pil2-stark/build/bctree \
+     -t ./pil2-components/lib/std/pil \
 && cargo run --release --bin venus-setup -- \
      -a ./pil2-components/test/special/build/direct_optimizations.pilout \
      -u ./pil2-components/test/special/build/fixed_direct_optimizations \
      -b ./pil2-components/test/special/build \
-     -t ./pil2-stark/build/bctree \
+     -t ./pil2-components/lib/std/pil \
 && cargo run --release --bin venus-setup -- \
      -a ./pil2-components/test/special/build/expr_optimizations.pilout \
      -u ./pil2-components/test/special/build/fixed_expr_optimizations \

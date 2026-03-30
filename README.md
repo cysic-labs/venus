@@ -15,8 +15,9 @@ This repository is a deeply integrated monorepo consolidating multiple projects 
 | **`venus-acc/`** | **Cysic Labs** | **FPGA/ASIC acceleration backend (submodule, Cysic original work)** |
 | `zisk` | [0xPolygonHermez/zisk](https://github.com/0xPolygonHermez/zisk) | zkVM core: state machines, emulator, executor, PIL definitions, CLI tools |
 | `pil2-proofman/` | [0xPolygonHermez/pil2-proofman](https://github.com/0xPolygonHermez/pil2-proofman) | Rust proving backend with GPU (CUDA) acceleration |
-| `pil2-compiler/` | [0xPolygonHermez/pil2-compiler](https://github.com/0xPolygonHermez/pil2-compiler) | PIL (Polynomial Identity Language) compiler |
-| `pil2-stark-setup/` | Cysic Labs (Rust port) | Rust-native proving key generation and setup (replaces legacy JS tooling) |
+| `pil2-compiler-rust/` | Cysic Labs (Rust port) | PIL (Polynomial Identity Language) compiler (`pil2c` binary) |
+| `pil2-stark-setup/` | Cysic Labs (Rust port) | Proving key generation and setup (`venus-setup` binary) |
+| `stark-recurser-rust/` | Cysic Labs (Rust port) | Recursive STARK circuit generation (pil2circom, gencircom, plonk2pil) |
 
 We chose this monorepo consolidation because we believe a clean repository with minimal external dependencies facilitates rapid development iteration.
 

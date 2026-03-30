@@ -36,7 +36,7 @@ This will run Docker container and open the ZisK test menu inside the container.
    After building, it installs the CLI tools and necessary files to the `$HOME/.zisk` folder and adds that folder to the `$PATH` environment variable.
 
 3. **Build setup from source**  
-   Builds the setup files (proving key) using the `pil2-proofman` and `pil2-compiler` repository sources (checking out the branches specified in the environment variables).  
+   Builds the setup files (proving key) using the Rust tools (`pil2c` compiler and `venus-setup`) with the `pil2-proofman` repository (checking out the branch specified in the environment variables).  
    After building, it installs the proving key to the `$HOME/.zisk` folder and generates the constant files using the `cargo-zisk check-setup` command.
 
 4. **Package setup outcome**  

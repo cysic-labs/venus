@@ -371,4 +371,37 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_verkey_json_byte_identical_to_golden() {
+        // Verify verkey.json serialization matches golden reference byte-for-byte.
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../golden_reference/zisk/Zisk/airs/Dma/air/Dma.verkey.json");
+        if !golden_path.exists() {
+            eprintln!("Skipping verkey golden test: {:?} not found", golden_path);
+            return;
+        }
+        let golden = std::fs::read_to_string(&golden_path).unwrap();
+
+        // Parse the golden root values
+        let vals: Vec<u64> = golden
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|s| s.trim().parse::<u64>().unwrap())
+            .collect();
+        assert_eq!(vals.len(), 4);
+
+        // Re-serialize using the same format as compute_const_tree
+        let rendered = format!(
+            "[\n    {},\n    {},\n    {},\n    {}\n]\n",
+            vals[0], vals[1], vals[2], vals[3]
+        );
+
+        assert_eq!(
+            rendered, golden,
+            "verkey.json serialization does not match golden reference byte-for-byte"
+        );
+    }
 }

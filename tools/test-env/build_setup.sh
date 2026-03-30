@@ -15,28 +15,17 @@ main() {
 
     cd "${WORKSPACE_DIR}"
 
-    step  "Cloning pil2-compiler and pil2-proofman repos..."
+    step  "Cloning pil2-proofman repo..."
 
-    # Remove existing directories if they exist
-    rm -rf pil2-compiler
+    # Remove existing directory if it exists
     rm -rf pil2-proofman
 
-    # Clone repositories
+    # Clone repository
     if [[ "$DISABLE_CLONE_REPO" == "1" ]]; then
-        warn "Skipping cloning repositories as DISABLE_CLONE_REPO is set to 1"
+        warn "Skipping cloning repository as DISABLE_CLONE_REPO is set to 1"
     else
-        ensure git clone https://github.com/0xPolygonHermez/pil2-compiler.git || return 1
-        cd pil2-compiler
-        # If PIL2_COMPILER_BRANCH is defined, check out the specified branch
-        if [[ -n "$PIL2_COMPILER_BRANCH" ]]; then
-            echo "Checking out branch '$PIL2_COMPILER_BRANCH' for pil2-compiler..."
-            ensure git checkout "$PIL2_COMPILER_BRANCH" || return 1
-        fi
-        cd ..
-
         ensure git clone https://github.com/0xPolygonHermez/pil2-proofman.git || return 1
         cd pil2-proofman
-        # If PIL2_PROOFMAN_BRANCH is defined, check out the specified branch
         if [[ -n "$PIL2_PROOFMAN_BRANCH" ]]; then
             echo "Checking out branch '$PIL2_PROOFMAN_BRANCH' for pil2-proofman..."
             ensure git checkout "$PIL2_PROOFMAN_BRANCH" || return 1
