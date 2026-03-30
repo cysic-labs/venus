@@ -143,7 +143,7 @@ pub fn pil_code_gen(
         dom: ctx.dom.clone(),
         verifier_evaluations: ctx.verifier_evaluations,
         opening_points: ctx.opening_points.clone(),
-        ev_map: ctx.ev_map.clone(),
+        ev_map: std::mem::take(&mut ctx.ev_map), // move instead of clone
         tmp_used: ctx.tmp_used,
         code: Vec::new(),
         calculated: std::mem::take(&mut ctx.calculated),
@@ -185,8 +185,9 @@ pub fn pil_code_gen(
     }
 
     ctx.code.extend(code_ctx.code);
-    // Restore calculated (was moved into sub-context)
+    // Restore moved fields
     ctx.calculated = code_ctx.calculated;
+    ctx.ev_map = code_ctx.ev_map;
 
     ctx.calculated
         .entry(exp_id)
