@@ -546,11 +546,10 @@ fn push_args(
             args.push(prime_index as u64);
         }
         OpType::Number => {
-            let mut num = r.value as i128;
-            if (r.value as i64) < 0 {
-                num = r.value as i64 as i128 + 0xFFFFFFFF00000001i128;
-            }
-            let num_string = format!("{}", num as u64);
+            // r.value is already a u64 parsed from the JSON string representation.
+            // Values are already in Goldilocks field representation (e.g. p-1 = 0xFFFFFFFF00000000).
+            // Do NOT apply modular reduction - the JSON stores the final u64 value directly.
+            let num_string = format!("{}", r.value);
             if !numbers.contains(&num_string) {
                 numbers.push(num_string.clone());
             }

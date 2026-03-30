@@ -2241,11 +2241,8 @@ mod tests_global_info {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
-    /// Test Binary .bin byte-identity (has negative primes).
-    /// Currently fails with 4-byte diff at positions 25790/25794/32773/32777.
-    /// Root cause under investigation: tmp ID compaction or hint encoding diff.
+    /// Test Binary .bin byte-identity (has negative primes and large Goldilocks values).
     #[test]
-    #[ignore] // known 4-byte parity gap, investigating
     fn test_binary_bin_byte_identical_to_golden() {
         let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let golden_dir = base.join("golden_reference/zisk/Zisk/airs/Binary/air");
