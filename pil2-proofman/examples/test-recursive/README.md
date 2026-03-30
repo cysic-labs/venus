@@ -13,8 +13,10 @@ export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib
 After compiling the PIL files, generate the setup:
 
 ```bash
+# TODO: recursive setup with circom is not yet fully supported in venus-setup.
+# The legacy JS tooling used flags (-c, -n, -p) that are not available in venus-setup.
 cargo run --release --bin venus-setup -- -r \
-     -b ./examples/test-recursive/build -c ./examples/test-recursive/test.circom -n test -p pil2-components/lib/std/pil
+     -b ./examples/test-recursive/build -t pil2-components/lib/std/pil
 ```
 
 ### Build the Project
@@ -50,8 +52,10 @@ Finally, generate the proof using the following command:
 
 ```bash
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
+# TODO: recursive setup with circom is not yet fully supported in venus-setup.
+# The legacy JS tooling used flags (-c, -n, -p) that are not available in venus-setup.
 && cargo run --release --bin venus-setup -- -r \
-     -b ./examples/test-recursive/build -c ./examples/test-recursive/test.circom -n test -p pil2-components/lib/std/pil \
+     -b ./examples/test-recursive/build -t pil2-components/lib/std/pil \
 && cargo build --workspace \
 && cargo run --bin proofman-cli verify-constraints \
      --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \

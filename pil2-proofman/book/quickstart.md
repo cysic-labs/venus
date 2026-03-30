@@ -11,11 +11,16 @@ Optional recommendations:
 - [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer) extension if you are using VS Code to assist you when writing Rust code.
 - [PIL2 Highlight syntax code](https://github.com/0xPolygonHermez/pil2-vscode) if you are using VS Code to highlight your code when writing PIL2 code.
 
-Install the following repositories:
+Clone the repository:
 
 ```bash
-git clone https://github.com/0xPolygonHermez/pil2-compiler.git
 git clone https://github.com/0xPolygonHermez/pil2-proofman.git
+```
+
+Build the required Rust tools (PIL2 compiler and setup):
+
+```bash
+cargo build --release --bin pil2c --bin venus-setup
 ```
 
 ## PIL2 code

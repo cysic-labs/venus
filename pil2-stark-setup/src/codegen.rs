@@ -40,9 +40,10 @@ pub struct CodeGenCtx {
     /// Used by `build_code` to resolve expression refs to temporaries.
     /// Keyed by prime (can be negative, e.g. -1) then by expression id.
     exp_map: HashMap<i64, HashMap<usize, usize>>,
-    /// Pre-computed symbol index: exp_id -> symbol index for witness imPol lookups.
-    /// Avoids O(N) linear scan of symbols on every fix_commit_pol call.
-    pub witness_by_exp_id: HashMap<(usize, usize, usize), usize>,
+    /// Pre-computed symbol index: (exp_id, air_id, airgroup_id) -> symbol index
+    /// for witness imPol lookups. Shared across all codegen calls via reference;
+    /// stored as owned only when context is self-contained (tests).
+    pub witness_by_exp_id: std::sync::Arc<HashMap<(usize, usize, usize), usize>>,
 }
 
 /// An entry in the evaluation map built during verifier code generation.
@@ -78,7 +79,7 @@ impl CodeGenCtx {
             code: Vec::new(),
             calculated: HashMap::new(),
             exp_map: HashMap::new(),
-            witness_by_exp_id: HashMap::new(),
+            witness_by_exp_id: std::sync::Arc::new(HashMap::new()),
         }
     }
 }

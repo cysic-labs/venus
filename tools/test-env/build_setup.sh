@@ -15,16 +15,15 @@ main() {
 
     cd "${WORKSPACE_DIR}"
 
-    step  "Cloning pil2-compiler, pil2-proofman and pil2-proofman-js repos..."
+    step  "Cloning pil2-compiler and pil2-proofman repos..."
 
     # Remove existing directories if they exist
     rm -rf pil2-compiler
     rm -rf pil2-proofman
-    rm -rf pil2-proofman-js
 
-    # Clone pil2-compiler
+    # Clone repositories
     if [[ "$DISABLE_CLONE_REPO" == "1" ]]; then
-        warn "Skipping cloning pil2-compiler repository as DISABLE_CLONE_REPO is set to 1"
+        warn "Skipping cloning repositories as DISABLE_CLONE_REPO is set to 1"
     else
         ensure git clone https://github.com/0xPolygonHermez/pil2-compiler.git || return 1
         cd pil2-compiler
@@ -33,8 +32,6 @@ main() {
             echo "Checking out branch '$PIL2_COMPILER_BRANCH' for pil2-compiler..."
             ensure git checkout "$PIL2_COMPILER_BRANCH" || return 1
         fi
-        rm -rf package-lock.json
-        rm -rf node_modules
         cd ..
 
         ensure git clone https://github.com/0xPolygonHermez/pil2-proofman.git || return 1
@@ -45,27 +42,10 @@ main() {
             ensure git checkout "$PIL2_PROOFMAN_BRANCH" || return 1
         fi
         cd ..
-
-        ensure git clone https://github.com/0xPolygonHermez/pil2-proofman-js.git || return 1
-        cd pil2-proofman-js
-        # If PIL2_PROOFMAN_JS_BRANCH is defined, check out the specified branch
-        if [[ -n "$PIL2_PROOFMAN_JS_BRANCH" ]]; then
-            echo "Checking out branch '$PIL2_PROOFMAN_JS_BRANCH' for pil2-proofman-js..."
-            ensure git checkout "$PIL2_PROOFMAN_JS_BRANCH" || return 1
-        fi
-        rm -rf package-lock.json
-        rm -rf node_modules
-        cd ..
     fi
 
-    step "Installing npm packages..."
-    cd pil2-compiler
-    ensure npm i || return 1
-    cd ..
-
-    cd pil2-proofman-js
-    ensure npm i || return 1
-    cd ..
+    step "Building Rust tools..."
+    ensure cargo build --release --bin pil2c --bin venus-setup || return 1
 
     cd "$(get_zisk_repo_dir)"
 
@@ -75,7 +55,7 @@ main() {
     ensure cargo run --release --bin binary_extension_frops_fixed_gen || return 1
 
     step "Compiling ZisK PIL..."
-    ensure node --max-old-space-size=16384 "${WORKSPACE_DIR}/pil2-compiler/src/pil.js" pil/zisk.pil \
+    ensure cargo run --release --bin pil2c -- pil/zisk.pil \
 	-I pil,"${WORKSPACE_DIR}/pil2-proofman/pil2-components/lib/std/pil",state-machines,precompiles \
 	-o pil/zisk.pilout -u tmp/fixed -O fixed-to-file || return 1
 
@@ -113,8 +93,7 @@ main() {
         fi
 
         rm -rf build/provingKey
-        ensure node --max-old-space-size=16384 --stack-size=8192 \
-            "${WORKSPACE_DIR}/pil2-proofman-js/src/main_setup.js" \
+        ensure cargo run --release --bin venus-setup -- \
             -a ./pil/zisk.pilout -b build \
             -u tmp/fixed ${setup_flags} \
             -s state-machines/starkstructs.json

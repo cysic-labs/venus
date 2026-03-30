@@ -62,22 +62,7 @@ cargo run --release --bin venus-setup -- \
      -b ./examples/fibonacci-square/build -r -u ./examples/fibonacci-square/build/fixed
 ```
 
-Additionally, to run the snark setup:
-
-```bash
-cargo run --release --bin venus-setup -- --snark \
-     -b ./examples/fibonacci-square/build -t ./pil2-components/lib/std/pil \
-     -n plonk -p examples/fibonacci-square/src/publics_info.json -w <powers_of_tau>
-```
-
-If only wants to generate the recursive final for debugging purposes, run:
-
-```bash
-cargo run --release --bin venus-setup -- --snark \
-     -b ./examples/fibonacci-square/build -t ./pil2-components/lib/std/pil -o
-```
-
-To run the aggregated proof, need to add -r to the previous command
+<!-- TODO: snark setup is not yet available in venus-setup -->
 
 ### 2.3 Generate PIL Helpers
 
@@ -166,9 +151,6 @@ export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib
 && cargo run --release --bin venus-setup -- \
      -a ./examples/fibonacci-square/pil/build.pilout \
      -b ./examples/fibonacci-square/build -t pil2-components/lib/std/pil \
-&& cargo run --release --bin venus-setup -- --stats \
-     -a ./examples/fibonacci-square/pil/build.pilout \
-     -o ./examples/fibonacci-square/build/build.stats \
 && cargo run --bin proofman-cli pil-helpers \
      --pilout ./examples/fibonacci-square/pil/build.pilout \
      --path ./examples/fibonacci-square/src -o \
@@ -201,9 +183,6 @@ export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib
      -a ./examples/fibonacci-square/pil/build.pilout \
      -b ./examples/fibonacci-square/build -t pil2-components/lib/std/pil \
      -r \
-&& cargo run --release --bin venus-setup -- --stats \
-     -a ./examples/fibonacci-square/pil/build.pilout \
-     -o ./examples/fibonacci-square/build/build.stats \
 && cargo run --bin proofman-cli pil-helpers \
      --pilout ./examples/fibonacci-square/pil/build.pilout \
      --path ./examples/fibonacci-square/src -o \

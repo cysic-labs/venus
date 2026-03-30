@@ -74,10 +74,6 @@ install_dependencies_linux() {
         libsodium-dev libpqxx-dev nasm libopenmpi-dev openmpi-bin openmpi-common \
         sudo ca-certificates gnupg lsb-release wget libclang-dev clang gcc-riscv64-unknown-elf || return 1
 
-    step "Installing Node.js 20.x..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | ( [[ "$(id -u)" -ne 0 ]] && sudo -E bash || bash )
-    ensure_sudo apt-get install -y nodejs || return 1
-
     step "Installing Rust..."
     # Create the profile file if it doesn't exist
     touch $PROFILE

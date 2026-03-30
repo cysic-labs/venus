@@ -11,6 +11,7 @@
 //! - Hint computations
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::codegen::{build_code, pil_code_gen, CalcEntry, CodeGenCtx, EvMapRef};
 use crate::expression::Expression;
@@ -27,7 +28,7 @@ fn build_witness_index(
     symbols: &[SymbolInfo],
     air_id: usize,
     airgroup_id: usize,
-) -> HashMap<(usize, usize, usize), usize> {
+) -> Arc<HashMap<(usize, usize, usize), usize>> {
     let mut index = HashMap::new();
     for (i, s) in symbols.iter().enumerate() {
         if s.sym_type == "witness"
@@ -39,7 +40,7 @@ fn build_witness_index(
             }
         }
     }
-    index
+    Arc::new(index)
 }
 use crate::types::CodeRef;
 
@@ -289,7 +290,7 @@ fn generate_expressions_code(
     params: &CodeGenParams,
     symbols: &[SymbolInfo],
     expressions: &[Expression],
-    witness_index: &HashMap<(usize, usize, usize), usize>,
+    witness_index: &Arc<HashMap<(usize, usize, usize), usize>>,
 ) -> Vec<ExpressionCodeEntry> {
     let mut result = Vec::new();
 
@@ -318,7 +319,7 @@ fn generate_expressions_code(
             Vec::new(),
             Vec::new(),
         );
-        ctx.witness_by_exp_id = witness_index.clone();
+        ctx.witness_by_exp_id = Arc::clone(&witness_index);
 
         if j == params.fri_exp_id {
             ctx.opening_points = params.opening_points.clone();
@@ -428,7 +429,7 @@ fn generate_constraints_debug_code(
     symbols: &[SymbolInfo],
     constraints: &[ConstraintInfo],
     expressions: &[Expression],
-    witness_index: &HashMap<(usize, usize, usize), usize>,
+    witness_index: &Arc<HashMap<(usize, usize, usize), usize>>,
 ) -> Vec<ConstraintCodeEntry> {
     let mut result = Vec::new();
 
@@ -442,7 +443,7 @@ fn generate_constraints_debug_code(
             Vec::new(),
             Vec::new(),
         );
-        ctx.witness_by_exp_id = witness_index.clone();
+        ctx.witness_by_exp_id = Arc::clone(&witness_index);
 
         // Pre-mark imPol expressions as calculated
         for sym in symbols.iter() {
@@ -500,7 +501,7 @@ fn generate_constraint_polynomial_verifier_code(
     symbols: &[SymbolInfo],
     expressions: &[Expression],
     ev_map_out: &mut Vec<EvMapRef>,
-    witness_index: &HashMap<(usize, usize, usize), usize>,
+    witness_index: &Arc<HashMap<(usize, usize, usize), usize>>,
 ) -> ExpressionCodeEntry {
     let mut ctx = CodeGenCtx::new(
         params.air_id,
@@ -511,7 +512,7 @@ fn generate_constraint_polynomial_verifier_code(
         params.opening_points.clone(),
         Vec::new(),
     );
-    ctx.witness_by_exp_id = witness_index.clone();
+    ctx.witness_by_exp_id = Arc::clone(&witness_index);
 
     // Pre-mark imPol expressions as calculated
     for sym in symbols.iter() {
