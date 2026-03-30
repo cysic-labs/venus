@@ -2824,4 +2824,16 @@ mod tests {
             other => panic!("expected Constraint, got {:?}", other),
         }
     }
+
+    #[test]
+    fn test_parse_braceless_if_break() {
+        let source = r#"
+            for (int i = 0; i < 10; i++) {
+                if (i == 5) break;
+                if (i == 3) continue;
+            }
+        "#;
+        let _ast = parse(source).unwrap();
+        // Should parse without error - the break/continue are if-body, not standalone
+    }
 }
