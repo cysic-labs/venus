@@ -327,16 +327,22 @@ pub fn get_parser_args(
             )?;
         }
 
-        let dest_dim_str = dim_str(r.dest.dim);
-        let ops_index = OPERATIONS.iter().position(|entry| {
-            entry.dest_type == dest_dim_str && entry.src0_type == src0_dim && entry.src1_type == src1_dim
-        });
-        match ops_index {
-            Some(idx) => ops.push(idx as u64),
-            None => bail!(
-                "Operation not considered: dest={} src0={} src1={}",
-                dest_dim_str, src0_dim, src1_dim
-            ),
+        // Copy ops always use ops_index 0 (matching JS where operationsTypeMap["copy"]
+        // is undefined -> 0, and the src1_dim lookup would also fall through to 0).
+        if r.op == "copy" {
+            ops.push(0);
+        } else {
+            let dest_dim_str = dim_str(r.dest.dim);
+            let ops_index = OPERATIONS.iter().position(|entry| {
+                entry.dest_type == dest_dim_str && entry.src0_type == src0_dim && entry.src1_type == src1_dim
+            });
+            match ops_index {
+                Some(idx) => ops.push(idx as u64),
+                None => bail!(
+                    "Operation not considered: dest={} src0={} src1={}",
+                    dest_dim_str, src0_dim, src1_dim
+                ),
+            }
         }
     }
 
