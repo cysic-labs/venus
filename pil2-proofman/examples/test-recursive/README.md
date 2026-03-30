@@ -10,11 +10,11 @@ export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib
 ```
 ### Generate Setup
 
-After compiling the PIL files, generate the setup:
+All commands below should be run from the `pil2-proofman/` directory:
 
 ```bash
-# Note: test.pilout must be generated first by compiling the test PIL files.
-# The recursive setup (-r) requires circom and circuit library files.
+cd pil2-proofman
+
 cargo run --release --bin pil2c -- ./examples/test-recursive/test.pil \
      -I pil2-components/lib/std/pil \
      -o ./examples/test-recursive/test.pilout
@@ -22,8 +22,7 @@ cargo run --release --bin pil2c -- ./examples/test-recursive/test.pil \
 cargo run --release --bin venus-setup -- \
      -a ./examples/test-recursive/test.pilout \
      -b ./examples/test-recursive/build \
-     -t pil2-components/lib/std/pil \
-     -r
+     -t pil2-components/lib/std/pil
 ```
 
 ### Build the Project
@@ -57,7 +56,10 @@ Finally, generate the proof using the following command:
 
 ### All at once
 
+Run from the `pil2-proofman/` directory:
+
 ```bash
+cd pil2-proofman
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
 && cargo run --release --bin pil2c -- ./examples/test-recursive/test.pil \
      -I pil2-components/lib/std/pil \
@@ -65,7 +67,7 @@ export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib
 && cargo run --release --bin venus-setup -- \
      -a ./examples/test-recursive/test.pilout \
      -b ./examples/test-recursive/build \
-     -t pil2-components/lib/std/pil -r \
+     -t pil2-components/lib/std/pil \
 && cargo build --workspace \
 && cargo run --bin proofman-cli verify-constraints \
      --witness-lib ./target/debug/libtest_recursive${PIL2_PROOFMAN_EXT} \
