@@ -386,20 +386,8 @@ fn run_recursive_setup(
             let verifier_info: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&vi_path)?)?;
 
-            if !vk_path.exists() {
-                anyhow::bail!(
-                    "Recursive setup requires verkey for air '{}': {:?} not found",
-                    air_name, vk_path
-                );
-            }
-            let vk: Vec<serde_json::Value> =
-                serde_json::from_str(&fs::read_to_string(&vk_path)?)?;
-            let const_root_strings: [String; 4] = [
-                vk.get(0).and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
-                vk.get(1).and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
-                vk.get(2).and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
-                vk.get(3).and_then(|v| v.as_u64()).unwrap_or(0).to_string(),
-            ];
+            let const_root_strings = parse_verkey_json(&vk_path)
+                .with_context(|| format!("Failed to load verkey for air '{}'", air_name))?;
 
             // Check if compressor is needed
             let has_compressor = match compressor_check::is_compressor_needed(
@@ -644,6 +632,35 @@ fn run_recursive_setup(
 }
 
 /// Resolve circom executable path.
+/// Parse a verkey.json file and return exactly 4 u64 limb strings.
+/// Returns Err if the file is missing, malformed, has fewer than 4 entries,
+/// or contains non-numeric values.
+fn parse_verkey_json(path: &Path) -> Result<[String; 4]> {
+    if !path.exists() {
+        anyhow::bail!("verkey.json not found: {:?}", path);
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read verkey file: {:?}", path))?;
+    let vk: Vec<serde_json::Value> = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse verkey JSON: {:?}", path))?;
+    if vk.len() < 4 {
+        anyhow::bail!(
+            "verkey.json has {} entries, expected 4: {:?}", vk.len(), path
+        );
+    }
+    let mut limbs = [String::new(), String::new(), String::new(), String::new()];
+    for i in 0..4 {
+        limbs[i] = vk[i]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!(
+                "verkey.json limb {} is not a valid u64: {:?} in {:?}",
+                i, vk[i], path
+            ))?
+            .to_string();
+    }
+    Ok(limbs)
+}
+
 fn resolve_circom_exec() -> String {
     // Check env variable first
     if let Ok(path) = std::env::var("CIRCOM_EXEC") {
@@ -2224,43 +2241,60 @@ mod tests_global_info {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
-    /// Test that write_global_info produces the expected files from a valid pilout.
-    /// This verifies the contract that global files are written before AIR processing.
+    /// Test the run_setup contract: write_global_info runs before per-AIR processing.
+    /// Verifies by calling run_setup with a minimal zero-row PilOut: global files
+    /// are written, and run_setup returns Ok (no AIRs to process with zero rows).
+    /// Then verifies the global files exist on disk.
     #[test]
-    fn test_global_files_written_from_pilout() {
-        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let pilout_path = base.join("pil/zisk.pilout");
-        if !pilout_path.exists() {
-            eprintln!("Skipping test: zisk.pilout not found");
-            return;
-        }
+    fn test_run_setup_writes_global_files() {
+        use pilout::pilout as pb;
+        use prost::Message;
 
-        let tmp_dir = std::env::temp_dir().join("pil2_global_write_test");
+        // Build minimal PilOut: one airgroup, one zero-row air (skipped by setup)
+        let pilout_proto = pb::PilOut {
+            name: Some("globaltest".to_string()),
+            air_groups: vec![pb::AirGroup {
+                name: Some("TestGroup".to_string()),
+                airs: vec![pb::Air {
+                    name: Some("TestAir".to_string()),
+                    num_rows: Some(0), // zero rows -> skipped
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let tmp_dir = std::env::temp_dir().join("pil2_run_setup_global");
         let _ = std::fs::remove_dir_all(&tmp_dir);
         let build_dir = tmp_dir.join("build");
         std::fs::create_dir_all(&build_dir).unwrap();
 
-        // Parse pilout and call write_global_info directly
-        let pilout_data = std::fs::read(&pilout_path).unwrap();
-        let pilout = pilout::pilout::PilOut::decode(pilout_data.as_slice()).unwrap();
-        let pilout_name = pilout.name.clone().unwrap_or_else(|| "pilout".to_string());
-        let settings_map: IndexMap<String, StarkSettings> = IndexMap::new();
+        let pilout_path = tmp_dir.join("test.pilout");
+        let mut buf = Vec::new();
+        pilout_proto.encode(&mut buf).unwrap();
+        std::fs::write(&pilout_path, &buf).unwrap();
 
-        write_global_info(&pilout, &pilout_name, build_dir.to_str().unwrap(), &settings_map).unwrap();
+        let opts = SetupOptions {
+            airout_path: pilout_path.to_str().unwrap().to_string(),
+            build_dir: build_dir.to_str().unwrap().to_string(),
+            fixed_dir: None,
+            stark_structs_path: None,
+            recursive: false,
+        };
 
+        // run_setup should succeed (zero-row AIR is skipped)
+        let result = run_setup(&opts);
+        assert!(result.is_ok(), "run_setup should succeed with zero-row AIR: {:#}", result.unwrap_err());
+
+        // Global files must exist on disk
         let pk_dir = build_dir.join("provingKey");
-        assert!(
-            pk_dir.join("pilout.globalInfo.json").exists(),
-            "globalInfo.json should be written"
-        );
-        assert!(
-            pk_dir.join("pilout.globalConstraints.json").exists(),
-            "globalConstraints.json should be written"
-        );
-        assert!(
-            pk_dir.join("pilout.globalConstraints.bin").exists(),
-            "globalConstraints.bin should be written"
-        );
+        assert!(pk_dir.join("pilout.globalInfo.json").exists(),
+            "globalInfo.json must exist after run_setup");
+        assert!(pk_dir.join("pilout.globalConstraints.json").exists(),
+            "globalConstraints.json must exist after run_setup");
+        assert!(pk_dir.join("pilout.globalConstraints.bin").exists(),
+            "globalConstraints.bin must exist after run_setup");
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
@@ -2363,22 +2397,66 @@ mod tests_global_info {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
-    /// Test that the recursive2 prerequisite check rejects missing recursive1 artifacts.
-    /// This verifies the bail! at the recursive2 entry point in run_recursive_setup.
+    /// Test that recursive2 fails when recursive1 starkinfo/verifierinfo are missing.
+    /// Uses a minimal PilOut with one zero-row AIR so the per-AIR recursive loop
+    /// skips it (num_rows=0), then recursive2 checks for recursive1 artifacts and fails.
     #[test]
-    fn test_recursive2_prerequisite_check() {
-        // The recursive2 code requires recursive1.starkinfo.json and
-        // recursive1.verifierinfo.json. Verify the bail! message directly
-        // by checking that the error path exists in source.
-        // (Full integration testing requires circom which is not available in unit tests.)
-        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let si_path = base.join("nonexistent/recursive1/recursive1.starkinfo.json");
-        let vi_path = base.join("nonexistent/recursive1/recursive1.verifierinfo.json");
-        assert!(!si_path.exists(), "test precondition: starkinfo should not exist");
-        assert!(!vi_path.exists(), "test precondition: verifierinfo should not exist");
-        // The actual bail! is at setup_cmd.rs line ~521:
-        // "Recursive2 requires recursive1 artifacts..."
-        // This test verifies the paths don't exist, confirming the bail condition.
+    fn test_recursive2_fails_without_recursive1_artifacts() {
+        use pilout::pilout as pb;
+        use prost::Message;
+
+        // Build minimal PilOut with one airgroup, one zero-row air
+        let pilout = pb::PilOut {
+            name: Some("test".to_string()),
+            air_groups: vec![pb::AirGroup {
+                name: Some("TestGroup".to_string()),
+                airs: vec![pb::Air {
+                    name: Some("TestAir".to_string()),
+                    num_rows: Some(0), // zero rows -> skipped in recursive per-AIR loop
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let tmp_dir = std::env::temp_dir().join("pil2_r2_prereq_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let build_dir = tmp_dir.join("build");
+        let pk_dir = build_dir.join("provingKey");
+        std::fs::create_dir_all(&pk_dir).unwrap();
+
+        // Write required global files
+        std::fs::write(pk_dir.join("pilout.globalInfo.json"),
+            r#"{"name":"test","nPublics":0}"#).unwrap();
+        std::fs::write(pk_dir.join("pilout.globalConstraints.json"),
+            r#"{"constraints":[],"hints":[]}"#).unwrap();
+
+        // Do NOT create recursive1/ directory -> recursive2 should bail
+
+        // Encode pilout to disk for the opts path
+        let pilout_path = tmp_dir.join("test.pilout");
+        let mut buf = Vec::new();
+        pilout.encode(&mut buf).unwrap();
+        std::fs::write(&pilout_path, &buf).unwrap();
+
+        let opts = SetupOptions {
+            airout_path: pilout_path.to_str().unwrap().to_string(),
+            build_dir: build_dir.to_str().unwrap().to_string(),
+            fixed_dir: None,
+            stark_structs_path: None,
+            recursive: true,
+        };
+
+        let result = run_recursive_setup(&pilout, "test", &opts);
+        assert!(result.is_err(), "recursive2 should fail when recursive1 artifacts are missing");
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Recursive2 requires") || err_msg.contains("recursive1"),
+            "error should mention missing recursive1 artifacts: {}", err_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
 
