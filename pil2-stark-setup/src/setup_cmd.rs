@@ -669,12 +669,17 @@ fn resolve_circom_exec() -> String {
         }
     }
     let candidates = if cfg!(target_os = "macos") {
-        vec!["circom_mac", "circom"]
+        vec!["circom_mac", "circom", "circom/circom_mac", "circom/circom"]
     } else {
-        vec!["circom", "./circom"]
+        vec!["circom", "./circom", "circom/circom"]
     };
     for path in &candidates {
-        if Path::new(path).exists() {
+        let p = Path::new(path);
+        if p.is_file() {
+            // Return absolute path to avoid CWD-relative resolution issues
+            if let Ok(abs) = p.canonicalize() {
+                return abs.to_string_lossy().to_string();
+            }
             return path.to_string();
         }
     }
