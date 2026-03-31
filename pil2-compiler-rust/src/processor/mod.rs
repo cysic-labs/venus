@@ -1922,15 +1922,17 @@ impl Processor {
             _ => Value::Int(0),
         };
 
-        // Reclaim memory from function-local variables. The returned
-        // value owns its data (Value is cloned/moved on return), so
-        // clearing the stores is safe. This is critical for recursive
-        // circuits where thousands of function calls within a single
-        // AIR would otherwise accumulate ~90 GB of expression trees.
+        // Reclaim memory from function-local expression trees. This is
+        // critical for recursive circuits where thousands of function
+        // calls within a single AIR would otherwise accumulate ~90 GB
+        // of expression trees.
+        //
+        // Only trim expression stores (which hold large Rc<RuntimeExpr>
+        // trees). Do NOT trim ints/fes/strings because container
+        // variables (e.g. vt.num_groups) may have been written inside a
+        // function call and must persist across calls. Integer/string
+        // values are small and do not cause memory issues.
         self.exprs.trim_values_after(exprs_mark);
-        self.ints.trim_values_after(ints_mark);
-        self.fes.trim_values_after(fes_mark);
-        self.strings.trim_values_after(strings_mark);
 
         ret
     }
