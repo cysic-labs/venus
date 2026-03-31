@@ -120,7 +120,7 @@ pub struct CustomCommits {
     pub name: String,
     #[serde(default, rename = "stageWidths")]
     pub stage_widths: Vec<u32>,
-    #[serde(rename = "publicValues")]
+    #[serde(default, rename = "publicValues")]
     pub public_values: Vec<PublicValues>,
 }
 
