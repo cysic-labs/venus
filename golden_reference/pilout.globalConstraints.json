@@ -1,0 +1,7925 @@
+{
+ "constraints": [
+  {
+   "tmpUsed": 68,
+   "code": [
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 34,
+      "dim": 1
+     },
+     "src": [
+      {
+       "type": "number",
+       "value": "1",
+       "dim": 1
+      },
+      {
+       "type": "public",
+       "id": 67,
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 35,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5984,
+       "id": 34,
+       "prime": 0,
+       "dim": 1
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 36,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5985,
+       "id": 35,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "public",
+       "id": 66,
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 37,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5986,
+       "id": 36,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 38,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5987,
+       "id": 37,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "public",
+       "id": 67,
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 39,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5988,
+       "id": 38,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 40,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5989,
+       "id": 39,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "public",
+       "id": 66,
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 41,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5990,
+       "id": 40,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 42,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5991,
+       "id": 41,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "number",
+       "value": "1",
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 43,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5992,
+       "id": 42,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 44,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5993,
+       "id": 43,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "number",
+       "value": "31",
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 45,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5994,
+       "id": 44,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 46,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5995,
+       "id": 45,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "number",
+       "value": "48",
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 47,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5996,
+       "id": 46,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 48,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5997,
+       "id": 47,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "number",
+       "value": "5000",
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 49,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 5998,
+       "id": 48,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 1,
+       "stageId": 1,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 50,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "number",
+       "value": "0",
+       "dim": 1
+      },
+      {
+       "type": "tmp",
+       "expId": 5999,
+       "id": 49,
+       "prime": 0,
+       "dim": 3
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 51,
+      "dim": 1
+     },
+     "src": [
+      {
+       "type": "number",
+       "value": "1",
+       "dim": 1
+      },
+      {
+       "type": "public",
+       "id": 65,
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 52,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6001,
+       "id": 51,
+       "prime": 0,
+       "dim": 1
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 53,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6002,
+       "id": 52,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "public",
+       "id": 64,
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 54,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6003,
+       "id": 53,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 55,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6004,
+       "id": 54,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "public",
+       "id": 65,
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 56,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6005,
+       "id": 55,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 57,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6006,
+       "id": 56,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "public",
+       "id": 64,
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 58,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6007,
+       "id": 57,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 59,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6008,
+       "id": 58,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "number",
+       "value": "1",
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 60,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6009,
+       "id": 59,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 61,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6010,
+       "id": 60,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "number",
+       "value": "30",
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 62,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6011,
+       "id": 61,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 63,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6012,
+       "id": 62,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "number",
+       "value": "48",
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "mul",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 64,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6013,
+       "id": 63,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 0,
+       "stageId": 0,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 65,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6014,
+       "id": 64,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "number",
+       "value": "5000",
+       "dim": 1
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 66,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6015,
+       "id": 65,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "challenge",
+       "id": 1,
+       "stageId": 1,
+       "dim": 3,
+       "stage": 2
+      }
+     ]
+    },
+    {
+     "op": "add",
+     "dest": {
+      "type": "tmp",
+      "prime": 0,
+      "id": 67,
+      "dim": 3
+     },
+     "src": [
+      {
+       "type": "tmp",
+       "expId": 6000,
+       "id": 50,
+       "prime": 0,
+       "dim": 3
+      },
+      {
+       "type": "tmp",
+       "expId": 6016,
+       "id": 66,
+       "prime": 0,
+       "dim": 3
+      }
+     ]
+    }
+   ],
+   "boundary": "finalProof",
+   "line": "(airgroup-execution) (((0 * ((((((((((((((((1 * inputs) * std_alpha) + inputs) * std_alpha) + inputs) * std_alpha) + inputs) * std_alpha) * 1) * std_alpha) + 31) * std_alpha) + 48) * std_alpha) + 5000) + std_gamma)) + ((((((((((((((((1 * inputs) * std_alpha) + inputs) * std_alpha) + inputs) * std_alpha) + inputs) * std_alpha) * 1) * std_alpha) + 30) * std_alpha) + 48) * std_alpha) + 5000) + std_gamma)))"
+  }
+ ],
+ "hints": [
+  {
+   "name": "std_rc_users",
+   "fields": [
+    {
+     "name": "num_users",
+     "values": [
+      {
+       "op": "number",
+       "value": "20",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "airgroup_ids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "air_ids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids_count",
+     "values": [
+      {
+       "op": "number",
+       "value": "8",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "spec_opids_count",
+     "values": [
+      {
+       "op": "number",
+       "value": "8",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "std_sum_users",
+   "fields": [
+    {
+     "name": "num_users",
+     "values": [
+      {
+       "op": "number",
+       "value": "20",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "std_mode",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "airgroup_ids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "air_ids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "num_global_hints",
+     "values": [
+      {
+       "op": "number",
+       "value": "73",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "8200",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "8200",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "8200",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "8200",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "8200",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "1000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "1000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "8",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "10",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "11",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "11",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "11",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "gsum_debug_data_global",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_piop",
+     "values": [
+      {
+       "op": "string",
+       "string": "Direct",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "type_piop",
+     "values": [
+      {
+       "op": "number",
+       "value": "1",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "opids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "busid",
+     "values": [
+      {
+       "op": "number",
+       "value": "5000",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "num_reps",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "name_exprs",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "len_expressions",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "specified_ranges",
+   "fields": [
+    {
+     "name": "airgroup_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "air_id",
+     "values": [
+      {
+       "op": "number",
+       "value": "47",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "virtual_table_data_global",
+   "fields": [
+    {
+     "name": "airgroup_ids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    },
+    {
+     "name": "air_ids",
+     "values": [
+      {
+       "op": "number",
+       "value": "0",
+       "pos": []
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

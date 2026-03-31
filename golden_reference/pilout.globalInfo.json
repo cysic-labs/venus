@@ -1,0 +1,685 @@
+{
+ "name": "zisk",
+ "airs": [
+  [
+   {
+    "name": "Dma",
+    "num_rows": 2097152
+   },
+   {
+    "name": "DmaMemCpy",
+    "num_rows": 2097152
+   },
+   {
+    "name": "DmaInputCpy",
+    "num_rows": 2097152
+   },
+   {
+    "name": "Dma64Aligned",
+    "num_rows": 2097152
+   },
+   {
+    "name": "Dma64AlignedInputCpy",
+    "num_rows": 2097152
+   },
+   {
+    "name": "Dma64AlignedMemSet",
+    "num_rows": 2097152
+   },
+   {
+    "name": "Dma64AlignedMem",
+    "num_rows": 2097152
+   },
+   {
+    "name": "Dma64AlignedMemCpy",
+    "num_rows": 2097152
+   },
+   {
+    "name": "DmaUnaligned",
+    "num_rows": 2097152
+   },
+   {
+    "name": "DmaPrePost",
+    "num_rows": 2097152
+   },
+   {
+    "name": "DmaPrePostMemCpy",
+    "num_rows": 2097152
+   },
+   {
+    "name": "DmaPrePostInputCpy",
+    "num_rows": 2097152
+   },
+   {
+    "name": "Main",
+    "num_rows": 4194304
+   },
+   {
+    "name": "Rom",
+    "num_rows": 4194304
+   },
+   {
+    "name": "Mem",
+    "num_rows": 4194304
+   },
+   {
+    "name": "RomData",
+    "num_rows": 2097152
+   },
+   {
+    "name": "InputData",
+    "num_rows": 2097152
+   },
+   {
+    "name": "MemAlign",
+    "num_rows": 2097152
+   },
+   {
+    "name": "MemAlignByte",
+    "num_rows": 4194304
+   },
+   {
+    "name": "MemAlignReadByte",
+    "num_rows": 4194304
+   },
+   {
+    "name": "MemAlignWriteByte",
+    "num_rows": 4194304
+   },
+   {
+    "name": "Arith",
+    "num_rows": 2097152
+   },
+   {
+    "name": "Binary",
+    "num_rows": 4194304
+   },
+   {
+    "name": "BinaryAdd",
+    "num_rows": 4194304
+   },
+   {
+    "name": "BinaryExtension",
+    "num_rows": 4194304
+   },
+   {
+    "name": "Add256",
+    "num_rows": 1048576
+   },
+   {
+    "name": "ArithEq",
+    "num_rows": 1048576,
+    "hasCompressor": true
+   },
+   {
+    "name": "ArithEq384",
+    "num_rows": 1048576,
+    "hasCompressor": true
+   },
+   {
+    "name": "Keccakf",
+    "num_rows": 131072,
+    "hasCompressor": true
+   },
+   {
+    "name": "Sha256f",
+    "num_rows": 262144,
+    "hasCompressor": true
+   },
+   {
+    "name": "Poseidon2",
+    "num_rows": 131072
+   },
+   {
+    "name": "Blake2br",
+    "num_rows": 262144
+   },
+   {
+    "name": "SpecifiedRanges",
+    "num_rows": 1048576
+   },
+   {
+    "name": "VirtualTable0",
+    "num_rows": 2097152
+   },
+   {
+    "name": "VirtualTable1",
+    "num_rows": 2097152
+   }
+  ]
+ ],
+ "air_groups": [
+  "Zisk"
+ ],
+ "aggTypes": [
+  [
+   {
+    "aggType": 0,
+    "stage": 2
+   }
+  ]
+ ],
+ "curve": "None",
+ "latticeSize": 368,
+ "transcriptArity": 4,
+ "nPublics": 68,
+ "numChallenges": [
+  0,
+  2
+ ],
+ "numProofValues": [
+  8
+ ],
+ "proofValuesMap": [
+  {
+   "name": "enable_input_data",
+   "stage": 1
+  },
+  {
+   "name": "enable_rom_data",
+   "stage": 1
+  },
+  {
+   "name": "enable_dma_64_aligned",
+   "stage": 1
+  },
+  {
+   "name": "enable_dma_64_aligned_inputcpy",
+   "stage": 1
+  },
+  {
+   "name": "enable_dma_64_aligned_mem",
+   "stage": 1
+  },
+  {
+   "name": "enable_dma_64_aligned_memcpy",
+   "stage": 1
+  },
+  {
+   "name": "enable_dma_64_aligned_memset",
+   "stage": 1
+  },
+  {
+   "name": "enable_dma_unaligned",
+   "stage": 1
+  }
+ ],
+ "publicsMap": [
+  {
+   "name": "rom_root",
+   "stage": 1,
+   "lengths": [
+    0
+   ]
+  },
+  {
+   "name": "rom_root",
+   "stage": 1,
+   "lengths": [
+    1
+   ]
+  },
+  {
+   "name": "rom_root",
+   "stage": 1,
+   "lengths": [
+    2
+   ]
+  },
+  {
+   "name": "rom_root",
+   "stage": 1,
+   "lengths": [
+    3
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    0
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    1
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    2
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    3
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    4
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    5
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    6
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    7
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    8
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    9
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    10
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    11
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    12
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    13
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    14
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    15
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    16
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    17
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    18
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    19
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    20
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    21
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    22
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    23
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    24
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    25
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    26
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    27
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    28
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    29
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    30
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    31
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    32
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    33
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    34
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    35
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    36
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    37
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    38
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    39
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    40
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    41
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    42
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    43
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    44
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    45
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    46
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    47
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    48
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    49
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    50
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    51
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    52
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    53
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    54
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    55
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    56
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    57
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    58
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    59
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    60
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    61
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    62
+   ]
+  },
+  {
+   "name": "inputs",
+   "stage": 1,
+   "lengths": [
+    63
+   ]
+  }
+ ]
+}
