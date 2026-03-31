@@ -579,7 +579,11 @@ fn get_global_name(global_info: &Value) -> String {
         .to_string()
 }
 
-/// Compile PIL source using the pil2-compiler-rust library directly.
+/// Compile PIL source by spawning pil2c as a subprocess.
+///
+/// This isolates the compiler's memory from the venus-setup process,
+/// which is critical for recursive circuits that can consume 80+ GB
+/// during compilation.
 pub fn compile_pil(
     pil_path: &str,
     output_path: &str,
@@ -588,20 +592,66 @@ pub fn compile_pil(
 ) -> Result<()> {
     tracing::info!("Compiling PIL: {}", pil_path);
 
-    let options = pil2_compiler_rust::CompileOptions {
-        source: pil_path.to_string(),
-        include_paths: vec![
-            std_pil_path.to_string(),
-            recurser_pil_path.to_string(),
-        ],
-        output: Some(output_path.to_string()),
-        ..Default::default()
-    };
+    let pil2c_exec = resolve_pil2c_exec()
+        .context("Cannot find pil2c binary. Build it with: cargo build --release -p pil2-compiler-rust")?;
 
-    pil2_compiler_rust::compile(&options)
-        .map_err(|e| anyhow::anyhow!("PIL compilation failed: {}", e))?;
+    tracing::info!("Using pil2c: {}", pil2c_exec);
+
+    let include_arg = format!("{},{}", std_pil_path, recurser_pil_path);
+
+    let status = std::process::Command::new(&pil2c_exec)
+        .arg(pil_path)
+        .arg("-I")
+        .arg(&include_arg)
+        .arg("-o")
+        .arg(output_path)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .with_context(|| format!("Failed to execute pil2c: {}", pil2c_exec))?;
+
+    if !status.success() {
+        bail!(
+            "pil2c exited with status {} for {}",
+            status.code().unwrap_or(-1),
+            pil_path
+        );
+    }
+
+    if !Path::new(output_path).exists() {
+        bail!("pil2c did not produce output file: {}", output_path);
+    }
 
     Ok(())
+}
+
+/// Find the pil2c binary, checking env var, then common locations.
+fn resolve_pil2c_exec() -> Option<String> {
+    if let Ok(path) = std::env::var("PIL2C_EXEC") {
+        if Path::new(&path).is_file() {
+            return Some(path);
+        }
+    }
+    // Check next to the current executable (same target dir)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("pil2c");
+            if candidate.is_file() {
+                return candidate.to_str().map(|s| s.to_string());
+            }
+        }
+    }
+    // Fallback: check target/release
+    let candidates = ["target/release/pil2c", "./pil2c"];
+    for c in &candidates {
+        let p = Path::new(c);
+        if p.is_file() {
+            if let Ok(abs) = p.canonicalize() {
+                return abs.to_str().map(|s| s.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

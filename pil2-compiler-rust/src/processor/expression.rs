@@ -4,6 +4,7 @@
 //! `ExpressionItems`, and `ExpressionOperatorMethods` modules.
 
 use std::fmt;
+use std::rc::Rc;
 
 use crate::parser::ast::{BinOp, Expr, NumericLiteral, NumericRadix, UnaryOp};
 
@@ -27,7 +28,9 @@ pub enum Value {
     },
     /// Expression that cannot be fully evaluated at compile time.
     /// Stored as a tree of operations for later protobuf emission.
-    RuntimeExpr(Box<RuntimeExpr>),
+    /// Uses Rc for sharing: mirrors JS reference semantics where
+    /// expression nodes are shared objects, not deep-copied.
+    RuntimeExpr(Rc<RuntimeExpr>),
     /// A reference to a (sub-)array in a VariableStore.
     ///
     /// Produced when a multi-dimensional array is partially indexed in
@@ -64,12 +67,12 @@ pub enum RuntimeExpr {
     Value(Value),
     BinOp {
         op: RuntimeOp,
-        left: Box<RuntimeExpr>,
-        right: Box<RuntimeExpr>,
+        left: Rc<RuntimeExpr>,
+        right: Rc<RuntimeExpr>,
     },
     UnaryOp {
         op: RuntimeUnaryOp,
-        operand: Box<RuntimeExpr>,
+        operand: Rc<RuntimeExpr>,
     },
     ColRef {
         col_type: ColRefKind,

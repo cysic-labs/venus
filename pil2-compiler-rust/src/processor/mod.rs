@@ -18,6 +18,7 @@ pub mod references;
 pub mod variables;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Instant;
 
 use crate::parser::ast::*;
@@ -1226,12 +1227,12 @@ impl Processor {
                                 BinOp::Mul => RuntimeOp::Mul,
                                 _ => return Value::Void,
                             };
-                            let left_rt = value_to_runtime_expr(&lval);
-                            let right_rt = value_to_runtime_expr(&rval);
-                            return Value::RuntimeExpr(Box::new(RuntimeExpr::BinOp {
+                            let left_rc = value_to_rc_runtime_expr(&lval);
+                            let right_rc = value_to_rc_runtime_expr(&rval);
+                            return Value::RuntimeExpr(Rc::new(RuntimeExpr::BinOp {
                                 op: rt_op,
-                                left: Box::new(left_rt),
-                                right: Box::new(right_rt),
+                                left: left_rc,
+                                right: right_rc,
                             }));
                         }
                         Value::Void
@@ -1243,10 +1244,10 @@ impl Processor {
                 if let Some(v) = val.as_int() {
                     eval_unaryop_int(op, v)
                 } else if is_symbolic(&val) && matches!(op, UnaryOp::Neg) {
-                    let rt = value_to_runtime_expr(&val);
-                    Value::RuntimeExpr(Box::new(RuntimeExpr::UnaryOp {
+                    let operand_rc = value_to_rc_runtime_expr(&val);
+                    Value::RuntimeExpr(Rc::new(RuntimeExpr::UnaryOp {
                         op: RuntimeUnaryOp::Neg,
-                        operand: Box::new(rt),
+                        operand: operand_rc,
                     }))
                 } else {
                     Value::Void
@@ -1794,6 +1795,15 @@ impl Processor {
 
     /// Execute a user-defined function.
     fn execute_user_function(&mut self, func: &FunctionDef, args: &[Value]) -> Value {
+        // Snapshot expression stores so we can reclaim function-local
+        // expression memory after the call returns. Constraints and
+        // hints capture their own copies, so function-scoped expression
+        // variables are safe to drop.
+        let exprs_mark = self.exprs.snapshot();
+        let ints_mark = self.ints.snapshot();
+        let fes_mark = self.fes.snapshot();
+        let strings_mark = self.strings.snapshot();
+
         self.function_deep += 1;
         self.callstack.push(CallStackEntry {
             name: func.name.clone(),
@@ -1893,10 +1903,22 @@ impl Processor {
         self.callstack.pop();
         self.function_deep -= 1;
 
-        match result {
+        let ret = match result {
             FlowSignal::Return(val) => val,
             _ => Value::Int(0),
-        }
+        };
+
+        // Reclaim memory from function-local variables. The returned
+        // value owns its data (Value is cloned/moved on return), so
+        // clearing the stores is safe. This is critical for recursive
+        // circuits where thousands of function calls within a single
+        // AIR would otherwise accumulate ~90 GB of expression trees.
+        self.exprs.trim_values_after(exprs_mark);
+        self.ints.trim_values_after(ints_mark);
+        self.fes.trim_values_after(fes_mark);
+        self.strings.trim_values_after(strings_mark);
+
+        ret
     }
 
     // -----------------------------------------------------------------------
@@ -2735,15 +2757,17 @@ impl Processor {
         // Hint ExprId values reference indices in
         // self.air_expression_store, which are placed first so that
         // hint indices remain valid without remapping.
+        // Move constraint data out (zero-cost take, no clone).
+        let (constraint_entries, constraint_exprs) =
+            self.constraints.take_entries_and_expressions();
+        let n_constraint_exprs = constraint_exprs.len();
+
         let air_expr_store: Vec<RuntimeExpr> = {
-            let mut store = Vec::new();
-            // 1. Hint-referenced expressions first (preserving indices).
-            for expr in &self.air_expression_store {
-                store.push(expr.clone());
-            }
-            // 2. Intermediate column expressions from this AIR scope.
-            //    Only include symbolic values (ColRef or RuntimeExpr),
-            //    not compile-time constants.
+            // Move hint-referenced expressions (zero-cost, no clone).
+            let mut store = std::mem::take(&mut self.air_expression_store);
+            // Intermediate column expressions from this AIR scope.
+            // Only include symbolic values (ColRef or RuntimeExpr),
+            // not compile-time constants.
             for eid in 0..self.exprs.len() {
                 if let Some(val) = self.exprs.get(eid) {
                     if is_symbolic(val) {
@@ -2752,10 +2776,8 @@ impl Processor {
                     }
                 }
             }
-            // 3. Constraint expressions.
-            for expr in self.constraints.all_expressions() {
-                store.push(expr.clone());
-            }
+            // Constraint expressions - moved, not cloned.
+            store.extend(constraint_exprs);
             store
         };
 
@@ -2931,8 +2953,15 @@ impl Processor {
                 let air_id = air_on_stack.id;
                 if let Some(ag) = self.air_groups.get_mut(&ag_name) {
                     if let Some(stored_air) = ag.airs.iter_mut().find(|a| a.id == air_id) {
-                        stored_air.store_constraints(&self.constraints);
-                        stored_air.store_air_expressions(&air_expr_store);
+                        // Constraint entries/expressions were already taken
+                        // above; constraint exprs are appended at the end of
+                        // air_expr_store. Pass just the count to avoid
+                        // duplicating expression trees.
+                        stored_air.store_constraints_owned(
+                            constraint_entries,
+                            n_constraint_exprs,
+                        );
+                        stored_air.store_air_expressions_owned(air_expr_store);
                         stored_air.fixed_id_map = fixed_id_map;
                         stored_air.fixed_col_start = fc_start;
                         stored_air.witness_id_map = witness_id_map;
@@ -3662,8 +3691,19 @@ fn value_to_runtime_expr(val: &Value) -> RuntimeExpr {
             id: *id,
             row_offset: *row_offset,
         },
-        Value::RuntimeExpr(expr) => *expr.clone(),
+        Value::RuntimeExpr(expr) => RuntimeExpr::clone(expr),
         _ => RuntimeExpr::Value(val.clone()),
+    }
+}
+
+/// Convert a Value to a shared Rc<RuntimeExpr>. When the value is already
+/// a RuntimeExpr, the Rc is cloned (cheap refcount bump) instead of
+/// deep-copying the tree. This is the key optimization: matches JS
+/// reference semantics where expression subtrees are shared.
+fn value_to_rc_runtime_expr(val: &Value) -> Rc<RuntimeExpr> {
+    match val {
+        Value::RuntimeExpr(expr) => Rc::clone(expr),
+        _ => Rc::new(value_to_runtime_expr(val)),
     }
 }
 

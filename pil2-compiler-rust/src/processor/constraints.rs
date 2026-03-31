@@ -3,6 +3,7 @@
 //! Mirrors the JS `Constraints` class. Collects constraint expressions
 //! during compilation and stores them for later protobuf serialization.
 
+use std::rc::Rc;
 use super::expression::{RuntimeExpr, Value};
 
 /// A single constraint: an expression that must evaluate to zero.
@@ -70,8 +71,8 @@ impl Constraints {
         } else {
             RuntimeExpr::BinOp {
                 op: super::expression::RuntimeOp::Sub,
-                left: Box::new(left),
-                right: Box::new(right),
+                left: Rc::new(left),
+                right: Rc::new(right),
             }
         };
 
@@ -122,6 +123,12 @@ impl Constraints {
     /// Get all expressions (for protobuf packing).
     pub fn all_expressions(&self) -> &[RuntimeExpr] {
         &self.expressions
+    }
+
+    /// Take ownership of entries and expressions, leaving self empty.
+    /// Avoids cloning large expression trees for recursive circuits.
+    pub fn take_entries_and_expressions(&mut self) -> (Vec<ConstraintEntry>, Vec<RuntimeExpr>) {
+        (std::mem::take(&mut self.entries), std::mem::take(&mut self.expressions))
     }
 
     /// Clear all constraints and expressions (used between airs).

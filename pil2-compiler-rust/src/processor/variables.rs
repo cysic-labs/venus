@@ -96,6 +96,23 @@ impl VariableStore {
             self.values = vals;
         }
     }
+
+    /// Return a snapshot of the current allocation high-water mark.
+    /// Used to trim back after a function call returns.
+    pub fn snapshot(&self) -> u32 {
+        self.values.len() as u32
+    }
+
+    /// Discard values allocated after `mark`, replacing them with None.
+    /// Does NOT shrink the underlying Vec (IDs remain valid but empty).
+    /// This reclaims heap memory held by Value::RuntimeExpr trees while
+    /// keeping the allocator state consistent.
+    pub fn trim_values_after(&mut self, mark: u32) {
+        let mark = mark as usize;
+        for slot in self.values.iter_mut().skip(mark) {
+            *slot = None;
+        }
+    }
 }
 
 #[cfg(test)]

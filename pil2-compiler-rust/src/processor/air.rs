@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::parser::ast::{FunctionArg, Statement};
-use super::constraints::{ConstraintEntry, Constraints};
+use super::constraints::ConstraintEntry;
 use super::expression::RuntimeExpr;
 
 /// Hint data value that can appear inside a hint field.
@@ -67,7 +67,12 @@ pub struct Air {
     /// Per-AIR constraint entries, captured before clearing.
     pub stored_constraints: Vec<ConstraintEntry>,
     /// Per-AIR expressions referenced by constraints.
+    /// Empty when air_expression_store is populated (use
+    /// stored_expressions_count instead).
     pub stored_expressions: Vec<RuntimeExpr>,
+    /// Number of constraint expressions (used for offset calculation in
+    /// proto_out when stored_expressions itself is empty to save memory).
+    pub stored_expressions_count: usize,
     /// Full AIR expression store: ALL expressions created during AIR
     /// execution (intermediate column definitions, constraint
     /// sub-expressions, etc.).  Mirrors the JS `this.expressions` store.
@@ -137,6 +142,7 @@ impl Air {
             info: AirInfo::default(),
             stored_constraints: Vec::new(),
             stored_expressions: Vec::new(),
+            stored_expressions_count: 0,
             air_expression_store: Vec::new(),
             fixed_id_map: Vec::new(),
             fixed_col_start: 0,
@@ -158,16 +164,24 @@ impl Air {
     }
 
     /// Capture constraint/expression data from the processor before it
-    /// is cleared between AIR template calls.
-    pub fn store_constraints(&mut self, constraints: &Constraints) {
-        self.stored_constraints = constraints.iter().cloned().collect();
-        self.stored_expressions = constraints.all_expressions().to_vec();
+    /// is cleared between AIR template calls. Takes ownership to avoid
+    /// cloning large expression trees.
+    pub fn store_constraints_owned(
+        &mut self,
+        entries: Vec<ConstraintEntry>,
+        expr_count: usize,
+    ) {
+        self.stored_constraints = entries;
+        self.stored_expressions_count = expr_count;
+        // stored_expressions left empty to save memory; proto_out uses
+        // air_expression_store when available and only needs the count.
     }
 
     /// Capture the full AIR expression store (all expressions created
     /// during AIR execution, not just those referenced by constraints).
-    pub fn store_air_expressions(&mut self, expressions: &[RuntimeExpr]) {
-        self.air_expression_store = expressions.to_vec();
+    /// Takes ownership to avoid cloning large expression trees.
+    pub fn store_air_expressions_owned(&mut self, expressions: Vec<RuntimeExpr>) {
+        self.air_expression_store = expressions;
     }
 }
 

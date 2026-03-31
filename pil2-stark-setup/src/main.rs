@@ -33,8 +33,15 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt::init();
 
-    // Configure rayon with larger stack size for deep expression evaluation
+    // Configure rayon: limit threads to control peak memory, use larger
+    // stack for deep expression evaluation. With 35 AIRs processed in
+    // parallel, unbounded threads can push peak RSS above 90 GB.
+    let num_threads = std::env::var("VENUS_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4);
     rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
         .stack_size(64 * 1024 * 1024) // 64 MB per thread
         .build_global()
         .ok(); // Ignore error if already initialized

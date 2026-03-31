@@ -19,6 +19,7 @@ indexmap = { version = "2", features = ["serde"] }
 regex = "1"
 pest = "2"
 pest_derive = "2"
+tikv-jemallocator = "0.6"
 
 [build-dependencies]
 prost-build = { workspace = true }

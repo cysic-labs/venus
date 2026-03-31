@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use clap::Parser;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Parser)]
 #[command(name = "pil2c", about = "PIL2 compiler (Rust implementation)")]
 struct Cli {
