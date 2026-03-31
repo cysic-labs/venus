@@ -655,7 +655,21 @@ impl Processor {
             let array_dims: Vec<u32> = item
                 .array_dims
                 .iter()
-                .filter_map(|d| d.as_ref().and_then(|e| self.eval_expr(e).as_int().map(|v| v as u32)))
+                .filter_map(|d| {
+                    d.as_ref().and_then(|e| {
+                        let val = self.eval_expr(e);
+                        match val.as_int() {
+                            Some(v) => Some(v as u32),
+                            None => {
+                                eprintln!(
+                                    "warning: array dimension for '{}' evaluated to {:?} (not int), dropping dimension",
+                                    name, val
+                                );
+                                None
+                            }
+                        }
+                    })
+                })
                 .collect();
             let size: u32 = if array_dims.is_empty() {
                 1
