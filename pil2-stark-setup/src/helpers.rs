@@ -544,7 +544,7 @@ pub fn add_info_expressions_symbols(
                         add_info_expressions_symbols(ev_map, expressions, *child_id, explored);
                     }
                     ExprChild::Inline(child_expr) => {
-                        add_info_expressions_symbols_inline(ev_map, expressions, child_expr);
+                        add_info_expressions_symbols_inline(ev_map, expressions, child_expr, explored);
                     }
                 }
             }
@@ -555,17 +555,17 @@ pub fn add_info_expressions_symbols(
 }
 
 /// Walk inline expression trees for symbol collection.
+/// Shares the `explored` vec from the parent to avoid re-exploring arena expressions.
 fn add_info_expressions_symbols_inline(
     ev_map: &mut Vec<EvMapItem>,
     expressions: &[Expression],
     expr: &Expression,
+    explored: &mut Vec<bool>,
 ) {
     match expr.op.as_str() {
         "exp" => {
             let ref_id = expr.id.unwrap_or(0);
-            // Use a temporary explored vec for the referenced arena expression
-            let mut explored = vec![false; expressions.len()];
-            add_info_expressions_symbols(ev_map, expressions, ref_id, &mut explored);
+            add_info_expressions_symbols(ev_map, expressions, ref_id, explored);
         }
         "cm" | "const" | "custom" => {
             let id = expr.id.unwrap_or(0);
@@ -595,11 +595,10 @@ fn add_info_expressions_symbols_inline(
             for child in &expr.values {
                 match child {
                     ExprChild::Id(child_id) => {
-                        let mut explored = vec![false; expressions.len()];
-                        add_info_expressions_symbols(ev_map, expressions, *child_id, &mut explored);
+                        add_info_expressions_symbols(ev_map, expressions, *child_id, explored);
                     }
                     ExprChild::Inline(child_expr) => {
-                        add_info_expressions_symbols_inline(ev_map, expressions, child_expr);
+                        add_info_expressions_symbols_inline(ev_map, expressions, child_expr, explored);
                     }
                 }
             }
