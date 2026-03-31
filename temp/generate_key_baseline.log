@@ -1,252 +1,19 @@
 mkdir -p "/data/eric/venus/build" "/data/eric/venus/tmp/fixed" "/data/eric/venus/tmp"
 rm -rf "/data/eric/venus/build/provingKey"
 cargo run --release --bin arith_frops_fixed_gen
-   Compiling libc v0.2.183
-   Compiling proc-macro2 v1.0.106
-   Compiling unicode-ident v1.0.24
-   Compiling quote v1.0.45
-   Compiling cfg-if v1.0.4
-   Compiling shlex v1.3.0
-   Compiling find-msvc-tools v0.1.9
-   Compiling autocfg v1.5.0
-   Compiling once_cell v1.21.4
-   Compiling serde_core v1.0.228
-   Compiling zerocopy v0.8.47
-   Compiling paste v1.0.15
-   Compiling version_check v0.9.5
-   Compiling either v1.15.0
-   Compiling serde v1.0.228
-   Compiling log v0.4.29
-   Compiling memchr v2.8.0
-   Compiling crossbeam-utils v0.8.21
-   Compiling typenum v1.19.0
-   Compiling pin-project-lite v0.2.17
-   Compiling glob v0.3.3
-   Compiling cfg_aliases v0.2.1
-   Compiling regex-syntax v0.8.10
-   Compiling minimal-lexical v0.2.1
-   Compiling shell-words v1.1.1
-   Compiling pkg-config v0.3.32
-   Compiling bindgen v0.69.5
-   Compiling arrayvec v0.7.6
-   Compiling smallvec v1.15.1
-   Compiling rayon-core v1.13.0
-   Compiling lazycell v1.3.0
-   Compiling libloading v0.8.9
-   Compiling bitflags v2.11.0
-   Compiling rustc-hash v1.1.0
-   Compiling lazy_static v1.5.0
-   Compiling itoa v1.0.18
-   Compiling colored v3.1.1
-   Compiling tracing-core v0.1.36
-   Compiling equivalent v1.0.2
-   Compiling winnow v1.0.0
-   Compiling thiserror v2.0.18
-   Compiling itertools v0.12.1
-   Compiling bytemuck v1.25.0
-   Compiling hashbrown v0.16.1
-   Compiling itertools v0.13.0
-   Compiling generic-array v0.14.7
-   Compiling ahash v0.8.12
-   Compiling allocator-api2 v0.2.21
-   Compiling dunce v1.0.5
-   Compiling toml_datetime v1.1.0+spec-1.1.0
-   Compiling build-probe-mpi v0.1.5
-   Compiling foldhash v0.1.5
-   Compiling zmij v1.0.21
-   Compiling fs_extra v1.3.0
-   Compiling clang-sys v1.8.1
-   Compiling num-traits v0.2.19
-   Compiling serde_json v1.0.149
-   Compiling borsh v1.6.1
-   Compiling custom_derive v0.1.7
-   Compiling proofman-starks-lib-c v0.16.1 (/data/eric/venus/pil2-proofman/provers/starks-lib-c)
-   Compiling conv v0.3.3
-   Compiling mpi v0.8.1
-   Compiling sharded-slab v0.1.7
-   Compiling thread_local v1.1.9
-   Compiling nom v7.1.3
-   Compiling hashbrown v0.15.5
-   Compiling aho-corasick v1.1.4
-   Compiling tracing-log v0.2.0
-   Compiling csv-core v0.1.13
-   Compiling aws-lc-rs v1.16.2
-   Compiling num_threads v0.1.7
-   Compiling nu-ansi-term v0.50.3
-   Compiling indexmap v2.13.0
-   Compiling crossbeam-epoch v0.9.18
-   Compiling crossbeam-channel v0.5.15
-   Compiling ryu v1.0.23
-   Compiling getrandom v0.3.4
-   Compiling proofman-common v0.16.1 (/data/eric/venus/pil2-proofman/common)
-   Compiling crossbeam-queue v0.3.12
-   Compiling syn v2.0.117
-   Compiling env v1.0.1
-   Compiling proofman-verifier v0.16.1 (/data/eric/venus/pil2-proofman/verifier)
-   Compiling untrusted v0.9.0
-   Compiling yansi v1.0.1
-   Compiling parking_lot_core v0.9.12
-   Compiling cpufeatures v0.2.17
-   Compiling crossbeam-deque v0.8.6
-   Compiling crunchy v0.2.4
-   Compiling scopeguard v1.2.0
-   Compiling lib-c v0.16.1 (/data/eric/venus/lib-c)
-   Compiling lib-float v0.16.1 (/data/eric/venus/lib-float)
-   Compiling bytes v1.11.1
-   Compiling anyhow v1.0.102
-   Compiling lock_api v0.4.14
-   Compiling tiny-keccak v2.0.2
-   Compiling libm v0.2.16
-   Compiling rustls v0.23.37
-   Compiling subtle v2.6.1
-   Compiling num-integer v0.1.46
-   Compiling utf8parse v0.2.2
-   Compiling rustc-hash v2.1.1
-   Compiling circuit v0.16.1 (/data/eric/venus/tools/circuit)
-   Compiling openssl-probe v0.2.1
-   Compiling powerfmt v0.2.0
-   Compiling quinn-udp v0.5.14
-   Compiling anstyle-parse v1.0.0
-   Compiling jobserver v0.1.34
-   Compiling getrandom v0.2.17
-   Compiling sysinfo v0.38.4
-   Compiling toml_parser v1.1.0+spec-1.1.0
-   Compiling num_cpus v1.17.0
-   Compiling regex-automata v0.4.14
-   Compiling socket2 v0.6.3
-   Compiling num-bigint v0.4.6
-   Compiling errno v0.3.14
-   Compiling rand_core v0.6.4
-   Compiling rand_core v0.9.5
-   Compiling mio v1.2.0
-   Compiling deranged v0.5.8
-   Compiling cc v1.2.58
-   Compiling signal-hook-registry v1.4.8
-   Compiling zisk-core v0.16.1 (/data/eric/venus/core)
-   Compiling parking_lot v0.12.5
-   Compiling crypto-common v0.1.7
-   Compiling block-buffer v0.10.4
-   Compiling tinyvec_macros v0.1.1
-   Compiling is_terminal_polyfill v1.70.2
-   Compiling siphasher v1.0.2
-   Compiling anstyle-query v1.1.5
-   Compiling rayon v1.11.0
-   Compiling time-core v0.1.8
-   Compiling digest v0.10.7
-   Compiling toml_edit v0.25.8+spec-1.1.0
-   Compiling num-conv v0.2.1
-   Compiling anstyle v1.0.14
-   Compiling colorchoice v1.0.5
-   Compiling tinyvec v1.11.0
-   Compiling sha2 v0.10.9
-   Compiling quinn v0.11.9
-   Compiling zisk-definitions v0.16.1 (/data/eric/venus/definitions)
-   Compiling strsim v0.11.1
-   Compiling anstream v1.0.0
-   Compiling heck v0.5.0
-   Compiling slab v0.4.12
-   Compiling cexpr v0.6.0
-   Compiling futures-core v0.3.32
-   Compiling constant_time_eq v0.4.2
-   Compiling riscv v0.16.1 (/data/eric/venus/riscv)
-   Compiling clap_lex v1.1.0
-   Compiling base64 v0.22.1
-   Compiling iana-time-zone v0.1.65
-   Compiling arrayref v0.3.9
-   Compiling lru-slab v0.1.2
-   Compiling proofman v0.16.1 (/data/eric/venus/pil2-proofman/proofman)
-   Compiling futures-sink v0.3.32
-   Compiling elf v0.7.4
-   Compiling clap_builder v4.6.0
-   Compiling zisk-common v0.16.1 (/data/eric/venus/common)
-   Compiling static_assertions v1.1.0
-   Compiling proc-macro-crate v3.5.0
-   Compiling cmake v0.1.58
-   Compiling pem v3.0.6
-   Compiling csv v1.4.0
-   Compiling time v0.3.47
-   Compiling libffi-sys v4.1.0
-   Compiling regex v1.12.3
-   Compiling aws-lc-sys v0.39.1
-   Compiling ring v0.17.14
-   Compiling blake3 v1.8.3
-   Compiling ppv-lite86 v0.2.21
-   Compiling yasna v0.5.2
-   Compiling rand_chacha v0.3.1
-   Compiling rand_chacha v0.9.0
-   Compiling rand v0.8.5
-   Compiling rand v0.9.2
-   Compiling zeroize_derive v1.4.3
-   Compiling serde_derive v1.0.228
-   Compiling tracing-attributes v0.1.31
-   Compiling enum-ordinalize-derive v4.3.2
-   Compiling ark-serialize-derive v0.5.0
-   Compiling ark-ff-macros v0.5.0
-   Compiling thiserror-impl v2.0.18
-   Compiling ark-ff-asm v0.5.0
-   Compiling borsh-derive v1.6.1
-   Compiling proofman-macros v0.16.1 (/data/eric/venus/pil2-proofman/macros)
-   Compiling tokio-macros v2.6.1
-   Compiling clap_derive v4.6.0
-   Compiling ark-std v0.5.0
-   Compiling zeroize v1.8.2
-   Compiling enum-ordinalize v4.3.2
-   Compiling ark-serialize v0.5.0
-   Compiling fastbloom v0.14.1
-   Compiling educe v0.6.0
-   Compiling rustls-pki-types v1.14.0
-   Compiling tokio v1.50.0
-   Compiling tracing v0.1.44
-   Compiling matchers v0.2.0
-   Compiling rustls-native-certs v0.8.3
-   Compiling clap v4.6.0
-   Compiling ark-ff v0.5.0
-   Compiling bincode v1.3.3
-   Compiling fields v0.16.1 (/data/eric/venus/pil2-proofman/fields)
-   Compiling tracing-serde v0.2.0
-   Compiling chrono v0.4.44
-   Compiling serde_arrays v0.2.0
-   Compiling tracing-subscriber v0.3.23
-   Compiling mpi-sys v0.2.3
-   Compiling proofman-util v0.16.1 (/data/eric/venus/pil2-proofman/util)
-   Compiling curves v0.16.1 (/data/eric/venus/pil2-proofman/curves)
-   Compiling rcgen v0.14.7
-   Compiling libffi v5.1.0
-   Compiling tokio-util v0.7.18
-   Compiling witness v0.16.1 (/data/eric/venus/pil2-proofman/witness)
-   Compiling proofman-hints v0.16.1 (/data/eric/venus/pil2-proofman/hints)
-   Compiling zisk-pil v0.16.1 (/data/eric/venus/pil)
-   Compiling pil-std-lib v0.16.1 (/data/eric/venus/pil2-proofman/pil2-components/lib/std/rs)
-   Compiling zisk-verifier v0.16.1 (/data/eric/venus/verifier)
-   Compiling ark-poly v0.5.0
-   Compiling ark-ec v0.5.0
-   Compiling ark-secp256k1 v0.5.0
-   Compiling ark-bn254 v0.5.0
-   Compiling ark-secp256r1 v0.5.0
-   Compiling ark-bls12-381 v0.5.0
-   Compiling precompiles-helpers v0.16.1 (/data/eric/venus/precompiles/helpers)
-   Compiling ziskos-hints v0.16.1 (/data/eric/venus/ziskos-hints)
-   Compiling sm-frequent-ops v0.16.1 (/data/eric/venus/state-machines/frequent-ops)
-   Compiling rustls-webpki v0.103.10
-   Compiling rustls-platform-verifier v0.6.2
-   Compiling quinn-proto v0.11.14
-   Compiling sm-binary v0.16.1 (/data/eric/venus/state-machines/binary)
-   Compiling sm-arith v0.16.1 (/data/eric/venus/state-machines/arith)
-    Finished `release` profile [optimized] target(s) in 20.22s
+    Finished `release` profile [optimized] target(s) in 0.14s
      Running `target/release/arith_frops_fixed_gen`
 Generating columns for 2085944 rows
 Columns generated successfully op:2085944 a0:2085944 a1:2085944 b0:2085944 b1:2085944 c0:2085944 c1:2085944 flag:2085944
 OP, A, B, C and FLAG columns written to state-machines/arith/src/arith_frops_fixed.bin
 cargo run --release --bin binary_basic_frops_fixed_gen
-   Compiling sm-binary v0.16.1 (/data/eric/venus/state-machines/binary)
-    Finished `release` profile [optimized] target(s) in 0.26s
+    Finished `release` profile [optimized] target(s) in 0.11s
      Running `target/release/binary_basic_frops_fixed_gen`
 Generating columns for 13084068 rows
 Columns generated successfully op:13084068 a0:13084068 a1:13084068 b0:13084068 b1:13084068 c0:13084068 c1:13084068 flag:13084068
 OP, A, B, C and FLAG columns written to state-machines/binary/src/binary_basic_frops_fixed.bin
 cargo run --release --bin binary_extension_frops_fixed_gen
-   Compiling sm-binary v0.16.1 (/data/eric/venus/state-machines/binary)
-    Finished `release` profile [optimized] target(s) in 0.21s
+    Finished `release` profile [optimized] target(s) in 0.11s
      Running `target/release/binary_extension_frops_fixed_gen`
 Generating columns for 1607204 rows
 Columns generated successfully op:1607204 a0:1607204 a1:1607204 b0:1607204 b1:1607204 c0:1607204 c1:1607204 flag:1607204
@@ -254,30 +21,6 @@ OP, A, B, C and FLAG columns written to state-machines/binary/src/binary_extensi
 cargo run --release --bin pil2c -- "/data/eric/venus/pil/zisk.pil" \
 	-I "/data/eric/venus/pil,/data/eric/venus/pil2-proofman/pil2-components/lib/std/pil,/data/eric/venus/state-machines,/data/eric/venus/precompiles" \
 	-o "/data/eric/venus/pil/zisk.pilout" -u "/data/eric/venus/tmp/fixed" -O fixed-to-file
-   Compiling getrandom v0.4.2
-   Compiling rustix v1.1.4
-   Compiling bytes v1.11.1
-   Compiling prettyplease v0.2.37
-   Compiling linux-raw-sys v0.12.1
-   Compiling anyhow v1.0.102
-   Compiling itertools v0.14.0
-   Compiling fastrand v2.3.0
-   Compiling ucd-trie v0.1.7
-   Compiling fixedbitset v0.5.7
-   Compiling multimap v0.10.1
-   Compiling log v0.4.29
-   Compiling regex v1.12.3
-   Compiling pest v2.8.6
-   Compiling petgraph v0.7.1
-   Compiling pest_meta v2.8.6
-   Compiling prost-derive v0.13.5
-   Compiling tempfile v3.27.0
-   Compiling pest_generator v2.8.6
-   Compiling prost v0.13.5
-   Compiling pest_derive v2.8.6
-   Compiling prost-types v0.13.5
-   Compiling prost-build v0.13.5
-   Compiling pil2-compiler-rust v0.1.0 (/data/eric/venus/pil2-compiler-rust)
 warning: unused import: `RuntimeUnaryOp`
    --> pil2-compiler-rust/src/processor/builtins.rs:349:65
     |
@@ -418,7 +161,7 @@ help: consistently use `'a`
     |                                 ++          ++
 
 warning: `pil2-compiler-rust` (lib) generated 15 warnings (run `cargo fix --lib -p pil2-compiler-rust` to apply 8 suggestions)
-    Finished `release` profile [optimized] target(s) in 6.75s
+    Finished `release` profile [optimized] target(s) in 0.10s
      Running `target/release/pil2c /data/eric/venus/pil/zisk.pil -I /data/eric/venus/pil,/data/eric/venus/pil2-proofman/pil2-components/lib/std/pil,/data/eric/venus/state-machines,/data/eric/venus/precompiles -o /data/eric/venus/pil/zisk.pilout -u /data/eric/venus/tmp/fixed -O fixed-to-file`
 pil2c: compiling /data/eric/venus/pil/zisk.pil
   > Parsing /data/eric/venus/pil/zisk.pil
@@ -723,11 +466,11 @@ AIR instance BinaryAdd in airgroup Zisk
   > Fixed cols written to /data/eric/venus/tmp/fixed/BinaryAdd.fixed: 1 cols, 4194304 values
 
 AIR virtual instance BinaryTable in airgroup Zisk
-  > loop progress: 1048576 iterations (14.3s)
-  > loop progress: 2097152 iterations (29.1s)
-  > loop progress: 3145728 iterations (43.8s)
-  > loop progress: 4194304 iterations (58.4s)
-  > loop progress: 5242880 iterations (72.6s)
+  > loop progress: 1048576 iterations (14.4s)
+  > loop progress: 2097152 iterations (29.3s)
+  > loop progress: 3145728 iterations (44.4s)
+  > loop progress: 4194304 iterations (59.2s)
+  > loop progress: 5242880 iterations (73.8s)
   > Witness cols: 1
   > Fixed cols: 7
   > Constraints: 0
@@ -740,9 +483,9 @@ AIR instance BinaryExtension in airgroup Zisk
   > Fixed cols written to /data/eric/venus/tmp/fixed/BinaryExtension.fixed: 1 cols, 4194304 values
 
 AIR virtual instance BinaryExtensionTable in airgroup Zisk
-  > loop progress: 1048576 iterations (10.0s)
-  > loop progress: 2097152 iterations (20.4s)
-  > loop progress: 3145728 iterations (30.8s)
+  > loop progress: 1048576 iterations (10.1s)
+  > loop progress: 2097152 iterations (20.7s)
+  > loop progress: 3145728 iterations (31.2s)
   > Witness cols: 1
   > Fixed cols: 7
   > Constraints: 0
@@ -794,8 +537,8 @@ AIR instance Keccakf in airgroup Zisk
   > Fixed cols written to /data/eric/venus/tmp/fixed/Keccakf.fixed: 2 cols, 262144 values
 
 AIR virtual instance KeccakfTable in airgroup Zisk
-  > loop progress: 1048576 iterations (8.2s)
-  > loop progress: 2097152 iterations (16.4s)
+  > loop progress: 1048576 iterations (8.5s)
+  > loop progress: 2097152 iterations (16.9s)
   > Witness cols: 1
   > Fixed cols: 4
   > Constraints: 0
@@ -871,7 +614,7 @@ AIR instance VirtualTable1 in airgroup Zisk
   >  - [0, 255]: 10 times
   >  - [-4194303, 4194304]: 12 times
   >  - [0, 7]: 2 times
-  > Total compilation: 205890.63ms
+  > Total compilation: 210883.24ms
   > Compilation complete: /data/eric/venus/pil/zisk.pilout
   > Proto: 1 air groups, 29846 symbols, 6424 hints, 6018 global expressions, 1 global constraints, 224006 air expressions, 7839 air constraints
   > Proto encoded size: 5984459 bytes
@@ -880,26 +623,6 @@ cargo run --release --bin venus-setup -- \
 	-a "/data/eric/venus/pil/zisk.pilout" -b "/data/eric/venus/build" \
 	-t "/data/eric/venus/pil2-proofman/pil2-components/lib/std/pil" \
 	-u "/data/eric/venus/tmp/fixed" -r -s "/data/eric/venus/state-machines/starkstructs.json"
-   Compiling siphasher v1.0.2
-   Compiling rand_core v0.6.4
-   Compiling bstr v1.12.1
-   Compiling same-file v1.0.6
-   Compiling phf_shared v0.11.3
-   Compiling gmp-mpfr-sys v1.7.0
-   Compiling parse-zoneinfo v0.3.1
-   Compiling bitflags v2.11.0
-   Compiling deunicode v1.6.2
-   Compiling humansize v2.1.3
-   Compiling rustix v1.1.4
-   Compiling getrandom v0.4.2
-   Compiling linux-raw-sys v0.12.1
-   Compiling rug v1.29.0
-   Compiling percent-encoding v2.3.2
-   Compiling unicode-segmentation v1.13.2
-   Compiling fastrand v2.3.0
-   Compiling az v1.3.0
-   Compiling byteorder v1.5.0
-   Compiling pilout v0.16.1 (/data/eric/venus/pil2-proofman/pilout)
 warning: unused import: `RuntimeUnaryOp`
    --> pil2-compiler-rust/src/processor/builtins.rs:349:65
     |
@@ -1040,21 +763,6 @@ help: consistently use `'a`
     |                                 ++          ++
 
 warning: `pil2-compiler-rust` (lib) generated 15 warnings (run `cargo fix --lib -p pil2-compiler-rust` to apply 8 suggestions)
-   Compiling rand v0.8.5
-   Compiling walkdir v2.5.0
-   Compiling phf v0.11.3
-   Compiling slug v0.1.6
-   Compiling globset v0.4.18
-   Compiling phf_generator v0.11.3
-   Compiling phf_codegen v0.11.3
-   Compiling chrono-tz-build v0.3.0
-   Compiling chrono-tz v0.9.0
-   Compiling ignore v0.4.25
-   Compiling globwalk v0.9.1
-   Compiling tempfile v3.27.0
-   Compiling tera v1.20.1
-   Compiling stark-recurser-rust v0.1.0 (/data/eric/venus/stark-recurser-rust)
-   Compiling pil2-stark-setup v0.16.1 (/data/eric/venus/pil2-stark-setup)
 warning: unused imports: `PathBuf` and `Path`
  --> pil2-stark-setup/src/compressor_check.rs:8:17
   |
@@ -1078,45 +786,21 @@ warning: unused variable: `i`
    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
 
 warning: `pil2-stark-setup` (lib) generated 3 warnings (run `cargo fix --lib -p pil2-stark-setup` to apply 3 suggestions)
-    Finished `release` profile [optimized] target(s) in 6.68s
+    Finished `release` profile [optimized] target(s) in 0.11s
      Running `target/release/venus-setup -a /data/eric/venus/pil/zisk.pilout -b /data/eric/venus/build -t /data/eric/venus/pil2-proofman/pil2-components/lib/std/pil -u /data/eric/venus/tmp/fixed -r -s /data/eric/venus/state-machines/starkstructs.json`
 > Writing the global constraints file finished
 ---------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 15 -> Columns in the basefield: 15
-Columns stage 2: 6 (1 intermediate polynomials) -> Columns in the basefield: 18 (3 from intermediate polynomials)
+Columns stage 1: 25 -> Columns in the basefield: 25
+Columns stage 2: 11 (2 intermediate polynomials) -> Columns in the basefield: 29 (2 from intermediate polynomials)
 Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 22 -> Columns in the basefield: 36
-Total Constraints: 19
+Total Columns: 37 -> Columns in the basefield: 57
+Total Constraints: 41
 Number of opening points: 2
-Prover memory: 2.19 GB
+Prover memory: 2.84 GB
 ------------------------------------------------------------
-SUMMARY | DmaInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 15 | Stage2: 18 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 36 | nConstraints: 19 | nOpeningPoints: 2| Prover memory: 2.19 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 32 -> Columns in the basefield: 32
-Columns stage 2: 6 (1 intermediate polynomials) -> Columns in the basefield: 18 (3 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 39 -> Columns in the basefield: 53
-Total Constraints: 49
-Number of opening points: 2
-Prover memory: 2.72 GB
-------------------------------------------------------------
-SUMMARY | Dma | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 32 | Stage2: 18 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 53 | nConstraints: 49 | nOpeningPoints: 2| Prover memory: 2.72 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 32 -> Columns in the basefield: 32
-Columns stage 2: 5 (0 intermediate polynomials) -> Columns in the basefield: 15 (0 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 38 -> Columns in the basefield: 50
-Total Constraints: 62
-Number of opening points: 2
-Prover memory: 2.63 GB
-------------------------------------------------------------
-SUMMARY | DmaPrePostInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 32 | Stage2: 15 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 50 | nConstraints: 62 | nOpeningPoints: 2| Prover memory: 2.63 GB
+SUMMARY | Dma64AlignedInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 25 | Stage2: 29 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 57 | nConstraints: 41 | nOpeningPoints: 2| Prover memory: 2.84 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
@@ -1144,15 +828,27 @@ SUMMARY | Dma64AlignedMemSet | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 24 -> Columns in the basefield: 24
-Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
+Columns stage 1: 26 -> Columns in the basefield: 26
+Columns stage 2: 5 (0 intermediate polynomials) -> Columns in the basefield: 15 (0 from intermediate polynomials)
 Columns stage Q: 2 -> Columns in the basefield: 6
-Total Columns: 30 -> Columns in the basefield: 42
+Total Columns: 33 -> Columns in the basefield: 47
 Total Constraints: 69
 Number of opening points: 2
-Prover memory: 2.38 GB
+Prover memory: 2.53 GB
 ------------------------------------------------------------
-SUMMARY | DmaUnaligned | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 24 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 42 | nConstraints: 69 | nOpeningPoints: 2| Prover memory: 2.38 GB
+SUMMARY | Dma64AlignedMem | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 26 | Stage2: 15 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 47 | nConstraints: 69 | nOpeningPoints: 2| Prover memory: 2.53 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 32 -> Columns in the basefield: 32
+Columns stage 2: 6 (1 intermediate polynomials) -> Columns in the basefield: 18 (3 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 39 -> Columns in the basefield: 53
+Total Constraints: 49
+Number of opening points: 2
+Prover memory: 2.72 GB
+------------------------------------------------------------
+SUMMARY | Dma | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 32 | Stage2: 18 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 53 | nConstraints: 49 | nOpeningPoints: 2| Prover memory: 2.72 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
@@ -1168,63 +864,15 @@ SUMMARY | DmaPrePostMemCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 26 -> Columns in the basefield: 26
+Columns stage 1: 32 -> Columns in the basefield: 32
 Columns stage 2: 5 (0 intermediate polynomials) -> Columns in the basefield: 15 (0 from intermediate polynomials)
-Columns stage Q: 2 -> Columns in the basefield: 6
-Total Columns: 33 -> Columns in the basefield: 47
-Total Constraints: 69
-Number of opening points: 2
-Prover memory: 2.53 GB
-------------------------------------------------------------
-SUMMARY | Dma64AlignedMem | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 26 | Stage2: 15 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 47 | nConstraints: 69 | nOpeningPoints: 2| Prover memory: 2.53 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 66 -> Columns in the basefield: 66
-Columns stage 2: 6 (0 intermediate polynomials) -> Columns in the basefield: 18 (0 from intermediate polynomials)
-Columns stage Q: 2 -> Columns in the basefield: 6
-Total Columns: 74 -> Columns in the basefield: 90
-Total Constraints: 86
-Number of opening points: 2
-Prover memory: 4.10 GB
-------------------------------------------------------------
-SUMMARY | DmaPrePost | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 66 | Stage2: 18 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 90 | nConstraints: 86 | nOpeningPoints: 2| Prover memory: 4.10 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 35 -> Columns in the basefield: 35
-Columns stage 2: 13 (2 intermediate polynomials) -> Columns in the basefield: 35 (2 from intermediate polynomials)
 Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 49 -> Columns in the basefield: 73
-Total Constraints: 72
+Total Columns: 38 -> Columns in the basefield: 50
+Total Constraints: 62
 Number of opening points: 2
-Prover memory: 3.34 GB
+Prover memory: 2.63 GB
 ------------------------------------------------------------
-SUMMARY | Dma64Aligned | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 35 | Stage2: 35 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 73 | nConstraints: 72 | nOpeningPoints: 2| Prover memory: 3.34 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 25 -> Columns in the basefield: 25
-Columns stage 2: 11 (2 intermediate polynomials) -> Columns in the basefield: 29 (2 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 37 -> Columns in the basefield: 57
-Total Constraints: 41
-Number of opening points: 2
-Prover memory: 2.84 GB
-------------------------------------------------------------
-SUMMARY | Dma64AlignedInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 25 | Stage2: 29 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 57 | nConstraints: 41 | nOpeningPoints: 2| Prover memory: 2.84 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 1 -> Columns in the basefield: 1
-Columns stage 2: 1 (0 intermediate polynomials) -> Columns in the basefield: 3 (0 from intermediate polynomials)
-Columns stage Q: 0 -> Columns in the basefield: 0
-Total Columns: 2 -> Columns in the basefield: 4
-Total Constraints: 176
-Number of opening points: 2
-Prover memory: 3.74 GB
-------------------------------------------------------------
-SUMMARY | Rom | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 1 | Fixed: 1 | Stage1: 1 | Stage2: 3 | StageQ: 0 | ImPols: 0 => 0 = 0 + 0 | Total: 4 | nConstraints: 176 | nOpeningPoints: 2| Prover memory: 3.74 GB
+SUMMARY | DmaPrePostInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 32 | Stage2: 15 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 50 | nConstraints: 62 | nOpeningPoints: 2| Prover memory: 2.63 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 2 -> Columns in the basefield: 2
@@ -1240,27 +888,39 @@ SUMMARY | Poseidon2 | nBits: 17 | blowUpFactor: 2 | maxConstraintDegree: 3 | Fix
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 10 -> Columns in the basefield: 10
-Columns stage 2: 3 (0 intermediate polynomials) -> Columns in the basefield: 9 (0 from intermediate polynomials)
+Columns stage 1: 35 -> Columns in the basefield: 35
+Columns stage 2: 13 (2 intermediate polynomials) -> Columns in the basefield: 35 (2 from intermediate polynomials)
 Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 14 -> Columns in the basefield: 22
-Total Constraints: 216
+Total Columns: 49 -> Columns in the basefield: 73
+Total Constraints: 72
 Number of opening points: 2
-Prover memory: 3.50 GB
+Prover memory: 3.34 GB
 ------------------------------------------------------------
-SUMMARY | BinaryAdd | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 10 | Stage2: 9 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 22 | nConstraints: 216 | nOpeningPoints: 2| Prover memory: 3.50 GB
+SUMMARY | Dma64Aligned | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 35 | Stage2: 35 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 73 | nConstraints: 72 | nOpeningPoints: 2| Prover memory: 3.34 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
-Columns fixed: 2 -> Columns in the basefield: 2
-Columns stage 1: 9 -> Columns in the basefield: 9
-Columns stage 2: 2 (0 intermediate polynomials) -> Columns in the basefield: 6 (0 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 12 -> Columns in the basefield: 18
-Total Constraints: 217
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 24 -> Columns in the basefield: 24
+Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
+Columns stage Q: 2 -> Columns in the basefield: 6
+Total Columns: 30 -> Columns in the basefield: 42
+Total Constraints: 69
 Number of opening points: 2
-Prover memory: 1.67 GB
+Prover memory: 2.38 GB
 ------------------------------------------------------------
-SUMMARY | InputData | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 9 | Stage2: 6 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 18 | nConstraints: 217 | nOpeningPoints: 2| Prover memory: 1.67 GB
+SUMMARY | DmaUnaligned | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 24 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 42 | nConstraints: 69 | nOpeningPoints: 2| Prover memory: 2.38 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 15 -> Columns in the basefield: 15
+Columns stage 2: 6 (1 intermediate polynomials) -> Columns in the basefield: 18 (3 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 22 -> Columns in the basefield: 36
+Total Constraints: 19
+Number of opening points: 2
+Prover memory: 2.19 GB
+------------------------------------------------------------
+SUMMARY | DmaInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 15 | Stage2: 18 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 36 | nConstraints: 19 | nOpeningPoints: 2| Prover memory: 2.19 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 2 -> Columns in the basefield: 2
@@ -1275,16 +935,16 @@ Prover memory: 1.67 GB
 SUMMARY | RomData | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 6 | Stage2: 9 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 18 | nConstraints: 205 | nOpeningPoints: 2| Prover memory: 1.67 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
-Columns fixed: 2 -> Columns in the basefield: 2
-Columns stage 1: 29 -> Columns in the basefield: 29
-Columns stage 2: 6 (0 intermediate polynomials) -> Columns in the basefield: 18 (0 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 36 -> Columns in the basefield: 50
-Total Constraints: 239
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 1 -> Columns in the basefield: 1
+Columns stage 2: 1 (0 intermediate polynomials) -> Columns in the basefield: 3 (0 from intermediate polynomials)
+Columns stage Q: 0 -> Columns in the basefield: 0
+Total Columns: 2 -> Columns in the basefield: 4
+Total Constraints: 176
 Number of opening points: 2
-Prover memory: 2.67 GB
+Prover memory: 3.74 GB
 ------------------------------------------------------------
-SUMMARY | MemAlign | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 29 | Stage2: 18 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 50 | nConstraints: 239 | nOpeningPoints: 2| Prover memory: 2.67 GB
+SUMMARY | Rom | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 1 | Fixed: 1 | Stage1: 1 | Stage2: 3 | StageQ: 0 | ImPols: 0 => 0 = 0 + 0 | Total: 4 | nConstraints: 176 | nOpeningPoints: 2| Prover memory: 3.74 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
@@ -1311,6 +971,42 @@ Prover memory: 2.11 GB
 SUMMARY | Add256 | nBits: 20 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 47 | Stage2: 51 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 101 | nConstraints: 245 | nOpeningPoints: 2| Prover memory: 2.11 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
+Columns fixed: 2 -> Columns in the basefield: 2
+Columns stage 1: 9 -> Columns in the basefield: 9
+Columns stage 2: 2 (0 intermediate polynomials) -> Columns in the basefield: 6 (0 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 12 -> Columns in the basefield: 18
+Total Constraints: 217
+Number of opening points: 2
+Prover memory: 1.67 GB
+------------------------------------------------------------
+SUMMARY | InputData | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 9 | Stage2: 6 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 18 | nConstraints: 217 | nOpeningPoints: 2| Prover memory: 1.67 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 66 -> Columns in the basefield: 66
+Columns stage 2: 6 (0 intermediate polynomials) -> Columns in the basefield: 18 (0 from intermediate polynomials)
+Columns stage Q: 2 -> Columns in the basefield: 6
+Total Columns: 74 -> Columns in the basefield: 90
+Total Constraints: 86
+Number of opening points: 2
+Prover memory: 4.10 GB
+------------------------------------------------------------
+SUMMARY | DmaPrePost | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 66 | Stage2: 18 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 90 | nConstraints: 86 | nOpeningPoints: 2| Prover memory: 4.10 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 2 -> Columns in the basefield: 2
+Columns stage 1: 29 -> Columns in the basefield: 29
+Columns stage 2: 6 (0 intermediate polynomials) -> Columns in the basefield: 18 (0 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 36 -> Columns in the basefield: 50
+Total Constraints: 239
+Number of opening points: 2
+Prover memory: 2.67 GB
+------------------------------------------------------------
+SUMMARY | MemAlign | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 29 | Stage2: 18 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 50 | nConstraints: 239 | nOpeningPoints: 2| Prover memory: 2.67 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
 Columns stage 1: 16 -> Columns in the basefield: 16
 Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
@@ -1323,16 +1019,16 @@ Prover memory: 4.25 GB
 SUMMARY | MemAlignByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 16 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 34 | nConstraints: 215 | nOpeningPoints: 2| Prover memory: 4.25 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
-Columns fixed: 2 -> Columns in the basefield: 2
-Columns stage 1: 13 -> Columns in the basefield: 13
-Columns stage 2: 2 (0 intermediate polynomials) -> Columns in the basefield: 6 (0 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 16 -> Columns in the basefield: 22
-Total Constraints: 206
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 14 -> Columns in the basefield: 14
+Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
+Columns stage Q: 2 -> Columns in the basefield: 6
+Total Columns: 20 -> Columns in the basefield: 32
+Total Constraints: 218
 Number of opening points: 2
-Prover memory: 3.60 GB
+Prover memory: 4.13 GB
 ------------------------------------------------------------
-SUMMARY | Mem | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 13 | Stage2: 6 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 22 | nConstraints: 206 | nOpeningPoints: 2| Prover memory: 3.60 GB
+SUMMARY | MemAlignWriteByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 14 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 32 | nConstraints: 218 | nOpeningPoints: 2| Prover memory: 4.13 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
@@ -1345,6 +1041,30 @@ Number of opening points: 2
 Prover memory: 5.44 GB
 ------------------------------------------------------------
 SUMMARY | BinaryExtension | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 29 | Stage2: 21 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 53 | nConstraints: 217 | nOpeningPoints: 2| Prover memory: 5.44 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 10 -> Columns in the basefield: 10
+Columns stage 2: 3 (0 intermediate polynomials) -> Columns in the basefield: 9 (0 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 14 -> Columns in the basefield: 22
+Total Constraints: 216
+Number of opening points: 2
+Prover memory: 3.50 GB
+------------------------------------------------------------
+SUMMARY | BinaryAdd | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 10 | Stage2: 9 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 22 | nConstraints: 216 | nOpeningPoints: 2| Prover memory: 3.50 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 2 -> Columns in the basefield: 2
+Columns stage 1: 13 -> Columns in the basefield: 13
+Columns stage 2: 2 (0 intermediate polynomials) -> Columns in the basefield: 6 (0 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 16 -> Columns in the basefield: 22
+Total Constraints: 206
+Number of opening points: 2
+Prover memory: 3.60 GB
+------------------------------------------------------------
+SUMMARY | Mem | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 13 | Stage2: 6 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 22 | nConstraints: 206 | nOpeningPoints: 2| Prover memory: 3.60 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
@@ -1395,18 +1115,6 @@ Prover memory: 0.72 GB
 SUMMARY | Sha256f | nBits: 18 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 102 | Stage2: 12 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 117 | nConstraints: 321 | nOpeningPoints: 66| Prover memory: 0.72 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
-Columns fixed: 3 -> Columns in the basefield: 3
-Columns stage 1: 159 -> Columns in the basefield: 159
-Columns stage 2: 10 (1 intermediate polynomials) -> Columns in the basefield: 30 (3 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 170 -> Columns in the basefield: 192
-Total Constraints: 377
-Number of opening points: 9
-Prover memory: 1.09 GB
-------------------------------------------------------------
-SUMMARY | Blake2br | nBits: 18 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 3 | Stage1: 159 | Stage2: 30 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 192 | nConstraints: 377 | nOpeningPoints: 9| Prover memory: 1.09 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
 Columns fixed: 67 -> Columns in the basefield: 67
 Columns stage 1: 29 -> Columns in the basefield: 29
 Columns stage 2: 16 (1 intermediate polynomials) -> Columns in the basefield: 48 (3 from intermediate polynomials)
@@ -1419,16 +1127,16 @@ Prover memory: 2.81 GB
 SUMMARY | SpecifiedRanges | nBits: 20 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 67 | Stage1: 29 | Stage2: 48 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 80 | nConstraints: 259 | nOpeningPoints: 2| Prover memory: 2.81 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
-Columns fixed: 52 -> Columns in the basefield: 52
-Columns stage 1: 8 -> Columns in the basefield: 8
-Columns stage 2: 5 (0 intermediate polynomials) -> Columns in the basefield: 15 (0 from intermediate polynomials)
+Columns fixed: 3 -> Columns in the basefield: 3
+Columns stage 1: 159 -> Columns in the basefield: 159
+Columns stage 2: 10 (1 intermediate polynomials) -> Columns in the basefield: 30 (3 from intermediate polynomials)
 Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 14 -> Columns in the basefield: 26
-Total Constraints: 248
-Number of opening points: 2
-Prover memory: 3.45 GB
+Total Columns: 170 -> Columns in the basefield: 192
+Total Constraints: 377
+Number of opening points: 9
+Prover memory: 1.09 GB
 ------------------------------------------------------------
-SUMMARY | VirtualTable0 | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 52 | Stage1: 8 | Stage2: 15 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 26 | nConstraints: 248 | nOpeningPoints: 2| Prover memory: 3.45 GB
+SUMMARY | Blake2br | nBits: 18 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 3 | Stage1: 159 | Stage2: 30 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 192 | nConstraints: 377 | nOpeningPoints: 9| Prover memory: 1.09 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 2 -> Columns in the basefield: 2
@@ -1443,7 +1151,6 @@ Prover memory: 1.90 GB
 SUMMARY | ArithEq | nBits: 20 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 2 | Stage1: 43 | Stage2: 37 | StageQ: 6 | ImPols: 1 => 1 = 1 + 0 | Total: 86 | nConstraints: 311 | nOpeningPoints: 16| Prover memory: 1.90 GB
 ------------------------------------------------------------
 > Writing the chelpers file
-> Writing the chelpers file
 ------------------------- AIR INFO -------------------------
 Columns fixed: 2 -> Columns in the basefield: 2
 Columns stage 1: 33 -> Columns in the basefield: 33
@@ -1457,28 +1164,7 @@ Prover memory: 1.74 GB
 SUMMARY | ArithEq384 | nBits: 20 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 2 | Stage1: 33 | Stage2: 37 | StageQ: 6 | ImPols: 1 => 1 = 1 + 0 | Total: 76 | nConstraints: 284 | nOpeningPoints: 24| Prover memory: 1.74 GB
 ------------------------------------------------------------
 > Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
 > Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
 > Writing the chelpers file
 > Writing the chelpers file finished
 ---------------------------------------------
@@ -1486,22 +1172,44 @@ SUMMARY | ArithEq384 | nBits: 20 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fi
 > Writing the chelpers file finished
 ---------------------------------------------
 ------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 14 -> Columns in the basefield: 14
-Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
-Columns stage Q: 2 -> Columns in the basefield: 6
-Total Columns: 20 -> Columns in the basefield: 32
-Total Constraints: 218
+Columns fixed: 52 -> Columns in the basefield: 52
+Columns stage 1: 8 -> Columns in the basefield: 8
+Columns stage 2: 5 (0 intermediate polynomials) -> Columns in the basefield: 15 (0 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 14 -> Columns in the basefield: 26
+Total Constraints: 248
 Number of opening points: 2
-Prover memory: 4.13 GB
+Prover memory: 3.45 GB
 ------------------------------------------------------------
-SUMMARY | MemAlignWriteByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 14 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 32 | nConstraints: 218 | nOpeningPoints: 2| Prover memory: 4.13 GB
+SUMMARY | VirtualTable0 | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 52 | Stage1: 8 | Stage2: 15 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 26 | nConstraints: 248 | nOpeningPoints: 2| Prover memory: 3.45 GB
 ------------------------------------------------------------
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 31 -> Columns in the basefield: 31
+Columns stage 2: 11 (2 intermediate polynomials) -> Columns in the basefield: 29 (2 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 43 -> Columns in the basefield: 63
+Total Constraints: 64
+Number of opening points: 2
+Prover memory: 3.03 GB
+------------------------------------------------------------
+SUMMARY | Dma64AlignedMemCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 31 | Stage2: 29 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 63 | nConstraints: 64 | nOpeningPoints: 2| Prover memory: 3.03 GB
+------------------------------------------------------------
 > Writing the chelpers file
 > Writing the chelpers file
 > Writing the chelpers file finished
@@ -1514,6 +1222,24 @@ SUMMARY | MemAlignWriteByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree:
 > Writing the chelpers file
 > Writing the chelpers file
 > Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file
+> Writing chelpers verifier file
+> Writing the chelpers file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 73 -> Columns in the basefield: 73
 Columns stage 1: 8 -> Columns in the basefield: 8
@@ -1541,23 +1267,23 @@ SUMMARY | VirtualTable1 | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 |
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 31 -> Columns in the basefield: 31
-Columns stage 2: 11 (2 intermediate polynomials) -> Columns in the basefield: 29 (2 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 43 -> Columns in the basefield: 63
-Total Constraints: 64
-Number of opening points: 2
-Prover memory: 3.03 GB
-------------------------------------------------------------
-SUMMARY | Dma64AlignedMemCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 31 | Stage2: 29 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 63 | nConstraints: 64 | nOpeningPoints: 2| Prover memory: 3.03 GB
-------------------------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file
+> Writing the chelpers file
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
@@ -1614,49 +1340,7 @@ SUMMARY | Keccakf | nBits: 17 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed
 > Writing the chelpers file
 > Writing the chelpers file
 > Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
 > Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
 > Writing the chelpers file
 > Writing the chelpers file
 > Writing the chelpers file
@@ -1687,6 +1371,16 @@ SUMMARY | Keccakf | nBits: 17 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed
 ---------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
@@ -1700,7 +1394,21 @@ SUMMARY | Keccakf | nBits: 17 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
-> Writing the chelpers file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
@@ -1715,28 +1423,244 @@ SUMMARY | Keccakf | nBits: 17 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed
 Error: Compressor check failed for air 'Dma'
 
 Caused by:
-    0: Failed to execute circom compiler for compressor check
-    1: No such file or directory (os error 2)
+    Circom compilation failed in compressor check: [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1671:26
+         [0m[34m│[0m
+    [0m[34m1671[0m [0m[34m│[0m     signal tmp_2[3] <== [[0m[31mmapValues.cm1_6[0m - evals[1][0], -evals[1][1], -evals[1][2]];
+         [0m[34m│[0m                          [0m[31m^^^^^^^^^^^^^^^[0m [0m[31mcm1_6 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1674:26
+         [0m[34m│[0m
+    [0m[34m1674[0m [0m[34m│[0m     signal tmp_5[3] <== [[0m[31mmapValues.cm1_7[0m - evals[2][0], -evals[2][1], -evals[2][2]];
+         [0m[34m│[0m                          [0m[31m^^^^^^^^^^^^^^^[0m [0m[31mcm1_7 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1677:26
+         [0m[34m│[0m
+    [0m[34m1677[0m [0m[34m│[0m     signal tmp_8[3] <== [[0m[31mmapValues.cm1_8[0m - evals[3][0], -evals[3][1], -evals[3][2]];
+         [0m[34m│[0m                          [0m[31m^^^^^^^^^^^^^^^[0m [0m[31mcm1_8 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1680:27
+         [0m[34m│[0m
+    [0m[34m1680[0m [0m[34m│[0m     signal tmp_11[3] <== [[0m[31mmapValues.cm1_11[0m - evals[4][0], -evals[4][1], -evals[4][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^[0m [0m[31mcm1_11 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1683:27
+         [0m[34m│[0m
+    [0m[34m1683[0m [0m[34m│[0m     signal tmp_14[3] <== [[0m[31mmapValues.cm1_12[0m - evals[5][0], -evals[5][1], -evals[5][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^[0m [0m[31mcm1_12 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1686:27
+         [0m[34m│[0m
+    [0m[34m1686[0m [0m[34m│[0m     signal tmp_17[3] <== [[0m[31mmapValues.cm1_13[0m - evals[6][0], -evals[6][1], -evals[6][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^[0m [0m[31mcm1_13 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1689:27
+         [0m[34m│[0m
+    [0m[34m1689[0m [0m[34m│[0m     signal tmp_20[3] <== [[0m[31mmapValues.cm1_14[0m - evals[7][0], -evals[7][1], -evals[7][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^[0m [0m[31mcm1_14 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1692:27
+         [0m[34m│[0m
+    [0m[34m1692[0m [0m[34m│[0m     signal tmp_23[3] <== [[0m[31mmapValues.cm1_20[0m - evals[8][0], -evals[8][1], -evals[8][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^[0m [0m[31mcm1_20 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1695:27
+         [0m[34m│[0m
+    [0m[34m1695[0m [0m[34m│[0m     signal tmp_26[3] <== [[0m[31mmapValues.cm1_21[0m - evals[9][0], -evals[9][1], -evals[9][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^[0m [0m[31mcm1_21 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1698:27
+         [0m[34m│[0m
+    [0m[34m1698[0m [0m[34m│[0m     signal tmp_29[3] <== [[0m[31mmapValues.cm1_22[0m - evals[10][0], -evals[10][1], -evals[10][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^[0m [0m[31mcm1_22 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1701:27
+         [0m[34m│[0m
+    [0m[34m1701[0m [0m[34m│[0m     signal tmp_32[3] <== [[0m[31mmapValues.cm1_23[0m - evals[11][0], -evals[11][1], -evals[11][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^[0m [0m[31mcm1_23 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1704:27
+         [0m[34m│[0m
+    [0m[34m1704[0m [0m[34m│[0m     signal tmp_35[3] <== [[0m[31mmapValues.cm1_24[0m - evals[12][0], -evals[12][1], -evals[12][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^[0m [0m[31mcm1_24 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1707:27
+         [0m[34m│[0m
+    [0m[34m1707[0m [0m[34m│[0m     signal tmp_38[3] <== [[0m[31mmapValues.cm2_0[0][0m - evals[13][0], mapValues.cm2_0[1] - evals[13][1], mapValues.cm2_0[2] - evals[13][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_0 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1707:62
+         [0m[34m│[0m
+    [0m[34m1707[0m [0m[34m│[0m     signal tmp_38[3] <== [mapValues.cm2_0[0] - evals[13][0], [0m[31mmapValues.cm2_0[1][0m - evals[13][1], mapValues.cm2_0[2] - evals[13][2]];
+         [0m[34m│[0m                                                              [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_0 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1707:97
+         [0m[34m│[0m
+    [0m[34m1707[0m [0m[34m│[0m     signal tmp_38[3] <== [mapValues.cm2_0[0] - evals[13][0], mapValues.cm2_0[1] - evals[13][1], [0m[31mmapValues.cm2_0[2][0m - evals[13][2]];
+         [0m[34m│[0m                                                                                                 [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_0 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1710:27
+         [0m[34m│[0m
+    [0m[34m1710[0m [0m[34m│[0m     signal tmp_41[3] <== [[0m[31mmapValues.cm2_1[0][0m - evals[14][0], mapValues.cm2_1[1] - evals[14][1], mapValues.cm2_1[2] - evals[14][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_1 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1710:62
+         [0m[34m│[0m
+    [0m[34m1710[0m [0m[34m│[0m     signal tmp_41[3] <== [mapValues.cm2_1[0] - evals[14][0], [0m[31mmapValues.cm2_1[1][0m - evals[14][1], mapValues.cm2_1[2] - evals[14][2]];
+         [0m[34m│[0m                                                              [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_1 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1710:97
+         [0m[34m│[0m
+    [0m[34m1710[0m [0m[34m│[0m     signal tmp_41[3] <== [mapValues.cm2_1[0] - evals[14][0], mapValues.cm2_1[1] - evals[14][1], [0m[31mmapValues.cm2_1[2][0m - evals[14][2]];
+         [0m[34m│[0m                                                                                                 [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_1 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1713:27
+         [0m[34m│[0m
+    [0m[34m1713[0m [0m[34m│[0m     signal tmp_44[3] <== [[0m[31mmapValues.cm2_2[0][0m - evals[15][0], mapValues.cm2_2[1] - evals[15][1], mapValues.cm2_2[2] - evals[15][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_2 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1713:62
+         [0m[34m│[0m
+    [0m[34m1713[0m [0m[34m│[0m     signal tmp_44[3] <== [mapValues.cm2_2[0] - evals[15][0], [0m[31mmapValues.cm2_2[1][0m - evals[15][1], mapValues.cm2_2[2] - evals[15][2]];
+         [0m[34m│[0m                                                              [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_2 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1713:97
+         [0m[34m│[0m
+    [0m[34m1713[0m [0m[34m│[0m     signal tmp_44[3] <== [mapValues.cm2_2[0] - evals[15][0], mapValues.cm2_2[1] - evals[15][1], [0m[31mmapValues.cm2_2[2][0m - evals[15][2]];
+         [0m[34m│[0m                                                                                                 [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_2 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1716:27
+         [0m[34m│[0m
+    [0m[34m1716[0m [0m[34m│[0m     signal tmp_47[3] <== [[0m[31mmapValues.cm2_3[0][0m - evals[16][0], mapValues.cm2_3[1] - evals[16][1], mapValues.cm2_3[2] - evals[16][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_3 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1716:62
+         [0m[34m│[0m
+    [0m[34m1716[0m [0m[34m│[0m     signal tmp_47[3] <== [mapValues.cm2_3[0] - evals[16][0], [0m[31mmapValues.cm2_3[1][0m - evals[16][1], mapValues.cm2_3[2] - evals[16][2]];
+         [0m[34m│[0m                                                              [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_3 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1716:97
+         [0m[34m│[0m
+    [0m[34m1716[0m [0m[34m│[0m     signal tmp_47[3] <== [mapValues.cm2_3[0] - evals[16][0], mapValues.cm2_3[1] - evals[16][1], [0m[31mmapValues.cm2_3[2][0m - evals[16][2]];
+         [0m[34m│[0m                                                                                                 [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_3 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1719:27
+         [0m[34m│[0m
+    [0m[34m1719[0m [0m[34m│[0m     signal tmp_50[3] <== [[0m[31mmapValues.cm2_4[0][0m - evals[17][0], mapValues.cm2_4[1] - evals[17][1], mapValues.cm2_4[2] - evals[17][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_4 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1719:62
+         [0m[34m│[0m
+    [0m[34m1719[0m [0m[34m│[0m     signal tmp_50[3] <== [mapValues.cm2_4[0] - evals[17][0], [0m[31mmapValues.cm2_4[1][0m - evals[17][1], mapValues.cm2_4[2] - evals[17][2]];
+         [0m[34m│[0m                                                              [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_4 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1719:97
+         [0m[34m│[0m
+    [0m[34m1719[0m [0m[34m│[0m     signal tmp_50[3] <== [mapValues.cm2_4[0] - evals[17][0], mapValues.cm2_4[1] - evals[17][1], [0m[31mmapValues.cm2_4[2][0m - evals[17][2]];
+         [0m[34m│[0m                                                                                                 [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_4 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1722:27
+         [0m[34m│[0m
+    [0m[34m1722[0m [0m[34m│[0m     signal tmp_53[3] <== [[0m[31mmapValues.cm2_5[0][0m - evals[18][0], mapValues.cm2_5[1] - evals[18][1], mapValues.cm2_5[2] - evals[18][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_5 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1722:62
+         [0m[34m│[0m
+    [0m[34m1722[0m [0m[34m│[0m     signal tmp_53[3] <== [mapValues.cm2_5[0] - evals[18][0], [0m[31mmapValues.cm2_5[1][0m - evals[18][1], mapValues.cm2_5[2] - evals[18][2]];
+         [0m[34m│[0m                                                              [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_5 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1722:97
+         [0m[34m│[0m
+    [0m[34m1722[0m [0m[34m│[0m     signal tmp_53[3] <== [mapValues.cm2_5[0] - evals[18][0], mapValues.cm2_5[1] - evals[18][1], [0m[31mmapValues.cm2_5[2][0m - evals[18][2]];
+         [0m[34m│[0m                                                                                                 [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_5 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1725:27
+         [0m[34m│[0m
+    [0m[34m1725[0m [0m[34m│[0m     signal tmp_56[3] <== [[0m[31mmapValues.cm3_0[0][0m - evals[19][0], mapValues.cm3_0[1] - evals[19][1], mapValues.cm3_0[2] - evals[19][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm3_0 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1725:62
+         [0m[34m│[0m
+    [0m[34m1725[0m [0m[34m│[0m     signal tmp_56[3] <== [mapValues.cm3_0[0] - evals[19][0], [0m[31mmapValues.cm3_0[1][0m - evals[19][1], mapValues.cm3_0[2] - evals[19][2]];
+         [0m[34m│[0m                                                              [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm3_0 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1725:97
+         [0m[34m│[0m
+    [0m[34m1725[0m [0m[34m│[0m     signal tmp_56[3] <== [mapValues.cm3_0[0] - evals[19][0], mapValues.cm3_0[1] - evals[19][1], [0m[31mmapValues.cm3_0[2][0m - evals[19][2]];
+         [0m[34m│[0m                                                                                                 [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm3_0 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1731:27
+         [0m[34m│[0m
+    [0m[34m1731[0m [0m[34m│[0m     signal tmp_62[3] <== [[0m[31mmapValues.cm2_0[0][0m - evals[21][0], mapValues.cm2_0[1] - evals[21][1], mapValues.cm2_0[2] - evals[21][2]];
+         [0m[34m│[0m                           [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_0 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1731:62
+         [0m[34m│[0m
+    [0m[34m1731[0m [0m[34m│[0m     signal tmp_62[3] <== [mapValues.cm2_0[0] - evals[21][0], [0m[31mmapValues.cm2_0[1][0m - evals[21][1], mapValues.cm2_0[2] - evals[21][2]];
+         [0m[34m│[0m                                                              [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_0 is not defined in mapValues[0m
+    
+    [0m[1m[38;5;9merror[T2046][0m[1m: Bus or signal not defined in component[0m
+         [0m[34m┌─[0m "/tmp/.tmpTBapwr/verifier.circom":1731:97
+         [0m[34m│[0m
+    [0m[34m1731[0m [0m[34m│[0m     signal tmp_62[3] <== [mapValues.cm2_0[0] - evals[21][0], mapValues.cm2_0[1] - evals[21][1], [0m[31mmapValues.cm2_0[2][0m - evals[21][2]];
+         [0m[34m│[0m                                                                                                 [0m[31m^^^^^^^^^^^^^^^^^^[0m [0m[31mcm2_0 is not defined in mapValues[0m
+    
+    [31mprevious errors were found[0m
+    
 make: *** [Makefile:62: generate-key] Error 1
 Command exited with non-zero status 2
 	Command being timed: "make generate-key"
-	User time (seconds): 1221.24
-	System time (seconds): 178.41
-	Percent of CPU this job got: 474%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:54.97
+	User time (seconds): 947.84
+	System time (seconds): 167.76
+	Percent of CPU this job got: 421%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:24.46
 	Average shared text size (kbytes): 0
 	Average unshared data size (kbytes): 0
 	Average stack size (kbytes): 0
 	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 35175244
+	Maximum resident set size (kbytes): 35174968
 	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 5311
-	Minor (reclaiming a frame) page faults: 55228557
-	Voluntary context switches: 387931
-	Involuntary context switches: 78443
+	Major (requiring I/O) page faults: 1
+	Minor (reclaiming a frame) page faults: 46110375
+	Voluntary context switches: 261185
+	Involuntary context switches: 55707
 	Swaps: 0
-	File system inputs: 1238256
-	File system outputs: 18754424
+	File system inputs: 1912
+	File system outputs: 15710120
 	Socket messages sent: 0
 	Socket messages received: 0
 	Signals delivered: 0
