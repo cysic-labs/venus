@@ -33,6 +33,7 @@ pub struct SetupOptions {
     pub fixed_dir: Option<String>,
     pub stark_structs_path: Option<String>,
     pub recursive: bool,
+    pub std_pil_path: Option<String>,
 }
 
 
@@ -315,7 +316,9 @@ fn run_recursive_setup(
     let circuits_gl_path = resolve_path_env("CIRCUITS_GL_PATH", "circuits.gl");
     let recurser_circuits_path =
         resolve_path_env("RECURSER_CIRCUITS_PATH", "vadcop/helpers/circuits");
-    let std_pil_path = resolve_path_env("STD_PIL_PATH", "pil");
+    let std_pil_path = opts.std_pil_path.clone()
+        .or_else(|| std::env::var("STD_PIL_PATH").ok())
+        .unwrap_or_else(|| "pil".to_string());
     let recurser_pil_path = resolve_path_env("RECURSER_PIL_PATH", "circom2pil/pil");
     let circom_helpers_dir = resolve_path_env("CIRCOM_HELPERS_DIR", "circom");
 
@@ -2363,6 +2366,7 @@ mod tests_global_info {
             fixed_dir: None,
             stark_structs_path: None,
             recursive: false,
+            std_pil_path: None,
         };
 
         let result = run_setup(&opts);
@@ -2411,6 +2415,7 @@ mod tests_global_info {
             fixed_dir: None,
             stark_structs_path: None,
             recursive: true,
+            std_pil_path: None,
         };
 
         let result = run_recursive_setup(&pilout, "zisk", &opts);
@@ -2465,6 +2470,7 @@ mod tests_global_info {
             fixed_dir: None,
             stark_structs_path: None,
             recursive: true,
+            std_pil_path: None,
         };
 
         let result = run_recursive_setup(&pilout, "zisk", &opts);
@@ -2527,6 +2533,7 @@ mod tests_global_info {
             fixed_dir: None,
             stark_structs_path: None,
             recursive: true,
+            std_pil_path: None,
         };
 
         let result = run_recursive_setup(&pilout, "test", &opts);
@@ -2584,6 +2591,7 @@ mod tests_global_info {
             fixed_dir: None,
             stark_structs_path: None,
             recursive: false,
+            std_pil_path: None,
         };
 
         let result = run_setup(&opts);

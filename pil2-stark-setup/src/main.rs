@@ -50,6 +50,7 @@ fn main() -> anyhow::Result<()> {
         fixed_dir: cli.fixed_dir,
         stark_structs_path: cli.stark_structs,
         recursive: cli.recursive,
+        std_pil_path: cli.std_path,
     };
 
     setup_cmd::run_setup(&opts)
