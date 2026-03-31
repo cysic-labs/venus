@@ -2654,7 +2654,7 @@ impl Processor {
         self.call_deferred_functions("air", "final");
 
         let witness_count = self.witness_cols.len();
-        let fixed_count = self.fixed_cols.len();
+        let fixed_count = self.fixed_cols.ids.current_len();
         let constraint_count = self.constraints.len() as u32;
 
         eprintln!("  > Witness cols: {}", witness_count);
@@ -2672,7 +2672,7 @@ impl Processor {
             let num_rows = self.air_stack.last().map(|a| a.rows).unwrap_or(0);
             let mut fixed_proto_idx = 0u32;
             let mut periodic_proto_idx = 0u32;
-            let fc_end = fc_start + self.fixed_cols.len();
+            let fc_end = fc_start + self.fixed_cols.ids.current_len();
             for col_id in fc_start..fc_end {
                 if let Some(data) = self.fixed_cols.ids.get_data(col_id) {
                     if data.temporal {
@@ -2993,7 +2993,7 @@ impl Processor {
                     // Only write if there are non-temporal, non-external fixed
                     // columns with actual data.
                     let fc_s = self.fixed_cols.current_start();
-                    let fc_e = fc_s + self.fixed_cols.len();
+                    let fc_e = fc_s + self.fixed_cols.ids.current_len();
                     let has_writable_cols = (fc_s..fc_e).any(|id| {
                         if let Some(data) = self.fixed_cols.ids.get_data(id) {
                             !data.temporal && !data.external

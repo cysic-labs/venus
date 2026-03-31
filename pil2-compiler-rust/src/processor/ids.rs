@@ -91,8 +91,15 @@ impl IdAllocator {
         }
     }
 
+    /// Returns the total number of IDs allocated across all AIRs.
     pub fn len(&self) -> u32 {
         self.next_id
+    }
+
+    /// Returns the number of IDs allocated for the current AIR scope
+    /// (i.e. since the last `clear_metadata_only` call).
+    pub fn current_len(&self) -> u32 {
+        self.next_id - self.base_id
     }
 
     pub fn is_empty(&self) -> bool {

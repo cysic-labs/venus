@@ -1460,7 +1460,7 @@ pub fn write_fixed_cols_to_file(
     // Collect the IDs of non-temporal, non-external columns that have data.
     let mut col_ids: Vec<u32> = Vec::new();
     let fc_start = fixed_cols.current_start();
-    let fc_end = fc_start + fixed_cols.len();
+    let fc_end = fc_start + fixed_cols.ids.current_len();
     for id in fc_start..fc_end {
         if let Some(data) = fixed_cols.ids.get_data(id) {
             if data.temporal || data.external {
