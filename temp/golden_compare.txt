@@ -1,46 +1,797 @@
-OK: All files match byte-for-byte
-
-=== Per-AIR 7-File Subset Analysis ===
-Files checked per AIR: starkinfo.json, expressionsinfo.json, verifierinfo.json, bin, verifier.bin, verkey.json, verkey.bin
-
-Add256: match=7 differ=0 missing=0
-Arith: match=7 differ=0 missing=0
-ArithEq: match=7 differ=0 missing=0
-ArithEq384: match=7 differ=0 missing=0
-Binary: match=7 differ=0 missing=0
-BinaryAdd: match=7 differ=0 missing=0
-BinaryExtension: match=7 differ=0 missing=0
-Blake2br: match=7 differ=0 missing=0
-Dma: match=7 differ=0 missing=0
-Dma64Aligned: match=7 differ=0 missing=0
-Dma64AlignedInputCpy: match=7 differ=0 missing=0
-Dma64AlignedMem: match=7 differ=0 missing=0
-Dma64AlignedMemCpy: match=7 differ=0 missing=0
-Dma64AlignedMemSet: match=7 differ=0 missing=0
-DmaInputCpy: match=7 differ=0 missing=0
-DmaMemCpy: match=7 differ=0 missing=0
-DmaPrePost: match=7 differ=0 missing=0
-DmaPrePostInputCpy: match=7 differ=0 missing=0
-DmaPrePostMemCpy: match=7 differ=0 missing=0
-DmaUnaligned: match=7 differ=0 missing=0
-InputData: match=7 differ=0 missing=0
-Keccakf: match=7 differ=0 missing=0
-Main: match=7 differ=0 missing=0
-Mem: match=7 differ=0 missing=0
-MemAlign: match=7 differ=0 missing=0
-MemAlignByte: match=7 differ=0 missing=0
-MemAlignReadByte: match=7 differ=0 missing=0
-MemAlignWriteByte: match=7 differ=0 missing=0
-Poseidon2: match=7 differ=0 missing=0
-Rom: match=7 differ=0 missing=0
-RomData: match=7 differ=0 missing=0
-Sha256f: match=7 differ=0 missing=0
-SpecifiedRanges: match=7 differ=0 missing=0
-VirtualTable0: match=7 differ=0 missing=0
-VirtualTable1: match=7 differ=0 missing=0
-
-=== Summary ===
-Total AIRs: 35
-Total files compared: 842 vs 842
-All 35 AIRs: 7/7 files byte-identical
-Global files (globalConstraints.bin, globalConstraints.json, globalInfo.json): byte-identical
+MISSING: zisk/vadcop_final/build.err
+MISSING: zisk/vadcop_final/build.log
+MISSING: zisk/vadcop_final_compressed/build.err
+MISSING: zisk/vadcop_final_compressed/build.log
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.bin
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.const
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.const_gpu
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.consttree_gpu
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.dat
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.exec
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.expressionsinfo.json
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.so
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.starkinfo.json
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.verifier.bin
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.verifierinfo.json
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.verifier.rs
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.verkey.bin
+MISSING: zisk/vadcop_final_compressed/vadcop_final_compressed.verkey.json
+MISSING: zisk/vadcop_final/vadcop_final.bin
+MISSING: zisk/vadcop_final/vadcop_final.const
+MISSING: zisk/vadcop_final/vadcop_final.const_gpu
+MISSING: zisk/vadcop_final/vadcop_final.consttree_gpu
+MISSING: zisk/vadcop_final/vadcop_final.dat
+MISSING: zisk/vadcop_final/vadcop_final.exec
+MISSING: zisk/vadcop_final/vadcop_final.expressionsinfo.json
+MISSING: zisk/vadcop_final/vadcop_final.so
+MISSING: zisk/vadcop_final/vadcop_final.starkinfo.json
+MISSING: zisk/vadcop_final/vadcop_final.verifier.bin
+MISSING: zisk/vadcop_final/vadcop_final.verifierinfo.json
+MISSING: zisk/vadcop_final/vadcop_final.verifier.rs
+MISSING: zisk/vadcop_final/vadcop_final.verkey.bin
+MISSING: zisk/vadcop_final/vadcop_final.verkey.json
+DIFFER: zisk/Zisk/airs/Add256/air/Add256.bin
+MISSING: zisk/Zisk/airs/Add256/air/Add256.const_gpu
+MISSING: zisk/Zisk/airs/Add256/air/Add256.consttree_gpu
+DIFFER: zisk/Zisk/airs/Add256/air/Add256.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Add256/air/Add256.starkinfo.json
+DIFFER: zisk/Zisk/airs/Add256/air/Add256.verifier.bin
+DIFFER: zisk/Zisk/airs/Add256/air/Add256.verifierinfo.json
+MISSING: zisk/Zisk/airs/Add256/recursive1/build.err
+MISSING: zisk/Zisk/airs/Add256/recursive1/build.log
+MISSING: zisk/Zisk/airs/Add256/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Add256/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Add256/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Add256/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Add256/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Add256/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Add256/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Add256/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Arith/air/Arith.bin
+MISSING: zisk/Zisk/airs/Arith/air/Arith.const_gpu
+MISSING: zisk/Zisk/airs/Arith/air/Arith.consttree_gpu
+DIFFER: zisk/Zisk/airs/Arith/air/Arith.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Arith/air/Arith.starkinfo.json
+DIFFER: zisk/Zisk/airs/Arith/air/Arith.verifier.bin
+DIFFER: zisk/Zisk/airs/Arith/air/Arith.verifierinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.bin
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.const
+MISSING: zisk/Zisk/airs/ArithEq384/air/ArithEq384.const_gpu
+MISSING: zisk/Zisk/airs/ArithEq384/air/ArithEq384.consttree_gpu
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.starkinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.verifier.bin
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.verifierinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.verkey.bin
+DIFFER: zisk/Zisk/airs/ArithEq384/air/ArithEq384.verkey.json
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/build.err
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/build.log
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.bin
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.const
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.const_gpu
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.consttree_gpu
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.dat
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.exec
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.expressionsinfo.json
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.so
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.starkinfo.json
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.verifier.bin
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.verifierinfo.json
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.verkey.bin
+MISSING: zisk/Zisk/airs/ArithEq384/compressor/compressor.verkey.json
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/build.err
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/build.log
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/ArithEq384/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.bin
+MISSING: zisk/Zisk/airs/ArithEq/air/ArithEq.const_gpu
+MISSING: zisk/Zisk/airs/ArithEq/air/ArithEq.consttree_gpu
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.starkinfo.json
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.verifier.bin
+DIFFER: zisk/Zisk/airs/ArithEq/air/ArithEq.verifierinfo.json
+MISSING: zisk/Zisk/airs/ArithEq/compressor/build.err
+MISSING: zisk/Zisk/airs/ArithEq/compressor/build.log
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.bin
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.const
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.const_gpu
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.consttree_gpu
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.dat
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.exec
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.expressionsinfo.json
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.so
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.starkinfo.json
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.verifier.bin
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.verifierinfo.json
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.verkey.bin
+MISSING: zisk/Zisk/airs/ArithEq/compressor/compressor.verkey.json
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/build.err
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/build.log
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/ArithEq/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/airs/Arith/recursive1/build.err
+MISSING: zisk/Zisk/airs/Arith/recursive1/build.log
+MISSING: zisk/Zisk/airs/Arith/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Arith/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Arith/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Arith/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Arith/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Arith/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Arith/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Arith/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/BinaryAdd/air/BinaryAdd.bin
+MISSING: zisk/Zisk/airs/BinaryAdd/air/BinaryAdd.const_gpu
+MISSING: zisk/Zisk/airs/BinaryAdd/air/BinaryAdd.consttree_gpu
+DIFFER: zisk/Zisk/airs/BinaryAdd/air/BinaryAdd.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/BinaryAdd/air/BinaryAdd.starkinfo.json
+DIFFER: zisk/Zisk/airs/BinaryAdd/air/BinaryAdd.verifier.bin
+DIFFER: zisk/Zisk/airs/BinaryAdd/air/BinaryAdd.verifierinfo.json
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/build.err
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/build.log
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/BinaryAdd/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Binary/air/Binary.bin
+MISSING: zisk/Zisk/airs/Binary/air/Binary.const_gpu
+MISSING: zisk/Zisk/airs/Binary/air/Binary.consttree_gpu
+DIFFER: zisk/Zisk/airs/Binary/air/Binary.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Binary/air/Binary.starkinfo.json
+DIFFER: zisk/Zisk/airs/Binary/air/Binary.verifier.bin
+DIFFER: zisk/Zisk/airs/Binary/air/Binary.verifierinfo.json
+DIFFER: zisk/Zisk/airs/BinaryExtension/air/BinaryExtension.bin
+MISSING: zisk/Zisk/airs/BinaryExtension/air/BinaryExtension.const_gpu
+MISSING: zisk/Zisk/airs/BinaryExtension/air/BinaryExtension.consttree_gpu
+DIFFER: zisk/Zisk/airs/BinaryExtension/air/BinaryExtension.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/BinaryExtension/air/BinaryExtension.starkinfo.json
+DIFFER: zisk/Zisk/airs/BinaryExtension/air/BinaryExtension.verifier.bin
+DIFFER: zisk/Zisk/airs/BinaryExtension/air/BinaryExtension.verifierinfo.json
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/build.err
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/build.log
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/BinaryExtension/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/airs/Binary/recursive1/build.err
+MISSING: zisk/Zisk/airs/Binary/recursive1/build.log
+MISSING: zisk/Zisk/airs/Binary/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Binary/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Binary/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Binary/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Binary/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Binary/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Binary/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Binary/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.bin
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.const
+MISSING: zisk/Zisk/airs/Blake2br/air/Blake2br.const_gpu
+MISSING: zisk/Zisk/airs/Blake2br/air/Blake2br.consttree_gpu
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.starkinfo.json
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.verifier.bin
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.verkey.bin
+DIFFER: zisk/Zisk/airs/Blake2br/air/Blake2br.verkey.json
+MISSING: zisk/Zisk/airs/Blake2br/compressor/build.err
+MISSING: zisk/Zisk/airs/Blake2br/compressor/build.log
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.bin
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.const
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.const_gpu
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.consttree_gpu
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.dat
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.exec
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.expressionsinfo.json
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.so
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.starkinfo.json
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.verifier.bin
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.verifierinfo.json
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.verkey.bin
+MISSING: zisk/Zisk/airs/Blake2br/compressor/compressor.verkey.json
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/build.err
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/build.log
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Blake2br/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Dma64Aligned/air/Dma64Aligned.bin
+MISSING: zisk/Zisk/airs/Dma64Aligned/air/Dma64Aligned.const_gpu
+MISSING: zisk/Zisk/airs/Dma64Aligned/air/Dma64Aligned.consttree_gpu
+DIFFER: zisk/Zisk/airs/Dma64Aligned/air/Dma64Aligned.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Dma64Aligned/air/Dma64Aligned.starkinfo.json
+DIFFER: zisk/Zisk/airs/Dma64Aligned/air/Dma64Aligned.verifier.bin
+DIFFER: zisk/Zisk/airs/Dma64Aligned/air/Dma64Aligned.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedInputCpy/air/Dma64AlignedInputCpy.bin
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/air/Dma64AlignedInputCpy.const_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/air/Dma64AlignedInputCpy.consttree_gpu
+DIFFER: zisk/Zisk/airs/Dma64AlignedInputCpy/air/Dma64AlignedInputCpy.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedInputCpy/air/Dma64AlignedInputCpy.starkinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedInputCpy/air/Dma64AlignedInputCpy.verifier.bin
+DIFFER: zisk/Zisk/airs/Dma64AlignedInputCpy/air/Dma64AlignedInputCpy.verifierinfo.json
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/build.err
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/build.log
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Dma64AlignedInputCpy/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedMem/air/Dma64AlignedMem.bin
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/air/Dma64AlignedMem.const_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/air/Dma64AlignedMem.consttree_gpu
+DIFFER: zisk/Zisk/airs/Dma64AlignedMem/air/Dma64AlignedMem.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedMem/air/Dma64AlignedMem.starkinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedMem/air/Dma64AlignedMem.verifier.bin
+DIFFER: zisk/Zisk/airs/Dma64AlignedMem/air/Dma64AlignedMem.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemCpy/air/Dma64AlignedMemCpy.bin
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/air/Dma64AlignedMemCpy.const_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/air/Dma64AlignedMemCpy.consttree_gpu
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemCpy/air/Dma64AlignedMemCpy.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemCpy/air/Dma64AlignedMemCpy.starkinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemCpy/air/Dma64AlignedMemCpy.verifier.bin
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemCpy/air/Dma64AlignedMemCpy.verifierinfo.json
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/build.err
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/build.log
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Dma64AlignedMemCpy/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/build.err
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/build.log
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Dma64AlignedMem/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemSet/air/Dma64AlignedMemSet.bin
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/air/Dma64AlignedMemSet.const_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/air/Dma64AlignedMemSet.consttree_gpu
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemSet/air/Dma64AlignedMemSet.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemSet/air/Dma64AlignedMemSet.starkinfo.json
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemSet/air/Dma64AlignedMemSet.verifier.bin
+DIFFER: zisk/Zisk/airs/Dma64AlignedMemSet/air/Dma64AlignedMemSet.verifierinfo.json
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/build.err
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/build.log
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Dma64AlignedMemSet/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/build.err
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/build.log
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Dma64Aligned/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Dma/air/Dma.bin
+MISSING: zisk/Zisk/airs/Dma/air/Dma.const_gpu
+MISSING: zisk/Zisk/airs/Dma/air/Dma.consttree_gpu
+DIFFER: zisk/Zisk/airs/Dma/air/Dma.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Dma/air/Dma.starkinfo.json
+DIFFER: zisk/Zisk/airs/Dma/air/Dma.verifier.bin
+DIFFER: zisk/Zisk/airs/Dma/air/Dma.verifierinfo.json
+DIFFER: zisk/Zisk/airs/DmaInputCpy/air/DmaInputCpy.bin
+MISSING: zisk/Zisk/airs/DmaInputCpy/air/DmaInputCpy.const_gpu
+MISSING: zisk/Zisk/airs/DmaInputCpy/air/DmaInputCpy.consttree_gpu
+DIFFER: zisk/Zisk/airs/DmaInputCpy/air/DmaInputCpy.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/DmaInputCpy/air/DmaInputCpy.starkinfo.json
+DIFFER: zisk/Zisk/airs/DmaInputCpy/air/DmaInputCpy.verifier.bin
+DIFFER: zisk/Zisk/airs/DmaInputCpy/air/DmaInputCpy.verifierinfo.json
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/build.err
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/build.log
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/DmaInputCpy/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/DmaMemCpy/air/DmaMemCpy.bin
+MISSING: zisk/Zisk/airs/DmaMemCpy/air/DmaMemCpy.const_gpu
+MISSING: zisk/Zisk/airs/DmaMemCpy/air/DmaMemCpy.consttree_gpu
+DIFFER: zisk/Zisk/airs/DmaMemCpy/air/DmaMemCpy.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/DmaMemCpy/air/DmaMemCpy.starkinfo.json
+DIFFER: zisk/Zisk/airs/DmaMemCpy/air/DmaMemCpy.verifier.bin
+DIFFER: zisk/Zisk/airs/DmaMemCpy/air/DmaMemCpy.verifierinfo.json
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/build.err
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/build.log
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/DmaMemCpy/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/DmaPrePost/air/DmaPrePost.bin
+MISSING: zisk/Zisk/airs/DmaPrePost/air/DmaPrePost.const_gpu
+MISSING: zisk/Zisk/airs/DmaPrePost/air/DmaPrePost.consttree_gpu
+DIFFER: zisk/Zisk/airs/DmaPrePost/air/DmaPrePost.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/DmaPrePost/air/DmaPrePost.starkinfo.json
+DIFFER: zisk/Zisk/airs/DmaPrePost/air/DmaPrePost.verifier.bin
+DIFFER: zisk/Zisk/airs/DmaPrePost/air/DmaPrePost.verifierinfo.json
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/build.err
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/build.log
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.bin
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.const
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.const_gpu
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.consttree_gpu
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.dat
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.exec
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.expressionsinfo.json
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.so
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.starkinfo.json
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.verifier.bin
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.verifierinfo.json
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.verkey.bin
+MISSING: zisk/Zisk/airs/DmaPrePost/compressor/compressor.verkey.json
+DIFFER: zisk/Zisk/airs/DmaPrePostInputCpy/air/DmaPrePostInputCpy.bin
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/air/DmaPrePostInputCpy.const_gpu
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/air/DmaPrePostInputCpy.consttree_gpu
+DIFFER: zisk/Zisk/airs/DmaPrePostInputCpy/air/DmaPrePostInputCpy.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/DmaPrePostInputCpy/air/DmaPrePostInputCpy.starkinfo.json
+DIFFER: zisk/Zisk/airs/DmaPrePostInputCpy/air/DmaPrePostInputCpy.verifier.bin
+DIFFER: zisk/Zisk/airs/DmaPrePostInputCpy/air/DmaPrePostInputCpy.verifierinfo.json
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/build.err
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/build.log
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/DmaPrePostInputCpy/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/DmaPrePostMemCpy/air/DmaPrePostMemCpy.bin
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/air/DmaPrePostMemCpy.const_gpu
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/air/DmaPrePostMemCpy.consttree_gpu
+DIFFER: zisk/Zisk/airs/DmaPrePostMemCpy/air/DmaPrePostMemCpy.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/DmaPrePostMemCpy/air/DmaPrePostMemCpy.starkinfo.json
+DIFFER: zisk/Zisk/airs/DmaPrePostMemCpy/air/DmaPrePostMemCpy.verifier.bin
+DIFFER: zisk/Zisk/airs/DmaPrePostMemCpy/air/DmaPrePostMemCpy.verifierinfo.json
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/build.err
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/build.log
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/DmaPrePostMemCpy/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/build.err
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/build.log
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/DmaPrePost/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/airs/Dma/recursive1/build.err
+MISSING: zisk/Zisk/airs/Dma/recursive1/build.log
+MISSING: zisk/Zisk/airs/Dma/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Dma/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Dma/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Dma/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Dma/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Dma/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Dma/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Dma/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/DmaUnaligned/air/DmaUnaligned.bin
+MISSING: zisk/Zisk/airs/DmaUnaligned/air/DmaUnaligned.const_gpu
+MISSING: zisk/Zisk/airs/DmaUnaligned/air/DmaUnaligned.consttree_gpu
+DIFFER: zisk/Zisk/airs/DmaUnaligned/air/DmaUnaligned.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/DmaUnaligned/air/DmaUnaligned.starkinfo.json
+DIFFER: zisk/Zisk/airs/DmaUnaligned/air/DmaUnaligned.verifier.bin
+DIFFER: zisk/Zisk/airs/DmaUnaligned/air/DmaUnaligned.verifierinfo.json
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/build.err
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/build.log
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/DmaUnaligned/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/InputData/air/InputData.bin
+MISSING: zisk/Zisk/airs/InputData/air/InputData.const_gpu
+MISSING: zisk/Zisk/airs/InputData/air/InputData.consttree_gpu
+DIFFER: zisk/Zisk/airs/InputData/air/InputData.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/InputData/air/InputData.starkinfo.json
+DIFFER: zisk/Zisk/airs/InputData/air/InputData.verifier.bin
+DIFFER: zisk/Zisk/airs/InputData/air/InputData.verifierinfo.json
+MISSING: zisk/Zisk/airs/InputData/recursive1/build.err
+MISSING: zisk/Zisk/airs/InputData/recursive1/build.log
+MISSING: zisk/Zisk/airs/InputData/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/InputData/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/InputData/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/InputData/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/InputData/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/InputData/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/InputData/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/InputData/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.bin
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.const
+MISSING: zisk/Zisk/airs/Keccakf/air/Keccakf.const_gpu
+MISSING: zisk/Zisk/airs/Keccakf/air/Keccakf.consttree_gpu
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.starkinfo.json
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.verifier.bin
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.verkey.bin
+DIFFER: zisk/Zisk/airs/Keccakf/air/Keccakf.verkey.json
+MISSING: zisk/Zisk/airs/Keccakf/compressor/build.err
+MISSING: zisk/Zisk/airs/Keccakf/compressor/build.log
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.bin
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.const
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.const_gpu
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.consttree_gpu
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.dat
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.exec
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.expressionsinfo.json
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.so
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.starkinfo.json
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.verifier.bin
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.verifierinfo.json
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.verkey.bin
+MISSING: zisk/Zisk/airs/Keccakf/compressor/compressor.verkey.json
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/build.err
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/build.log
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Keccakf/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Main/air/Main.bin
+MISSING: zisk/Zisk/airs/Main/air/Main.const_gpu
+MISSING: zisk/Zisk/airs/Main/air/Main.consttree_gpu
+DIFFER: zisk/Zisk/airs/Main/air/Main.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Main/air/Main.starkinfo.json
+DIFFER: zisk/Zisk/airs/Main/air/Main.verifier.bin
+DIFFER: zisk/Zisk/airs/Main/air/Main.verifierinfo.json
+MISSING: zisk/Zisk/airs/Main/recursive1/build.err
+MISSING: zisk/Zisk/airs/Main/recursive1/build.log
+MISSING: zisk/Zisk/airs/Main/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Main/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Main/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Main/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Main/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Main/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Main/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Main/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Mem/air/Mem.bin
+MISSING: zisk/Zisk/airs/Mem/air/Mem.const_gpu
+MISSING: zisk/Zisk/airs/Mem/air/Mem.consttree_gpu
+DIFFER: zisk/Zisk/airs/Mem/air/Mem.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Mem/air/Mem.starkinfo.json
+DIFFER: zisk/Zisk/airs/Mem/air/Mem.verifier.bin
+DIFFER: zisk/Zisk/airs/Mem/air/Mem.verifierinfo.json
+DIFFER: zisk/Zisk/airs/MemAlign/air/MemAlign.bin
+MISSING: zisk/Zisk/airs/MemAlign/air/MemAlign.const_gpu
+MISSING: zisk/Zisk/airs/MemAlign/air/MemAlign.consttree_gpu
+DIFFER: zisk/Zisk/airs/MemAlign/air/MemAlign.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/MemAlign/air/MemAlign.starkinfo.json
+DIFFER: zisk/Zisk/airs/MemAlign/air/MemAlign.verifier.bin
+DIFFER: zisk/Zisk/airs/MemAlign/air/MemAlign.verifierinfo.json
+DIFFER: zisk/Zisk/airs/MemAlignByte/air/MemAlignByte.bin
+MISSING: zisk/Zisk/airs/MemAlignByte/air/MemAlignByte.const_gpu
+MISSING: zisk/Zisk/airs/MemAlignByte/air/MemAlignByte.consttree_gpu
+DIFFER: zisk/Zisk/airs/MemAlignByte/air/MemAlignByte.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/MemAlignByte/air/MemAlignByte.starkinfo.json
+DIFFER: zisk/Zisk/airs/MemAlignByte/air/MemAlignByte.verifier.bin
+DIFFER: zisk/Zisk/airs/MemAlignByte/air/MemAlignByte.verifierinfo.json
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/build.err
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/build.log
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/MemAlignByte/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/MemAlignReadByte/air/MemAlignReadByte.bin
+MISSING: zisk/Zisk/airs/MemAlignReadByte/air/MemAlignReadByte.const_gpu
+MISSING: zisk/Zisk/airs/MemAlignReadByte/air/MemAlignReadByte.consttree_gpu
+DIFFER: zisk/Zisk/airs/MemAlignReadByte/air/MemAlignReadByte.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/MemAlignReadByte/air/MemAlignReadByte.starkinfo.json
+DIFFER: zisk/Zisk/airs/MemAlignReadByte/air/MemAlignReadByte.verifier.bin
+DIFFER: zisk/Zisk/airs/MemAlignReadByte/air/MemAlignReadByte.verifierinfo.json
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/build.err
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/build.log
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/MemAlignReadByte/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/build.err
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/build.log
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/MemAlign/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/MemAlignWriteByte/air/MemAlignWriteByte.bin
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/air/MemAlignWriteByte.const_gpu
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/air/MemAlignWriteByte.consttree_gpu
+DIFFER: zisk/Zisk/airs/MemAlignWriteByte/air/MemAlignWriteByte.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/MemAlignWriteByte/air/MemAlignWriteByte.starkinfo.json
+DIFFER: zisk/Zisk/airs/MemAlignWriteByte/air/MemAlignWriteByte.verifier.bin
+DIFFER: zisk/Zisk/airs/MemAlignWriteByte/air/MemAlignWriteByte.verifierinfo.json
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/build.err
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/build.log
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/MemAlignWriteByte/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/airs/Mem/recursive1/build.err
+MISSING: zisk/Zisk/airs/Mem/recursive1/build.log
+MISSING: zisk/Zisk/airs/Mem/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Mem/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Mem/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Mem/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Mem/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Mem/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Mem/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Mem/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Poseidon2/air/Poseidon2.bin
+DIFFER: zisk/Zisk/airs/Poseidon2/air/Poseidon2.const
+MISSING: zisk/Zisk/airs/Poseidon2/air/Poseidon2.const_gpu
+MISSING: zisk/Zisk/airs/Poseidon2/air/Poseidon2.consttree_gpu
+DIFFER: zisk/Zisk/airs/Poseidon2/air/Poseidon2.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Poseidon2/air/Poseidon2.starkinfo.json
+DIFFER: zisk/Zisk/airs/Poseidon2/air/Poseidon2.verifier.bin
+DIFFER: zisk/Zisk/airs/Poseidon2/air/Poseidon2.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Poseidon2/air/Poseidon2.verkey.bin
+DIFFER: zisk/Zisk/airs/Poseidon2/air/Poseidon2.verkey.json
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/build.err
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/build.log
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Poseidon2/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Rom/air/Rom.bin
+MISSING: zisk/Zisk/airs/Rom/air/Rom.const_gpu
+MISSING: zisk/Zisk/airs/Rom/air/Rom.consttree_gpu
+DIFFER: zisk/Zisk/airs/Rom/air/Rom.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Rom/air/Rom.starkinfo.json
+DIFFER: zisk/Zisk/airs/Rom/air/Rom.verifier.bin
+DIFFER: zisk/Zisk/airs/Rom/air/Rom.verifierinfo.json
+DIFFER: zisk/Zisk/airs/RomData/air/RomData.bin
+MISSING: zisk/Zisk/airs/RomData/air/RomData.const_gpu
+MISSING: zisk/Zisk/airs/RomData/air/RomData.consttree_gpu
+DIFFER: zisk/Zisk/airs/RomData/air/RomData.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/RomData/air/RomData.starkinfo.json
+DIFFER: zisk/Zisk/airs/RomData/air/RomData.verifier.bin
+DIFFER: zisk/Zisk/airs/RomData/air/RomData.verifierinfo.json
+MISSING: zisk/Zisk/airs/RomData/recursive1/build.err
+MISSING: zisk/Zisk/airs/RomData/recursive1/build.log
+MISSING: zisk/Zisk/airs/RomData/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/RomData/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/RomData/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/RomData/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/RomData/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/RomData/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/RomData/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/RomData/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/airs/Rom/recursive1/build.err
+MISSING: zisk/Zisk/airs/Rom/recursive1/build.log
+MISSING: zisk/Zisk/airs/Rom/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Rom/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Rom/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Rom/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Rom/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Rom/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Rom/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Rom/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.bin
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.const
+MISSING: zisk/Zisk/airs/Sha256f/air/Sha256f.const_gpu
+MISSING: zisk/Zisk/airs/Sha256f/air/Sha256f.consttree_gpu
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.starkinfo.json
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.verifier.bin
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.verifierinfo.json
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.verkey.bin
+DIFFER: zisk/Zisk/airs/Sha256f/air/Sha256f.verkey.json
+MISSING: zisk/Zisk/airs/Sha256f/compressor/build.err
+MISSING: zisk/Zisk/airs/Sha256f/compressor/build.log
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.bin
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.const
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.const_gpu
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.consttree_gpu
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.dat
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.exec
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.expressionsinfo.json
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.so
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.starkinfo.json
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.verifier.bin
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.verifierinfo.json
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.verkey.bin
+MISSING: zisk/Zisk/airs/Sha256f/compressor/compressor.verkey.json
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/build.err
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/build.log
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/Sha256f/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.bin
+DIFFER: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.const
+MISSING: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.const_gpu
+MISSING: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.consttree_gpu
+DIFFER: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.starkinfo.json
+DIFFER: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.verifier.bin
+DIFFER: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.verifierinfo.json
+DIFFER: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.verkey.bin
+DIFFER: zisk/Zisk/airs/SpecifiedRanges/air/SpecifiedRanges.verkey.json
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/build.err
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/build.log
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/SpecifiedRanges/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.bin
+DIFFER: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.const
+MISSING: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.const_gpu
+MISSING: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.consttree_gpu
+DIFFER: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.starkinfo.json
+DIFFER: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.verifier.bin
+DIFFER: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.verifierinfo.json
+DIFFER: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.verkey.bin
+DIFFER: zisk/Zisk/airs/VirtualTable0/air/VirtualTable0.verkey.json
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/build.err
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/build.log
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/VirtualTable0/recursive1/recursive1.verkey.json
+DIFFER: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.bin
+DIFFER: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.const
+MISSING: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.const_gpu
+MISSING: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.consttree_gpu
+DIFFER: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.expressionsinfo.json
+DIFFER: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.starkinfo.json
+DIFFER: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.verifier.bin
+DIFFER: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.verifierinfo.json
+DIFFER: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.verkey.bin
+DIFFER: zisk/Zisk/airs/VirtualTable1/air/VirtualTable1.verkey.json
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/build.err
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/build.log
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/recursive1.const
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/recursive1.const_gpu
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/recursive1.consttree_gpu
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/recursive1.dat
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/recursive1.exec
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/recursive1.so
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/recursive1.verkey.bin
+MISSING: zisk/Zisk/airs/VirtualTable1/recursive1/recursive1.verkey.json
+MISSING: zisk/Zisk/recursive2/build.err
+MISSING: zisk/Zisk/recursive2/build.log
+MISSING: zisk/Zisk/recursive2/recursive2.bin
+MISSING: zisk/Zisk/recursive2/recursive2.const
+MISSING: zisk/Zisk/recursive2/recursive2.const_gpu
+MISSING: zisk/Zisk/recursive2/recursive2.consttree_gpu
+MISSING: zisk/Zisk/recursive2/recursive2.dat
+MISSING: zisk/Zisk/recursive2/recursive2.exec
+MISSING: zisk/Zisk/recursive2/recursive2.expressionsinfo.json
+MISSING: zisk/Zisk/recursive2/recursive2.so
+MISSING: zisk/Zisk/recursive2/recursive2.starkinfo.json
+MISSING: zisk/Zisk/recursive2/recursive2.verifier.bin
+MISSING: zisk/Zisk/recursive2/recursive2.verifierinfo.json
+MISSING: zisk/Zisk/recursive2/recursive2.verifier.rs
+MISSING: zisk/Zisk/recursive2/recursive2.verkey.bin
+MISSING: zisk/Zisk/recursive2/recursive2.verkey.json
+MISSING: zisk/Zisk/recursive2/recursive2.vks.json
+FAIL: Differences found
+=== 7-FILE SUBSET COMPARE ===
+=== 7-FILE SUBSET COMPARE ===
+PARTIAL Add256 (match=2 differ=5 missing=0)
+PARTIAL Arith (match=2 differ=5 missing=0)
+PARTIAL ArithEq (match=2 differ=5 missing=0)
+PARTIAL ArithEq384 (match=0 differ=7 missing=0)
+PARTIAL Binary (match=2 differ=5 missing=0)
+PARTIAL BinaryAdd (match=2 differ=5 missing=0)
+PARTIAL BinaryExtension (match=2 differ=5 missing=0)
+PARTIAL Blake2br (match=0 differ=7 missing=0)
+PARTIAL Dma (match=2 differ=5 missing=0)
+PARTIAL Dma64Aligned (match=2 differ=5 missing=0)
+PARTIAL Dma64AlignedInputCpy (match=2 differ=5 missing=0)
+PARTIAL Dma64AlignedMem (match=2 differ=5 missing=0)
+PARTIAL Dma64AlignedMemCpy (match=2 differ=5 missing=0)
+PARTIAL Dma64AlignedMemSet (match=2 differ=5 missing=0)
+PARTIAL DmaInputCpy (match=2 differ=5 missing=0)
+PARTIAL DmaMemCpy (match=2 differ=5 missing=0)
+PARTIAL DmaPrePost (match=2 differ=5 missing=0)
+PARTIAL DmaPrePostInputCpy (match=2 differ=5 missing=0)
+PARTIAL DmaPrePostMemCpy (match=2 differ=5 missing=0)
+PARTIAL DmaUnaligned (match=2 differ=5 missing=0)
+PARTIAL InputData (match=2 differ=5 missing=0)
+PARTIAL Keccakf (match=0 differ=7 missing=0)
+PARTIAL Main (match=2 differ=5 missing=0)
+PARTIAL Mem (match=2 differ=5 missing=0)
+PARTIAL MemAlign (match=2 differ=5 missing=0)
+PARTIAL MemAlignByte (match=2 differ=5 missing=0)
+PARTIAL MemAlignReadByte (match=2 differ=5 missing=0)
+PARTIAL MemAlignWriteByte (match=2 differ=5 missing=0)
+PARTIAL Poseidon2 (match=0 differ=7 missing=0)
+PARTIAL Rom (match=2 differ=5 missing=0)
+PARTIAL RomData (match=2 differ=5 missing=0)
+PARTIAL Sha256f (match=0 differ=7 missing=0)
+PARTIAL SpecifiedRanges (match=0 differ=7 missing=0)
+PARTIAL VirtualTable0 (match=0 differ=7 missing=0)
+PARTIAL VirtualTable1 (match=0 differ=7 missing=0)
+TOTAL: match=54 differ=191 missing=0
