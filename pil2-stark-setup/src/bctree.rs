@@ -82,13 +82,11 @@ pub fn compute_const_tree(
     // Drop raw bytes before extending - no longer needed
     drop(const_bytes);
 
-    // Extend polynomials to the evaluation domain
+    // Extend polynomials to the evaluation domain.
+    // Takes ownership of const_pols to reuse its allocation (no copy).
     tracing::info!("Extending constant polynomials to evaluation domain");
-    let const_pols_ext = extend_pol(&const_pols, n_bits, n_bits_ext, n_pols);
+    let const_pols_ext = extend_pol(const_pols, n_bits, n_bits_ext, n_pols);
     assert_eq!(const_pols_ext.len(), n_extended * n_pols);
-
-    // Drop original polynomials - no longer needed
-    drop(const_pols);
     tracing::info!("Extended done");
 
     // Build Merkle tree.

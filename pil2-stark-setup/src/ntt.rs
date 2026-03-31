@@ -179,7 +179,7 @@ fn ntt_core(data: &mut [Goldilocks], n_bits: usize, n_cols: usize, inverse: bool
 /// The coset shift ensures evaluation on the domain {shift * omega^i}
 /// instead of {omega^i}, which is required for FRI-based STARK proofs.
 pub fn extend_pol(
-    input: &[Goldilocks],
+    input: Vec<Goldilocks>,
     n_bits: usize,
     n_bits_ext: usize,
     n_cols: usize,
@@ -189,36 +189,35 @@ pub fn extend_pol(
     assert_eq!(input.len(), n * n_cols);
     assert!(n_bits_ext >= n_bits);
 
-    // INTT on original domain
-    let mut coeffs = input.to_vec();
-    ntt_core(&mut coeffs, n_bits, n_cols, true);
+    // Work in-place on the input buffer to avoid any copy.
+    // Takes ownership of input to reuse its allocation.
 
-    // Apply coset shift: multiply row i coefficients by shift^i
-    // C++ uses Goldilocks::SHIFT = 7
-    // Precompute all shift powers, then apply in parallel
+    // 1. INTT in-place to get coefficients
+    let mut buf = input;
+    ntt_core(&mut buf, n_bits, n_cols, true);
+
+    // 2. Apply coset shift in-place: multiply row i by shift^i
     let shift = Goldilocks::new(7);
     let mut shift_pows = Vec::with_capacity(n);
     shift_pows.push(Goldilocks::ONE);
     for row in 1..n {
         shift_pows.push(shift_pows[row - 1] * shift);
     }
-    coeffs.par_chunks_mut(n_cols).enumerate().for_each(|(row, chunk)| {
+    buf.par_chunks_mut(n_cols).enumerate().for_each(|(row, chunk)| {
         let sp = shift_pows[row];
         for val in chunk.iter_mut() {
             *val = *val * sp;
         }
     });
 
-    // Zero-pad to extended size. Drop coeffs first to free memory
-    // before allocating the larger extended buffer.
-    let mut extended = vec![Goldilocks::ZERO; n_ext * n_cols];
-    extended[..n * n_cols].copy_from_slice(&coeffs);
-    drop(coeffs);
+    // 3. Resize the same buffer to extended size (zero-padded).
+    //    This grows the allocation in-place without a second full-size copy.
+    buf.resize(n_ext * n_cols, Goldilocks::ZERO);
 
-    // Forward NTT on extended domain
-    ntt_core(&mut extended, n_bits_ext, n_cols, false);
+    // 4. Forward NTT on the extended domain
+    ntt_core(&mut buf, n_bits_ext, n_cols, false);
 
-    extended
+    buf
 }
 
 #[cfg(test)]
@@ -259,7 +258,7 @@ mod tests {
 
         let val = Goldilocks::new(42);
         let input = vec![val; n * n_cols];
-        let extended = extend_pol(&input, n_bits, n_bits_ext, n_cols);
+        let extended = extend_pol(input, n_bits, n_bits_ext, n_cols);
 
         assert_eq!(extended.len(), n_ext * n_cols);
         for (i, v) in extended.iter().enumerate() {

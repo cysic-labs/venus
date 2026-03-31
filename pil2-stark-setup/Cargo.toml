@@ -11,6 +11,10 @@ categories = { workspace = true }
 name = "venus-setup"
 path = "src/main.rs"
 
+[[bin]]
+name = "venus-bctree"
+path = "src/bctree_main.rs"
+
 [dependencies]
 fields = { workspace = true, features = ["verify"] }
 pilout = { workspace = true }

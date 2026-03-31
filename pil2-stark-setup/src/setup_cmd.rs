@@ -225,14 +225,18 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             )?;
 
             // Compute constant polynomial Merkle tree -> verkey.json / verkey.bin
+            // Run in a child process to isolate bctree memory: large NTT
+            // buffers and Merkle tree nodes are freed when the child exits,
+            // preventing accumulation across 35 AIRs.
             let verkey_json_path = files_dir.join(format!("{}.verkey.json", item.air_name));
             if const_path.exists() {
                 tracing::info!("Computing Constant Tree for '{}'...", item.air_name);
-                match crate::bctree::compute_const_tree(
+                let bctree_result = run_bctree_subprocess(
                     const_path.to_str().unwrap_or(""),
                     starkinfo_path.to_str().unwrap_or(""),
                     verkey_json_path.to_str().unwrap_or(""),
-                ) {
+                );
+                match bctree_result {
                     Ok(const_root) => {
                         let mut verkey_bin = Vec::with_capacity(32);
                         for &val in const_root.iter() {
@@ -1654,6 +1658,57 @@ fn write_bin_files_native(
     )?;
 
     Ok(())
+}
+
+/// Run bctree in a child process to isolate memory.
+///
+/// Uses fork+exec pattern: the child process computes the Merkle tree
+/// and writes verkey.json, then exits. All NTT/Merkle memory is freed
+/// by the OS when the child exits, preventing accumulation across AIRs.
+fn run_bctree_subprocess(
+    const_path: &str,
+    starkinfo_path: &str,
+    verkey_path: &str,
+) -> Result<[u64; 4]> {
+    // Find the venus-bctree binary next to the current executable
+    let bctree_exec = if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("venus-bctree");
+            if candidate.is_file() {
+                candidate
+            } else {
+                // Fallback: run bctree in-process
+                return crate::bctree::compute_const_tree(const_path, starkinfo_path, verkey_path);
+            }
+        } else {
+            return crate::bctree::compute_const_tree(const_path, starkinfo_path, verkey_path);
+        }
+    } else {
+        return crate::bctree::compute_const_tree(const_path, starkinfo_path, verkey_path);
+    };
+
+    let output = std::process::Command::new(&bctree_exec)
+        .args([const_path, starkinfo_path, verkey_path])
+        .output()
+        .with_context(|| format!("Failed to run venus-bctree: {}", bctree_exec.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("venus-bctree failed: {}", stderr);
+    }
+
+    // Parse verkey from the written file
+    let verkey_json = fs::read_to_string(verkey_path)?;
+    let vk: Vec<serde_json::Value> = serde_json::from_str(&verkey_json)?;
+    if vk.len() != 4 {
+        anyhow::bail!("verkey.json expected 4 elements, got {}", vk.len());
+    }
+    let mut root = [0u64; 4];
+    for i in 0..4 {
+        root[i] = vk[i].as_u64()
+            .ok_or_else(|| anyhow::anyhow!("verkey limb {} is not u64", i))?;
+    }
+    Ok(root)
 }
 
 /// Compute floor(log2(n)) for a nonzero usize.
