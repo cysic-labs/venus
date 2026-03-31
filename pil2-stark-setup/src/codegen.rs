@@ -32,6 +32,9 @@ pub struct CodeGenCtx {
     pub verifier_evaluations: bool,
     pub opening_points: Vec<i64>,
     pub ev_map: Vec<EvMapRef>,
+    /// Pre-computed index: (entry_type, id, opening_pos) -> first ev_map index.
+    /// Enables O(1) lookup in `fix_eval` instead of O(|ev_map|) linear scan.
+    pub ev_map_index: HashMap<(String, usize, usize), usize>,
 
     pub tmp_used: usize,
     pub code: Vec<CodeEntry>,
@@ -75,12 +78,25 @@ impl CodeGenCtx {
             verifier_evaluations,
             opening_points,
             ev_map,
+            ev_map_index: HashMap::new(),
             tmp_used: 0,
             code: Vec::new(),
             calculated: HashMap::new(),
             exp_map: HashMap::new(),
             witness_by_exp_id: std::sync::Arc::new(HashMap::new()),
         }
+    }
+}
+
+/// Rebuild the `ev_map_index` from the current `ev_map` contents.
+///
+/// Must be called after `ev_map` is fully populated and sorted so that
+/// `fix_eval` can perform O(1) lookups instead of O(|ev_map|) linear scans.
+pub fn rebuild_ev_map_index(ctx: &mut CodeGenCtx) {
+    ctx.ev_map_index.clear();
+    for (i, e) in ctx.ev_map.iter().enumerate() {
+        let key = (e.entry_type.clone(), e.id, e.opening_pos);
+        ctx.ev_map_index.entry(key).or_insert(i); // first match wins, like JS findIndex
     }
 }
 
@@ -144,6 +160,7 @@ pub fn pil_code_gen(
         verifier_evaluations: ctx.verifier_evaluations,
         opening_points: ctx.opening_points.clone(),
         ev_map: std::mem::take(&mut ctx.ev_map), // move instead of clone
+        ev_map_index: std::mem::take(&mut ctx.ev_map_index),
         tmp_used: ctx.tmp_used,
         code: Vec::new(),
         calculated: std::mem::take(&mut ctx.calculated),
@@ -188,6 +205,7 @@ pub fn pil_code_gen(
     // Restore moved fields
     ctx.calculated = code_ctx.calculated;
     ctx.ev_map = code_ctx.ev_map;
+    ctx.ev_map_index = code_ctx.ev_map_index;
 
     ctx.calculated
         .entry(exp_id)
@@ -484,15 +502,19 @@ fn fix_commit_pol(r: &mut CodeRef, ctx: &CodeGenCtx, symbols: &[SymbolInfo]) {
 // fixEval
 // ---------------------------------------------------------------------------
 
-/// Rewrite a column reference into an eval reference using the ev_map.
+/// Rewrite a column reference into an eval reference using the ev_map index.
+///
+/// Uses the pre-built `ev_map_index` HashMap for O(1) lookup instead of
+/// scanning `ev_map` linearly, which was the source of a >20 min stall on
+/// Poseidon2 (31k code entries x 182 ev_map entries).
 fn fix_eval(r: &mut CodeRef, ctx: &CodeGenCtx, _symbols: &[SymbolInfo]) {
     let prime = r.prime.unwrap_or(0);
-    let opening_pos = ctx.opening_points.iter().position(|&p| p == prime).unwrap_or(0);
-    let eval_index = ctx.ev_map.iter().position(|e| {
-        e.entry_type == r.ref_type && e.id == r.id && e.opening_pos == opening_pos
-    });
-
-    if let Some(idx) = eval_index {
+    let opening_pos = match ctx.opening_points.iter().position(|&p| p == prime) {
+        Some(pos) => pos,
+        None => return, // unknown opening point: do not remap
+    };
+    let key = (r.ref_type.clone(), r.id, opening_pos);
+    if let Some(&idx) = ctx.ev_map_index.get(&key) {
         r.prime = None;
         r.id = idx;
         r.ref_type = "eval".to_string();
@@ -782,5 +804,110 @@ mod tests {
         assert_eq!(last.op, "copy");
         assert_eq!(last.src[0].ref_type, "number");
         assert_eq!(last.src[0].value.as_deref(), Some("42"));
+    }
+
+    // -----------------------------------------------------------------------
+    // fix_eval tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a CodeGenCtx with verifier_evaluations=true, a populated
+    /// ev_map and the corresponding ev_map_index.
+    fn verifier_ctx_with_ev_map(
+        opening_points: Vec<i64>,
+        ev_map: Vec<EvMapRef>,
+    ) -> CodeGenCtx {
+        let mut ctx = CodeGenCtx::new(
+            0, 0, 1, "n", true, opening_points, ev_map,
+        );
+        rebuild_ev_map_index(&mut ctx);
+        ctx
+    }
+
+    fn make_code_ref(ref_type: &str, id: usize, prime: Option<i64>) -> CodeRef {
+        CodeRef {
+            ref_type: ref_type.to_string(),
+            id,
+            dim: 1,
+            prime,
+            value: None,
+            stage: None,
+            stage_id: None,
+            commit_id: None,
+            opening: None,
+            boundary_id: None,
+            airgroup_id: None,
+            exp_id: None,
+        }
+    }
+
+    #[test]
+    fn test_fix_eval_finds_matching_eval() {
+        let ev_map = vec![
+            EvMapRef { entry_type: "cm".into(), id: 0, prime: 0, opening_pos: 0, commit_id: None },
+            EvMapRef { entry_type: "const".into(), id: 5, prime: 0, opening_pos: 0, commit_id: None },
+        ];
+        let ctx = verifier_ctx_with_ev_map(vec![0], ev_map);
+        let symbols: Vec<SymbolInfo> = Vec::new();
+
+        // Look up "const" id=5 at prime=0 -> opening_pos=0 -> should match index 1
+        let mut r = make_code_ref("const", 5, Some(0));
+        fix_eval(&mut r, &ctx, &symbols);
+
+        assert_eq!(r.ref_type, "eval");
+        assert_eq!(r.id, 1);
+        assert_eq!(r.dim, FIELD_EXTENSION);
+        assert!(r.prime.is_none());
+    }
+
+    #[test]
+    fn test_fix_eval_missing_opening_point_returns_early() {
+        let ev_map = vec![
+            EvMapRef { entry_type: "cm".into(), id: 0, prime: 0, opening_pos: 0, commit_id: None },
+        ];
+        // opening_points only contains 0; prime=99 is not present
+        let ctx = verifier_ctx_with_ev_map(vec![0], ev_map);
+        let symbols: Vec<SymbolInfo> = Vec::new();
+
+        let mut r = make_code_ref("cm", 0, Some(99));
+        fix_eval(&mut r, &ctx, &symbols);
+
+        // Should be unchanged because prime=99 is not in opening_points
+        assert_eq!(r.ref_type, "cm");
+        assert_eq!(r.id, 0);
+        assert_eq!(r.prime, Some(99));
+    }
+
+    #[test]
+    fn test_fix_eval_missing_eval_entry_no_change() {
+        let ev_map = vec![
+            EvMapRef { entry_type: "cm".into(), id: 0, prime: 0, opening_pos: 0, commit_id: None },
+        ];
+        let ctx = verifier_ctx_with_ev_map(vec![0], ev_map);
+        let symbols: Vec<SymbolInfo> = Vec::new();
+
+        // "const" id=99 does not exist in ev_map
+        let mut r = make_code_ref("const", 99, Some(0));
+        fix_eval(&mut r, &ctx, &symbols);
+
+        assert_eq!(r.ref_type, "const");
+        assert_eq!(r.id, 99);
+    }
+
+    #[test]
+    fn test_fix_eval_first_match_wins() {
+        // Two entries with the same (entry_type, id, opening_pos); the first
+        // one inserted should win (replicating JS Array.findIndex semantics).
+        let ev_map = vec![
+            EvMapRef { entry_type: "cm".into(), id: 3, prime: 0, opening_pos: 0, commit_id: None },
+            EvMapRef { entry_type: "cm".into(), id: 3, prime: 0, opening_pos: 0, commit_id: None },
+        ];
+        let ctx = verifier_ctx_with_ev_map(vec![0], ev_map);
+        let symbols: Vec<SymbolInfo> = Vec::new();
+
+        let mut r = make_code_ref("cm", 3, Some(0));
+        fix_eval(&mut r, &ctx, &symbols);
+
+        assert_eq!(r.ref_type, "eval");
+        assert_eq!(r.id, 0); // first entry at index 0, not index 1
     }
 }

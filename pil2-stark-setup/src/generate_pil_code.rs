@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::codegen::{build_code, pil_code_gen, CalcEntry, CodeGenCtx, EvMapRef};
+use crate::codegen::{build_code, pil_code_gen, rebuild_ev_map_index, CalcEntry, CodeGenCtx, EvMapRef};
 use crate::expression::Expression;
 use crate::fri_poly::{self, ChallengeMapEntry};
 use crate::helpers::{add_info_expressions, add_info_expressions_symbols, EvMapItem};
@@ -585,6 +585,9 @@ fn generate_constraint_polynomial_verifier_code(
             .then(a.id.cmp(&b.id))
             .then(a.prime.cmp(&b.prime))
     });
+
+    // Build the hash index after sorting so fix_eval can do O(1) lookups
+    rebuild_ev_map_index(&mut ctx);
 
     pil_code_gen(&mut ctx, symbols, expressions, params.c_exp_id, 0);
     let block = build_code(&mut ctx);
