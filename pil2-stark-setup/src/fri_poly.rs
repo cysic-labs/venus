@@ -391,7 +391,10 @@ mod tests {
             &mut challenges_map,
         );
 
-        assert!(result.fri_exp_id > 0);
+        // fri_exp_id is the index in the expressions arena; when the arena
+        // starts empty (as in this test) the first pushed expression gets id 0.
+        assert_eq!(result.fri_exp_id, 0);
+        assert!(!expressions.is_empty());
 
         // Should have added std_vf1 and std_vf2
         let challenge_names: Vec<&str> = symbols
@@ -437,8 +440,8 @@ mod tests {
             &mut challenges_map,
         );
 
-        assert!(result.fri_exp_id > 0);
-        // The final expression should exist
+        // fri_exp_id is a valid index into the expressions arena
         assert!(result.fri_exp_id < expressions.len());
+        assert!(!expressions.is_empty());
     }
 }

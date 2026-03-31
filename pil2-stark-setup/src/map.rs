@@ -221,7 +221,7 @@ pub fn map(res: &mut SetupResult, recursion: bool) {
     // Use printExpressions for ImPol constraint lines in non-recursion mode.
     // We temporarily take expressions out to allow mutable access while also
     // reading the maps.
-    if !recursion && !im_pol_constraints.is_empty() {
+    if !recursion && !im_pol_constraints.is_empty() && !res.expressions.is_empty() {
         let mut expressions = std::mem::take(&mut res.expressions);
         {
             let ctx = PrintCtx {

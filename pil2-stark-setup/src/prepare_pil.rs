@@ -170,10 +170,11 @@ mod tests {
                     continue;
                 }
 
-                let n_bits = air.num_rows.unwrap_or(0) as usize;
-                if n_bits == 0 {
+                let num_rows = air.num_rows.unwrap_or(0) as usize;
+                if num_rows == 0 {
                     continue;
                 }
+                let n_bits = (num_rows as f64).log2() as usize;
 
                 let settings = StarkSettings {
                     blowup_factor: Some(1),
