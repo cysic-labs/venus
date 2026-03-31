@@ -2223,9 +2223,14 @@ pub fn gen_circom(input: &GenCircomInput<'_>) -> Result<String> {
     );
 
     // assign_stark_inputs (componentName="sV", prefix="", for compressor/recursive1)
+    // When hasCompressor=false, addPublics=true (matches JS: addPublics: !options.hasCompressor)
+    let has_compressor = vadcop_info
+        .get("hasCompressor")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     ctx.insert(
         "assign_stark_inputs_code",
-        &render_assign_stark_inputs("sV", "", si_for_fragments, false, false),
+        &render_assign_stark_inputs("sV", "", si_for_fragments, false, !has_compressor),
     );
 
     // assign_stark_inputs for recursive2 (vA/vB/vC with a/b/c prefixes)
