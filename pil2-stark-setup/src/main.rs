@@ -1,8 +1,9 @@
 use clap::Parser;
 use pil2_stark_setup::setup_cmd::{self, SetupOptions};
 
-// Use system allocator - jemalloc retains freed pages too aggressively
-// for the bctree workload pattern (large short-lived allocations).
+// Use system allocator (glibc) with malloc_trim() calls after each
+// AIR to return freed heap pages to the OS. jemalloc does not support
+// malloc_trim and retains freed pages across AIR processing.
 
 #[derive(Parser)]
 #[command(name = "venus-setup", about = "Proving key setup (replaces pil2-proofman-js)")]

@@ -70,13 +70,13 @@ pub fn compute_const_tree(
     let const_bytes = read_file_exact(const_path, expected_const_size)
         .with_context(|| format!("Failed to read const file: {const_path}"))?;
 
-    let const_pols: Vec<Goldilocks> = const_bytes
-        .chunks_exact(8)
-        .map(|chunk| {
-            let val = u64::from_le_bytes(chunk.try_into().unwrap());
-            Goldilocks::new(val)
-        })
-        .collect();
+    // Pre-allocate with extended-domain capacity so extend_pol's
+    // resize() grows in-place without reallocating/copying.
+    let mut const_pols: Vec<Goldilocks> = Vec::with_capacity(n_extended * n_pols);
+    for chunk in const_bytes.chunks_exact(8) {
+        let val = u64::from_le_bytes(chunk.try_into().unwrap());
+        const_pols.push(Goldilocks::new(val));
+    }
     assert_eq!(const_pols.len(), n * n_pols);
 
     // Drop raw bytes before extending - no longer needed

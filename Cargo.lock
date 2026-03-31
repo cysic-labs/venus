@@ -3066,6 +3066,7 @@ dependencies = [
  "clap",
  "fields",
  "indexmap",
+ "libc",
  "pilout",
  "prost 0.13.5",
  "rayon",

@@ -61,6 +61,7 @@ generate-key:
 	cargo run --release --bin pil2c -- "$(ROOT)/pil/zisk.pil" \
 		-I "$(ROOT)/pil,$(ROOT)/pil2-proofman/pil2-components/lib/std/pil,$(ROOT)/state-machines,$(ROOT)/precompiles" \
 		-o "$(ROOT)/pil/zisk.pilout" -u "$(FIXED_DIR)" -O fixed-to-file
+	cargo build --release --bin venus-bctree
 	cargo run --release --bin venus-setup -- \
 		-a "$(ROOT)/pil/zisk.pilout" -b "$(BUILD_DIR)" \
 		-t "$(ROOT)/pil2-proofman/pil2-components/lib/std/pil" \

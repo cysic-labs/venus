@@ -109,9 +109,11 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
     // so they are always written even if a slow AIR causes a timeout.
     write_global_info(&pilout, &pilout_name, &opts.build_dir, &settings_map)?;
 
-    // Process all AIRs in parallel
+    // Process AIRs sequentially to control peak memory.
+    // par_iter with even 1 worker thread allows 2 concurrent closures
+    // (main + worker), which together can hold ~80 GB of pil_info data.
     let results: Vec<Result<()>> = work_items
-        .par_iter()
+        .iter()
         .map(|item| {
             let n_bits = log2_usize(item.num_rows);
 
@@ -224,6 +226,21 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 &verifier_info_str,
             )?;
 
+            // Free all pil_info data before bctree - it's no longer needed.
+            // write_bin_files_native reads from the JSON files on disk.
+            // For Keccakf (2218 columns), this frees ~5 GB.
+            drop(starkinfo_output);
+            drop(starkinfo_json);
+            drop(expr_info_str);
+            drop(verifier_info_str);
+            drop(pil_result);
+            // Force the allocator to return freed pages to the OS.
+            // Without this, glibc's sbrk heap retains freed memory
+            // across 35 AIRs, accumulating to ~90 GB.
+            #[cfg(target_os = "linux")]
+            unsafe { libc::malloc_trim(0); }
+            tracing::info!("[mem-trim] AIR '{}' freed", item.air_name);
+
             // Compute constant polynomial Merkle tree -> verkey.json / verkey.bin
             // Run in a child process to isolate bctree memory: large NTT
             // buffers and Merkle tree nodes are freed when the child exits,
@@ -271,7 +288,13 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 &files_dir.join(format!("{}.verifier.bin", item.air_name)),
             )?;
 
-            tracing::info!("Setup for air '{}' complete", item.air_name);
+            {
+                let rss = std::fs::read_to_string("/proc/self/status").ok()
+                    .and_then(|s| s.lines().find(|l| l.starts_with("VmRSS:"))
+                        .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()))
+                    .unwrap_or(0);
+                tracing::info!("Setup for air '{}' complete (VmRSS: {} MB)", item.air_name, rss / 1024);
+            }
             Ok(())
         })
         .collect();
@@ -1670,22 +1693,16 @@ fn run_bctree_subprocess(
     starkinfo_path: &str,
     verkey_path: &str,
 ) -> Result<[u64; 4]> {
-    // Find the venus-bctree binary next to the current executable
-    let bctree_exec = if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("venus-bctree");
-            if candidate.is_file() {
-                candidate
-            } else {
-                // Fallback: run bctree in-process
-                return crate::bctree::compute_const_tree(const_path, starkinfo_path, verkey_path);
-            }
-        } else {
-            return crate::bctree::compute_const_tree(const_path, starkinfo_path, verkey_path);
-        }
-    } else {
-        return crate::bctree::compute_const_tree(const_path, starkinfo_path, verkey_path);
-    };
+    // Find the venus-bctree binary next to the current executable.
+    // Fails loudly if not found - never silently falls back to in-process.
+    let bctree_exec = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join("venus-bctree")))
+        .filter(|p| p.is_file())
+        .ok_or_else(|| anyhow::anyhow!(
+            "venus-bctree binary not found next to venus-setup. \
+             Build it with: cargo build --release --bin venus-bctree"
+        ))?;
 
     let output = std::process::Command::new(&bctree_exec)
         .args([const_path, starkinfo_path, verkey_path])

@@ -189,8 +189,15 @@ pub fn extend_pol(
     assert_eq!(input.len(), n * n_cols);
     assert!(n_bits_ext >= n_bits);
 
-    // Work in-place on the input buffer to avoid any copy.
-    // Takes ownership of input to reuse its allocation.
+    // Work in-place on the input buffer to avoid any copy or reallocation.
+    // Caller must pre-allocate with capacity >= n_ext * n_cols so that
+    // resize() grows in-place without a second allocation.
+    assert!(
+        input.capacity() >= n_ext * n_cols,
+        "extend_pol: input capacity {} < required {} (n_ext={}, n_cols={}). \
+         Pre-allocate with Vec::with_capacity(n_ext * n_cols).",
+        input.capacity(), n_ext * n_cols, n_ext, n_cols
+    );
 
     // 1. INTT in-place to get coefficients
     let mut buf = input;
@@ -257,7 +264,8 @@ mod tests {
         let n_cols = 1;
 
         let val = Goldilocks::new(42);
-        let input = vec![val; n * n_cols];
+        let mut input = Vec::with_capacity(n_ext * n_cols);
+        input.resize(n * n_cols, val);
         let extended = extend_pol(input, n_bits, n_bits_ext, n_cols);
 
         assert_eq!(extended.len(), n_ext * n_cols);
