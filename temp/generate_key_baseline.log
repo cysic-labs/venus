@@ -1,37 +1,245 @@
 mkdir -p "/data/eric/venus/build" "/data/eric/venus/tmp/fixed" "/data/eric/venus/tmp"
 rm -rf "/data/eric/venus/build/provingKey"
 cargo run --release --bin arith_frops_fixed_gen
-   Compiling csv v1.4.0
-   Compiling mpi-sys v0.2.3
-   Compiling ark-poly v0.5.0
-   Compiling tokio-util v0.7.18
-   Compiling ark-ec v0.5.0
+   Compiling libc v0.2.183
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling cfg-if v1.0.4
+   Compiling shlex v1.3.0
+   Compiling find-msvc-tools v0.1.9
+   Compiling autocfg v1.5.0
+   Compiling once_cell v1.21.4
+   Compiling serde_core v1.0.228
+   Compiling zerocopy v0.8.47
+   Compiling paste v1.0.15
+   Compiling version_check v0.9.5
+   Compiling either v1.15.0
+   Compiling serde v1.0.228
+   Compiling log v0.4.29
+   Compiling memchr v2.8.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling typenum v1.19.0
+   Compiling pin-project-lite v0.2.17
+   Compiling glob v0.3.3
+   Compiling cfg_aliases v0.2.1
+   Compiling regex-syntax v0.8.10
+   Compiling minimal-lexical v0.2.1
+   Compiling shell-words v1.1.1
+   Compiling pkg-config v0.3.32
+   Compiling bindgen v0.69.5
+   Compiling arrayvec v0.7.6
+   Compiling smallvec v1.15.1
+   Compiling rayon-core v1.13.0
+   Compiling lazycell v1.3.0
+   Compiling libloading v0.8.9
+   Compiling bitflags v2.11.0
+   Compiling rustc-hash v1.1.0
+   Compiling lazy_static v1.5.0
+   Compiling itoa v1.0.18
+   Compiling colored v3.1.1
+   Compiling tracing-core v0.1.36
+   Compiling equivalent v1.0.2
+   Compiling winnow v1.0.0
+   Compiling thiserror v2.0.18
+   Compiling itertools v0.12.1
+   Compiling bytemuck v1.25.0
+   Compiling hashbrown v0.16.1
+   Compiling itertools v0.13.0
+   Compiling generic-array v0.14.7
+   Compiling ahash v0.8.12
+   Compiling allocator-api2 v0.2.21
+   Compiling dunce v1.0.5
+   Compiling toml_datetime v1.1.0+spec-1.1.0
+   Compiling build-probe-mpi v0.1.5
+   Compiling foldhash v0.1.5
+   Compiling zmij v1.0.21
+   Compiling fs_extra v1.3.0
+   Compiling clang-sys v1.8.1
+   Compiling num-traits v0.2.19
+   Compiling serde_json v1.0.149
+   Compiling borsh v1.6.1
+   Compiling custom_derive v0.1.7
+   Compiling proofman-starks-lib-c v0.16.1 (/data/eric/venus/pil2-proofman/provers/starks-lib-c)
+   Compiling conv v0.3.3
    Compiling mpi v0.8.1
-   Compiling ark-secp256r1 v0.5.0
-   Compiling ark-bn254 v0.5.0
-   Compiling ark-bls12-381 v0.5.0
-   Compiling ark-secp256k1 v0.5.0
+   Compiling sharded-slab v0.1.7
+   Compiling thread_local v1.1.9
+   Compiling nom v7.1.3
+   Compiling hashbrown v0.15.5
+   Compiling aho-corasick v1.1.4
+   Compiling tracing-log v0.2.0
+   Compiling csv-core v0.1.13
+   Compiling aws-lc-rs v1.16.2
+   Compiling num_threads v0.1.7
+   Compiling nu-ansi-term v0.50.3
+   Compiling indexmap v2.13.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling crossbeam-channel v0.5.15
+   Compiling ryu v1.0.23
+   Compiling getrandom v0.3.4
    Compiling proofman-common v0.16.1 (/data/eric/venus/pil2-proofman/common)
-   Compiling precompiles-helpers v0.16.1 (/data/eric/venus/precompiles/helpers)
-   Compiling ziskos-hints v0.16.1 (/data/eric/venus/ziskos-hints)
+   Compiling crossbeam-queue v0.3.12
+   Compiling syn v2.0.117
+   Compiling env v1.0.1
+   Compiling proofman-verifier v0.16.1 (/data/eric/venus/pil2-proofman/verifier)
+   Compiling untrusted v0.9.0
+   Compiling yansi v1.0.1
+   Compiling parking_lot_core v0.9.12
+   Compiling cpufeatures v0.2.17
+   Compiling crossbeam-deque v0.8.6
+   Compiling crunchy v0.2.4
+   Compiling scopeguard v1.2.0
+   Compiling lib-c v0.16.1 (/data/eric/venus/lib-c)
+   Compiling lib-float v0.16.1 (/data/eric/venus/lib-float)
+   Compiling bytes v1.11.1
+   Compiling anyhow v1.0.102
+   Compiling lock_api v0.4.14
+   Compiling tiny-keccak v2.0.2
+   Compiling libm v0.2.16
+   Compiling rustls v0.23.37
+   Compiling subtle v2.6.1
+   Compiling num-integer v0.1.46
+   Compiling utf8parse v0.2.2
+   Compiling rustc-hash v2.1.1
+   Compiling circuit v0.16.1 (/data/eric/venus/tools/circuit)
+   Compiling openssl-probe v0.2.1
+   Compiling powerfmt v0.2.0
+   Compiling quinn-udp v0.5.14
+   Compiling anstyle-parse v1.0.0
+   Compiling jobserver v0.1.34
+   Compiling getrandom v0.2.17
+   Compiling sysinfo v0.38.4
+   Compiling toml_parser v1.1.0+spec-1.1.0
+   Compiling num_cpus v1.17.0
+   Compiling regex-automata v0.4.14
+   Compiling socket2 v0.6.3
+   Compiling num-bigint v0.4.6
+   Compiling errno v0.3.14
+   Compiling rand_core v0.6.4
+   Compiling rand_core v0.9.5
+   Compiling mio v1.2.0
+   Compiling deranged v0.5.8
+   Compiling cc v1.2.58
+   Compiling signal-hook-registry v1.4.8
+   Compiling zisk-core v0.16.1 (/data/eric/venus/core)
+   Compiling parking_lot v0.12.5
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling tinyvec_macros v0.1.1
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling siphasher v1.0.2
+   Compiling anstyle-query v1.1.5
+   Compiling rayon v1.11.0
+   Compiling time-core v0.1.8
+   Compiling digest v0.10.7
+   Compiling toml_edit v0.25.8+spec-1.1.0
+   Compiling num-conv v0.2.1
+   Compiling anstyle v1.0.14
+   Compiling colorchoice v1.0.5
+   Compiling tinyvec v1.11.0
+   Compiling sha2 v0.10.9
+   Compiling quinn v0.11.9
+   Compiling zisk-definitions v0.16.1 (/data/eric/venus/definitions)
+   Compiling strsim v0.11.1
+   Compiling anstream v1.0.0
+   Compiling heck v0.5.0
+   Compiling slab v0.4.12
+   Compiling cexpr v0.6.0
+   Compiling futures-core v0.3.32
+   Compiling constant_time_eq v0.4.2
+   Compiling riscv v0.16.1 (/data/eric/venus/riscv)
+   Compiling clap_lex v1.1.0
+   Compiling base64 v0.22.1
+   Compiling iana-time-zone v0.1.65
+   Compiling arrayref v0.3.9
+   Compiling lru-slab v0.1.2
+   Compiling proofman v0.16.1 (/data/eric/venus/pil2-proofman/proofman)
+   Compiling futures-sink v0.3.32
+   Compiling elf v0.7.4
+   Compiling clap_builder v4.6.0
+   Compiling zisk-common v0.16.1 (/data/eric/venus/common)
+   Compiling static_assertions v1.1.0
+   Compiling proc-macro-crate v3.5.0
+   Compiling cmake v0.1.58
+   Compiling pem v3.0.6
+   Compiling csv v1.4.0
+   Compiling time v0.3.47
+   Compiling libffi-sys v4.1.0
+   Compiling regex v1.12.3
+   Compiling aws-lc-sys v0.39.1
+   Compiling ring v0.17.14
+   Compiling blake3 v1.8.3
+   Compiling ppv-lite86 v0.2.21
+   Compiling yasna v0.5.2
+   Compiling rand_chacha v0.3.1
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.8.5
+   Compiling rand v0.9.2
+   Compiling zeroize_derive v1.4.3
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling enum-ordinalize-derive v4.3.2
+   Compiling ark-serialize-derive v0.5.0
+   Compiling ark-ff-macros v0.5.0
+   Compiling thiserror-impl v2.0.18
+   Compiling ark-ff-asm v0.5.0
+   Compiling borsh-derive v1.6.1
+   Compiling proofman-macros v0.16.1 (/data/eric/venus/pil2-proofman/macros)
+   Compiling tokio-macros v2.6.1
+   Compiling clap_derive v4.6.0
+   Compiling ark-std v0.5.0
+   Compiling zeroize v1.8.2
+   Compiling enum-ordinalize v4.3.2
+   Compiling ark-serialize v0.5.0
+   Compiling fastbloom v0.14.1
+   Compiling educe v0.6.0
+   Compiling rustls-pki-types v1.14.0
+   Compiling tokio v1.50.0
+   Compiling tracing v0.1.44
+   Compiling matchers v0.2.0
+   Compiling rustls-native-certs v0.8.3
+   Compiling clap v4.6.0
+   Compiling ark-ff v0.5.0
+   Compiling bincode v1.3.3
+   Compiling fields v0.16.1 (/data/eric/venus/pil2-proofman/fields)
+   Compiling tracing-serde v0.2.0
+   Compiling chrono v0.4.44
+   Compiling serde_arrays v0.2.0
+   Compiling tracing-subscriber v0.3.23
+   Compiling mpi-sys v0.2.3
+   Compiling proofman-util v0.16.1 (/data/eric/venus/pil2-proofman/util)
+   Compiling curves v0.16.1 (/data/eric/venus/pil2-proofman/curves)
+   Compiling rcgen v0.14.7
+   Compiling libffi v5.1.0
+   Compiling tokio-util v0.7.18
    Compiling witness v0.16.1 (/data/eric/venus/pil2-proofman/witness)
    Compiling proofman-hints v0.16.1 (/data/eric/venus/pil2-proofman/hints)
    Compiling zisk-pil v0.16.1 (/data/eric/venus/pil)
-   Compiling zisk-core v0.16.1 (/data/eric/venus/core)
    Compiling pil-std-lib v0.16.1 (/data/eric/venus/pil2-proofman/pil2-components/lib/std/rs)
-   Compiling proofman v0.16.1 (/data/eric/venus/pil2-proofman/proofman)
+   Compiling zisk-verifier v0.16.1 (/data/eric/venus/verifier)
+   Compiling ark-poly v0.5.0
+   Compiling ark-ec v0.5.0
+   Compiling ark-secp256k1 v0.5.0
+   Compiling ark-bn254 v0.5.0
+   Compiling ark-secp256r1 v0.5.0
+   Compiling ark-bls12-381 v0.5.0
+   Compiling precompiles-helpers v0.16.1 (/data/eric/venus/precompiles/helpers)
+   Compiling ziskos-hints v0.16.1 (/data/eric/venus/ziskos-hints)
    Compiling sm-frequent-ops v0.16.1 (/data/eric/venus/state-machines/frequent-ops)
-   Compiling zisk-common v0.16.1 (/data/eric/venus/common)
+   Compiling rustls-webpki v0.103.10
+   Compiling rustls-platform-verifier v0.6.2
+   Compiling quinn-proto v0.11.14
    Compiling sm-binary v0.16.1 (/data/eric/venus/state-machines/binary)
    Compiling sm-arith v0.16.1 (/data/eric/venus/state-machines/arith)
-    Finished `release` profile [optimized] target(s) in 8.43s
+    Finished `release` profile [optimized] target(s) in 20.22s
      Running `target/release/arith_frops_fixed_gen`
 Generating columns for 2085944 rows
 Columns generated successfully op:2085944 a0:2085944 a1:2085944 b0:2085944 b1:2085944 c0:2085944 c1:2085944 flag:2085944
 OP, A, B, C and FLAG columns written to state-machines/arith/src/arith_frops_fixed.bin
 cargo run --release --bin binary_basic_frops_fixed_gen
    Compiling sm-binary v0.16.1 (/data/eric/venus/state-machines/binary)
-    Finished `release` profile [optimized] target(s) in 0.25s
+    Finished `release` profile [optimized] target(s) in 0.26s
      Running `target/release/binary_basic_frops_fixed_gen`
 Generating columns for 13084068 rows
 Columns generated successfully op:13084068 a0:13084068 a1:13084068 b0:13084068 b1:13084068 c0:13084068 c1:13084068 flag:13084068
@@ -46,6 +254,30 @@ OP, A, B, C and FLAG columns written to state-machines/binary/src/binary_extensi
 cargo run --release --bin pil2c -- "/data/eric/venus/pil/zisk.pil" \
 	-I "/data/eric/venus/pil,/data/eric/venus/pil2-proofman/pil2-components/lib/std/pil,/data/eric/venus/state-machines,/data/eric/venus/precompiles" \
 	-o "/data/eric/venus/pil/zisk.pilout" -u "/data/eric/venus/tmp/fixed" -O fixed-to-file
+   Compiling getrandom v0.4.2
+   Compiling rustix v1.1.4
+   Compiling bytes v1.11.1
+   Compiling prettyplease v0.2.37
+   Compiling linux-raw-sys v0.12.1
+   Compiling anyhow v1.0.102
+   Compiling itertools v0.14.0
+   Compiling fastrand v2.3.0
+   Compiling ucd-trie v0.1.7
+   Compiling fixedbitset v0.5.7
+   Compiling multimap v0.10.1
+   Compiling log v0.4.29
+   Compiling regex v1.12.3
+   Compiling pest v2.8.6
+   Compiling petgraph v0.7.1
+   Compiling pest_meta v2.8.6
+   Compiling prost-derive v0.13.5
+   Compiling tempfile v3.27.0
+   Compiling pest_generator v2.8.6
+   Compiling prost v0.13.5
+   Compiling pest_derive v2.8.6
+   Compiling prost-types v0.13.5
+   Compiling prost-build v0.13.5
+   Compiling pil2-compiler-rust v0.1.0 (/data/eric/venus/pil2-compiler-rust)
 warning: unused import: `RuntimeUnaryOp`
    --> pil2-compiler-rust/src/processor/builtins.rs:349:65
     |
@@ -186,8 +418,7 @@ help: consistently use `'a`
     |                                 ++          ++
 
 warning: `pil2-compiler-rust` (lib) generated 15 warnings (run `cargo fix --lib -p pil2-compiler-rust` to apply 8 suggestions)
-   Compiling pil2-compiler-rust v0.1.0 (/data/eric/venus/pil2-compiler-rust)
-    Finished `release` profile [optimized] target(s) in 0.34s
+    Finished `release` profile [optimized] target(s) in 6.75s
      Running `target/release/pil2c /data/eric/venus/pil/zisk.pil -I /data/eric/venus/pil,/data/eric/venus/pil2-proofman/pil2-components/lib/std/pil,/data/eric/venus/state-machines,/data/eric/venus/precompiles -o /data/eric/venus/pil/zisk.pilout -u /data/eric/venus/tmp/fixed -O fixed-to-file`
 pil2c: compiling /data/eric/venus/pil/zisk.pil
   > Parsing /data/eric/venus/pil/zisk.pil
@@ -492,11 +723,11 @@ AIR instance BinaryAdd in airgroup Zisk
   > Fixed cols written to /data/eric/venus/tmp/fixed/BinaryAdd.fixed: 1 cols, 4194304 values
 
 AIR virtual instance BinaryTable in airgroup Zisk
-  > loop progress: 1048576 iterations (14.1s)
-  > loop progress: 2097152 iterations (28.9s)
-  > loop progress: 3145728 iterations (43.7s)
+  > loop progress: 1048576 iterations (14.3s)
+  > loop progress: 2097152 iterations (29.1s)
+  > loop progress: 3145728 iterations (43.8s)
   > loop progress: 4194304 iterations (58.4s)
-  > loop progress: 5242880 iterations (72.8s)
+  > loop progress: 5242880 iterations (72.6s)
   > Witness cols: 1
   > Fixed cols: 7
   > Constraints: 0
@@ -510,8 +741,8 @@ AIR instance BinaryExtension in airgroup Zisk
 
 AIR virtual instance BinaryExtensionTable in airgroup Zisk
   > loop progress: 1048576 iterations (10.0s)
-  > loop progress: 2097152 iterations (20.7s)
-  > loop progress: 3145728 iterations (31.5s)
+  > loop progress: 2097152 iterations (20.4s)
+  > loop progress: 3145728 iterations (30.8s)
   > Witness cols: 1
   > Fixed cols: 7
   > Constraints: 0
@@ -563,8 +794,8 @@ AIR instance Keccakf in airgroup Zisk
   > Fixed cols written to /data/eric/venus/tmp/fixed/Keccakf.fixed: 2 cols, 262144 values
 
 AIR virtual instance KeccakfTable in airgroup Zisk
-  > loop progress: 1048576 iterations (8.3s)
-  > loop progress: 2097152 iterations (16.5s)
+  > loop progress: 1048576 iterations (8.2s)
+  > loop progress: 2097152 iterations (16.4s)
   > Witness cols: 1
   > Fixed cols: 4
   > Constraints: 0
@@ -640,7 +871,7 @@ AIR instance VirtualTable1 in airgroup Zisk
   >  - [0, 255]: 10 times
   >  - [-4194303, 4194304]: 12 times
   >  - [0, 7]: 2 times
-  > Total compilation: 208197.41ms
+  > Total compilation: 205890.63ms
   > Compilation complete: /data/eric/venus/pil/zisk.pilout
   > Proto: 1 air groups, 29846 symbols, 6424 hints, 6018 global expressions, 1 global constraints, 224006 air expressions, 7839 air constraints
   > Proto encoded size: 5984459 bytes
@@ -649,6 +880,26 @@ cargo run --release --bin venus-setup -- \
 	-a "/data/eric/venus/pil/zisk.pilout" -b "/data/eric/venus/build" \
 	-t "/data/eric/venus/pil2-proofman/pil2-components/lib/std/pil" \
 	-u "/data/eric/venus/tmp/fixed" -r -s "/data/eric/venus/state-machines/starkstructs.json"
+   Compiling siphasher v1.0.2
+   Compiling rand_core v0.6.4
+   Compiling bstr v1.12.1
+   Compiling same-file v1.0.6
+   Compiling phf_shared v0.11.3
+   Compiling gmp-mpfr-sys v1.7.0
+   Compiling parse-zoneinfo v0.3.1
+   Compiling bitflags v2.11.0
+   Compiling deunicode v1.6.2
+   Compiling humansize v2.1.3
+   Compiling rustix v1.1.4
+   Compiling getrandom v0.4.2
+   Compiling linux-raw-sys v0.12.1
+   Compiling rug v1.29.0
+   Compiling percent-encoding v2.3.2
+   Compiling unicode-segmentation v1.13.2
+   Compiling fastrand v2.3.0
+   Compiling az v1.3.0
+   Compiling byteorder v1.5.0
+   Compiling pilout v0.16.1 (/data/eric/venus/pil2-proofman/pilout)
 warning: unused import: `RuntimeUnaryOp`
    --> pil2-compiler-rust/src/processor/builtins.rs:349:65
     |
@@ -789,6 +1040,21 @@ help: consistently use `'a`
     |                                 ++          ++
 
 warning: `pil2-compiler-rust` (lib) generated 15 warnings (run `cargo fix --lib -p pil2-compiler-rust` to apply 8 suggestions)
+   Compiling rand v0.8.5
+   Compiling walkdir v2.5.0
+   Compiling phf v0.11.3
+   Compiling slug v0.1.6
+   Compiling globset v0.4.18
+   Compiling phf_generator v0.11.3
+   Compiling phf_codegen v0.11.3
+   Compiling chrono-tz-build v0.3.0
+   Compiling chrono-tz v0.9.0
+   Compiling ignore v0.4.25
+   Compiling globwalk v0.9.1
+   Compiling tempfile v3.27.0
+   Compiling tera v1.20.1
+   Compiling stark-recurser-rust v0.1.0 (/data/eric/venus/stark-recurser-rust)
+   Compiling pil2-stark-setup v0.16.1 (/data/eric/venus/pil2-stark-setup)
 warning: unused imports: `PathBuf` and `Path`
  --> pil2-stark-setup/src/compressor_check.rs:8:17
   |
@@ -812,21 +1078,45 @@ warning: unused variable: `i`
    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
 
 warning: `pil2-stark-setup` (lib) generated 3 warnings (run `cargo fix --lib -p pil2-stark-setup` to apply 3 suggestions)
-    Finished `release` profile [optimized] target(s) in 0.13s
+    Finished `release` profile [optimized] target(s) in 6.68s
      Running `target/release/venus-setup -a /data/eric/venus/pil/zisk.pilout -b /data/eric/venus/build -t /data/eric/venus/pil2-proofman/pil2-components/lib/std/pil -u /data/eric/venus/tmp/fixed -r -s /data/eric/venus/state-machines/starkstructs.json`
 > Writing the global constraints file finished
 ---------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 26 -> Columns in the basefield: 26
-Columns stage 2: 5 (0 intermediate polynomials) -> Columns in the basefield: 15 (0 from intermediate polynomials)
-Columns stage Q: 2 -> Columns in the basefield: 6
-Total Columns: 33 -> Columns in the basefield: 47
-Total Constraints: 69
+Columns stage 1: 15 -> Columns in the basefield: 15
+Columns stage 2: 6 (1 intermediate polynomials) -> Columns in the basefield: 18 (3 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 22 -> Columns in the basefield: 36
+Total Constraints: 19
 Number of opening points: 2
-Prover memory: 2.53 GB
+Prover memory: 2.19 GB
 ------------------------------------------------------------
-SUMMARY | Dma64AlignedMem | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 26 | Stage2: 15 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 47 | nConstraints: 69 | nOpeningPoints: 2| Prover memory: 2.53 GB
+SUMMARY | DmaInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 15 | Stage2: 18 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 36 | nConstraints: 19 | nOpeningPoints: 2| Prover memory: 2.19 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 32 -> Columns in the basefield: 32
+Columns stage 2: 6 (1 intermediate polynomials) -> Columns in the basefield: 18 (3 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 39 -> Columns in the basefield: 53
+Total Constraints: 49
+Number of opening points: 2
+Prover memory: 2.72 GB
+------------------------------------------------------------
+SUMMARY | Dma | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 32 | Stage2: 18 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 53 | nConstraints: 49 | nOpeningPoints: 2| Prover memory: 2.72 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 32 -> Columns in the basefield: 32
+Columns stage 2: 5 (0 intermediate polynomials) -> Columns in the basefield: 15 (0 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 38 -> Columns in the basefield: 50
+Total Constraints: 62
+Number of opening points: 2
+Prover memory: 2.63 GB
+------------------------------------------------------------
+SUMMARY | DmaPrePostInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 32 | Stage2: 15 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 50 | nConstraints: 62 | nOpeningPoints: 2| Prover memory: 2.63 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
@@ -854,15 +1144,15 @@ SUMMARY | Dma64AlignedMemSet | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 32 -> Columns in the basefield: 32
-Columns stage 2: 6 (1 intermediate polynomials) -> Columns in the basefield: 18 (3 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 39 -> Columns in the basefield: 53
-Total Constraints: 49
+Columns stage 1: 24 -> Columns in the basefield: 24
+Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
+Columns stage Q: 2 -> Columns in the basefield: 6
+Total Columns: 30 -> Columns in the basefield: 42
+Total Constraints: 69
 Number of opening points: 2
-Prover memory: 2.72 GB
+Prover memory: 2.38 GB
 ------------------------------------------------------------
-SUMMARY | Dma | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 32 | Stage2: 18 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 53 | nConstraints: 49 | nOpeningPoints: 2| Prover memory: 2.72 GB
+SUMMARY | DmaUnaligned | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 24 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 42 | nConstraints: 69 | nOpeningPoints: 2| Prover memory: 2.38 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
@@ -878,39 +1168,15 @@ SUMMARY | DmaPrePostMemCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 15 -> Columns in the basefield: 15
-Columns stage 2: 6 (1 intermediate polynomials) -> Columns in the basefield: 18 (3 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 22 -> Columns in the basefield: 36
-Total Constraints: 19
-Number of opening points: 2
-Prover memory: 2.19 GB
-------------------------------------------------------------
-SUMMARY | DmaInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 15 | Stage2: 18 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 36 | nConstraints: 19 | nOpeningPoints: 2| Prover memory: 2.19 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 24 -> Columns in the basefield: 24
-Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
+Columns stage 1: 26 -> Columns in the basefield: 26
+Columns stage 2: 5 (0 intermediate polynomials) -> Columns in the basefield: 15 (0 from intermediate polynomials)
 Columns stage Q: 2 -> Columns in the basefield: 6
-Total Columns: 30 -> Columns in the basefield: 42
+Total Columns: 33 -> Columns in the basefield: 47
 Total Constraints: 69
 Number of opening points: 2
-Prover memory: 2.38 GB
+Prover memory: 2.53 GB
 ------------------------------------------------------------
-SUMMARY | DmaUnaligned | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 24 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 42 | nConstraints: 69 | nOpeningPoints: 2| Prover memory: 2.38 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 25 -> Columns in the basefield: 25
-Columns stage 2: 11 (2 intermediate polynomials) -> Columns in the basefield: 29 (2 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 37 -> Columns in the basefield: 57
-Total Constraints: 41
-Number of opening points: 2
-Prover memory: 2.84 GB
-------------------------------------------------------------
-SUMMARY | Dma64AlignedInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 25 | Stage2: 29 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 57 | nConstraints: 41 | nOpeningPoints: 2| Prover memory: 2.84 GB
+SUMMARY | Dma64AlignedMem | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 26 | Stage2: 15 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 47 | nConstraints: 69 | nOpeningPoints: 2| Prover memory: 2.53 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
@@ -926,15 +1192,39 @@ SUMMARY | DmaPrePost | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fi
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 31 -> Columns in the basefield: 31
+Columns stage 1: 35 -> Columns in the basefield: 35
+Columns stage 2: 13 (2 intermediate polynomials) -> Columns in the basefield: 35 (2 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 49 -> Columns in the basefield: 73
+Total Constraints: 72
+Number of opening points: 2
+Prover memory: 3.34 GB
+------------------------------------------------------------
+SUMMARY | Dma64Aligned | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 35 | Stage2: 35 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 73 | nConstraints: 72 | nOpeningPoints: 2| Prover memory: 3.34 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 25 -> Columns in the basefield: 25
 Columns stage 2: 11 (2 intermediate polynomials) -> Columns in the basefield: 29 (2 from intermediate polynomials)
 Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 43 -> Columns in the basefield: 63
-Total Constraints: 64
+Total Columns: 37 -> Columns in the basefield: 57
+Total Constraints: 41
 Number of opening points: 2
-Prover memory: 3.03 GB
+Prover memory: 2.84 GB
 ------------------------------------------------------------
-SUMMARY | Dma64AlignedMemCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 31 | Stage2: 29 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 63 | nConstraints: 64 | nOpeningPoints: 2| Prover memory: 3.03 GB
+SUMMARY | Dma64AlignedInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 25 | Stage2: 29 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 57 | nConstraints: 41 | nOpeningPoints: 2| Prover memory: 2.84 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 1 -> Columns in the basefield: 1
+Columns stage 2: 1 (0 intermediate polynomials) -> Columns in the basefield: 3 (0 from intermediate polynomials)
+Columns stage Q: 0 -> Columns in the basefield: 0
+Total Columns: 2 -> Columns in the basefield: 4
+Total Constraints: 176
+Number of opening points: 2
+Prover memory: 3.74 GB
+------------------------------------------------------------
+SUMMARY | Rom | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 1 | Fixed: 1 | Stage1: 1 | Stage2: 3 | StageQ: 0 | ImPols: 0 => 0 = 0 + 0 | Total: 4 | nConstraints: 176 | nOpeningPoints: 2| Prover memory: 3.74 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 2 -> Columns in the basefield: 2
@@ -950,30 +1240,6 @@ SUMMARY | Poseidon2 | nBits: 17 | blowUpFactor: 2 | maxConstraintDegree: 3 | Fix
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 32 -> Columns in the basefield: 32
-Columns stage 2: 5 (0 intermediate polynomials) -> Columns in the basefield: 15 (0 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 38 -> Columns in the basefield: 50
-Total Constraints: 62
-Number of opening points: 2
-Prover memory: 2.63 GB
-------------------------------------------------------------
-SUMMARY | DmaPrePostInputCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 32 | Stage2: 15 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 50 | nConstraints: 62 | nOpeningPoints: 2| Prover memory: 2.63 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 1 -> Columns in the basefield: 1
-Columns stage 2: 1 (0 intermediate polynomials) -> Columns in the basefield: 3 (0 from intermediate polynomials)
-Columns stage Q: 0 -> Columns in the basefield: 0
-Total Columns: 2 -> Columns in the basefield: 4
-Total Constraints: 176
-Number of opening points: 2
-Prover memory: 3.74 GB
-------------------------------------------------------------
-SUMMARY | Rom | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 1 | Fixed: 1 | Stage1: 1 | Stage2: 3 | StageQ: 0 | ImPols: 0 => 0 = 0 + 0 | Total: 4 | nConstraints: 176 | nOpeningPoints: 2| Prover memory: 3.74 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
 Columns stage 1: 10 -> Columns in the basefield: 10
 Columns stage 2: 3 (0 intermediate polynomials) -> Columns in the basefield: 9 (0 from intermediate polynomials)
 Columns stage Q: 1 -> Columns in the basefield: 3
@@ -983,66 +1249,6 @@ Number of opening points: 2
 Prover memory: 3.50 GB
 ------------------------------------------------------------
 SUMMARY | BinaryAdd | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 10 | Stage2: 9 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 22 | nConstraints: 216 | nOpeningPoints: 2| Prover memory: 3.50 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 10 -> Columns in the basefield: 10
-Columns stage 2: 3 (0 intermediate polynomials) -> Columns in the basefield: 9 (0 from intermediate polynomials)
-Columns stage Q: 2 -> Columns in the basefield: 6
-Total Columns: 15 -> Columns in the basefield: 25
-Total Constraints: 211
-Number of opening points: 2
-Prover memory: 3.69 GB
-------------------------------------------------------------
-SUMMARY | MemAlignReadByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 10 | Stage2: 9 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 25 | nConstraints: 211 | nOpeningPoints: 2| Prover memory: 3.69 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 2 -> Columns in the basefield: 2
-Columns stage 1: 29 -> Columns in the basefield: 29
-Columns stage 2: 6 (0 intermediate polynomials) -> Columns in the basefield: 18 (0 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 36 -> Columns in the basefield: 50
-Total Constraints: 239
-Number of opening points: 2
-Prover memory: 2.67 GB
-------------------------------------------------------------
-SUMMARY | MemAlign | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 29 | Stage2: 18 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 50 | nConstraints: 239 | nOpeningPoints: 2| Prover memory: 2.67 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 2 -> Columns in the basefield: 2
-Columns stage 1: 6 -> Columns in the basefield: 6
-Columns stage 2: 3 (1 intermediate polynomials) -> Columns in the basefield: 9 (3 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 10 -> Columns in the basefield: 18
-Total Constraints: 205
-Number of opening points: 2
-Prover memory: 1.67 GB
-------------------------------------------------------------
-SUMMARY | RomData | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 6 | Stage2: 9 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 18 | nConstraints: 205 | nOpeningPoints: 2| Prover memory: 1.67 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 47 -> Columns in the basefield: 47
-Columns stage 2: 17 (0 intermediate polynomials) -> Columns in the basefield: 51 (0 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 65 -> Columns in the basefield: 101
-Total Constraints: 245
-Number of opening points: 2
-Prover memory: 2.11 GB
-------------------------------------------------------------
-SUMMARY | Add256 | nBits: 20 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 47 | Stage2: 51 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 101 | nConstraints: 245 | nOpeningPoints: 2| Prover memory: 2.11 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 2 -> Columns in the basefield: 2
-Columns stage 1: 13 -> Columns in the basefield: 13
-Columns stage 2: 2 (0 intermediate polynomials) -> Columns in the basefield: 6 (0 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 16 -> Columns in the basefield: 22
-Total Constraints: 206
-Number of opening points: 2
-Prover memory: 3.60 GB
-------------------------------------------------------------
-SUMMARY | Mem | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 13 | Stage2: 6 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 22 | nConstraints: 206 | nOpeningPoints: 2| Prover memory: 3.60 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 2 -> Columns in the basefield: 2
@@ -1057,6 +1263,78 @@ Prover memory: 1.67 GB
 SUMMARY | InputData | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 9 | Stage2: 6 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 18 | nConstraints: 217 | nOpeningPoints: 2| Prover memory: 1.67 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
+Columns fixed: 2 -> Columns in the basefield: 2
+Columns stage 1: 6 -> Columns in the basefield: 6
+Columns stage 2: 3 (1 intermediate polynomials) -> Columns in the basefield: 9 (3 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 10 -> Columns in the basefield: 18
+Total Constraints: 205
+Number of opening points: 2
+Prover memory: 1.67 GB
+------------------------------------------------------------
+SUMMARY | RomData | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 6 | Stage2: 9 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 18 | nConstraints: 205 | nOpeningPoints: 2| Prover memory: 1.67 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 2 -> Columns in the basefield: 2
+Columns stage 1: 29 -> Columns in the basefield: 29
+Columns stage 2: 6 (0 intermediate polynomials) -> Columns in the basefield: 18 (0 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 36 -> Columns in the basefield: 50
+Total Constraints: 239
+Number of opening points: 2
+Prover memory: 2.67 GB
+------------------------------------------------------------
+SUMMARY | MemAlign | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 29 | Stage2: 18 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 50 | nConstraints: 239 | nOpeningPoints: 2| Prover memory: 2.67 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 10 -> Columns in the basefield: 10
+Columns stage 2: 3 (0 intermediate polynomials) -> Columns in the basefield: 9 (0 from intermediate polynomials)
+Columns stage Q: 2 -> Columns in the basefield: 6
+Total Columns: 15 -> Columns in the basefield: 25
+Total Constraints: 211
+Number of opening points: 2
+Prover memory: 3.69 GB
+------------------------------------------------------------
+SUMMARY | MemAlignReadByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 10 | Stage2: 9 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 25 | nConstraints: 211 | nOpeningPoints: 2| Prover memory: 3.69 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 47 -> Columns in the basefield: 47
+Columns stage 2: 17 (0 intermediate polynomials) -> Columns in the basefield: 51 (0 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 65 -> Columns in the basefield: 101
+Total Constraints: 245
+Number of opening points: 2
+Prover memory: 2.11 GB
+------------------------------------------------------------
+SUMMARY | Add256 | nBits: 20 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 47 | Stage2: 51 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 101 | nConstraints: 245 | nOpeningPoints: 2| Prover memory: 2.11 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 1 -> Columns in the basefield: 1
+Columns stage 1: 16 -> Columns in the basefield: 16
+Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
+Columns stage Q: 2 -> Columns in the basefield: 6
+Total Columns: 22 -> Columns in the basefield: 34
+Total Constraints: 215
+Number of opening points: 2
+Prover memory: 4.25 GB
+------------------------------------------------------------
+SUMMARY | MemAlignByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 16 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 34 | nConstraints: 215 | nOpeningPoints: 2| Prover memory: 4.25 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
+Columns fixed: 2 -> Columns in the basefield: 2
+Columns stage 1: 13 -> Columns in the basefield: 13
+Columns stage 2: 2 (0 intermediate polynomials) -> Columns in the basefield: 6 (0 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 16 -> Columns in the basefield: 22
+Total Constraints: 206
+Number of opening points: 2
+Prover memory: 3.60 GB
+------------------------------------------------------------
+SUMMARY | Mem | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 2 | Stage1: 13 | Stage2: 6 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 22 | nConstraints: 206 | nOpeningPoints: 2| Prover memory: 3.60 GB
+------------------------------------------------------------
+------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
 Columns stage 1: 29 -> Columns in the basefield: 29
 Columns stage 2: 7 (1 intermediate polynomials) -> Columns in the basefield: 21 (3 from intermediate polynomials)
@@ -1067,18 +1345,6 @@ Number of opening points: 2
 Prover memory: 5.44 GB
 ------------------------------------------------------------
 SUMMARY | BinaryExtension | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 29 | Stage2: 21 | StageQ: 3 | ImPols: 1 => 3 = 0 + 3 | Total: 53 | nConstraints: 217 | nOpeningPoints: 2| Prover memory: 5.44 GB
-------------------------------------------------------------
-------------------------- AIR INFO -------------------------
-Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 14 -> Columns in the basefield: 14
-Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
-Columns stage Q: 2 -> Columns in the basefield: 6
-Total Columns: 20 -> Columns in the basefield: 32
-Total Constraints: 218
-Number of opening points: 2
-Prover memory: 4.13 GB
-------------------------------------------------------------
-SUMMARY | MemAlignWriteByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 14 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 32 | nConstraints: 218 | nOpeningPoints: 2| Prover memory: 4.13 GB
 ------------------------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
@@ -1191,12 +1457,29 @@ Prover memory: 1.74 GB
 SUMMARY | ArithEq384 | nBits: 20 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 2 | Stage1: 33 | Stage2: 37 | StageQ: 6 | ImPols: 1 => 1 = 1 + 0 | Total: 76 | nConstraints: 284 | nOpeningPoints: 24| Prover memory: 1.74 GB
 ------------------------------------------------------------
 > Writing the chelpers file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
 > Writing the chelpers file
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
@@ -1204,27 +1487,33 @@ SUMMARY | ArithEq384 | nBits: 20 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fi
 ---------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 35 -> Columns in the basefield: 35
-Columns stage 2: 13 (2 intermediate polynomials) -> Columns in the basefield: 35 (2 from intermediate polynomials)
-Columns stage Q: 1 -> Columns in the basefield: 3
-Total Columns: 49 -> Columns in the basefield: 73
-Total Constraints: 72
+Columns stage 1: 14 -> Columns in the basefield: 14
+Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
+Columns stage Q: 2 -> Columns in the basefield: 6
+Total Columns: 20 -> Columns in the basefield: 32
+Total Constraints: 218
 Number of opening points: 2
-Prover memory: 3.34 GB
+Prover memory: 4.13 GB
 ------------------------------------------------------------
-SUMMARY | Dma64Aligned | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 35 | Stage2: 35 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 73 | nConstraints: 72 | nOpeningPoints: 2| Prover memory: 3.34 GB
+SUMMARY | MemAlignWriteByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 14 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 32 | nConstraints: 218 | nOpeningPoints: 2| Prover memory: 4.13 GB
 ------------------------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
 > Writing the chelpers file
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
 ------------------------- AIR INFO -------------------------
 Columns fixed: 73 -> Columns in the basefield: 73
 Columns stage 1: 8 -> Columns in the basefield: 8
@@ -1237,36 +1526,6 @@ Prover memory: 4.11 GB
 ------------------------------------------------------------
 SUMMARY | VirtualTable1 | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 73 | Stage1: 8 | Stage2: 15 | StageQ: 3 | ImPols: 0 => 0 = 0 + 0 | Total: 26 | nConstraints: 248 | nOpeningPoints: 2| Prover memory: 4.11 GB
 ------------------------------------------------------------
-> Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file
-> Writing the chelpers file
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
@@ -1275,30 +1534,35 @@ SUMMARY | VirtualTable1 | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 |
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
 ------------------------- AIR INFO -------------------------
 Columns fixed: 1 -> Columns in the basefield: 1
-Columns stage 1: 16 -> Columns in the basefield: 16
-Columns stage 2: 4 (0 intermediate polynomials) -> Columns in the basefield: 12 (0 from intermediate polynomials)
-Columns stage Q: 2 -> Columns in the basefield: 6
-Total Columns: 22 -> Columns in the basefield: 34
-Total Constraints: 215
+Columns stage 1: 31 -> Columns in the basefield: 31
+Columns stage 2: 11 (2 intermediate polynomials) -> Columns in the basefield: 29 (2 from intermediate polynomials)
+Columns stage Q: 1 -> Columns in the basefield: 3
+Total Columns: 43 -> Columns in the basefield: 63
+Total Constraints: 64
 Number of opening points: 2
-Prover memory: 4.25 GB
+Prover memory: 3.03 GB
 ------------------------------------------------------------
-SUMMARY | MemAlignByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 1 | Stage1: 16 | Stage2: 12 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 34 | nConstraints: 215 | nOpeningPoints: 2| Prover memory: 4.25 GB
+SUMMARY | Dma64AlignedMemCpy | nBits: 21 | blowUpFactor: 1 | maxConstraintDegree: 2 | Fixed: 1 | Stage1: 31 | Stage2: 29 | StageQ: 3 | ImPols: 2 => 2 = 2 + 0 | Total: 63 | nConstraints: 64 | nOpeningPoints: 2| Prover memory: 3.03 GB
 ------------------------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
@@ -1316,9 +1580,6 @@ SUMMARY | MemAlignByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | 
 ---------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
@@ -1329,28 +1590,9 @@ SUMMARY | MemAlignByte | nBits: 22 | blowUpFactor: 1 | maxConstraintDegree: 3 | 
 ---------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
-> Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing the chelpers file
 ------------------------- AIR INFO -------------------------
 Columns fixed: 2 -> Columns in the basefield: 2
 Columns stage 1: 2137 -> Columns in the basefield: 2137
@@ -1364,6 +1606,14 @@ Prover memory: 6.39 GB
 SUMMARY | Keccakf | nBits: 17 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed: 2 | Stage1: 2137 | Stage2: 78 | StageQ: 6 | ImPols: 0 => 0 = 0 + 0 | Total: 2221 | nConstraints: 1840 | nOpeningPoints: 5| Prover memory: 6.39 GB
 ------------------------------------------------------------
 > Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
@@ -1379,6 +1629,11 @@ SUMMARY | Keccakf | nBits: 17 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
@@ -1389,9 +1644,25 @@ SUMMARY | Keccakf | nBits: 17 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file finished
+---------------------------------------------
 > Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file
+> Writing the chelpers file finished
+---------------------------------------------
+> Writing chelpers verifier file
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing the chelpers file finished
@@ -1430,11 +1701,6 @@ SUMMARY | Keccakf | nBits: 17 | blowUpFactor: 1 | maxConstraintDegree: 3 | Fixed
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing the chelpers file
-> Writing the chelpers file finished
----------------------------------------------
-> Writing chelpers verifier file
-> Writing the chelpers file finished
----------------------------------------------
 > Writing the chelpers file finished
 ---------------------------------------------
 > Writing chelpers verifier file
@@ -1454,23 +1720,23 @@ Caused by:
 make: *** [Makefile:62: generate-key] Error 1
 Command exited with non-zero status 2
 	Command being timed: "make generate-key"
-	User time (seconds): 985.02
-	System time (seconds): 184.53
-	Percent of CPU this job got: 430%
-	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:31.36
+	User time (seconds): 1221.24
+	System time (seconds): 178.41
+	Percent of CPU this job got: 474%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:54.97
 	Average shared text size (kbytes): 0
 	Average unshared data size (kbytes): 0
 	Average stack size (kbytes): 0
 	Average total size (kbytes): 0
-	Maximum resident set size (kbytes): 35173796
+	Maximum resident set size (kbytes): 35175244
 	Average resident set size (kbytes): 0
-	Major (requiring I/O) page faults: 2426
-	Minor (reclaiming a frame) page faults: 56578369
-	Voluntary context switches: 324594
-	Involuntary context switches: 54422
+	Major (requiring I/O) page faults: 5311
+	Minor (reclaiming a frame) page faults: 55228557
+	Voluntary context switches: 387931
+	Involuntary context switches: 78443
 	Swaps: 0
-	File system inputs: 630256
-	File system outputs: 15984000
+	File system inputs: 1238256
+	File system outputs: 18754424
 	Socket messages sent: 0
 	Socket messages received: 0
 	Signals delivered: 0
