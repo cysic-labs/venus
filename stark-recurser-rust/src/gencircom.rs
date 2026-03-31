@@ -2230,7 +2230,7 @@ pub fn gen_circom(input: &GenCircomInput<'_>) -> Result<String> {
         .unwrap_or(false);
     ctx.insert(
         "assign_stark_inputs_code",
-        &render_assign_stark_inputs("sV", "", si_for_fragments, false, !has_compressor),
+        &render_assign_stark_inputs("sV", "", si_for_fragments, !has_compressor, false),
     );
 
     // assign_stark_inputs for recursive2 (vA/vB/vC with a/b/c prefixes)
