@@ -1,6 +1,9 @@
 use clap::Parser;
 use pil2_stark_setup::setup_cmd::{self, SetupOptions};
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Parser)]
 #[command(name = "venus-setup", about = "Proving key setup (replaces pil2-proofman-js)")]
 struct Cli {
@@ -33,18 +36,17 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt::init();
 
-    // Configure rayon: limit threads to control peak memory, use larger
-    // stack for deep expression evaluation. With 35 AIRs processed in
-    // parallel, unbounded threads can push peak RSS above 90 GB.
-    let num_threads = std::env::var("VENUS_THREADS")
+    // Configure rayon with larger stack size for deep expression evaluation.
+    // VENUS_THREADS env var overrides the default thread count if set.
+    let mut builder = rayon::ThreadPoolBuilder::new()
+        .stack_size(64 * 1024 * 1024); // 64 MB per thread
+    if let Some(n) = std::env::var("VENUS_THREADS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(4);
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .stack_size(64 * 1024 * 1024) // 64 MB per thread
-        .build_global()
-        .ok(); // Ignore error if already initialized
+    {
+        builder = builder.num_threads(n);
+    }
+    builder.build_global().ok();
 
     tracing::info!("venus-setup: starting");
     tracing::info!("  airout: {}", cli.airout);

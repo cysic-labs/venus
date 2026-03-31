@@ -3,14 +3,6 @@ use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-
-fn rss_mb() -> u64 {
-    std::fs::read_to_string("/proc/self/statm")
-        .ok()
-        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
-        .map(|pages| pages * 4 / 1024)
-        .unwrap_or(0)
-}
 use fields::{
     Field, Goldilocks, Poseidon16, Poseidon2Constants, Poseidon8, PrimeField64,
     linear_hash_seq, poseidon2_hash,
@@ -91,20 +83,20 @@ pub fn compute_const_tree(
     drop(const_bytes);
 
     // Extend polynomials to the evaluation domain
-    tracing::info!("Extending constant polynomials to evaluation domain (RSS: {} MB)", rss_mb());
+    tracing::info!("Extending constant polynomials to evaluation domain");
     let const_pols_ext = extend_pol(&const_pols, n_bits, n_bits_ext, n_pols);
     assert_eq!(const_pols_ext.len(), n_extended * n_pols);
 
     // Drop original polynomials - no longer needed
     drop(const_pols);
-    tracing::info!("Extended done (RSS: {} MB)", rss_mb());
+    tracing::info!("Extended done");
 
     // Build Merkle tree.
     // The C++ code maps arity to Poseidon2 sponge width as: arity * HASH_SIZE (4).
     //   arity=2 -> sponge width 8  (Poseidon2Goldilocks<8>)
     //   arity=3 -> sponge width 12 (Poseidon2Goldilocks<12>)
     //   arity=4 -> sponge width 16 (Poseidon2Goldilocks<16>)
-    tracing::info!("Building Poseidon2 Merkle tree (arity={}) (RSS: {} MB)", arity, rss_mb());
+    tracing::info!("Building Poseidon2 Merkle tree (arity={})", arity);
     let root = match arity {
         2 => merkle_tree_gl::<Poseidon8, 8>(&const_pols_ext, n_extended, n_pols, arity),
         3 => merkle_tree_gl::<fields::Poseidon12, 12>(&const_pols_ext, n_extended, n_pols, arity),
@@ -113,7 +105,7 @@ pub fn compute_const_tree(
     };
 
     // Write verkey.json
-    tracing::info!("Writing verkey to {} (RSS: {} MB)", verkey_path, rss_mb());
+    tracing::info!("Writing verkey to {}", verkey_path);
     let root_u64: [u64; 4] = [
         root[0].as_canonical_u64(),
         root[1].as_canonical_u64(),

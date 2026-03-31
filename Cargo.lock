@@ -3074,6 +3074,7 @@ dependencies = [
  "serde_json",
  "stark-recurser-rust",
  "tempfile",
+ "tikv-jemallocator",
  "tracing",
  "tracing-subscriber",
 ]

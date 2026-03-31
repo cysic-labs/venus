@@ -95,32 +95,28 @@ fn ntt_core(data: &mut [Goldilocks], n_bits: usize, n_cols: usize, inverse: bool
     let n = 1usize << n_bits;
     assert_eq!(data.len(), n * n_cols);
 
-    // Bit-reverse permutation (parallel via chunks)
-    let mut buf = vec![Goldilocks::ZERO; n * n_cols];
-    // Parallel: compute rev-index per source row, then copy
-    // Build destination-indexed mapping: for each dest slot r, what source i maps to it
-    let mut src_for_dst = vec![0usize; n];
+    // In-place bit-reverse permutation: swap row pairs (i, rev(i))
+    // without allocating a full-size copy buffer.
     for i in 0..n {
         let r = bit_reverse(i as u32, n_bits) as usize;
-        src_for_dst[r] = i;
+        if i < r {
+            let (lo, hi) = data.split_at_mut(r * n_cols);
+            let src = &mut lo[i * n_cols..(i + 1) * n_cols];
+            let dst = &mut hi[..n_cols];
+            for c in 0..n_cols {
+                std::mem::swap(&mut src[c], &mut dst[c]);
+            }
+        }
     }
-    buf.par_chunks_mut(n_cols)
-        .enumerate()
-        .for_each(|(r, dst_chunk)| {
-            let i = src_for_dst[r];
-            let src_start = i * n_cols;
-            dst_chunk.copy_from_slice(&data[src_start..src_start + n_cols]);
-        });
 
     let omega_table = if inverse { &OMEGAS_INV } else { &OMEGAS };
 
-    // Cooley-Tukey stages with rayon parallelism on large stages
+    // Cooley-Tukey butterfly stages
     for stage in 0..n_bits {
         let m = 1usize << (stage + 1);
         let half_m = m >> 1;
         let omega_base = Goldilocks::new(omega_table[stage + 1]);
 
-        // Precompute twiddle factors for this stage
         let mut twiddles = Vec::with_capacity(half_m);
         twiddles.push(Goldilocks::ONE);
         for j in 1..half_m {
@@ -128,11 +124,9 @@ fn ntt_core(data: &mut [Goldilocks], n_bits: usize, n_cols: usize, inverse: bool
         }
 
         let n_groups = n / m;
-        // Parallelize when there are enough independent groups
         if n_groups >= 64 {
-            // Each chunk of size `m * n_cols` in buf is independent
             let chunk_size = m * n_cols;
-            buf.par_chunks_mut(chunk_size).for_each(|chunk| {
+            data.par_chunks_mut(chunk_size).for_each(|chunk| {
                 for (j, w) in twiddles.iter().enumerate().take(half_m) {
                     for c in 0..n_cols {
                         let idx1 = j * n_cols + c;
@@ -150,10 +144,10 @@ fn ntt_core(data: &mut [Goldilocks], n_bits: usize, n_cols: usize, inverse: bool
                     for c in 0..n_cols {
                         let idx1 = (k + j) * n_cols + c;
                         let idx2 = (k + j + half_m) * n_cols + c;
-                        let u = buf[idx1];
-                        let t = buf[idx2] * *w;
-                        buf[idx1] = u + t;
-                        buf[idx2] = u - t;
+                        let u = data[idx1];
+                        let t = data[idx2] * *w;
+                        data[idx1] = u + t;
+                        data[idx2] = u - t;
                     }
                 }
             }
@@ -162,13 +156,12 @@ fn ntt_core(data: &mut [Goldilocks], n_bits: usize, n_cols: usize, inverse: bool
 
     if inverse {
         let inv_n = Goldilocks::new(DOMAIN_SIZE_INVERSE[n_bits]);
-        for v in buf.iter_mut() {
+        for v in data.iter_mut() {
             *v *= inv_n;
         }
     }
-
-    data.copy_from_slice(&buf);
 }
+
 
 /// Extend `n_cols` polynomials from domain of size N = 2^n_bits to
 /// N_ext = 2^n_bits_ext via coset evaluation.

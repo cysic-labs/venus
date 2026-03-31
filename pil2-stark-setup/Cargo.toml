@@ -26,3 +26,4 @@ rug = "1"
 stark-recurser-rust = { path = "../stark-recurser-rust" }
 tempfile = "3"
 rayon = { workspace = true }
+tikv-jemallocator = "0.6"

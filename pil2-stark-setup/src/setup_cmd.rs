@@ -9,13 +9,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 
-fn get_rss_mb() -> u64 {
-    std::fs::read_to_string("/proc/self/statm")
-        .ok()
-        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
-        .map(|pages| pages * 4 / 1024)
-        .unwrap_or(0)
-}
 // IndexMap used in some helper functions below
 #[allow(unused_imports)]
 use indexmap::IndexMap;
@@ -118,13 +111,11 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
 
     // Process all AIRs in parallel
     let results: Vec<Result<()>> = work_items
-        .par_iter()
+        .iter()
         .map(|item| {
             let n_bits = log2_usize(item.num_rows);
 
-            // Track RSS for memory debugging
-            let rss_before = get_rss_mb();
-            tracing::info!("Computing setup for air '{}' (RSS: {} MB)", item.air_name, rss_before);
+            tracing::info!("Computing setup for air '{}'", item.air_name);
 
             // Resolve settings for this air
             let air_settings = {
@@ -276,9 +267,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 &files_dir.join(format!("{}.verifier.bin", item.air_name)),
             )?;
 
-            let rss_after = get_rss_mb();
-            tracing::info!("Setup for air '{}' complete (RSS: {} MB, delta: {} MB)",
-                item.air_name, rss_after, rss_after as i64 - rss_before as i64);
+            tracing::info!("Setup for air '{}' complete", item.air_name);
             Ok(())
         })
         .collect();
