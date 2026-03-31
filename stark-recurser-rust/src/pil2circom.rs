@@ -711,6 +711,14 @@ fn render_gl_verifier(
             ));
         }
 
+        // xDivXSubXi is computed in the parent template and passed to chunks
+        if !opening_points.is_empty() {
+            out.push_str(&format!(
+                "    signal input xDivXSubXi[{}][3];\n",
+                opening_points.len()
+            ));
+        }
+
         // Chunk inputs/outputs
         for &inp_id in &chunk.inputs {
             let dim = eval_p_chunks.tmps.get(&inp_id).map(|t| t.dim).unwrap_or(1);
