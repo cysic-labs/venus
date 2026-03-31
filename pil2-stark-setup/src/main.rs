@@ -1,8 +1,8 @@
 use clap::Parser;
 use pil2_stark_setup::setup_cmd::{self, SetupOptions};
 
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+// Use system allocator - jemalloc retains freed pages too aggressively
+// for the bctree workload pattern (large short-lived allocations).
 
 #[derive(Parser)]
 #[command(name = "venus-setup", about = "Proving key setup (replaces pil2-proofman-js)")]
@@ -36,17 +36,20 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt::init();
 
-    // Configure rayon with larger stack size for deep expression evaluation.
-    // VENUS_THREADS env var overrides the default thread count if set.
-    let mut builder = rayon::ThreadPoolBuilder::new()
-        .stack_size(64 * 1024 * 1024); // 64 MB per thread
-    if let Some(n) = std::env::var("VENUS_THREADS")
+    // Configure rayon: limit threads to bound peak memory from concurrent
+    // bctree NTT/Merkle operations. Each large AIR's bctree can use
+    // ~10 GB temporarily; with 2 threads the worst case is ~30 GB
+    // which fits comfortably under the 90 GB budget.
+    // VENUS_THREADS env var overrides for tuning on different hardware.
+    let num_threads = std::env::var("VENUS_THREADS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-    {
-        builder = builder.num_threads(n);
-    }
-    builder.build_global().ok();
+        .unwrap_or(2);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .stack_size(64 * 1024 * 1024) // 64 MB per thread
+        .build_global()
+        .ok();
 
     tracing::info!("venus-setup: starting");
     tracing::info!("  airout: {}", cli.airout);
@@ -62,5 +65,16 @@ fn main() -> anyhow::Result<()> {
         std_pil_path: cli.std_path,
     };
 
-    setup_cmd::run_setup(&opts)
+    let result = setup_cmd::run_setup(&opts);
+
+    // Log peak memory at exit for measurement validation
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if line.starts_with("VmHWM:") || line.starts_with("VmPeak:") {
+                tracing::info!("{}", line.trim());
+            }
+        }
+    }
+
+    result
 }

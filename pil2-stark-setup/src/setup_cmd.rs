@@ -111,7 +111,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
 
     // Process all AIRs in parallel
     let results: Vec<Result<()>> = work_items
-        .iter()
+        .par_iter()
         .map(|item| {
             let n_bits = log2_usize(item.num_rows);
 

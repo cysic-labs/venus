@@ -209,9 +209,11 @@ pub fn extend_pol(
         }
     });
 
-    // Zero-pad to extended size
+    // Zero-pad to extended size. Drop coeffs first to free memory
+    // before allocating the larger extended buffer.
     let mut extended = vec![Goldilocks::ZERO; n_ext * n_cols];
     extended[..n * n_cols].copy_from_slice(&coeffs);
+    drop(coeffs);
 
     // Forward NTT on extended domain
     ntt_core(&mut extended, n_bits_ext, n_cols, false);
