@@ -1046,13 +1046,13 @@ fn render_gl_verifier(
         let idx = val_idx.entry(stage).or_insert(0);
         if dim == 1 {
             out.push_str(&format!(
-                "    signal cm{}_{} <== vals{}[{}];\n",
+                "    signal output cm{}_{} <== vals{}[{}];\n",
                 stage, stage_id, stage, *idx
             ));
             *idx += 1;
         } else {
             out.push_str(&format!(
-                "    signal cm{}_{}[3] <== [vals{}[{}], vals{}[{}], vals{}[{}]];\n",
+                "    signal output cm{}_{}[3] <== [vals{}[{}], vals{}[{}], vals{}[{}]];\n",
                 stage, stage_id, stage, *idx, stage, *idx + 1, stage, *idx + 2
             ));
             *idx += 3;
@@ -1073,13 +1073,13 @@ fn render_gl_verifier(
             let dim = pol.get("dim").and_then(|v| v.as_u64()).unwrap_or(1);
             if dim == 1 {
                 out.push_str(&format!(
-                    "    signal custom_{}_{}_{} <== vals_{}_0[{}];\n",
+                    "    signal output custom_{}_{}_{} <== vals_{}_0[{}];\n",
                     name, stage, stage_id, name, cidx
                 ));
                 cidx += 1;
             } else {
                 out.push_str(&format!(
-                    "    signal custom_{}_{}_{}[3] <== [vals_{}_0[{}], vals_{}_0[{}], vals_{}_0[{}]];\n",
+                    "    signal output custom_{}_{}_{}[3] <== [vals_{}_0[{}], vals_{}_0[{}], vals_{}_0[{}]];\n",
                     name, stage, stage_id, name, cidx, name, cidx + 1, name, cidx + 2
                 ));
                 cidx += 3;
