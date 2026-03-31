@@ -1,0 +1,46 @@
+OK: All files match byte-for-byte
+
+=== Per-AIR 7-File Subset Analysis ===
+Files checked per AIR: starkinfo.json, expressionsinfo.json, verifierinfo.json, bin, verifier.bin, verkey.json, verkey.bin
+
+Add256: match=7 differ=0 missing=0
+Arith: match=7 differ=0 missing=0
+ArithEq: match=7 differ=0 missing=0
+ArithEq384: match=7 differ=0 missing=0
+Binary: match=7 differ=0 missing=0
+BinaryAdd: match=7 differ=0 missing=0
+BinaryExtension: match=7 differ=0 missing=0
+Blake2br: match=7 differ=0 missing=0
+Dma: match=7 differ=0 missing=0
+Dma64Aligned: match=7 differ=0 missing=0
+Dma64AlignedInputCpy: match=7 differ=0 missing=0
+Dma64AlignedMem: match=7 differ=0 missing=0
+Dma64AlignedMemCpy: match=7 differ=0 missing=0
+Dma64AlignedMemSet: match=7 differ=0 missing=0
+DmaInputCpy: match=7 differ=0 missing=0
+DmaMemCpy: match=7 differ=0 missing=0
+DmaPrePost: match=7 differ=0 missing=0
+DmaPrePostInputCpy: match=7 differ=0 missing=0
+DmaPrePostMemCpy: match=7 differ=0 missing=0
+DmaUnaligned: match=7 differ=0 missing=0
+InputData: match=7 differ=0 missing=0
+Keccakf: match=7 differ=0 missing=0
+Main: match=7 differ=0 missing=0
+Mem: match=7 differ=0 missing=0
+MemAlign: match=7 differ=0 missing=0
+MemAlignByte: match=7 differ=0 missing=0
+MemAlignReadByte: match=7 differ=0 missing=0
+MemAlignWriteByte: match=7 differ=0 missing=0
+Poseidon2: match=7 differ=0 missing=0
+Rom: match=7 differ=0 missing=0
+RomData: match=7 differ=0 missing=0
+Sha256f: match=7 differ=0 missing=0
+SpecifiedRanges: match=7 differ=0 missing=0
+VirtualTable0: match=7 differ=0 missing=0
+VirtualTable1: match=7 differ=0 missing=0
+
+=== Summary ===
+Total AIRs: 35
+Total files compared: 842 vs 842
+All 35 AIRs: 7/7 files byte-identical
+Global files (globalConstraints.bin, globalConstraints.json, globalInfo.json): byte-identical
