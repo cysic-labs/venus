@@ -343,8 +343,9 @@ fn read_custom_gates_list(section_data: &[u8], header: &R1csHeader) -> Result<Ve
     let mut gates = Vec::with_capacity(num as usize);
 
     for _ in 0..num {
-        // Read null-terminated string for template name
-        let name = read_null_terminated_string(section_data, &mut pos)?;
+        // Read NUL-terminated string for template name (R1CS section 4 uses
+        // actual NUL-terminated strings, not length-prefixed ones).
+        let name = read_nul_string(section_data, &mut pos)?;
 
         if pos + 4 > section_data.len() {
             bail!("unexpected end of data reading custom gate parameters count");
@@ -418,13 +419,12 @@ fn read_custom_gates_uses(section_data: &[u8]) -> Result<Vec<CustomGateUse>> {
     Ok(uses)
 }
 
-/// Read a null-terminated (C-style) string from the data.
+/// Read a length-prefixed string from the data.
 ///
-/// The JS `fd.readString()` method reads a u32 length prefix followed by that
-/// many bytes. However, for some R1CS writers the string may be null-terminated
-/// instead. We support the length-prefixed variant here to match the JS binfileutils.
-fn read_null_terminated_string(data: &[u8], pos: &mut usize) -> Result<String> {
-    // The JS readString reads: u32 length, then `length` bytes
+/// The JS `fd.readString()` method in binfileutils reads a u32 length prefix
+/// followed by that many bytes. This is used by some R1CS section readers.
+#[allow(dead_code)]
+fn read_length_prefixed_string(data: &[u8], pos: &mut usize) -> Result<String> {
     if *pos + 4 > data.len() {
         bail!("unexpected end of data reading string length");
     }
@@ -439,6 +439,23 @@ fn read_null_terminated_string(data: &[u8], pos: &mut usize) -> Result<String> {
         .to_string();
     *pos += len;
 
+    Ok(s)
+}
+
+/// Read a NUL-terminated (C-style) string from the data.
+///
+/// R1CS section 4 (custom gates list) encodes gate names as raw bytes terminated
+/// by a 0x00 byte, matching Rapidsnark's `BinFile::readString()` behaviour.
+fn read_nul_string(data: &[u8], pos: &mut usize) -> Result<String> {
+    let start = *pos;
+    while *pos < data.len() && data[*pos] != 0 {
+        *pos += 1;
+    }
+    if *pos >= data.len() {
+        bail!("unexpected end of data reading NUL-terminated string");
+    }
+    let s = String::from_utf8_lossy(&data[start..*pos]).to_string();
+    *pos += 1; // skip NUL terminator
     Ok(s)
 }
 
@@ -642,5 +659,66 @@ mod tests {
         let r1cs = read_r1cs_with_options(&buf, true, true, false)
             .expect("should parse R1CS with map");
         assert_eq!(r1cs.wire_to_label, vec![100, 200, 300]);
+    }
+
+    /// Regression test: section 4 custom gate names must be parsed as
+    /// NUL-terminated strings, not length-prefixed.  A length-prefixed reader
+    /// would interpret the first four ASCII bytes of the gate name as a u32
+    /// length and fail with "unexpected end of data".
+    #[test]
+    fn test_custom_gate_nul_terminated_string() {
+        let n8: u32 = 8;
+
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"r1cs");
+        buf.extend_from_slice(&1u32.to_le_bytes()); // version
+        buf.extend_from_slice(&4u32.to_le_bytes()); // 4 sections
+
+        // --- Header (section 1) ---
+        let mut hdr: Vec<u8> = Vec::new();
+        hdr.extend_from_slice(&n8.to_le_bytes());
+        hdr.extend_from_slice(&0xFFFF_FFFF_0000_0001u64.to_le_bytes());
+        hdr.extend_from_slice(&3u32.to_le_bytes()); // nVars
+        hdr.extend_from_slice(&0u32.to_le_bytes()); // nOutputs
+        hdr.extend_from_slice(&0u32.to_le_bytes()); // nPubInputs
+        hdr.extend_from_slice(&0u32.to_le_bytes()); // nPrvInputs
+        hdr.extend_from_slice(&3u64.to_le_bytes()); // nLabels
+        hdr.extend_from_slice(&0u32.to_le_bytes()); // nConstraints
+
+        buf.extend_from_slice(&R1CS_HEADER.to_le_bytes());
+        buf.extend_from_slice(&(hdr.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&hdr);
+
+        // --- Constraints (section 2, empty) ---
+        buf.extend_from_slice(&R1CS_CONSTRAINTS.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+
+        // --- Custom gates list (section 4) ---
+        let mut sec4: Vec<u8> = Vec::new();
+        sec4.extend_from_slice(&1u32.to_le_bytes()); // 1 gate
+        sec4.extend_from_slice(b"Poseidon16\0");     // NUL-terminated name
+        sec4.extend_from_slice(&2u32.to_le_bytes()); // 2 parameters
+        sec4.extend_from_slice(&42u64.to_le_bytes()); // param 0
+        sec4.extend_from_slice(&99u64.to_le_bytes()); // param 1
+
+        buf.extend_from_slice(&R1CS_CUSTOM_GATES_LIST.to_le_bytes());
+        buf.extend_from_slice(&(sec4.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&sec4);
+
+        // --- Custom gates uses (section 5, empty list) ---
+        let mut sec5: Vec<u8> = Vec::new();
+        sec5.extend_from_slice(&0u32.to_le_bytes()); // 0 uses
+
+        buf.extend_from_slice(&R1CS_CUSTOM_GATES_USES.to_le_bytes());
+        buf.extend_from_slice(&(sec5.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&sec5);
+
+        // Parse
+        let r1cs = read_r1cs(&buf).expect("should parse R1CS with custom gate");
+        assert!(r1cs.header.use_custom_gates);
+        assert_eq!(r1cs.custom_gates.len(), 1);
+        assert_eq!(r1cs.custom_gates[0].template_name, "Poseidon16");
+        assert_eq!(r1cs.custom_gates[0].parameters, vec![42, 99]);
+        assert!(r1cs.custom_gates_uses.is_empty());
     }
 }
