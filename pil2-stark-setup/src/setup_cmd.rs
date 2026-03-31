@@ -94,7 +94,7 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
     }
 
     tracing::info!(
-        "Processing {} AIRs in parallel using rayon",
+        "Processing {} AIRs (forked child per AIR for memory isolation)",
         work_items.len()
     );
 
@@ -109,12 +109,18 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
     // so they are always written even if a slow AIR causes a timeout.
     write_global_info(&pilout, &pilout_name, &opts.build_dir, &settings_map)?;
 
-    // Process AIRs sequentially to control peak memory.
-    // par_iter with even 1 worker thread allows 2 concurrent closures
-    // (main + worker), which together can hold ~80 GB of pil_info data.
+    // Process each AIR in a forked child process. The child runs pil_info,
+    // writes JSON/bin/bctree files, then exits. This fully isolates each
+    // AIR's memory: the OS reclaims ALL pages when the child exits, preventing
+    // VmHWM accumulation across 35 AIRs (which otherwise reaches ~89 GB from
+    // glibc mmap fragmentation even with sequential processing + malloc_trim).
     let results: Vec<Result<()>> = work_items
         .iter()
         .map(|item| {
+            if item.num_rows == 0 {
+                tracing::info!("Skipping empty air '{}'", item.air_name);
+                return Ok(());
+            }
             let n_bits = log2_usize(item.num_rows);
 
             tracing::info!("Computing setup for air '{}'", item.air_name);
@@ -158,143 +164,128 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
                 }
             }
 
-            // Run pil_info
-            let prepare_opts = PrepareOptions {
-                debug: false,
-                im_pols_stages: false,
-            };
-
-            let pil_result =
-                pil_info::pil_info(&pilout, item.ag_idx, item.air_idx, &stark_struct, &prepare_opts);
-
-            let setup_result = &pil_result.setup;
-            let pil_code = &pil_result.pil_code;
-
-            // Compute FRI security params
-            let ev_map_len = pil_code.ev_map.len();
-            let folding_factors = compute_folding_factors(&stark_struct);
-            let opening_points = collect_opening_points(setup_result);
-
-            let field_size = security::goldilocks_cube_field_size();
-            let fri_params = FRISecurityParams {
-                field_size,
-                dimension: 1u64 << stark_struct.n_bits,
-                rate: 1.0 / (1u64 << (stark_struct.n_bits_ext - stark_struct.n_bits)) as f64,
-                n_opening_points: opening_points.len() as u64,
-                n_functions: ev_map_len.max(1) as u64,
-                folding_factors: folding_factors.clone(),
-                max_grinding_bits: stark_struct.pow_bits as u64,
-                use_max_grinding_bits: true,
-                tree_arity: stark_struct.merkle_tree_arity as u64,
-                target_security_bits: 128,
-            };
-
-            let fri_security = security::get_optimal_fri_query_params("JBR", &fri_params);
-
-            let starkinfo_output = build_starkinfo_output(
-                setup_result,
-                &stark_struct,
-                pil_code,
-                &opening_points,
-                &fri_security,
-                item.ag_idx,
-                item.air_idx,
-                &item.air_name,
-                pil_result.c_exp_id,
-                pil_result.fri_exp_id,
-                pil_result.q_deg,
-            );
-
-            // Write starkinfo.json
-            let starkinfo_json = json_output::to_json_string(&starkinfo_output)?;
+            // Run pil_info + JSON write + bctree + bin write in a forked
+            // child process. The child inherits the parent's address space
+            // (COW), does all heavy work, writes files to disk, then exits.
+            // When the child exits, ALL its memory is freed by the OS -
+            // no VmHWM accumulation across 35 AIRs.
             let starkinfo_path = files_dir.join(format!("{}.starkinfo.json", item.air_name));
-            fs::write(&starkinfo_path, &starkinfo_json)?;
+            let child_pid = unsafe { libc::fork() };
+            if child_pid == 0 {
+                // === CHILD PROCESS ===
+                // After fork(), the parent's rayon thread pool workers don't
+                // exist in the child. The global pool is stale and will
+                // deadlock on par_iter/par_chunks_mut. We install a fresh
+                // pool; build_global() will succeed because the old global
+                // is effectively dead (no worker threads survived fork).
+                //
+                // Use std::env to force rayon to create a new pool:
+                std::env::set_var("RAYON_NUM_THREADS", "0");
+                // Actually use install() on a new pool for this child's work:
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .stack_size(64 * 1024 * 1024)
+                    .build()
+                    .expect("Failed to create rayon pool in child");
+                let result = pool.install(|| -> Result<()> {
+                    let prepare_opts = PrepareOptions {
+                        debug: false,
+                        im_pols_stages: false,
+                    };
+                    let pil_result =
+                        pil_info::pil_info(&pilout, item.ag_idx, item.air_idx, &stark_struct, &prepare_opts);
+                    let setup_result = &pil_result.setup;
+                    let pil_code = &pil_result.pil_code;
 
-            // Write expressionsinfo.json
-            let expr_info_json = build_expressions_info_json(&pil_code.expressions_info);
-            let expr_info_str = json_output::to_json_string(&expr_info_json)?;
-            fs::write(
-                files_dir.join(format!("{}.expressionsinfo.json", item.air_name)),
-                &expr_info_str,
-            )?;
+                    let ev_map_len = pil_code.ev_map.len();
+                    let folding_factors = compute_folding_factors(&stark_struct);
+                    let opening_points = collect_opening_points(setup_result);
+                    let field_size = security::goldilocks_cube_field_size();
+                    let fri_params = FRISecurityParams {
+                        field_size,
+                        dimension: 1u64 << stark_struct.n_bits,
+                        rate: 1.0 / (1u64 << (stark_struct.n_bits_ext - stark_struct.n_bits)) as f64,
+                        n_opening_points: opening_points.len() as u64,
+                        n_functions: ev_map_len.max(1) as u64,
+                        folding_factors: folding_factors.clone(),
+                        max_grinding_bits: stark_struct.pow_bits as u64,
+                        use_max_grinding_bits: true,
+                        tree_arity: stark_struct.merkle_tree_arity as u64,
+                        target_security_bits: 128,
+                    };
+                    let fri_security = security::get_optimal_fri_query_params("JBR", &fri_params);
 
-            // Write verifierinfo.json
-            let verifier_info_json = build_verifier_info_json(&pil_code.verifier_info);
-            let verifier_info_str = json_output::to_json_string(&verifier_info_json)?;
-            fs::write(
-                files_dir.join(format!("{}.verifierinfo.json", item.air_name)),
-                &verifier_info_str,
-            )?;
+                    let starkinfo_output = build_starkinfo_output(
+                        setup_result, &stark_struct, pil_code, &opening_points,
+                        &fri_security, item.ag_idx, item.air_idx, &item.air_name,
+                        pil_result.c_exp_id, pil_result.fri_exp_id, pil_result.q_deg,
+                    );
 
-            // Free all pil_info data before bctree - it's no longer needed.
-            // write_bin_files_native reads from the JSON files on disk.
-            // For Keccakf (2218 columns), this frees ~5 GB.
-            drop(starkinfo_output);
-            drop(starkinfo_json);
-            drop(expr_info_str);
-            drop(verifier_info_str);
-            drop(pil_result);
-            // Force the allocator to return freed pages to the OS.
-            // Without this, glibc's sbrk heap retains freed memory
-            // across 35 AIRs, accumulating to ~90 GB.
-            #[cfg(target_os = "linux")]
-            unsafe { libc::malloc_trim(0); }
-            tracing::info!("[mem-trim] AIR '{}' freed", item.air_name);
+                    let starkinfo_json = json_output::to_json_string(&starkinfo_output)?;
+                    fs::write(&starkinfo_path, &starkinfo_json)?;
 
-            // Compute constant polynomial Merkle tree -> verkey.json / verkey.bin
-            // Run in a child process to isolate bctree memory: large NTT
-            // buffers and Merkle tree nodes are freed when the child exits,
-            // preventing accumulation across 35 AIRs.
-            let verkey_json_path = files_dir.join(format!("{}.verkey.json", item.air_name));
-            if const_path.exists() {
-                tracing::info!("Computing Constant Tree for '{}'...", item.air_name);
-                let bctree_result = run_bctree_subprocess(
-                    const_path.to_str().unwrap_or(""),
-                    starkinfo_path.to_str().unwrap_or(""),
-                    verkey_json_path.to_str().unwrap_or(""),
-                );
-                match bctree_result {
-                    Ok(const_root) => {
-                        let mut verkey_bin = Vec::with_capacity(32);
-                        for &val in const_root.iter() {
-                            verkey_bin.extend_from_slice(&val.to_le_bytes());
-                        }
-                        fs::write(
-                            files_dir.join(format!("{}.verkey.bin", item.air_name)),
-                            &verkey_bin,
+                    let expr_info_json = build_expressions_info_json(&pil_code.expressions_info);
+                    fs::write(
+                        files_dir.join(format!("{}.expressionsinfo.json", item.air_name)),
+                        &json_output::to_json_string(&expr_info_json)?,
+                    )?;
+
+                    let verifier_info_json = build_verifier_info_json(&pil_code.verifier_info);
+                    fs::write(
+                        files_dir.join(format!("{}.verifierinfo.json", item.air_name)),
+                        &json_output::to_json_string(&verifier_info_json)?,
+                    )?;
+
+                    // bctree in the same child (no need for subprocess within subprocess)
+                    let verkey_json_path = files_dir.join(format!("{}.verkey.json", item.air_name));
+                    if const_path.exists() {
+                        let const_root = crate::bctree::compute_const_tree(
+                            const_path.to_str().unwrap_or(""),
+                            starkinfo_path.to_str().unwrap_or(""),
+                            verkey_json_path.to_str().unwrap_or(""),
                         )?;
+                        let verkey_bin: Vec<u8> = const_root.iter()
+                            .flat_map(|v| v.to_le_bytes())
+                            .collect();
+                        fs::write(files_dir.join(format!("{}.verkey.bin", item.air_name)), &verkey_bin)?;
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "bctree failed for air '{}': {:#}. \
-                             Skipping verkey generation.",
-                            item.air_name, e
-                        );
+
+                    write_bin_files_native(
+                        &starkinfo_path,
+                        &files_dir.join(format!("{}.expressionsinfo.json", item.air_name)),
+                        &files_dir.join(format!("{}.verifierinfo.json", item.air_name)),
+                        &files_dir.join(format!("{}.bin", item.air_name)),
+                        &files_dir.join(format!("{}.verifier.bin", item.air_name)),
+                    )?;
+                    Ok(())
+                });
+
+                // Exit child: _exit avoids running destructors/atexit handlers
+                let code = if result.is_ok() { 0 } else {
+                    if let Err(e) = &result {
+                        eprintln!("venus-setup child error for '{}': {:#}", item.air_name, e);
                     }
-                }
-            } else {
-                tracing::warn!(
-                    "Skipping bctree: const file not found at {}",
-                    const_path.display()
+                    1
+                };
+                unsafe { libc::_exit(code); }
+            }
+
+            // === PARENT PROCESS ===
+            if child_pid < 0 {
+                anyhow::bail!("fork() failed for air '{}'", item.air_name);
+            }
+            let mut status: libc::c_int = 0;
+            let waited = unsafe { libc::waitpid(child_pid, &mut status, 0) };
+            if waited < 0 {
+                anyhow::bail!("waitpid() failed for air '{}'", item.air_name);
+            }
+            if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
+                let exit_code = if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { -1 };
+                anyhow::bail!(
+                    "Setup child for air '{}' failed with exit code {}",
+                    item.air_name, exit_code
                 );
             }
-
-            // Write binary files
-            write_bin_files_native(
-                &starkinfo_path,
-                &files_dir.join(format!("{}.expressionsinfo.json", item.air_name)),
-                &files_dir.join(format!("{}.verifierinfo.json", item.air_name)),
-                &files_dir.join(format!("{}.bin", item.air_name)),
-                &files_dir.join(format!("{}.verifier.bin", item.air_name)),
-            )?;
-
-            {
-                let rss = std::fs::read_to_string("/proc/self/status").ok()
-                    .and_then(|s| s.lines().find(|l| l.starts_with("VmRSS:"))
-                        .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()))
-                    .unwrap_or(0);
-                tracing::info!("Setup for air '{}' complete (VmRSS: {} MB)", item.air_name, rss / 1024);
-            }
+            tracing::info!("Setup for air '{}' complete", item.air_name);
             Ok(())
         })
         .collect();
