@@ -1486,12 +1486,12 @@ fn render_verify_global_challenge(vadcop_info: &Value, si: &Value) -> String {
         );
     }
 
-    // put proof values at stage 1
+    // put proof values at stage 1: put(proofValues[j], 1) adds only [0] as scalar
     for (j, pv) in pv_map.iter().enumerate() {
         let stage = pv.get("stage").and_then(|v| v.as_u64()).unwrap_or(0);
         if stage == 1 {
             add1_vgc(
-                format!("proofValues[{}]", j),
+                format!("proofValues[{}][0]", j),
                 &mut pending,
                 &mut state_vals,
                 &mut all_out,
