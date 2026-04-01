@@ -907,11 +907,6 @@ fn render_gl_verifier(
         let _ = off_max;
     }
 
-    // xDivXSubXi is passed to VerifyEvaluationsChunks
-    if !opening_points.is_empty() {
-        inputs_p.push("xDivXSubXi".to_string());
-    }
-
     // Wire VerifyEvaluationsChunks
     for (j, chunk) in eval_p_chunks.chunks.iter().enumerate() {
         for &out_id in &chunk.outputs {
