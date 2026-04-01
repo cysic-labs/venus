@@ -289,19 +289,11 @@ pub fn gen_final_setup(
         .collect();
     fs::write(&exec_path, &exec_bytes)?;
 
-    // Write const file
+    // Const file writing is deferred until after pil_info, which determines
+    // the true nConstants (may be larger than plonk2pil's fixedPols count).
     let const_path = files_dir.join("vadcop_final.const");
-    let n_rows = 1usize << plonk_result.n_bits;
-    let n_fixed = plonk_result.fixed_pols.len();
-    let mut flat_buffer = vec![0u64; n_rows * n_fixed];
-    for (col_idx, fp) in plonk_result.fixed_pols.iter().enumerate() {
-        for (row, &val) in fp.values.iter().enumerate() {
-            if row < n_rows {
-                flat_buffer[row * n_fixed + col_idx] = val;
-            }
-        }
-    }
-    fixed_cols::write_fixed_cols_raw(const_path.to_str().unwrap(), &flat_buffer)?;
+    let plonk_n_rows = 1usize << plonk_result.n_bits;
+    let plonk_n_fixed = plonk_result.fixed_pols.len();
 
     // Final stark struct settings
     let final_settings = crate::stark_struct::StarkSettings {
@@ -402,6 +394,30 @@ pub fn gen_final_setup(
             &stark_info_loaded,
             &verifier_loaded,
         )?;
+
+        // Write const file with the correct number of columns from pil_info.
+        // plonk2pil gives plonk_n_fixed columns, but the PIL defines
+        // n_constants total. Extra columns are zero-filled.
+        let n_constants = stark_info_loaded.n_constants as usize;
+        {
+            let n_rows = plonk_n_rows;
+            let mut flat_buffer = vec![0u64; n_rows * n_constants];
+            for (col_idx, fp) in plonk_result.fixed_pols.iter().enumerate() {
+                if col_idx >= n_constants {
+                    break;
+                }
+                for (row, &val) in fp.values.iter().enumerate() {
+                    if row < n_rows {
+                        flat_buffer[row * n_constants + col_idx] = val;
+                    }
+                }
+            }
+            fixed_cols::write_fixed_cols_raw(const_path.to_str().unwrap(), &flat_buffer)?;
+            tracing::info!(
+                "Wrote vadcop_final const file: {} cols ({} from plonk + {} zero-fill), {} rows",
+                n_constants, plonk_n_fixed, n_constants.saturating_sub(plonk_n_fixed), n_rows
+            );
+        }
     }
 
     // Compute constant tree

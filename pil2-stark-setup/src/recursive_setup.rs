@@ -129,11 +129,10 @@ pub fn gen_recursive_setup(
     fs::create_dir_all(&files_dir)?;
 
     // Generate verifier circom
-    // For Recursive1 with compressor, the verifier was already generated during the
-    // Compressor step (with the compressor's starkInfo). Skip regeneration to avoid
-    // overwriting it with the original AIR's starkInfo (which has fewer publics).
-    let skip_verifier_gen = matches!(template, RecursiveTemplate::Recursive1) && config.has_compressor;
-    if !skip_verifier_gen {
+    // Each template step generates its own verifier. For recursive1 with compressor,
+    // the verifier is generated from the compressor's starkInfo/verifierInfo (passed
+    // via config), and written to {air}_compressor.verifier.circom.
+    {
         let const_root_circuit: [String; 4] = if config.const_root.iter().all(|s| s.is_empty()) {
             ["0".to_string(), "0".to_string(), "0".to_string(), "0".to_string()]
         } else {

@@ -1792,7 +1792,7 @@ fn render_verify_global_constraints(vadcop_info: &Value, si: &Value) -> String {
         }
 
         out.push_str(&format!(
-            "    (tmp_{}) <== GlobalConstraint{}_chunk0()({});\n",
+            "    tmp_{} <== GlobalConstraint{}_chunk0()({});\n",
             last_id,
             i,
             inputs.join(",")
