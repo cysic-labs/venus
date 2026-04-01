@@ -1198,25 +1198,11 @@ fn render_calculate_hashes(si: &Value, vadcop_info: &Value) -> String {
             arity,
         );
     }
-    // Put air values at stage 1 -- each airValue is [3] (extension field),
-    // so expand to 3 scalar elements matching JS transcript.put(name, 3).
-    for (j, av) in air_values_map.iter().enumerate() {
-        let stage = av.get("stage").and_then(|v| v.as_u64()).unwrap_or(0);
-        if stage == 1 {
-            for k in 0..3 {
-                add1(
-                    format!("airValues[{}][{}]", j, k),
-                    &mut pending,
-                    &mut state,
-                    &mut all_out,
-                    &mut h_cnt,
-                    &mut code_lines,
-                    arity,
-                );
-            }
-        } else {
-            code_lines.push(format!("    _ <== airValues[{}];", j));
-        }
+    // Discard all airValues in CalculateStage1Hash -- JS does NOT put any
+    // airValues into the stage 1 transcript (the main transcript loop starts
+    // at stage 2). Stage-1 airValues are consumed later, not in the hash.
+    for j in 0..air_values_map.len() {
+        code_lines.push(format!("    _ <== airValues[{}];", j));
     }
 
     // Get output: for lattice mode, call getStateLattices
