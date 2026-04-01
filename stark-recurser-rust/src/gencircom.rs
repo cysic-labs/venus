@@ -1204,23 +1204,25 @@ fn render_calculate_hashes(si: &Value, vadcop_info: &Value) -> String {
         );
     }
     // Match JS calculate_hashes.circom.ejs line 124-130:
+    // Only process airValues when the template declares them (has_stage1)
     // Stage-1 airValues: put(airValues[j], 1) -> adds airValues[j][0] as scalar
     // Non-stage-1 airValues: _ <== airValues[j] (discard)
-    for (j, av) in air_values_map.iter().enumerate() {
-        let stage = av.get("stage").and_then(|v| v.as_u64()).unwrap_or(0);
-        if stage == 1 {
-            // put("airValues[j]", 1) => adds airValues[j][0]
-            add1(
-                format!("airValues[{}][0]", j),
-                &mut pending,
-                &mut state,
-                &mut all_out,
-                &mut h_cnt,
-                &mut code_lines,
-                arity,
-            );
-        } else {
-            code_lines.push(format!("    _ <== airValues[{}];", j));
+    if has_stage1 {
+        for (j, av) in air_values_map.iter().enumerate() {
+            let stage = av.get("stage").and_then(|v| v.as_u64()).unwrap_or(0);
+            if stage == 1 {
+                add1(
+                    format!("airValues[{}][0]", j),
+                    &mut pending,
+                    &mut state,
+                    &mut all_out,
+                    &mut h_cnt,
+                    &mut code_lines,
+                    arity,
+                );
+            } else {
+                code_lines.push(format!("    _ <== airValues[{}];", j));
+            }
         }
     }
 
