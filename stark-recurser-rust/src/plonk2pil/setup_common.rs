@@ -235,12 +235,30 @@ fn calculate_plonk_constraints_rows(
             for tier in tiers.iter_mut() {
                 if tier.remaining > 0 {
                     tier.remaining -= 1;
-                    // Match JS behavior: the partial row tracks constraint
-                    // units starting at half_start with max at half_max.
-                    // For oneExtraConstraint (half_start==half_max==9), the
-                    // row is fully packed and no partial/half entry is created
-                    // (JS doesn't create partialRows for this tier at all).
-                    if tier.half_start < tier.half_max {
+                    // Match JS tier handling exactly:
+                    // nine:  partial={n_used:1, max:2} + half={n_used:2, max:9}
+                    // three: partial={n_used:7, max:9} (no half)
+                    // two:   partial={n_used:8, max:9} (no half)
+                    // one:   no partial, no half
+                    if tier.partial_max < tier.half_start {
+                        // nine-style: first half then second half
+                        partial_rows.insert(
+                            k.clone(),
+                            PartialRow {
+                                row: 0,
+                                n_used: 1,
+                                custom: true,
+                                max_used: tier.partial_max,
+                            },
+                        );
+                        half_rows.push(PartialRow {
+                            row: 0,
+                            n_used: tier.half_start,
+                            custom: true,
+                            max_used: tier.half_max,
+                        });
+                    } else if tier.half_start < tier.half_max {
+                        // three/two-style: direct partial, no half
                         partial_rows.insert(
                             k.clone(),
                             PartialRow {
@@ -251,6 +269,7 @@ fn calculate_plonk_constraints_rows(
                             },
                         );
                     }
+                    // one-style (half_start==half_max): no entries at all
                     placed = true;
                     break;
                 }
