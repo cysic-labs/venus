@@ -198,7 +198,7 @@ fn calculate_plonk_constraints_rows(
         #[allow(dead_code)]
         partial_start: usize,
         partial_max: usize,
-        half_start: usize,
+        needs_split: bool,
         half_max: usize,
     }
 
@@ -208,7 +208,10 @@ fn calculate_plonk_constraints_rows(
             remaining: count,
             partial_start: 1,
             partial_max: first_half_max,
-            half_start: first_half_max,
+            // needs_split: whether this tier creates both a partial AND a half row.
+            // JS nine-style: partial(1, first_half_max) + half(first_half_max, full_max).
+            // JS three/two-style: partial(first_half_max, full_max) only.
+            needs_split: first_half_max <= plonk_first_half_max && first_half_max < full_max,
             half_max: full_max,
         })
         .collect();
@@ -240,8 +243,8 @@ fn calculate_plonk_constraints_rows(
                     // three: partial={n_used:7, max:9} (no half)
                     // two:   partial={n_used:8, max:9} (no half)
                     // one:   no partial, no half
-                    if tier.partial_max < tier.half_start {
-                        // nine-style: first half then second half
+                    if tier.needs_split {
+                        // nine-style: partial for same-key, half for any-key
                         partial_rows.insert(
                             k.clone(),
                             PartialRow {
@@ -253,23 +256,23 @@ fn calculate_plonk_constraints_rows(
                         );
                         half_rows.push(PartialRow {
                             row: 0,
-                            n_used: tier.half_start,
+                            n_used: tier.partial_max,
                             custom: true,
                             max_used: tier.half_max,
                         });
-                    } else if tier.half_start < tier.half_max {
+                    } else if tier.partial_max < tier.half_max {
                         // three/two-style: direct partial, no half
                         partial_rows.insert(
                             k.clone(),
                             PartialRow {
                                 row: 0,
-                                n_used: tier.half_start,
+                                n_used: tier.partial_max,
                                 custom: true,
                                 max_used: tier.half_max,
                             },
                         );
                     }
-                    // one-style (half_start==half_max): no entries at all
+                    // one-style (partial_max==half_max): no entries at all
                     placed = true;
                     break;
                 }

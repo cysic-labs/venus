@@ -129,30 +129,36 @@ pub fn gen_recursive_setup(
     fs::create_dir_all(&files_dir)?;
 
     // Generate verifier circom
-    let const_root_circuit: [String; 4] = if config.const_root.iter().all(|s| s.is_empty()) {
-        ["0".to_string(), "0".to_string(), "0".to_string(), "0".to_string()]
-    } else {
-        config.const_root.clone()
-    };
+    // For Recursive1 with compressor, the verifier was already generated during the
+    // Compressor step (with the compressor's starkInfo). Skip regeneration to avoid
+    // overwriting it with the original AIR's starkInfo (which has fewer publics).
+    let skip_verifier_gen = matches!(template, RecursiveTemplate::Recursive1) && config.has_compressor;
+    if !skip_verifier_gen {
+        let const_root_circuit: [String; 4] = if config.const_root.iter().all(|s| s.is_empty()) {
+            ["0".to_string(), "0".to_string(), "0".to_string(), "0".to_string()]
+        } else {
+            config.const_root.clone()
+        };
 
-    let pil2circom_opts = Pil2CircomOptions {
-        skip_main: true,
-        verkey_input,
-        input_challenges,
-        enable_input,
-        ..Default::default()
-    };
+        let pil2circom_opts = Pil2CircomOptions {
+            skip_main: true,
+            verkey_input,
+            input_challenges,
+            enable_input,
+            ..Default::default()
+        };
 
-    let verifier_circom = pil2circom(
-        &const_root_circuit,
-        config.stark_info,
-        config.verifier_info,
-        &pil2circom_opts,
-    )
-    .context("pil2circom failed in recursive setup")?;
+        let verifier_circom = pil2circom(
+            &const_root_circuit,
+            config.stark_info,
+            config.verifier_info,
+            &pil2circom_opts,
+        )
+        .context("pil2circom failed in recursive setup")?;
 
-    let verifier_path = circom_dir.join(&verifier_name);
-    fs::write(&verifier_path, &verifier_circom)?;
+        let verifier_path = circom_dir.join(&verifier_name);
+        fs::write(&verifier_path, &verifier_circom)?;
+    }
 
     // Generate recursive circom
     let verifier_filenames = vec![verifier_name.clone()];

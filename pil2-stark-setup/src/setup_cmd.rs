@@ -428,6 +428,7 @@ fn run_recursive_setup(
                 }
             };
 
+            let mut compressor_result: Option<recursive_setup::RecursiveSetupResult> = None;
             if has_compressor {
                 tracing::info!("Air '{}' needs compressor", air_name);
 
@@ -455,8 +456,9 @@ fn run_recursive_setup(
                 };
 
                 match recursive_setup::gen_recursive_setup(&compressor_config, &witness_tracker) {
-                    Ok(_result) => {
+                    Ok(result) => {
                         tracing::info!("Compressor setup complete for air '{}'", air_name);
+                        compressor_result = Some(result);
                     }
                     Err(e) => {
                         return Err(e.context(format!(
@@ -465,6 +467,26 @@ fn run_recursive_setup(
                     }
                 }
             }
+
+            // When has_compressor, use compressor's starkInfo/verifierInfo for recursive1
+            let (r1_stark_info, r1_verifier_info) = if has_compressor {
+                let cr = compressor_result.as_ref().expect("compressor result missing");
+                (
+                    cr.stark_info.as_ref().unwrap_or(&stark_info),
+                    cr.verifier_info.as_ref().unwrap_or(&verifier_info),
+                )
+            } else {
+                (&stark_info, &verifier_info)
+            };
+
+            // Compressor const root for recursive1 when has_compressor
+            let r1_const_root = if has_compressor {
+                let cr = compressor_result.as_ref().expect("compressor result missing");
+                let cr_strs: Vec<String> = cr.const_root.iter().map(|v| v.to_string()).collect();
+                [cr_strs[0].clone(), cr_strs[1].clone(), cr_strs[2].clone(), cr_strs[3].clone()]
+            } else {
+                const_root_strings.clone()
+            };
 
             // Run recursive1
             tracing::info!("Running recursive1 for air '{}'", air_name);
@@ -476,10 +498,10 @@ fn run_recursive_setup(
                 air_id: air_idx,
                 air_name: &air_name,
                 global_info: &global_info,
-                const_root: &const_root_strings,
+                const_root: &r1_const_root,
                 verification_keys: &[],
-                stark_info: &stark_info,
-                verifier_info: &verifier_info,
+                stark_info: r1_stark_info,
+                verifier_info: r1_verifier_info,
                 stark_struct: None,
                 has_compressor,
                 circom_exec: &circom_exec,
@@ -873,15 +895,43 @@ pub fn build_starkinfo_output(
         .custom_commits
         .iter()
         .map(|cc| {
+            let public_values: Vec<serde_json::Value> = cc
+                .public_values
+                .iter()
+                .map(|&idx| json!({"idx": idx}))
+                .collect();
             json!({
                 "name": cc.name,
+                "publicValues": public_values,
                 "stageWidths": cc.stage_widths,
             })
         })
         .collect();
 
-    // Build custom commits map
-    let custom_commits_map: Vec<serde_json::Value> = Vec::new();
+    // Build custom commits map (array of arrays, one per custom commit)
+    let custom_commits_map: Vec<serde_json::Value> = setup
+        .custom_commits_map
+        .iter()
+        .map(|cc_entries| {
+            let entries: Vec<serde_json::Value> = cc_entries
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("stage".to_string(), json!(p.stage.unwrap_or(0)));
+                    // Strip namespace prefix (e.g. "Rom.line" -> "line")
+                    let short_name = p.name.rsplit('.').next().unwrap_or(&p.name);
+                    obj.insert("name".to_string(), json!(short_name));
+                    obj.insert("dim".to_string(), json!(p.dim));
+                    obj.insert("polsMapId".to_string(), json!(i));
+                    obj.insert("stageId".to_string(), json!(p.stage_id.unwrap_or(0)));
+                    obj.insert("stagePos".to_string(), json!(p.stage_pos.unwrap_or(0)));
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+            json!(entries)
+        })
+        .collect();
 
     // Build challengesMap from setup + FRI challenges.
     // Start from setup.challenges_map (may have default-filled gaps).

@@ -1111,7 +1111,9 @@ fn render_gl_verifier(
             .get(&q_cm_key)
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        out.push_str(&format!("    signal input cm{}[{}];\n", q_stage, q_cm_n));
+        if q_cm_n > 0 {
+            out.push_str(&format!("    signal input cm{}[{}];\n", q_stage, q_cm_n));
+        }
         out.push_str(&format!("    signal input consts[{}];\n", n_constants));
         for cc in &custom_commits {
             let name = cc.get("name").and_then(|v| v.as_str()).unwrap_or("custom");
@@ -1145,10 +1147,17 @@ fn render_gl_verifier(
                 out.push_str(&format!("    mapValues.vals{} <== cm{};\n", stage, stage));
             }
         }
-        out.push_str(&format!(
-            "    mapValues.vals{} <== cm{};\n",
-            q_stage, q_stage
-        ));
+        let q_cm_key = format!("cm{}", q_stage);
+        let q_cm_n = map_sections
+            .get(&q_cm_key)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if q_cm_n > 0 {
+            out.push_str(&format!(
+                "    mapValues.vals{} <== cm{};\n",
+                q_stage, q_stage
+            ));
+        }
         for cc in &custom_commits {
             let name = cc.get("name").and_then(|v| v.as_str()).unwrap_or("custom");
             out.push_str(&format!(
@@ -1222,8 +1231,10 @@ fn render_gl_verifier(
         .get(&q_cm_key2)
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    out.push_str(&format!("    signal input cm{}[{}];\n", q_stage, q_cm_n2));
-    inputs_q.push(format!("cm{}", q_stage));
+    if q_cm_n2 > 0 {
+        out.push_str(&format!("    signal input cm{}[{}];\n", q_stage, q_cm_n2));
+        inputs_q.push(format!("cm{}", q_stage));
+    }
     out.push_str(&format!("    signal input consts[{}];\n", n_constants));
     inputs_q.push("consts".to_string());
     for cc in &custom_commits {
@@ -1423,10 +1434,12 @@ fn render_gl_verifier(
         .get(&q_cm_key_sv)
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    out.push_str(&format!(
-        "    signal input s0_vals{}[{}][{}];\n",
-        q_stage, n_queries, q_cm_n_sv
-    ));
+    if q_cm_n_sv > 0 {
+        out.push_str(&format!(
+            "    signal input s0_vals{}[{}][{}];\n",
+            q_stage, n_queries, q_cm_n_sv
+        ));
+    }
     out.push_str(&format!(
         "    signal input s0_valsC[{}][{}];\n",
         n_queries, n_constants
@@ -1469,16 +1482,18 @@ fn render_gl_verifier(
             }
         }
     }
-    out.push_str(&format!(
-        "    signal input s0_siblings{}[{}][{}][{}];\n",
-        q_stage, n_queries, sib_levels_0, sib_width
-    ));
-    if last_level > 0 {
-        let ll_size = arity.pow(last_level as u32);
+    if q_cm_n_sv > 0 {
         out.push_str(&format!(
-            "    signal input s0_last_mt_levels{}[{}][4];\n",
-            q_stage, ll_size
+            "    signal input s0_siblings{}[{}][{}][{}];\n",
+            q_stage, n_queries, sib_levels_0, sib_width
         ));
+        if last_level > 0 {
+            let ll_size = arity.pow(last_level as u32);
+            out.push_str(&format!(
+                "    signal input s0_last_mt_levels{}[{}][4];\n",
+                q_stage, ll_size
+            ));
+        }
     }
     out.push_str(&format!(
         "    signal input s0_siblingsC[{}][{}][{}];\n",
@@ -1683,10 +1698,12 @@ fn render_gl_verifier(
             ));
         }
     }
-    out.push_str(&format!(
-        "    var s0_vals{}_p[{}][{}][1];\n",
-        q_stage, n_queries, q_cm_n_sv
-    ));
+    if q_cm_n_sv > 0 {
+        out.push_str(&format!(
+            "    var s0_vals{}_p[{}][{}][1];\n",
+            q_stage, n_queries, q_cm_n_sv
+        ));
+    }
     out.push_str(&format!(
         "    var s0_valsC_p[{}][{}][1];\n",
         n_queries, n_constants
@@ -1741,10 +1758,12 @@ fn render_gl_verifier(
             ));
         }
     }
-    out.push_str(&format!(
-        "        for (var i = 0; i < {}; i++) {{\n            s0_vals{}_p[q][i][0] = s0_vals{}[q][i];\n        }}\n",
-        q_cm_n_sv, q_stage, q_stage
-    ));
+    if q_cm_n_sv > 0 {
+        out.push_str(&format!(
+            "        for (var i = 0; i < {}; i++) {{\n            s0_vals{}_p[q][i][0] = s0_vals{}[q][i];\n        }}\n",
+            q_cm_n_sv, q_stage, q_stage
+        ));
+    }
     out.push_str(&format!(
         "        for (var i = 0; i < {}; i++) {{\n            s0_valsC_p[q][i][0] = s0_valsC[q][i];\n        }}\n",
         n_constants
@@ -1817,20 +1836,22 @@ fn render_gl_verifier(
         }
     }
 
-    // Q stage Merkle verification
-    out.push_str(&format!("\n    for (var q=0; q<{}; q++) {{\n", n_queries));
-    if last_level > 0 {
-        out.push_str(&format!(
-            "        VerifyMerkleHashUntilLevel(1, {}, {}, {}, {}, {})(s0_vals{}_p[q], s0_siblings{}[q], queriesFRIBits[q], s0_last_mt_levels{}, enabled);\n",
-            q_cm_n_sv, arity, sib_levels_0, last_level, 1u64 << n_bits_ext, q_stage, q_stage, q_stage
-        ));
-    } else {
-        out.push_str(&format!(
-            "        VerifyMerkleHash(1, {}, {}, {})(s0_vals{}_p[q], s0_siblings{}[q], queriesFRIBits[q], root{}, enabled);\n",
-            q_cm_n_sv, arity, n_bits_arity_ceil, q_stage, q_stage, q_stage
-        ));
+    // Q stage Merkle verification (skip if no Q-stage columns)
+    if q_cm_n_sv > 0 {
+        out.push_str(&format!("\n    for (var q=0; q<{}; q++) {{\n", n_queries));
+        if last_level > 0 {
+            out.push_str(&format!(
+                "        VerifyMerkleHashUntilLevel(1, {}, {}, {}, {}, {})(s0_vals{}_p[q], s0_siblings{}[q], queriesFRIBits[q], s0_last_mt_levels{}, enabled);\n",
+                q_cm_n_sv, arity, sib_levels_0, last_level, 1u64 << n_bits_ext, q_stage, q_stage, q_stage
+            ));
+        } else {
+            out.push_str(&format!(
+                "        VerifyMerkleHash(1, {}, {}, {})(s0_vals{}_p[q], s0_siblings{}[q], queriesFRIBits[q], root{}, enabled);\n",
+                q_cm_n_sv, arity, n_bits_arity_ceil, q_stage, q_stage, q_stage
+            ));
+        }
+        out.push_str("    }\n");
     }
-    out.push_str("    }\n");
 
     // Constants Merkle verification
     out.push_str(&format!("\n    for (var q=0; q<{}; q++) {{\n", n_queries));
@@ -1939,10 +1960,12 @@ fn render_gl_verifier(
                 last_level, arity, 1u64 << n_bits_ext, stage, stage
             ));
         }
-        out.push_str(&format!(
-            "    VerifyMerkleRoot({}, {}, {})(s0_last_mt_levels{}, root{}, enabled);\n",
-            last_level, arity, 1u64 << n_bits_ext, q_stage, q_stage
-        ));
+        if q_cm_n_sv > 0 {
+            out.push_str(&format!(
+                "    VerifyMerkleRoot({}, {}, {})(s0_last_mt_levels{}, root{}, enabled);\n",
+                last_level, arity, 1u64 << n_bits_ext, q_stage, q_stage
+            ));
+        }
         out.push_str(&format!(
             "    VerifyMerkleRoot({}, {}, {})(s0_last_mt_levelsC, rootC, enabled);\n",
             last_level, arity, 1u64 << n_bits_ext
@@ -1983,7 +2006,14 @@ fn render_gl_verifier(
             query_vals.push(format!("s0_vals{}[q]", stage));
         }
     }
-    query_vals.push(format!("s0_vals{}[q]", q_stage));
+    let q_cm_key_qv = format!("cm{}", q_stage);
+    let q_cm_n_qv = map_sections
+        .get(&q_cm_key_qv)
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if q_cm_n_qv > 0 {
+        query_vals.push(format!("s0_vals{}[q]", q_stage));
+    }
     query_vals.push("s0_valsC[q]".to_string());
     for cc in &custom_commits {
         let cc_name = cc.get("name").and_then(|v| v.as_str()).unwrap_or("custom");

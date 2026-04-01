@@ -81,6 +81,7 @@ pub struct HintInfo {
 pub struct CustomCommitInfo {
     pub name: String,
     pub stage_widths: Vec<u32>,
+    pub public_values: Vec<u32>,
 }
 
 /// Aggregate result from `get_pilout_info`.
@@ -1878,6 +1879,7 @@ pub fn get_pilout_info(
         custom_commits_info.push(CustomCommitInfo {
             name: cc_name.clone(),
             stage_widths: cc.stage_widths.clone(),
+            public_values: cc.public_values.iter().map(|pv| pv.idx).collect(),
         });
         custom_commits_map.push(Vec::new());
 

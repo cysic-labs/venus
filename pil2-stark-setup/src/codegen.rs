@@ -32,9 +32,11 @@ pub struct CodeGenCtx {
     pub verifier_evaluations: bool,
     pub opening_points: Vec<i64>,
     pub ev_map: Vec<EvMapRef>,
-    /// Pre-computed index: (entry_type, id, opening_pos) -> first ev_map index.
+    /// Pre-computed index: (entry_type, id, opening_pos, commit_id) -> first ev_map index.
     /// Enables O(1) lookup in `fix_eval` instead of O(|ev_map|) linear scan.
-    pub ev_map_index: HashMap<(String, usize, usize), usize>,
+    /// The commit_id is needed to disambiguate custom commit entries that share the
+    /// same (type, id, opening_pos) but belong to different custom commits.
+    pub ev_map_index: HashMap<(String, usize, usize, Option<usize>), usize>,
 
     pub tmp_used: usize,
     pub code: Vec<CodeEntry>,
@@ -95,7 +97,7 @@ impl CodeGenCtx {
 pub fn rebuild_ev_map_index(ctx: &mut CodeGenCtx) {
     ctx.ev_map_index.clear();
     for (i, e) in ctx.ev_map.iter().enumerate() {
-        let key = (e.entry_type.clone(), e.id, e.opening_pos);
+        let key = (e.entry_type.clone(), e.id, e.opening_pos, e.commit_id);
         ctx.ev_map_index.entry(key).or_insert(i); // first match wins, like JS findIndex
     }
 }
@@ -513,7 +515,7 @@ fn fix_eval(r: &mut CodeRef, ctx: &CodeGenCtx, _symbols: &[SymbolInfo]) {
         Some(pos) => pos,
         None => return, // unknown opening point: do not remap
     };
-    let key = (r.ref_type.clone(), r.id, opening_pos);
+    let key = (r.ref_type.clone(), r.id, opening_pos, r.commit_id);
     if let Some(&idx) = ctx.ev_map_index.get(&key) {
         r.prime = None;
         r.id = idx;

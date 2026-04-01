@@ -94,6 +94,10 @@ pub fn is_compressor_needed(
 
     if !compile_output.status.success() {
         let stderr = String::from_utf8_lossy(&compile_output.stderr);
+        // Save the failing circom for debugging
+        let debug_path = std::path::PathBuf::from("/data/eric/venus/temp/compressor_check_debug.circom");
+        let _ = fs::copy(&circom_file, &debug_path);
+        tracing::warn!("Saved failing circom to {:?}", debug_path);
         anyhow::bail!("Circom compilation failed in compressor check: {}", stderr);
     }
 
