@@ -849,7 +849,10 @@ fn render_init_vadcop_inputs(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    if !air_values_map.is_empty() {
+    let has_stage1_av = air_values_map
+        .iter()
+        .any(|a| a.get("stage").and_then(|v| v.as_u64()).unwrap_or(0) == 1);
+    if has_stage1_av {
         out.push_str(&format!(
             "    {}stage1Hash <== CalculateStage1Hash()({}.rootC, {}root1, {}airvalues);\n",
             p, component_name, ps, ps
@@ -1077,10 +1080,12 @@ fn render_calculate_hashes(si: &Value, vadcop_info: &Value) -> String {
     out.push_str("    signal input rootC[4];\n");
     out.push_str("    signal input root1[4];\n");
 
-    // Declare airValues whenever airValuesMap is non-empty, matching the JS
-    // template which references airValues[j] for all entries (both stage-1
-    // and non-stage-1 entries that get assigned to _ as unused).
-    if !air_values_map.is_empty() {
+    // Declare airValues only when there are stage-1 entries (matching JS
+    // calculate_hashes.circom.ejs line 111: filter a.stage == 1).
+    let has_stage1 = air_values_map
+        .iter()
+        .any(|a| a.get("stage").and_then(|v| v.as_u64()).unwrap_or(0) == 1);
+    if has_stage1 {
         out.push_str(&format!(
             "    signal input airValues[{}][3];\n",
             air_values_map.len()
@@ -1198,11 +1203,25 @@ fn render_calculate_hashes(si: &Value, vadcop_info: &Value) -> String {
             arity,
         );
     }
-    // Discard all airValues in CalculateStage1Hash -- JS does NOT put any
-    // airValues into the stage 1 transcript (the main transcript loop starts
-    // at stage 2). Stage-1 airValues are consumed later, not in the hash.
-    for j in 0..air_values_map.len() {
-        code_lines.push(format!("    _ <== airValues[{}];", j));
+    // Match JS calculate_hashes.circom.ejs line 124-130:
+    // Stage-1 airValues: put(airValues[j], 1) -> adds airValues[j][0] as scalar
+    // Non-stage-1 airValues: _ <== airValues[j] (discard)
+    for (j, av) in air_values_map.iter().enumerate() {
+        let stage = av.get("stage").and_then(|v| v.as_u64()).unwrap_or(0);
+        if stage == 1 {
+            // put("airValues[j]", 1) => adds airValues[j][0]
+            add1(
+                format!("airValues[{}][0]", j),
+                &mut pending,
+                &mut state,
+                &mut all_out,
+                &mut h_cnt,
+                &mut code_lines,
+                arity,
+            );
+        } else {
+            code_lines.push(format!("    _ <== airValues[{}];", j));
+        }
     }
 
     // Get output: for lattice mode, call getStateLattices
