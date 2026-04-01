@@ -30,12 +30,6 @@ template Compressor() {
     // --> Verify the STARK proof
 {{ assign_stark_inputs_code }}
 
-{% if vadcopInfo_nPublics > 0 %}
-    for (var i=0; i< {{ vadcopInfo_nPublics }}; i++) {
-        sV.publics[i] <== publics[i];
-    }
-{% endif %}
-
 {{ init_vadcop_inputs_code }}
 }
 
