@@ -244,12 +244,17 @@ fn calculate_plonk_constraints_rows(
                             max_used: tier.partial_max,
                         },
                     );
-                    half_rows.push(PartialRow {
-                        row: 0,
-                        n_used: tier.half_start,
-                        custom: true,
-                        max_used: tier.half_max,
-                    });
+                    // Only add half_rows if the row can actually hold more
+                    // constraints. When half_start == half_max the row is
+                    // fully packed and a phantom half_row would waste rows.
+                    if tier.half_start < tier.half_max {
+                        half_rows.push(PartialRow {
+                            row: 0,
+                            n_used: tier.half_start,
+                            custom: true,
+                            max_used: tier.half_max,
+                        });
+                    }
                     placed = true;
                     break;
                 }
@@ -1219,12 +1224,15 @@ fn place_plonk_in_extra_row_first_half(
             max_used: first_half_max,
         },
     );
-    half_rows.push(PartialRow {
-        row,
-        n_used: first_half_max,
-        custom: true,
-        max_used: full_max,
-    });
+    // Only add half_rows if the row can hold more constraints
+    if first_half_max < full_max {
+        half_rows.push(PartialRow {
+            row,
+            n_used: first_half_max,
+            custom: true,
+            max_used: full_max,
+        });
+    }
 }
 
 /// Place a plonk constraint into an extra row's second half (C[5..9]) with
