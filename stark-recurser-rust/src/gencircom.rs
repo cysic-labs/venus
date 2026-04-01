@@ -2213,13 +2213,11 @@ pub fn gen_circom(input: &GenCircomInput<'_>) -> Result<String> {
 
     // assign_stark_inputs (componentName="sV", prefix="", for compressor/recursive1)
     // When hasCompressor=false, addPublics=true (matches JS: addPublics: !options.hasCompressor)
-    let has_compressor = vadcop_info
-        .get("hasCompressor")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // Use options.has_compressor (set by the caller) rather than vadcop_info
+    // which may not include hasCompressor for all circuit types.
     ctx.insert(
         "assign_stark_inputs_code",
-        &render_assign_stark_inputs("sV", "", si_for_fragments, !has_compressor, false),
+        &render_assign_stark_inputs("sV", "", si_for_fragments, !options.has_compressor, false),
     );
 
     // assign_stark_inputs for recursive2 (vA/vB/vC with a/b/c prefixes)
