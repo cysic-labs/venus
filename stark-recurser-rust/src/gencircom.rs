@@ -1198,19 +1198,22 @@ fn render_calculate_hashes(si: &Value, vadcop_info: &Value) -> String {
             arity,
         );
     }
-    // Put air values at stage 1
+    // Put air values at stage 1 -- each airValue is [3] (extension field),
+    // so expand to 3 scalar elements matching JS transcript.put(name, 3).
     for (j, av) in air_values_map.iter().enumerate() {
         let stage = av.get("stage").and_then(|v| v.as_u64()).unwrap_or(0);
         if stage == 1 {
-            add1(
-                format!("airValues[{}]", j),
-                &mut pending,
-                &mut state,
-                &mut all_out,
-                &mut h_cnt,
-                &mut code_lines,
-                arity,
-            );
+            for k in 0..3 {
+                add1(
+                    format!("airValues[{}][{}]", j, k),
+                    &mut pending,
+                    &mut state,
+                    &mut all_out,
+                    &mut h_cnt,
+                    &mut code_lines,
+                    arity,
+                );
+            }
         } else {
             code_lines.push(format!("    _ <== airValues[{}];", j));
         }
