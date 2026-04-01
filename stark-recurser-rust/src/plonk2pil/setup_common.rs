@@ -235,25 +235,21 @@ fn calculate_plonk_constraints_rows(
             for tier in tiers.iter_mut() {
                 if tier.remaining > 0 {
                     tier.remaining -= 1;
-                    partial_rows.insert(
-                        k.clone(),
-                        PartialRow {
-                            row: 0, // row index doesn't matter for counting
-                            n_used: 1,
-                            custom: true,
-                            max_used: tier.partial_max,
-                        },
-                    );
-                    // Only add half_rows if the row can actually hold more
-                    // constraints. When half_start == half_max the row is
-                    // fully packed and a phantom half_row would waste rows.
+                    // Match JS behavior: the partial row tracks constraint
+                    // units starting at half_start with max at half_max.
+                    // For oneExtraConstraint (half_start==half_max==9), the
+                    // row is fully packed and no partial/half entry is created
+                    // (JS doesn't create partialRows for this tier at all).
                     if tier.half_start < tier.half_max {
-                        half_rows.push(PartialRow {
-                            row: 0,
-                            n_used: tier.half_start,
-                            custom: true,
-                            max_used: tier.half_max,
-                        });
+                        partial_rows.insert(
+                            k.clone(),
+                            PartialRow {
+                                row: 0,
+                                n_used: tier.half_start,
+                                custom: true,
+                                max_used: tier.half_max,
+                            },
+                        );
                     }
                     placed = true;
                     break;
