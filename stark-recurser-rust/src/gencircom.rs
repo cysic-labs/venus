@@ -1648,8 +1648,23 @@ fn render_verify_global_constraints(vadcop_info: &Value, si: &Value) -> String {
             num_challenges_1
         ));
 
-        // Unroll the constraint code
-        let unrolled = unroll_global_constraint_code(&code);
+        // Find the last dest signal and mark it as output so it's accessible
+        // from the named component instance in VerifyGlobalConstraints.
+        let chunk_last_id = code.last()
+            .and_then(|inst| inst.get("dest"))
+            .and_then(|d| d.get("id"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut unrolled = unroll_global_constraint_code(&code);
+        let target = format!("signal tmp_{}[", chunk_last_id);
+        let replacement = format!("signal output tmp_{}[", chunk_last_id);
+        if unrolled.contains(&target) {
+            unrolled = unrolled.replacen(&target, &replacement, 1);
+        } else {
+            let target_scalar = format!("signal tmp_{} ", chunk_last_id);
+            let replacement_scalar = format!("signal output tmp_{} ", chunk_last_id);
+            unrolled = unrolled.replacen(&target_scalar, &replacement_scalar, 1);
+        }
         out.push_str(&unrolled);
         out.push_str("}\n\n");
     }
@@ -1785,25 +1800,22 @@ fn render_verify_global_constraints(vadcop_info: &Value, si: &Value) -> String {
         let last_id = last_dest.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
         let last_dim = last_dest.get("dim").and_then(|v| v.as_u64()).unwrap_or(1);
 
-        if last_dim == 1 {
-            out.push_str(&format!("    signal output tmp_{};\n", last_id));
-        } else {
-            out.push_str(&format!("    signal output tmp_{}[3];\n", last_id));
+        // Use a named component instance to avoid circom tuple syntax issues
+        // with array outputs from anonymous inline instantiation.
+        out.push_str(&format!(
+            "    component gc_{} = GlobalConstraint{}_chunk0();\n",
+            i, i
+        ));
+        for inp in &inputs {
+            out.push_str(&format!("    gc_{}.{} <== {};\n", i, inp, inp));
         }
 
-        out.push_str(&format!(
-            "    tmp_{} <== GlobalConstraint{}_chunk0()({});\n",
-            last_id,
-            i,
-            inputs.join(",")
-        ));
-
         if last_dim == 1 {
-            out.push_str(&format!("    tmp_{} === 0;\n", last_id));
+            out.push_str(&format!("    gc_{}.tmp_{} === 0;\n", i, last_id));
         } else {
-            out.push_str(&format!("    tmp_{}[0] === 0;\n", last_id));
-            out.push_str(&format!("    tmp_{}[1] === 0;\n", last_id));
-            out.push_str(&format!("    tmp_{}[2] === 0;\n", last_id));
+            out.push_str(&format!("    gc_{}.tmp_{}[0] === 0;\n", i, last_id));
+            out.push_str(&format!("    gc_{}.tmp_{}[1] === 0;\n", i, last_id));
+            out.push_str(&format!("    gc_{}.tmp_{}[2] === 0;\n", i, last_id));
         }
     }
 
