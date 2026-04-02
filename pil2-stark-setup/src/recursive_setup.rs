@@ -616,32 +616,6 @@ pub fn compile_pil(
 ) -> Result<()> {
     tracing::info!("pil2c: compiling {}", pil_path);
 
-    // Use the JS pil2c compiler for recursive circuit PILs.
-    // The Rust pil2c compiler generates incomplete pilouts for recursive
-    // circuits (missing connection infrastructure hints, hidden columns,
-    // and bus interaction metadata). The JS compiler produces correct output.
-    let js_pil2c = resolve_js_pil2c();
-    if let Some(js_path) = &js_pil2c {
-        tracing::info!("Using JS pil2c: {}", js_path);
-        let include_arg = format!("{},{}", std_pil_path, recurser_pil_path);
-        let status = std::process::Command::new("node")
-            .arg(js_path)
-            .arg(pil_path)
-            .arg("-I")
-            .arg(&include_arg)
-            .arg("-o")
-            .arg(output_path)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .with_context(|| format!("Failed to execute JS pil2c: {}", js_path))?;
-
-        if status.success() && Path::new(output_path).exists() {
-            return Ok(());
-        }
-        tracing::warn!("JS pil2c failed, falling back to Rust pil2c");
-    }
-
     let pil2c_exec = resolve_pil2c_exec()
         .context("Cannot find pil2c binary. Build it with: cargo build --release -p pil2-compiler-rust")?;
 
@@ -673,22 +647,6 @@ pub fn compile_pil(
     }
 
     Ok(())
-}
-
-/// Resolve the JS pil2c compiler path.
-fn resolve_js_pil2c() -> Option<String> {
-    // Check for the golden reference JS compiler
-    let golden_path = "temp/golden_references/pil2-compiler/src/pil.js";
-    if Path::new(golden_path).exists() {
-        return Some(golden_path.to_string());
-    }
-    // Check environment variable
-    if let Ok(path) = std::env::var("PIL2C_JS") {
-        if Path::new(&path).exists() {
-            return Some(path);
-        }
-    }
-    None
 }
 
 /// Find the pil2c binary, checking env var, then common locations.
