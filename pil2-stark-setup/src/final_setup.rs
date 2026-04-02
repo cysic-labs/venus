@@ -167,6 +167,36 @@ pub fn gen_final_setup(
     fs::create_dir_all(&build_path)?;
     fs::create_dir_all(&pil_dir)?;
 
+    // Generate verifier circom for each airgroup's recursive2 output.
+    // This must use the recursive2 starkinfo (not reuse the verifier from the
+    // recursive2 step, which was generated from the recursive1 starkinfo).
+    for (i, (si, vi)) in stark_infos.iter().zip(verifier_infos.iter()).enumerate() {
+        let const_root = if i < agg_keys_recursive2.len() && agg_keys_recursive2[i].len() == 4 {
+            [
+                agg_keys_recursive2[i][0].clone(),
+                agg_keys_recursive2[i][1].clone(),
+                agg_keys_recursive2[i][2].clone(),
+                agg_keys_recursive2[i][3].clone(),
+            ]
+        } else {
+            ["0".into(), "0".into(), "0".into(), "0".into()]
+        };
+
+        let pil2circom_opts = stark_recurser_rust::pil2circom::Pil2CircomOptions {
+            skip_main: true,
+            verkey_input: true,
+            enable_input: true,
+            ..Default::default()
+        };
+
+        let verifier_circom = stark_recurser_rust::pil2circom::pil2circom(
+            &const_root, si, vi, &pil2circom_opts,
+        ).context("pil2circom failed generating recursive2 verifier for final setup")?;
+
+        let verifier_path = circom_dir.join(&verifier_names[i]);
+        fs::write(&verifier_path, &verifier_circom)?;
+    }
+
     // Build global info with constraints for the template
     let mut final_global_info = config.global_info.clone();
     if let Some(constraints) = config.global_constraints.get("constraints") {

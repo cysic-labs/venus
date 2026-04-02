@@ -140,7 +140,6 @@ fn render_define_stark_inputs(prefix: &str, si: &Value, add_publics: bool) -> St
         .get("lastLevelVerification")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-
     out.push_str(&format!(
         "    signal input {}s0_valsC[{}][{}];\n",
         p, n_queries, n_constants
