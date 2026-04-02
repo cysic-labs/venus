@@ -619,6 +619,51 @@ fn run_recursive_setup(
         }
     }
 
+    // Pad recursive1 const files to match recursive2 nBits.
+    // The prover loads recursive1 const using recursive2's starkinfo dimensions.
+    // If recursive2 has more rows than recursive1 (different nBits from plonk2pil),
+    // the const files need zero-padding to match.
+    {
+        let r2_dir = PathBuf::from(build_dir)
+            .join("provingKey")
+            .join(pilout_name)
+            .join(&pilout.air_groups[0].name.clone().unwrap_or_else(|| "Zisk".to_string()))
+            .join("recursive2");
+        let r2_si_path = r2_dir.join("recursive2.starkinfo.json");
+        if r2_si_path.exists() {
+            let r2_si: serde_json::Value = serde_json::from_str(&fs::read_to_string(&r2_si_path)?)?;
+            let r2_n_bits = r2_si.pointer("/starkStruct/nBits").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let r2_n_constants = r2_si.get("nConstants").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let r2_n_rows = 1usize << r2_n_bits;
+
+            for airgroup in pilout.air_groups.iter() {
+                let ag_name = airgroup.name.clone().unwrap_or_default();
+                for air in airgroup.airs.iter() {
+                    let air_name = air.name.clone().unwrap_or_default();
+                    if air.num_rows.unwrap_or(0) == 0 { continue; }
+                    let r1_const_path = PathBuf::from(build_dir)
+                        .join("provingKey").join(pilout_name).join(&ag_name)
+                        .join("airs").join(&air_name).join("recursive1")
+                        .join("recursive1.const");
+                    if r1_const_path.exists() {
+                        let file_size = fs::metadata(&r1_const_path)?.len() as usize;
+                        let expected_size = r2_n_rows * r2_n_constants * 8;
+                        if file_size < expected_size {
+                            tracing::info!(
+                                "Padding {}/recursive1.const from {} to {} bytes (r2 nBits={})",
+                                air_name, file_size, expected_size, r2_n_bits
+                            );
+                            let mut f = fs::OpenOptions::new().append(true).open(&r1_const_path)?;
+                            let padding = vec![0u8; expected_size - file_size];
+                            use std::io::Write;
+                            f.write_all(&padding)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Run final setup
     tracing::info!("Running final setup...");
     let final_config = final_setup::FinalSetupConfig {
