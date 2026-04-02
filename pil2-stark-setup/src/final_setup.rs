@@ -384,41 +384,6 @@ pub fn gen_final_setup(
     let verifier_info_json = crate::setup_cmd::build_verifier_info_json(&pil_info_result.pil_code.verifier_info);
     let expressions_info_json = crate::setup_cmd::build_expressions_info_json(&pil_info_result.pil_code.expressions_info);
 
-    // Override mapSectionsN to match plonk2pil committed column counts.
-    // The Rust pil2c compiler currently undercounts hidden columns for the final
-    // circuit template (connection infrastructure columns aren't generated).
-    // The exec file uses plonk2pil's correct column layout, so starkinfo must match.
-    {
-        let exec_path_check = files_dir.join("vadcop_final.exec");
-        if exec_path_check.exists() {
-            let exec_data = fs::read(&exec_path_check)?;
-            if exec_data.len() >= 8 {
-                let n_adds = u64::from_le_bytes(exec_data[0..8].try_into().unwrap()) as usize;
-                let n_u64 = exec_data.len() / 8;
-                let smap_u64 = n_u64 - 1 - 4 * n_adds;
-                let n_smap = 1usize << plonk_result.n_bits;
-                if n_smap > 0 {
-                    let exec_cm1 = smap_u64 / n_smap;
-                    let pil_info_cm1 = starkinfo_output.map_sections_n
-                        .get("cm1")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    if exec_cm1 != pil_info_cm1 {
-                        let col_diff = exec_cm1 - pil_info_cm1;
-                        tracing::warn!(
-                            "vadcop_final: exec implies cm1={} but pil_info gives cm1={}. Overriding starkinfo (+{} hidden columns).",
-                            exec_cm1, pil_info_cm1, col_diff
-                        );
-                        let new_const = starkinfo_output.n_constants + col_diff;
-                        starkinfo_output.map_sections_n.insert("cm1".to_string(), serde_json::json!(exec_cm1));
-                        starkinfo_output.map_sections_n.insert("const".to_string(), serde_json::json!(new_const));
-                        starkinfo_output.n_constants = new_const;
-                    }
-                }
-            }
-        }
-    }
-
     // Write all JSON files
     fs::write(&starkinfo_path, crate::json_output::to_json_string(&starkinfo_output)?)?;
     fs::write(
