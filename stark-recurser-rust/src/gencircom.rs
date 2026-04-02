@@ -2192,9 +2192,15 @@ pub fn gen_circom(input: &GenCircomInput<'_>) -> Result<String> {
     );
 
     // define_stark_inputs (no prefix, for compressor / recursive1 / final_compressed)
+    // add_publics=false: recursive1/compressor templates declare publics separately
+    // via vadcopInfo. final_compressed needs publics but it's added by
+    // assign_stark_inputs (sV.publics[i] <== publics[i]). We only declare the
+    // input signal here for non-recursive templates that don't have vadcopInfo.
+    // Identify final_compressed by: no airgroup_id, not is_final, not has_compressor.
+    let is_compressed_final = options.airgroup_id.is_none() && !options.is_final && !options.has_compressor;
     ctx.insert(
         "define_stark_inputs_code",
-        &render_define_stark_inputs("", si_for_fragments, false),
+        &render_define_stark_inputs("", si_for_fragments, is_compressed_final),
     );
 
     // define_vadcop_inputs (prefix="sv", output signals, for compressor)
