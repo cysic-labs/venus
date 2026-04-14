@@ -10,10 +10,10 @@ require "circuits/poseidon2.pil";
 require "circuits/plonk.pil";
 
 airtemplate FinalVadcop (const int N, const int nPlonkRows, const int nPoseidonCompressor, const int nPoseidonSponge, const int nCMulRows, const int nEvPol4, const int nFFT4, const int nTreeSelector4, const int nSelectVal1) {
-    col witness a[56];
+    col witness a[65];
 
     #pragma fixed_external
-    col fixed S[24];
+    col fixed S[33];
     
     #pragma fixed_external
     col fixed C[10];
@@ -44,30 +44,35 @@ airtemplate FinalVadcop (const int N, const int nPlonkRows, const int nPoseidonC
     plonk([a[9], a[10], a[11]], q1, CHECK_PLONK);
     plonk([a[12], a[13], a[14]], q1, CHECK_PLONK);
     plonk([a[15], a[16], a[17]], q1, CHECK_PLONK);
-    plonk([a[18], a[19], a[20]], q1, CHECK_PLONK + POSEIDON_FINAL + TREESELECTOR4 + CMUL);
-    plonk([a[21], a[22], a[23]], q1, CHECK_PLONK + POSEIDON_FINAL + TREESELECTOR4 + CMUL + EVPOL4);
+    plonk([a[18], a[19], a[20]], q1, CHECK_PLONK + POSEIDON_FINAL + TREESELECTOR4);
+    plonk([a[21], a[22], a[23]], q1, CHECK_PLONK + POSEIDON_FINAL + TREESELECTOR4 + EVPOL4);
+    plonk([a[24], a[25], a[26]], q1, CHECK_PLONK + POSEIDON_FINAL + TREESELECTOR4 + EVPOL4 + POSEIDONSPONGE + POSEIDONCOMPRESSION + SELECTVAL1);
+    plonk([a[27], a[28], a[29]], q1, CHECK_PLONK + POSEIDON_FINAL + TREESELECTOR4 + EVPOL4 + POSEIDONSPONGE + POSEIDONCOMPRESSION + SELECTVAL1);
+    plonk([a[30], a[31], a[32]], q1, CHECK_PLONK + POSEIDON_FINAL + TREESELECTOR4 + EVPOL4 + POSEIDONSPONGE + POSEIDONCOMPRESSION + SELECTVAL1);
 
     const expr b0 = a[16];
     const expr b1 = a[17];
+
+    const int firstColP = 33;
 
     const expr inputO[POSEIDON_WIDTH];
     const expr outputO[POSEIDON_WIDTH];
     for (int i = 0; i < POSEIDON_WIDTH; i++) {
         inputO[i] = a[i];
-        outputO[i] = a[24 + i];
+        outputO[i] = a[firstColP + i];
     }
-    poseidonInputOrder(inputO, [b0, b1], outputO, POSEIDONSPONGE, POSEIDONCOMPRESSION);
+    poseidonInputOrder(inputO, [a[16], a[17]], outputO, POSEIDONSPONGE, POSEIDONCOMPRESSION);
     
     const expr inputP[POSEIDON_WIDTH];
     const expr outputP[POSEIDON_WIDTH];
     for (int i = 0; i < POSEIDON_WIDTH; i++) {
-        inputP[i] = a[i + 24];
-        outputP[i] = a[i + 24]';
+        inputP[i] = a[i + firstColP];
+        outputP[i] = a[i + firstColP]';
     }
 
     const expr st0[22];
     for (int i = 0; i < 16; i++) {
-        st0[i] = a[i + 40];
+        st0[i] = a[i + firstColP + 16];
     }
     for (int i = 0; i < 6; i++) {
         st0[16 + i] = (2)'a[i + 18];
@@ -86,10 +91,10 @@ airtemplate FinalVadcop (const int N, const int nPlonkRows, const int nPoseidonC
 
         constantsPoseidonF2[i] = (POSEIDONSPONGE + POSEIDONCOMPRESSION) * POSEIDON_RC[i + 16] + POSEIDON_PARTIAL_ROUND' * POSEIDON_RC[i + 48] + POSEIDON_FINAL' * POSEIDON_RC[i + 102] + POSEIDON_FINAL * POSEIDON_RC[i + 134] + POSEIDON_PARTIAL_ROUND * POSEIDON_RC[i + 64];
 
-        inputF_7[i] = pow7(a[i + 24] + constantsPoseidonF[i]);
-        outputF[i] = a[i + 40];
-        inputF2_7[i] = pow7(a[i + 40] + constantsPoseidonF2[i]);
-        outputF2[i] = POSEIDON_FINAL * a[i] + (1 - POSEIDON_FINAL) * a[i + 24]';
+        inputF_7[i] = pow7(a[i + firstColP] + constantsPoseidonF[i]);
+        outputF[i] = a[i + firstColP + 16];
+        inputF2_7[i] = pow7(a[i + firstColP + 16] + constantsPoseidonF2[i]);
+        outputF2[i] = POSEIDON_FINAL * a[i] + (1 - POSEIDON_FINAL) * a[i + firstColP]';
 
         intermediateValues[i] = inputF2_7[i];
     }
@@ -112,6 +117,10 @@ airtemplate FinalVadcop (const int N, const int nPlonkRows, const int nPoseidonC
     const expr res2[3] = [a[15], a[16], a[17]];
     cmul(inA2, inB2, res2, CMUL);
 
+    const expr inA3[3] = [a[18], a[19], a[20]];
+    const expr inB3[3] = [a[21], a[22], a[23]];
+    const expr res3[3] = [a[24], a[25], a[26]];
+    cmul(inA3, inB3, res3, CMUL);
 
     const expr inpFFT[12] = [a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]];
     const expr outFFT[12] = [a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23]];
@@ -146,8 +155,8 @@ airtemplate FinalVadcop (const int N, const int nPlonkRows, const int nPoseidonC
     const expr selected[4] = [a[18], a[19], a[20], a[21]];
     selectval1(selectvals, selectvals_key, selected, SELECTVAL1);
 
-    const expr A[24];
-    for (int i = 0; i < 24; i++) {
+    const expr A[33];
+    for (int i = 0; i < 33; i++) {
         A[i] = a[i];
     }
     connection(1, A, S, PIOP_BUS_PROD);
