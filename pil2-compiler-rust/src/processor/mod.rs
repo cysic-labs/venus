@@ -810,21 +810,12 @@ impl Processor {
             }
 
             // Check for an existing binding to save for scope restore.
-            // For container declarations, we do NOT record the previous
-            // binding in the scope shadow stack: container-scoped vars
-            // belong to the container's lifetime, not the enclosing
-            // lexical scope. Restoring a container-origin reference to
-            // `self.refs` on scope pop (via apply_scope_cleanup) was the
-            // source of the `virtual_table_data_global` over-registration
-            // (`airgroup_ids`/`air_ids` from proof.std.rc / proof.std.gsum
-            // / proof.std.gprod leaked into `self.refs` with dim=[ARRAY_SIZE]
-            // and masked later qualified lookups).
-            let inside_container = self.references.inside_container();
-            let previous = if inside_container {
-                None
-            } else {
-                self.references.get_reference(name).cloned()
-            };
+            // `References::restore()` now routes container-origin refs
+            // back into their origin container via the Reference's
+            // `origin_container` field, so the scope shadow machinery
+            // is safe to use uniformly for container and non-container
+            // declarations without leaking into `self.refs`.
+            let previous = self.references.get_reference(name).cloned();
             self.references.declare(
                 name,
                 ref_type,
@@ -834,11 +825,7 @@ impl Processor {
                 self.scope.deep,
                 &self.source_ref,
             );
-            // Record in scope so that pop() can unset or restore. Only
-            // for non-container declarations (see comment above).
-            if !inside_container {
-                self.scope.declare(name, previous);
-            }
+            self.scope.declare(name, previous);
         }
         FlowSignal::None
     }
