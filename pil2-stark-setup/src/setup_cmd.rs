@@ -657,6 +657,14 @@ fn run_recursive_setup(
                             let padding = vec![0u8; expected_size - file_size];
                             use std::io::Write;
                             f.write_all(&padding)?;
+                            f.sync_all()?;
+                        }
+                        let actual = fs::metadata(&r1_const_path)?.len() as usize;
+                        if actual != expected_size {
+                            anyhow::bail!(
+                                "recursive1.const size mismatch after padding for {}/{}: got {} B, expected {} B (recursive2 nBits={}, nConstants={})",
+                                ag_name, air_name, actual, expected_size, r2_n_bits, r2_n_constants
+                            );
                         }
                     }
                 }
