@@ -2947,31 +2947,36 @@ impl Processor {
             self.constraints.take_entries_and_expressions();
         let n_constraint_exprs = constraint_exprs.len();
 
-        // Parallel mapping from `self.exprs` variable-store id to the
-        // position of its RuntimeExpr inside `air_expr_store`. Only
-        // populated for exprs values that survived the is_symbolic
-        // filter, mirroring JS's `packed.expressionLabels`: an IM symbol
-        // may only be emitted for an expression that ends up in the
-        // packed store, not for every labelled slot.
-        let mut exprs_id_to_store_idx: Vec<Option<u32>> = Vec::new();
+        // Lift self.exprs slots that survived is_symbolic into the
+        // per-AIR expression store, carrying provenance on each entry.
+        // For array-dim'd ranges the source_label includes the offset
+        // (`name[index]`) so downstream IM-symbol emission needs no
+        // range lookup. Anonymous subexpressions (constraint sub-trees
+        // produced directly from witness-calc / value_to_hint_value /
+        // constraint expansion) stay None and are pruned naturally by
+        // the consumer.
         let air_expr_store: Vec<air::AirExpressionEntry> = {
             let mut store = std::mem::take(&mut self.air_expression_store);
-            exprs_id_to_store_idx.resize(self.exprs.len() as usize, None);
-            // Capture provenance from self.exprs.ids.label_ranges so
-            // each surviving entry records its source exprs-id and (if
-            // labeled) its declaration target name. Round 8 recovery:
-            // carry provenance on the entry rather than reconstructing
-            // from label_ranges after packing.
             for eid in 0..self.exprs.len() {
                 if let Some(val) = self.exprs.get(eid) {
                     if is_symbolic(val) {
                         let rt = value_to_runtime_expr(val);
-                        let idx = store.len() as u32;
                         let source_label = self.exprs.ids.label_ranges
-                            .get_label(eid)
-                            .map(|s| s.to_string());
+                            .to_vec()
+                            .iter()
+                            .find_map(|lr| {
+                                if eid >= lr.from && eid < lr.from + lr.count {
+                                    let size = lr.array_dims.iter().copied().product::<u32>().max(1);
+                                    if size <= 1 {
+                                        Some(lr.label.clone())
+                                    } else {
+                                        Some(format!("{}[{}]", lr.label, eid - lr.from))
+                                    }
+                                } else {
+                                    None
+                                }
+                            });
                         store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
-                        exprs_id_to_store_idx[eid as usize] = Some(idx);
                     }
                 }
             }
@@ -3128,32 +3133,20 @@ impl Processor {
                 });
             }
 
-            // Intermediate (im) symbols: mirror JS's imSymbols =
-            // packed.expressionLabels.filter(defined). Only emit an IM
-            // symbol when the labelled exprs-store entry survived the
-            // is_symbolic filter into air_expr_store. Use the
-            // packed-position (index in air_expr_store) as the symbol
-            // id so downstream consumers resolve it through the proto
-            // expression array, matching JS behavior.
-            for lr in self.exprs.ids.label_ranges.to_vec() {
-                let size = lr.array_dims.iter().copied().product::<u32>().max(1);
-                for offset in 0..size {
-                    let eid = (lr.from + offset) as usize;
-                    let Some(Some(store_idx)) = exprs_id_to_store_idx.get(eid).copied().map(Some) else {
-                        continue;
-                    };
-                    let Some(packed_idx) = store_idx else {
-                        continue;
-                    };
-                    let name = if size == 1 {
-                        format!("{}.{}", air_name, lr.label)
-                    } else {
-                        format!("{}.{}[{}]", air_name, lr.label, offset)
-                    };
+            // Intermediate (im) symbols: read provenance directly off
+            // each air_expr_store entry instead of walking label_ranges
+            // after the fact. One IM symbol per entry whose source_label
+            // is Some; anonymous entries (None source_label: constraint
+            // sub-exprs, witness-calc pairs, value_to_hint_value
+            // lift sites) prune out naturally. The entry's position in
+            // the store is the packed index consumed via
+            // Operand::Expression on downstream hint emission.
+            for (packed_idx, entry) in air_expr_store.iter().enumerate() {
+                if let Some(label) = entry.source_label.as_ref() {
                     syms.push(air::SymbolEntry {
-                        name,
+                        name: format!("{}.{}", air_name, label),
                         ref_type_str: "im".to_string(),
-                        internal_id: packed_idx,
+                        internal_id: packed_idx as u32,
                         dim: 0,
                         lengths: Vec::new(),
                         source_ref: String::new(),
