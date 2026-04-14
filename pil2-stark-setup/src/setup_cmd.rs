@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rayon::prelude::*;
 
 // IndexMap used in some helper functions below
 #[allow(unused_imports)]
@@ -1789,6 +1788,7 @@ fn write_bin_files_native(
 /// Uses fork+exec pattern: the child process computes the Merkle tree
 /// and writes verkey.json, then exits. All NTT/Merkle memory is freed
 /// by the OS when the child exits, preventing accumulation across AIRs.
+#[allow(dead_code)]
 fn run_bctree_subprocess(
     const_path: &str,
     starkinfo_path: &str,

@@ -119,7 +119,7 @@ impl IdAllocator {
         self.next_id += count;
         // Extend datas to cover all newly allocated slots.
         for i in 0..count {
-            let mut d = data.clone();
+            let d = data.clone();
             if i > 0 {
                 // Only the first slot gets the full data; rest are copies.
             }

@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use crate::parser::ast::*;
 
-use air::{AirGroup, AirGroups, AirInfo, AirTemplateInfo, AirTemplates};
+use air::{AirGroups, AirTemplateInfo, AirTemplates};
 use builtins::{BuiltinKind, TestTracker};
 use constraints::Constraints;
 use context::{CompilerConfig, NamespaceContext, Scope};
@@ -154,12 +154,14 @@ pub struct Processor {
     pub global_hints: Vec<air::HintEntry>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct CallStackEntry {
     name: String,
     source: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct DeferredCallInfo {
     function_name: String,
@@ -174,14 +176,12 @@ struct PragmaNextStatement {
 
 #[derive(Debug, Clone, Default)]
 struct PragmaNextFixed {
+    #[allow(dead_code)]
     bytes: Option<u32>,
     temporal: bool,
     external: bool,
     load_from_file: Option<(String, u32)>,
 }
-
-/// Maximum number of values in a switch-case range expansion.
-const MAX_SWITCH_CASE_RANGE: i128 = 512;
 
 impl Processor {
     /// Create a new processor with the given configuration.

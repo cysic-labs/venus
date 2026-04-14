@@ -5,8 +5,6 @@
 
 use std::collections::HashMap;
 
-use super::context::{NamespaceContext, Scope};
-use super::expression::Value;
 
 /// The type of a declared reference.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -432,7 +430,7 @@ impl References {
     pub fn iter_of_types<'a>(
         &'a self,
         types: &'a [RefType],
-    ) -> impl Iterator<Item = (&String, &Reference)> + 'a {
+    ) -> impl Iterator<Item = (&'a String, &'a Reference)> + 'a {
         self.refs
             .iter()
             .filter(move |(_, r)| types.contains(&r.ref_type))

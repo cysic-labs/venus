@@ -63,7 +63,7 @@ pub fn gen_final_setup(
         .and_then(|v| v.as_str())
         .unwrap_or("pilout");
 
-    let agg_types = config
+    let _agg_types = config
         .global_info
         .get("aggTypes")
         .and_then(|v| v.as_array())
@@ -88,7 +88,7 @@ pub fn gen_final_setup(
     let mut verifier_names = Vec::new();
 
     // Read recursive2 artifacts for each airgroup
-    for (i, ag_name) in air_groups.iter().enumerate() {
+    for (_i, ag_name) in air_groups.iter().enumerate() {
         let r2_dir = build_dir
             .join("provingKey")
             .join(global_name)
@@ -373,7 +373,7 @@ pub fn gen_final_setup(
     };
     let fri_security = crate::security::get_optimal_fri_query_params("JBR", &fri_params);
 
-    let mut starkinfo_output = crate::setup_cmd::build_starkinfo_output(
+    let starkinfo_output = crate::setup_cmd::build_starkinfo_output(
         &pil_info_result.setup, &final_stark_struct, &pil_info_result.pil_code,
         &opening_points, &fri_security, 0, 0,
         "vadcop_final",

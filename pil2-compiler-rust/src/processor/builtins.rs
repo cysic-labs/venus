@@ -346,7 +346,7 @@ fn compute_value_degree(val: &Value) -> i128 {
 }
 
 fn compute_runtime_expr_degree(expr: &super::expression::RuntimeExpr) -> i128 {
-    use super::expression::{ColRefKind, RuntimeExpr, RuntimeOp, RuntimeUnaryOp};
+    use super::expression::{ColRefKind, RuntimeExpr, RuntimeOp};
     match expr {
         RuntimeExpr::Value(v) => compute_value_degree(v),
         RuntimeExpr::ColRef { col_type, .. } => match col_type {

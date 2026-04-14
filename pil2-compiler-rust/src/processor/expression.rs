@@ -6,7 +6,7 @@
 use std::fmt;
 use std::rc::Rc;
 
-use crate::parser::ast::{BinOp, Expr, NumericLiteral, NumericRadix, UnaryOp};
+use crate::parser::ast::{BinOp, NumericLiteral, NumericRadix, UnaryOp};
 
 /// Runtime value produced by compile-time expression evaluation.
 ///

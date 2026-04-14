@@ -1714,35 +1714,6 @@ fn build_ternary(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, ParseErr
     }
 }
 
-fn build_left_assoc_binop(pairs: Vec<pest::iterators::Pair<'_, Rule>>, build_operand: fn(pest::iterators::Pair<'_, Rule>) -> Result<Expr, ParseError>) -> Result<Expr, ParseError> {
-    // pairs alternates: operand, op_text, operand, op_text, operand, ...
-    // But pest gives us: child1, child2, child3... where odd ones are operators and even ones are operands
-    // Actually for rules like `and_expr ~ ("||" ~ and_expr)*`, pest gives us all the and_expr children
-    // The operators are implicit in the rule structure.
-    // We need to handle this differently.
-
-    if pairs.len() == 1 {
-        return build_operand(pairs.into_iter().next().unwrap());
-    }
-
-    let mut iter = pairs.into_iter();
-    let first = iter.next().unwrap();
-    let mut result = build_operand(first)?;
-
-    for pair in iter {
-        let right = build_operand(pair)?;
-        // We need to figure out the operator from the parent rule
-        // This approach won't work cleanly. Let me restructure.
-        result = Expr::BinaryOp {
-            op: BinOp::Or, // placeholder
-            left: Box::new(result),
-            right: Box::new(right),
-        };
-    }
-
-    Ok(result)
-}
-
 fn build_or_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, ParseError> {
     let children: Vec<pest::iterators::Pair<'_, Rule>> = pair.into_inner().collect();
     if children.is_empty() {

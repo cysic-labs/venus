@@ -5,7 +5,6 @@
 //! the resulting row count exceeds the recursive threshold (17 bits).
 
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 

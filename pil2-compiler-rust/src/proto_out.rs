@@ -31,6 +31,7 @@ const REF_TYPE_WITNESS_COL: i32 = 3;
 const REF_TYPE_PROOF_VALUE: i32 = 4;
 const REF_TYPE_AIR_GROUP_VALUE: i32 = 5;
 const REF_TYPE_PUBLIC_VALUE: i32 = 6;
+#[allow(dead_code)]
 const REF_TYPE_PUBLIC_TABLE: i32 = 7;
 const REF_TYPE_CHALLENGE: i32 = 8;
 const REF_TYPE_AIR_VALUE: i32 = 9;
@@ -60,6 +61,7 @@ fn bigint_to_bytes(value: i128) -> Vec<u8> {
 
 /// Main serialization structure that builds the PilOut protobuf from the
 /// processor's internal state.
+#[allow(dead_code)]
 pub struct ProtoOutBuilder<'a> {
     processor: &'a Processor,
     /// Maps internal witness column IDs to (stage, proto_index).

@@ -4,7 +4,6 @@
 //! (int, fe, string, expr) in flat arrays, supporting multi-dimensional
 //! array indexing and scoped push/pop.
 
-use std::collections::HashMap;
 
 use super::expression::Value;
 use super::ids::{IdAllocator, IdData};
