@@ -2042,6 +2042,14 @@ impl Processor {
     fn exec_col_declaration(&mut self, cd: &ColDeclaration) -> FlowSignal {
         for item in &cd.items {
             let full_name = self.namespace_ctx.get_full_name(&item.name);
+            // Mirror JS `references.js` label rule: air-direct bare names
+            // remain bare; only container-member columns are prefixed with
+            // the airgroup name. Multi-part names stay as-is.
+            let label = if self.references.inside_container() && !item.name.contains('.') {
+                format!("{}.{}", self.namespace_ctx.air_group_name, item.name)
+            } else {
+                item.name.clone()
+            };
             let array_dims: Vec<u32> = item
                 .array_dims
                 .iter()
@@ -2076,7 +2084,7 @@ impl Processor {
                     data.stage = stage;
                     let id = self.witness_cols.reserve(
                         size,
-                        Some(&full_name),
+                        Some(&label),
                         &array_dims,
                         data,
                     );
@@ -2143,7 +2151,7 @@ impl Processor {
 
                     let id = self.fixed_cols.reserve(
                         size,
-                        Some(&full_name),
+                        Some(&label),
                         &array_dims,
                         data,
                     );
@@ -2230,7 +2238,7 @@ impl Processor {
                     data.commit_id = cid;
                     let id = self.custom_cols.reserve(
                         size,
-                        Some(&full_name),
+                        Some(&label),
                         &array_dims,
                         data,
                     );
@@ -2396,9 +2404,14 @@ impl Processor {
     fn exec_air_value_declaration(&mut self, avd: &AirValueDeclaration) -> FlowSignal {
         for item in &avd.items {
             let full_name = self.namespace_ctx.get_full_name(&item.name);
+            let label = if self.references.inside_container() && !item.name.contains('.') {
+                format!("{}.{}", self.namespace_ctx.air_group_name, item.name)
+            } else {
+                item.name.clone()
+            };
             let id = self.air_values.reserve(
                 1,
-                Some(&full_name),
+                Some(&label),
                 &[],
                 IdData {
                     source_ref: self.source_ref.clone(),
