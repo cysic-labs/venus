@@ -1426,7 +1426,7 @@ impl Processor {
                         let v = val.as_int().unwrap_or(0);
                         Value::Fe(v as u64)
                     }
-                    "string" => Value::Str(val.to_display_string()),
+                    "string" => Value::Str(self.value_to_label_string(&val)),
                     "expr" => val,
                     _ => val,
                 }
@@ -1539,6 +1539,91 @@ impl Processor {
             self.get_var_value(&reference)
         } else {
             Value::Void
+        }
+    }
+
+    /// JS row-offset formatting: `rowOffsetToString` from
+    /// packed_expressions.js. Prefix form for negative offsets
+    /// (`'x`, `2'x`), suffix for positive (`x'`, `x'2`), bare for zero.
+    fn format_row_offset(label: &str, offset: i64) -> String {
+        if offset == 0 {
+            return label.to_string();
+        }
+        if offset < 0 {
+            let o = -offset;
+            if o == 1 {
+                format!("'{}", label)
+            } else {
+                format!("{}'{}", o, label)
+            }
+        } else if offset == 1 {
+            format!("{}'", label)
+        } else {
+            format!("{}'{}", label, offset)
+        }
+    }
+
+    /// Look up the declared label for a column id, applying array
+    /// indexing when the label range covers more than one slot.
+    fn column_label(&self, col_type: &expression::ColRefKind, id: u32) -> Option<String> {
+        use expression::ColRefKind;
+        let ranges: &ids::LabelRanges = match col_type {
+            ColRefKind::Witness => &self.witness_cols.label_ranges,
+            ColRefKind::Fixed => &self.fixed_cols.ids.label_ranges,
+            ColRefKind::Custom => &self.custom_cols.label_ranges,
+            ColRefKind::AirValue => &self.air_values.label_ranges,
+            ColRefKind::AirGroupValue => &self.air_group_values.label_ranges,
+            ColRefKind::Public => &self.publics.label_ranges,
+            ColRefKind::Challenge => &self.challenges.label_ranges,
+            ColRefKind::ProofValue => &self.proof_values.label_ranges,
+            _ => return None,
+        };
+        for range in ranges.to_vec().iter() {
+            if id >= range.from && id < range.from + range.count {
+                if range.array_dims.is_empty() {
+                    return Some(range.label.clone());
+                }
+                let offset = id - range.from;
+                return Some(format!("{}[{}]", range.label, offset));
+            }
+        }
+        None
+    }
+
+    /// JS-equivalent `string(expr)` cast: resolve column references to
+    /// their declared labels rather than the Rust `Value` debug form.
+    /// Mirrors the `toString({hideClass: true, hideLabel: false})`
+    /// path invoked from `builtin/cast.js`.
+    fn value_to_label_string(&self, val: &Value) -> String {
+        match val {
+            Value::ColRef { col_type, id, row_offset } => {
+                let label = self
+                    .column_label(col_type, *id)
+                    .unwrap_or_else(|| format!("{:?}@{}", col_type, id));
+                Self::format_row_offset(&label, row_offset.unwrap_or(0))
+            }
+            Value::ArrayRef { ref_type, base_id, dims } => {
+                use crate::processor::references::RefType;
+                let col_type = match ref_type {
+                    RefType::Witness => Some(expression::ColRefKind::Witness),
+                    RefType::Fixed => Some(expression::ColRefKind::Fixed),
+                    RefType::CustomCol => Some(expression::ColRefKind::Custom),
+                    RefType::AirValue => Some(expression::ColRefKind::AirValue),
+                    RefType::AirGroupValue => Some(expression::ColRefKind::AirGroupValue),
+                    RefType::Public => Some(expression::ColRefKind::Public),
+                    RefType::Challenge => Some(expression::ColRefKind::Challenge),
+                    RefType::ProofValue => Some(expression::ColRefKind::ProofValue),
+                    _ => None,
+                };
+                if let Some(kind) = col_type {
+                    if let Some(label) = self.column_label(&kind, *base_id) {
+                        return label;
+                    }
+                }
+                let dims_str: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
+                format!("{:?}@{}[{}]", ref_type, base_id, dims_str.join(","))
+            }
+            _ => val.to_display_string(),
         }
     }
 
