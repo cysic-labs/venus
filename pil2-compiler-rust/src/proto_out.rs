@@ -197,6 +197,7 @@ impl<'a> ProtoOutBuilder<'a> {
                 };
 
                 let mut rc_cache: HashMap<*const RuntimeExpr, u32> = HashMap::new();
+                let mut sem_cache: HashMap<RuntimeExpr, u32> = HashMap::new();
                 for expr in expr_source {
                     let root_idx = self.flatten_air_expr(
                         expr,
@@ -207,6 +208,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         &expr_id_map,
                         &mut proto_expressions,
                         &mut rc_cache,
+                        &mut sem_cache,
                     );
                     expr_id_map.push(root_idx);
                 }
@@ -1133,20 +1135,30 @@ impl<'a> ProtoOutBuilder<'a> {
         expr_id_map: &[u32],
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
+        sem_cache: &mut HashMap<RuntimeExpr, u32>,
     ) -> u32 {
-        // Deduplicate Rc-shared subtrees: if this pointer was already
-        // flattened, reference the existing proto entry. This mirrors the
-        // JS stack-based expression format where shared sub-expressions
-        // are referenced by index rather than duplicated.
+        // Rc-pointer fast path: if this exact node was already flattened,
+        // reference the existing proto entry.
         let ptr = expr as *const RuntimeExpr;
         if let Some(&cached_idx) = rc_cache.get(&ptr) {
+            return cached_idx;
+        }
+        // Semantic cache: mirrors JS `PackedExpressions.
+        // saveAndPushExpressionReference` which keys reuse by semantic
+        // expression identity (source id + row offset embedded in the
+        // RuntimeExpr tree itself). Two structurally-identical trees
+        // from different Rc chains — common in stdlib helper expansions
+        // like std_prod's compress_exprs / gsum_e / direct_gsum_e — end
+        // up sharing the same packed index.
+        if let Some(&cached_idx) = sem_cache.get(expr) {
+            rc_cache.insert(ptr, cached_idx);
             return cached_idx;
         }
 
         let op = match expr {
             RuntimeExpr::BinOp { op, left, right } => {
-                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache);
-                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache);
+                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, sem_cache);
+                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, sem_cache);
                 match op {
                     RuntimeOp::Add => pilout_proto::expression::Operation::Add(
                         pilout_proto::expression::Add { lhs, rhs },
@@ -1162,7 +1174,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
                     let value =
-                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache);
+                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, sem_cache);
                     pilout_proto::expression::Operation::Neg(
                         pilout_proto::expression::Neg { value },
                     )
@@ -1190,6 +1202,7 @@ impl<'a> ProtoOutBuilder<'a> {
         let idx = out.len() as u32;
         out.push(proto_expr);
         rc_cache.insert(ptr, idx);
+        sem_cache.insert(expr.clone(), idx);
         idx
     }
 
@@ -1204,10 +1217,11 @@ impl<'a> ProtoOutBuilder<'a> {
         expr_id_map: &[u32],
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
+        sem_cache: &mut HashMap<RuntimeExpr, u32>,
     ) -> Option<pilout_proto::Operand> {
         match expr {
             RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
-                let idx = self.flatten_air_expr(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache);
+                let idx = self.flatten_air_expr(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, sem_cache);
                 Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Expression(
                         pilout_proto::operand::Expression { idx },
