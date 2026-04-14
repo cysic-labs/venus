@@ -797,13 +797,13 @@ impl Processor {
                     (RefType::Str, id)
                 }
                 TypeKind::Expr => {
-                    // JS records intermediate-column labels via
-                    // packed.expressionLabels, which is populated only
-                    // when an expression is explicitly packed as a
-                    // reference. Function-local `expr X` scratch vars
-                    // never hit that path. Approximate by skipping the
-                    // label when we are inside a function call; this
-                    // keeps Rust IM emission close to the JS subset.
+                    // Record labels only for AIR-scope expr
+                    // declarations (function_deep == 0). Labels
+                    // captured inside helper bodies bleed into the IM
+                    // symbol set for every intermediate scratch var,
+                    // which never happens on the JS side. Parameters
+                    // are already skipped upstream in
+                    // execute_user_function.
                     let label_opt: Option<&str> = if self.function_deep == 0 {
                         Some(name)
                     } else {
@@ -2012,7 +2012,13 @@ impl Processor {
                     id
                 }
                 RefType::Expr => {
-                    let id = self.exprs.reserve(1, Some(&arg_def.name), &[], IdData::default());
+                    // Function parameter: do NOT label the underlying
+                    // exprs slot. JS binds the argument through the
+                    // local scope without naming the expression itself,
+                    // so emitting an IM symbol under the formal parameter
+                    // name is a Rust-only artifact. Without the label,
+                    // the IM-symbol harvester skips it entirely.
+                    let id = self.exprs.reserve(1, None, &[], IdData::default());
                     self.exprs.set(id, value);
                     id
                 }
