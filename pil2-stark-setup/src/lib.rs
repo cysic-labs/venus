@@ -27,5 +27,6 @@ pub mod setup_cmd;
 pub mod stark_info;
 pub mod stark_struct;
 pub mod types;
+pub mod validation;
 pub mod verifier_rs_gen;
 pub mod witness_gen;

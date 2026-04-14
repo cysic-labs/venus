@@ -437,6 +437,14 @@ pub fn gen_recursive_setup(
             );
         }
 
+        // Plan §6.3 cross-artifact consistency check.
+        let exec_header = if plonk_result.exec.len() >= 2 {
+            Some((plonk_result.exec[0], plonk_result.exec[1]))
+        } else {
+            None
+        };
+        crate::validation::validate_final_artifacts(files_dir.as_path(), template_str, exec_header)?;
+
         (Some(si_json), Some(verifier_info_json), Some(expressions_info_json))
     } else {
         bail!("Pilout not found at {}. Cannot run starkSetup for recursive circuit.", pilout_path_str);

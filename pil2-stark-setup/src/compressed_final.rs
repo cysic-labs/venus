@@ -328,6 +328,14 @@ pub fn gen_compressed_final_setup(
                 template, n_constants, plonk_n_fixed, n_constants.saturating_sub(plonk_n_fixed), n_rows
             );
         }
+
+        // Plan §6.3 cross-artifact consistency check.
+        let exec_header = if plonk_result.exec.len() >= 2 {
+            Some((plonk_result.exec[0], plonk_result.exec[1]))
+        } else {
+            None
+        };
+        crate::validation::validate_final_artifacts(files_dir.as_path(), template, exec_header)?;
     }
 
     // Compute constant tree
