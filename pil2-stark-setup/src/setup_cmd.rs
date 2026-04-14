@@ -1135,7 +1135,14 @@ pub fn collect_opening_points(setup: &crate::pilout_info::SetupResult) -> Vec<i6
             }
         }
     }
-    points.sort();
+    // Lexicographic (string) sort to match the JS reference, which does
+    //   [...new Set(...)].sort()
+    // without a comparator — i.e., default JS Array.sort is lexicographic.
+    // That produces ["-1", "-2", "0", "1"] for the set {-2, -1, 0, 1}, not
+    // numeric ascending. The prover's rowOffsetIndex derives from this order
+    // (see pil2-proofman-js src/pil2-stark/pil_info/helpers/code/codegen.js
+    // findIndex by prime), so the order must match golden exactly.
+    points.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
     points
 }
 

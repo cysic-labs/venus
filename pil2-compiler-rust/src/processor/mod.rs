@@ -1391,13 +1391,19 @@ impl Processor {
                     _ => val,
                 }
             }
-            Expr::RowOffset { base, offset } => {
-                // Row offset creates a column reference with offset.
+            Expr::RowOffset { base, offset, prior } => {
+                // Row offset creates a column reference with offset. Prefix form
+                // (`'col`, `2'col`) sets `prior = true`, which negates the offset
+                // to match the JS convention where prior rows have negative offsets
+                // (see pil2-compiler/src/expression_items/row_offset.js getValue).
                 let base_val = self.eval_expr(base);
-                let offset_val = self
+                let mut offset_val = self
                     .eval_expr(offset)
                     .as_int()
                     .unwrap_or(1);
+                if *prior {
+                    offset_val = -offset_val;
+                }
                 match base_val {
                     Value::ColRef {
                         col_type, id, ..

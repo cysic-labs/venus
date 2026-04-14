@@ -130,7 +130,8 @@ pub fn pil_info(
             }
         }
     }
-    opening_points.sort();
+    // Lexicographic (string) sort — see collect_opening_points in setup_cmd.rs.
+    opening_points.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
 
     // Build code-gen params
     let n_stages = setup.n_stages;

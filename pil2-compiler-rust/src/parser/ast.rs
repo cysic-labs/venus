@@ -574,10 +574,15 @@ pub enum Expr {
         member: String,
     },
 
-    /// Row offset: `a'`, `a'2`
+    /// Row offset: `a'`, `a'2`, `'a`, `2'a`, `(expr)'a`.
+    /// `prior` is true for the prefix form (previous rows, negative offset in the pilout)
+    /// and false for the suffix form (next rows, positive offset). Mirrors the JS
+    /// `RowOffset { index, prior }` distinction in
+    /// `pil2-compiler/src/expression_items/row_offset.js`.
     RowOffset {
         base: Box<Expr>,
         offset: Box<Expr>,
+        prior: bool,
     },
 
     /// Cast: `int(x)`, `fe(x)`, `expr(x)`

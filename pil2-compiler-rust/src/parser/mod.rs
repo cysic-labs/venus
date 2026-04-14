@@ -2031,17 +2031,20 @@ fn build_prefix_row_offset(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr
     // 1. (expr) ' postfix_expr  → children: [expression, postfix_expr]
     // 2. number ' postfix_expr  → children: [number, postfix_expr]
     // 3. ' postfix_expr         → children: [postfix_expr]
+    // All three are the PREFIX form (`'col`, `N'col`, `(expr)'col`), which means
+    // "prior rows". JS `RowOffset { prior: true }` negates the offset; mirror
+    // that with `prior: true` here so eval flips the sign when materializing.
     if children.len() >= 2 && children[0].as_rule() == Rule::expression {
         let offset = build_expression(children[0].clone())?;
         let base = build_postfix_expr(children[1].clone())?;
-        Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(offset) })
+        Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(offset), prior: true })
     } else if children.len() >= 2 && children[0].as_rule() == Rule::number {
         let offset = make_number_expr(children[0].as_str());
         let base = build_postfix_expr(children[1].clone())?;
-        Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(offset) })
+        Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(offset), prior: true })
     } else {
         let base = build_postfix_expr(children[0].clone())?;
-        Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(one_literal()) })
+        Ok(Expr::RowOffset { base: Box::new(base), offset: Box::new(one_literal()), prior: true })
     }
 }
 
@@ -2059,27 +2062,31 @@ fn build_postfix_expr(pair: pest::iterators::Pair<'_, Rule>) -> Result<Expr, Par
             let suffix_children: Vec<pest::iterators::Pair<'_, Rule>> = children[i].clone().into_inner().collect();
 
             if suffix_text.starts_with("'(") {
-                // Row offset with expression: ident'(expr)
+                // Row offset with expression: ident'(expr). Suffix form → next rows.
                 if let Some(expr_pair) = suffix_children.into_iter().find(|p| p.as_rule() == Rule::expression) {
                     let offset = build_expression(expr_pair)?;
                     result = Expr::RowOffset {
                         base: Box::new(result),
                         offset: Box::new(offset),
+                        prior: false,
                     };
                 }
             } else if suffix_text.starts_with("'") && suffix_children.iter().any(|p| p.as_rule() == Rule::number) {
-                // Row offset with number: ident'N
+                // Row offset with number: ident'N. Suffix form → next rows.
                 if let Some(num_pair) = suffix_children.into_iter().find(|p| p.as_rule() == Rule::number) {
                     let offset = make_number_expr(num_pair.as_str());
                     result = Expr::RowOffset {
                         base: Box::new(result),
                         offset: Box::new(offset),
+                        prior: false,
                     };
                 }
             } else if suffix_text == "'" {
+                // Bare suffix `'` → next row (+1).
                 result = Expr::RowOffset {
                     base: Box::new(result),
                     offset: Box::new(one_literal()),
+                    prior: false,
                 };
             } else if suffix_text.starts_with('[') {
                 // Array index

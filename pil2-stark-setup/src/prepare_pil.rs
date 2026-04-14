@@ -114,7 +114,8 @@ pub fn prepare_pil(
             }
         }
     }
-    opening_points_set.sort();
+    // Lexicographic (string) sort to match JS Array.sort default (see collect_opening_points).
+    opening_points_set.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
 
     // Initialize boundaries
     let mut boundaries = vec![Boundary {
