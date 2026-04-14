@@ -72,6 +72,17 @@ pub struct ProtoOutBuilder<'a> {
     custom_id_to_proto: Vec<(u32, u32, u32)>,
     /// Maps internal air value IDs to (stage, proto_index, air_group_id, air_id).
     air_value_id_to_proto: Vec<(u32, u32, u32, u32)>,
+    /// Per-(airgroup_id, air_id) packed expression maps built while
+    /// flattening per-AIR expressions. Indexed by raw exprs-store id;
+    /// value is the packed proto-expression index. Populated during
+    /// `build_air_groups` and consumed by `build_hints` so
+    /// `HintValue::ExprId` can emit `Operand::Expression` with a
+    /// packed index that matches the air's expressions[] array.
+    air_expr_id_maps: HashMap<(u32, u32), Vec<u32>>,
+    /// Scratch slot set before each per-air hint serialization so the
+    /// `HintValue::ExprId` arm can look up the packed index without
+    /// threading the map through every hint-value helper.
+    current_air_expr_id_map: Option<Vec<u32>>,
 }
 
 impl<'a> ProtoOutBuilder<'a> {
@@ -82,6 +93,8 @@ impl<'a> ProtoOutBuilder<'a> {
             fixed_id_to_proto: Vec::new(),
             custom_id_to_proto: Vec::new(),
             air_value_id_to_proto: Vec::new(),
+            air_expr_id_maps: HashMap::new(),
+            current_air_expr_id_map: None,
         }
     }
 
@@ -122,7 +135,9 @@ impl<'a> ProtoOutBuilder<'a> {
         // Build symbols.
         let symbols = self.build_symbols();
 
-        // Build hints (per-AIR and global).
+        // Build hints (per-AIR and global). Must run after
+        // build_air_groups so the per-air packed expression-id maps are
+        // populated for HintValue::ExprId serialization.
         let hints = self.build_hints();
 
         pilout_proto::PilOut {
@@ -162,6 +177,8 @@ impl<'a> ProtoOutBuilder<'a> {
             // Build airs within this group (skip virtual airs, which live
             // in a separate namespace in the JS compiler and are never
             // included in the protobuf output).
+            let ag_idx = self.processor.air_groups.iter().position(|g| std::ptr::eq(g, ag)).unwrap_or(0) as u32;
+            let mut air_id_counter = 0u32;
             for air in ag.airs.iter().filter(|a| !a.is_virtual) {
                 // Flatten the FULL AIR expression store into the protobuf
                 // array. This includes ALL expressions created during AIR
@@ -193,6 +210,13 @@ impl<'a> ProtoOutBuilder<'a> {
                     );
                     expr_id_map.push(root_idx);
                 }
+
+                // Stash the packed expression-id map so `build_hints`
+                // can look up packed indices for this air when
+                // serializing `HintValue::ExprId` hint leaves.
+                self.air_expr_id_maps
+                    .insert((ag_idx, air_id_counter), expr_id_map.clone());
+                air_id_counter += 1;
 
                 // Build per-AIR constraints, referencing the flattened
                 // expression indices. The constraint expr_id offsets into
@@ -669,7 +693,7 @@ impl<'a> ProtoOutBuilder<'a> {
     /// Collects per-AIR hints (with air_group_id/air_id) and global hints
     /// (without air/airgroup scope), converting HintValue trees into
     /// protobuf HintField messages.
-    fn build_hints(&self) -> Vec<pilout_proto::Hint> {
+    fn build_hints(&mut self) -> Vec<pilout_proto::Hint> {
         let mut result = Vec::new();
 
         // Per-AIR hints: iterate airgroups -> airs, using stored hints.
@@ -683,6 +707,13 @@ impl<'a> ProtoOutBuilder<'a> {
                 let air_id = non_virtual_pos;
                 non_virtual_pos += 1;
 
+                // Load the packed expression-id map built during
+                // build_air_groups so HintValue::ExprId can emit an
+                // Operand::Expression referencing the same index the
+                // per-AIR expressions[] array uses.
+                self.current_air_expr_id_map =
+                    self.air_expr_id_maps.get(&(air_group_id, air_id)).cloned();
+
                 for hint in &air.hints {
                     let hint_fields = self.hint_value_to_fields(
                         &hint.data,
@@ -694,15 +725,12 @@ impl<'a> ProtoOutBuilder<'a> {
                     );
                     result.push(pilout_proto::Hint {
                         name: hint.name.clone(),
-                        hint_fields: if hint_fields.len() == 1 {
-                            hint_fields
-                        } else {
-                            hint_fields
-                        },
+                        hint_fields,
                         air_group_id: Some(air_group_id),
                         air_id: Some(air_id),
                     });
                 }
+                self.current_air_expr_id_map = None;
             }
         }
 
@@ -779,32 +807,36 @@ impl<'a> ProtoOutBuilder<'a> {
                 value: Some(pilout_proto::hint_field::Value::StringValue(s.clone())),
             },
             HintValue::ExprId(expr_id) => {
-                // Look up the expression and try to convert it to a direct
-                // operand (single column ref or constant). If it's a complex
-                // expression, reference it by packed expression index.
-                if let Some(expr) = expr_store.get(*expr_id as usize) {
-                    // Build a temporary expr_id_map by packing all expressions
-                    // to get the proto index for this expression. Since we
-                    // don't have the full packed map here, we use the expr_id
-                    // directly as the operand expression index. This works
-                    // because the air expression store is serialized in order.
-                    let operand = self.expr_to_hint_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, *expr_id);
-                    pilout_proto::HintField {
-                        name: None,
-                        value: Some(pilout_proto::hint_field::Value::Operand(operand)),
-                    }
-                } else {
-                    // Fallback: reference by expression index.
-                    pilout_proto::HintField {
-                        name: None,
-                        value: Some(pilout_proto::hint_field::Value::Operand(
-                            pilout_proto::Operand {
-                                operand: Some(pilout_proto::operand::Operand::Expression(
-                                    pilout_proto::operand::Expression { idx: *expr_id },
-                                )),
-                            },
-                        )),
-                    }
+                // Always emit as Operand::Expression referencing the
+                // packed expression index. Mirrors JS `toHintField` which
+                // uses packed expression references for every expression-
+                // backed hint field, including simple witness / fixed /
+                // custom leaves. Rust previously collapsed simple leaves
+                // into direct witness/fixed/custom operands, which caused
+                // divergence on gprod_col, gsum_col, gprod_debug_data, and
+                // gsum_debug_data hint payloads. The translation from the
+                // raw self.exprs id to the packed proto-expression index
+                // lives on each air as `expr_id_map`; self.current_air_expr_id_map
+                // exposes it for the currently-being-serialized air.
+                let mapped = self
+                    .current_air_expr_id_map
+                    .as_ref()
+                    .and_then(|m| m.get(*expr_id as usize).copied())
+                    .unwrap_or(*expr_id);
+                let _ = expr_store;
+                let _ = fixed_map;
+                let _ = fixed_col_start;
+                let _ = witness_map;
+                let _ = custom_map;
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::Operand(
+                        pilout_proto::Operand {
+                            operand: Some(pilout_proto::operand::Operand::Expression(
+                                pilout_proto::operand::Expression { idx: mapped },
+                            )),
+                        },
+                    )),
                 }
             }
             HintValue::Array(items) => {
@@ -834,88 +866,6 @@ impl<'a> ProtoOutBuilder<'a> {
         }
     }
 
-    /// Convert a RuntimeExpr to a per-AIR Operand for hint fields.
-    /// For simple column references, produces the direct operand.
-    /// For complex expressions, falls back to Expression { idx }.
-    fn expr_to_hint_operand(
-        &self,
-        expr: &RuntimeExpr,
-        fixed_map: &[(char, u32)],
-        fixed_col_start: u32,
-        witness_map: &[(u32, u32)],
-        custom_map: &[(u32, u32, u32)],
-        expr_idx: u32,
-    ) -> pilout_proto::Operand {
-        match expr {
-            RuntimeExpr::Value(Value::Int(v)) => pilout_proto::Operand {
-                operand: Some(pilout_proto::operand::Operand::Constant(
-                    pilout_proto::operand::Constant {
-                        value: bigint_to_bytes(*v),
-                    },
-                )),
-            },
-            RuntimeExpr::Value(Value::Fe(v)) => pilout_proto::Operand {
-                operand: Some(pilout_proto::operand::Operand::Constant(
-                    pilout_proto::operand::Constant {
-                        value: bigint_to_bytes(*v as i128),
-                    },
-                )),
-            },
-            RuntimeExpr::ColRef { col_type, id, row_offset } => {
-                let offset = row_offset.unwrap_or(0) as i32;
-                let op = match col_type {
-                    ColRefKind::Fixed => {
-                        let rel_idx = (*id).checked_sub(fixed_col_start).unwrap_or(*id) as usize;
-                        let (ctype, proto_idx) = fixed_map.get(rel_idx).copied().unwrap_or(('F', *id));
-                        if ctype == 'P' {
-                            pilout_proto::operand::Operand::PeriodicCol(
-                                pilout_proto::operand::PeriodicCol { idx: proto_idx, row_offset: offset },
-                            )
-                        } else {
-                            pilout_proto::operand::Operand::FixedCol(
-                                pilout_proto::operand::FixedCol { idx: proto_idx, row_offset: offset },
-                            )
-                        }
-                    }
-                    ColRefKind::Witness => {
-                        let (stage, col_idx) = witness_map.get(*id as usize).copied().unwrap_or((1, *id));
-                        pilout_proto::operand::Operand::WitnessCol(
-                            pilout_proto::operand::WitnessCol { stage, col_idx, row_offset: offset },
-                        )
-                    }
-                    ColRefKind::Custom => {
-                        let (stage, col_idx, commit_id) = custom_map.get(*id as usize).copied().unwrap_or((0, *id, 0));
-                        pilout_proto::operand::Operand::CustomCol(
-                            pilout_proto::operand::CustomCol { commit_id, stage, col_idx, row_offset: offset },
-                        )
-                    }
-                    ColRefKind::AirValue => {
-                        pilout_proto::operand::Operand::AirValue(
-                            pilout_proto::operand::AirValue { idx: *id },
-                        )
-                    }
-                    ColRefKind::AirGroupValue => {
-                        pilout_proto::operand::Operand::AirGroupValue(
-                            pilout_proto::operand::AirGroupValue { idx: *id },
-                        )
-                    }
-                    _ => {
-                        // For other reference types, fall back to expression ref.
-                        pilout_proto::operand::Operand::Expression(
-                            pilout_proto::operand::Expression { idx: expr_idx },
-                        )
-                    }
-                };
-                pilout_proto::Operand { operand: Some(op) }
-            }
-            // Complex expression: reference by packed expression index.
-            _ => pilout_proto::Operand {
-                operand: Some(pilout_proto::operand::Operand::Expression(
-                    pilout_proto::operand::Expression { idx: expr_idx },
-                )),
-            },
-        }
-    }
 
     /// Convert hint value to fields in global (proof) context.
     fn hint_value_to_fields_global(
