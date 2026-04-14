@@ -2687,9 +2687,21 @@ impl Processor {
             .and_then(|v| v.as_int())
             .unwrap_or(0) as u64;
 
-        // Create the air instance.
-        self.last_air_id += 1;
-        let air_id = self.last_air_id as u32;
+        // Create the air instance. Only non-virtual airs consume an
+        // AIR_ID value — mirrors JS `AirGroup` where virtual helpers
+        // live in a separate `virtualAirs[]` namespace and do not
+        // advance the user-visible airs[] index. Global hints like
+        // `virtual_table_data_global.air_ids` serialize those
+        // non-virtual indices verbatim, so leaking a virtual air into
+        // the sequence off-by-ones every downstream consumer.
+        let air_id = if is_virtual {
+            // Virtual airs reuse the last non-virtual air_id as a
+            // placeholder; proto emission skips them anyway.
+            self.last_air_id.max(0) as u32
+        } else {
+            self.last_air_id += 1;
+            self.last_air_id as u32
+        };
         {
             let ag = self.air_groups.get_or_create(&ag_name);
             ag.create_air(air_id, &tpl.name, name, rows, is_virtual);
