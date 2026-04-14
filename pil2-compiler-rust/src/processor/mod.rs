@@ -2082,8 +2082,18 @@ impl Processor {
     fn exec_col_declaration(&mut self, cd: &ColDeclaration) -> FlowSignal {
         for item in &cd.items {
             let full_name = self.namespace_ctx.get_full_name(&item.name);
+            // JS processor routes witness / customcol through
+            // `this.declare(... fullName=true)` which still passes the
+            // RAW `col.name` to `declareReference`; fixed / IM go
+            // through `declareFullReference` which prepends the
+            // namespace before calling `declareReference`. Mirror that
+            // split here: pass full_name for fixed, raw for the rest.
+            let label_input = match &cd.col_type {
+                ColType::Fixed => full_name.as_str(),
+                _ => item.name.as_str(),
+            };
             let label = js_label_for_declaration(
-                &item.name,
+                label_input,
                 &self.namespace_ctx.air_group_name,
                 self.references.inside_container(),
             );
