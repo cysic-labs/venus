@@ -1922,17 +1922,17 @@ impl Processor {
             _ => Value::Int(0),
         };
 
-        // Reclaim memory from function-local expression trees. This is
-        // critical for recursive circuits where thousands of function
-        // calls within a single AIR would otherwise accumulate ~90 GB
-        // of expression trees.
-        //
-        // Only trim expression stores (which hold large Rc<RuntimeExpr>
-        // trees). Do NOT trim ints/fes/strings because container
-        // variables (e.g. vt.num_groups) may have been written inside a
-        // function call and must persist across calls. Integer/string
-        // values are small and do not cause memory issues.
-        self.exprs.trim_values_after(exprs_mark);
+        // Do NOT trim any store on function return. Expression slots
+        // written inside a container (e.g. `air.std.gprod.*`) belong to
+        // the enclosing container's lifetime, not the function's, and
+        // must survive the return so deferred-final calls like
+        // `piop_gprod_air()` can read them later. Trimming exprs here
+        // erased those container-backed slots and dropped the `@im_col`
+        // hints plus extra stage2/stage1/fixed columns from
+        // `vadcop_final.pilout`. JS `executeFunctionCall` does not trim.
+        // The int/fe/string stores are already preserved for the same
+        // lifetime reasons (see BL-20260331-trim-container-vars).
+        let _ = (exprs_mark, ints_mark, fes_mark, strings_mark);
 
         ret
     }
