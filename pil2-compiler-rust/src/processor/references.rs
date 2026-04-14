@@ -97,14 +97,6 @@ pub struct Reference {
     pub label: String,
     /// Whether this is a static (scope-qualified) reference.
     pub is_static: bool,
-    /// Name of the container this reference was declared in, if any.
-    /// When scope-pop's `restore()` runs to put back a shadowed binding,
-    /// it reinstalls the reference into its origin container instead of
-    /// into `self.refs`. Without this, container-scoped inner members
-    /// (e.g. `airgroup_ids` from `proof.std.rc` with `dim=[ARRAY_SIZE]`)
-    /// leak into the global `self.refs` table and short-circuit the
-    /// use-alias LIFO fallback in `search_definition`.
-    pub origin_container: Option<String>,
 }
 
 impl Reference {
@@ -131,6 +123,14 @@ pub struct References {
     current_container: Option<String>,
     /// "Use" aliases: alias -> container_name.
     use_aliases: HashMap<String, String>,
+    /// Insertion order of `use` aliases (mirrors JS `containers.uses`
+    /// which is iterated LIFO in `getReference`). Without LIFO order,
+    /// when multiple containers share an inner name (e.g. `airgroup_ids`
+    /// appears in `proof.std.vt`, `proof.std.gprod`, `proof.std.gsum`,
+    /// and `proof.std.rc`), the unqualified lookup inside
+    /// `issue_virtual_table_data_global()` can pick the wrong container
+    /// because HashMap iteration order is non-deterministic.
+    use_order: Vec<String>,
     /// Visibility scope stack for function calls.
     visibility_scope: (u32, Option<u32>),
     visibility_stack: Vec<(u32, Option<u32>)>,
@@ -143,6 +143,7 @@ impl References {
             containers: HashMap::new(),
             current_container: None,
             use_aliases: HashMap::new(),
+            use_order: Vec::new(),
             visibility_scope: (0, None),
             visibility_stack: Vec::new(),
         }
@@ -170,7 +171,6 @@ impl References {
             is_reference: false,
             label: name.to_string(),
             is_static: false,
-            origin_container: self.current_container.clone(),
         };
 
         if let Some(container_name) = &self.current_container {
@@ -241,7 +241,7 @@ impl References {
         // pil2-compiler/src/containers.js:#getReference, which walks
         // `this.uses` from the top of the stack down.
         if !name.contains('.') {
-            for target in self.use_aliases.values() {
+            for target in self.use_order.iter().rev() {
                 if let Some(container) = self.containers.get(target) {
                     if container.contains_key(name) {
                         return Some(target.clone());
@@ -269,10 +269,10 @@ impl References {
         }
 
         if !name.contains('.') {
-            // For unqualified names, also check all use-aliased containers.
-            // `use proof.std.rc` makes inner names of `proof.std.rc` directly
-            // accessible without qualification.
-            for (_alias, target) in &self.use_aliases {
+            // For unqualified names, also check all use-aliased containers
+            // in LIFO order (most recently `use`d first) to match JS
+            // `#getReference` in containers.js.
+            for target in self.use_order.iter().rev() {
                 if let Some(container) = self.containers.get(target) {
                     if let Some(r) = container.get(name) {
                         return Some(r);
@@ -358,27 +358,9 @@ impl References {
         });
     }
 
-    /// Restore a previously saved reference binding. If the reference
-    /// was originally declared inside a container, re-install it into
-    /// that container; otherwise, put it into `self.refs`. Without this
-    /// routing, container-scoped inner members (e.g.
-    /// `proof.std.rc.airgroup_ids` with `dim=[ARRAY_SIZE]`) would
-    /// leak into the global `self.refs` table on scope pop and
-    /// short-circuit unqualified lookups in `search_definition`'s
-    /// direct-refs path.
+    /// Restore a previously saved reference binding.
     pub fn restore(&mut self, name: &str, reference: Reference) {
-        match reference.origin_container.clone() {
-            Some(container_name) => {
-                let container = self
-                    .containers
-                    .entry(container_name)
-                    .or_default();
-                container.insert(name.to_string(), reference);
-            }
-            None => {
-                self.refs.insert(name.to_string(), reference);
-            }
-        }
+        self.refs.insert(name.to_string(), reference);
     }
 
     /// Start a container block. Returns false if the container already
@@ -391,6 +373,9 @@ impl References {
     pub fn create_container(&mut self, name: &str, alias: Option<&str>) -> bool {
         // Always install the alias first, even on reopen.
         if let Some(a) = alias {
+            if !self.use_aliases.contains_key(a) {
+                self.use_order.push(name.to_string());
+            }
             self.use_aliases.insert(a.to_string(), name.to_string());
         }
         if self.containers.contains_key(name) {
@@ -411,13 +396,15 @@ impl References {
         self.current_container.is_some()
     }
 
-    /// Register a `use` alias.
+    /// Register a `use` alias. Tracks insertion order so lookups iterate
+    /// LIFO (most-recent `use` wins on unqualified name collisions), per
+    /// JS `containers.js#getReference`.
     pub fn add_use(&mut self, name: &str, alias: Option<&str>) {
-        if let Some(a) = alias {
-            self.use_aliases.insert(a.to_string(), name.to_string());
-        } else {
-            self.use_aliases.insert(name.to_string(), name.to_string());
+        let key = alias.map(String::from).unwrap_or_else(|| name.to_string());
+        if !self.use_aliases.contains_key(&key) {
+            self.use_order.push(name.to_string());
         }
+        self.use_aliases.insert(key, name.to_string());
     }
 
     /// Check if a container is defined.

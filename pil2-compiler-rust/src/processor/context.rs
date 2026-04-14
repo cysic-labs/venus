@@ -267,7 +267,6 @@ mod tests {
             is_reference: false,
             label: "x".to_string(),
             is_static: false,
-            origin_container: None,
         };
         scope.declare("x", Some(old_ref));
         let (unset, restore) = scope.pop();
