@@ -1016,6 +1016,21 @@ impl Processor {
                 id: reference.id,
                 row_offset: None,
             },
+            RefType::ProofValue => Value::ColRef {
+                col_type: ColRefKind::ProofValue,
+                id: reference.id,
+                row_offset: None,
+            },
+            RefType::AirGroupValue => Value::ColRef {
+                col_type: ColRefKind::AirGroupValue,
+                id: reference.id,
+                row_offset: None,
+            },
+            RefType::AirValue => Value::ColRef {
+                col_type: ColRefKind::AirValue,
+                id: reference.id,
+                row_offset: None,
+            },
             _ => Value::Void,
         }
     }
@@ -1655,6 +1670,21 @@ impl Processor {
             },
             RefType::Challenge => Value::ColRef {
                 col_type: ColRefKind::Challenge,
+                id,
+                row_offset: None,
+            },
+            RefType::ProofValue => Value::ColRef {
+                col_type: ColRefKind::ProofValue,
+                id,
+                row_offset: None,
+            },
+            RefType::AirGroupValue => Value::ColRef {
+                col_type: ColRefKind::AirGroupValue,
+                id,
+                row_offset: None,
+            },
+            RefType::AirValue => Value::ColRef {
+                col_type: ColRefKind::AirValue,
                 id,
                 row_offset: None,
             },
