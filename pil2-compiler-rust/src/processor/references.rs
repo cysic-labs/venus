@@ -123,14 +123,6 @@ pub struct References {
     current_container: Option<String>,
     /// "Use" aliases: alias -> container_name.
     use_aliases: HashMap<String, String>,
-    /// Insertion order of `use` aliases (mirrors JS `containers.uses`
-    /// which is iterated LIFO in `getReference`). Without LIFO order,
-    /// when multiple containers share an inner name (e.g. `airgroup_ids`
-    /// appears in `proof.std.vt`, `proof.std.gprod`, `proof.std.gsum`,
-    /// and `proof.std.rc`), the unqualified lookup inside
-    /// `issue_virtual_table_data_global()` can pick the wrong container
-    /// because HashMap iteration order is non-deterministic.
-    use_order: Vec<String>,
     /// Visibility scope stack for function calls.
     visibility_scope: (u32, Option<u32>),
     visibility_stack: Vec<(u32, Option<u32>)>,
@@ -143,7 +135,6 @@ impl References {
             containers: HashMap::new(),
             current_container: None,
             use_aliases: HashMap::new(),
-            use_order: Vec::new(),
             visibility_scope: (0, None),
             visibility_stack: Vec::new(),
         }
@@ -235,13 +226,9 @@ impl References {
             }
         }
 
-        // For unqualified names, check use-aliased containers in LIFO
-        // order so the most recently `use`d container wins on name
-        // collisions. This matches the JS behavior in
-        // pil2-compiler/src/containers.js:#getReference, which walks
-        // `this.uses` from the top of the stack down.
+        // For unqualified names, check use-aliased containers.
         if !name.contains('.') {
-            for target in self.use_order.iter().rev() {
+            for target in self.use_aliases.values() {
                 if let Some(container) = self.containers.get(target) {
                     if container.contains_key(name) {
                         return Some(target.clone());
@@ -269,10 +256,10 @@ impl References {
         }
 
         if !name.contains('.') {
-            // For unqualified names, also check all use-aliased containers
-            // in LIFO order (most recently `use`d first) to match JS
-            // `#getReference` in containers.js.
-            for target in self.use_order.iter().rev() {
+            // For unqualified names, also check all use-aliased containers.
+            // `use proof.std.rc` makes inner names of `proof.std.rc` directly
+            // accessible without qualification.
+            for (_alias, target) in &self.use_aliases {
                 if let Some(container) = self.containers.get(target) {
                     if let Some(r) = container.get(name) {
                         return Some(r);
@@ -373,9 +360,6 @@ impl References {
     pub fn create_container(&mut self, name: &str, alias: Option<&str>) -> bool {
         // Always install the alias first, even on reopen.
         if let Some(a) = alias {
-            if !self.use_aliases.contains_key(a) {
-                self.use_order.push(name.to_string());
-            }
             self.use_aliases.insert(a.to_string(), name.to_string());
         }
         if self.containers.contains_key(name) {
@@ -396,15 +380,13 @@ impl References {
         self.current_container.is_some()
     }
 
-    /// Register a `use` alias. Tracks insertion order so lookups iterate
-    /// LIFO (most-recent `use` wins on unqualified name collisions), per
-    /// JS `containers.js#getReference`.
+    /// Register a `use` alias.
     pub fn add_use(&mut self, name: &str, alias: Option<&str>) {
-        let key = alias.map(String::from).unwrap_or_else(|| name.to_string());
-        if !self.use_aliases.contains_key(&key) {
-            self.use_order.push(name.to_string());
+        if let Some(a) = alias {
+            self.use_aliases.insert(a.to_string(), name.to_string());
+        } else {
+            self.use_aliases.insert(name.to_string(), name.to_string());
         }
-        self.use_aliases.insert(key, name.to_string());
     }
 
     /// Check if a container is defined.
