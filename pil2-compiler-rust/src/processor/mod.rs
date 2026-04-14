@@ -3337,9 +3337,50 @@ impl Processor {
                 self.air_expression_store.push(rt);
                 air::HintValue::ExprId(idx)
             }
-            Value::ArrayRef { .. } => air::HintValue::Int(0),
+            Value::ArrayRef { ref_type, base_id, dims } => {
+                // Materialize the referenced slice element-by-element,
+                // preserving element type. Without this, int/string/expr
+                // array-backed hint arguments (e.g. `int opids[1] = [opid]`
+                // or `string name_exprs[exprs_num]` in std_prod.pil) collapse
+                // to scalar Int(0), and downstream consumers (the prover's
+                // get_hint_field_m) reject the flattened shape. Mirrors how
+                // the JS compiler emits HintFieldArray recursively when the
+                // argument is a container array.
+                self.materialize_array_ref_as_hint(ref_type, *base_id, dims)
+            }
             Value::Void => air::HintValue::Int(0),
         }
+    }
+
+    /// Recursively resolve an `ArrayRef` into a `HintValue::Array` of the
+    /// referenced slice, preserving leaf element types. Scalar slots become
+    /// `Int` / `Str` / `ExprId` as appropriate; nested dims become nested
+    /// `HintValue::Array`s.
+    fn materialize_array_ref_as_hint(
+        &mut self,
+        ref_type: &RefType,
+        base_id: u32,
+        dims: &[u32],
+    ) -> air::HintValue {
+        if dims.is_empty() {
+            let v = self.get_var_value_by_type_and_id(ref_type, base_id);
+            return self.value_to_hint_value(&v);
+        }
+        let head_dim = dims[0] as u32;
+        let rest = &dims[1..];
+        let stride: u32 = rest.iter().copied().product::<u32>().max(1);
+        let mut out: Vec<air::HintValue> = Vec::with_capacity(head_dim as usize);
+        for i in 0..head_dim {
+            let child_base = base_id + i * stride;
+            let hv = if rest.is_empty() {
+                let v = self.get_var_value_by_type_and_id(ref_type, child_base);
+                self.value_to_hint_value(&v)
+            } else {
+                self.materialize_array_ref_as_hint(ref_type, child_base, rest)
+            };
+            out.push(hv);
+        }
+        air::HintValue::Array(out)
     }
 
     // -----------------------------------------------------------------------
