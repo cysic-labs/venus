@@ -183,6 +183,34 @@ struct PragmaNextFixed {
     load_from_file: Option<(String, u32)>,
 }
 
+/// Compute the pilout Symbol label for a witness / fixed / custom /
+/// air-value declaration, mirroring JS `references.js:287` plus the
+/// `decodeName` absolute-scope rule at `references.js:170-192`.
+///
+/// - `air.X` / `airgroup.X` / `proof.X` are absolute-scoped names; the
+///   emitted label drops the scope prefix (JS uses
+///   `parts.slice(1).join('.')`).
+/// - Container-member names with a single part are prefixed with the
+///   current airgroup name (JS `${Context.airGroupName}.${name}`).
+/// - All other names keep the bare `item.name` the parser received.
+fn js_label_for_declaration(
+    raw_name: &str,
+    air_group_name: &str,
+    inside_container: bool,
+) -> String {
+    if let Some(rest) = raw_name
+        .strip_prefix("air.")
+        .or_else(|| raw_name.strip_prefix("airgroup."))
+        .or_else(|| raw_name.strip_prefix("proof."))
+    {
+        return rest.to_string();
+    }
+    if inside_container && !raw_name.contains('.') {
+        return format!("{}.{}", air_group_name, raw_name);
+    }
+    raw_name.to_string()
+}
+
 impl Processor {
     /// Create a new processor with the given configuration.
     pub fn new(config: CompilerConfig) -> Self {
@@ -769,9 +797,21 @@ impl Processor {
                     (RefType::Str, id)
                 }
                 TypeKind::Expr => {
+                    // JS records intermediate-column labels via
+                    // packed.expressionLabels, which is populated only
+                    // when an expression is explicitly packed as a
+                    // reference. Function-local `expr X` scratch vars
+                    // never hit that path. Approximate by skipping the
+                    // label when we are inside a function call; this
+                    // keeps Rust IM emission close to the JS subset.
+                    let label_opt: Option<&str> = if self.function_deep == 0 {
+                        Some(name)
+                    } else {
+                        None
+                    };
                     let id = self.exprs.reserve(
                         size,
-                        Some(name),
+                        label_opt,
                         &array_dims,
                         IdData {
                             source_ref: self.source_ref.clone(),
@@ -2042,14 +2082,11 @@ impl Processor {
     fn exec_col_declaration(&mut self, cd: &ColDeclaration) -> FlowSignal {
         for item in &cd.items {
             let full_name = self.namespace_ctx.get_full_name(&item.name);
-            // Mirror JS `references.js` label rule: air-direct bare names
-            // remain bare; only container-member columns are prefixed with
-            // the airgroup name. Multi-part names stay as-is.
-            let label = if self.references.inside_container() && !item.name.contains('.') {
-                format!("{}.{}", self.namespace_ctx.air_group_name, item.name)
-            } else {
-                item.name.clone()
-            };
+            let label = js_label_for_declaration(
+                &item.name,
+                &self.namespace_ctx.air_group_name,
+                self.references.inside_container(),
+            );
             let array_dims: Vec<u32> = item
                 .array_dims
                 .iter()
@@ -2404,11 +2441,11 @@ impl Processor {
     fn exec_air_value_declaration(&mut self, avd: &AirValueDeclaration) -> FlowSignal {
         for item in &avd.items {
             let full_name = self.namespace_ctx.get_full_name(&item.name);
-            let label = if self.references.inside_container() && !item.name.contains('.') {
-                format!("{}.{}", self.namespace_ctx.air_group_name, item.name)
-            } else {
-                item.name.clone()
-            };
+            let label = js_label_for_declaration(
+                &item.name,
+                &self.namespace_ctx.air_group_name,
+                self.references.inside_container(),
+            );
             let id = self.air_values.reserve(
                 1,
                 Some(&label),
@@ -2797,21 +2834,28 @@ impl Processor {
             self.constraints.take_entries_and_expressions();
         let n_constraint_exprs = constraint_exprs.len();
 
+        // Parallel mapping from `self.exprs` variable-store id to the
+        // position of its RuntimeExpr inside `air_expr_store`. Only
+        // populated for exprs values that survived the is_symbolic
+        // filter, mirroring JS's `packed.expressionLabels`: an IM symbol
+        // may only be emitted for an expression that ends up in the
+        // packed store, not for every labelled slot.
+        let mut exprs_id_to_store_idx: Vec<Option<u32>> = Vec::new();
         let air_expr_store: Vec<RuntimeExpr> = {
-            // Move hint-referenced expressions (zero-cost, no clone).
             let mut store = std::mem::take(&mut self.air_expression_store);
-            // Intermediate column expressions from this AIR scope.
-            // Only include symbolic values (ColRef or RuntimeExpr),
-            // not compile-time constants.
+            let n_before = store.len();
+            exprs_id_to_store_idx.resize(self.exprs.len() as usize, None);
             for eid in 0..self.exprs.len() {
                 if let Some(val) = self.exprs.get(eid) {
                     if is_symbolic(val) {
                         let rt = value_to_runtime_expr(val);
+                        let idx = store.len() as u32;
                         store.push(rt);
+                        exprs_id_to_store_idx[eid as usize] = Some(idx);
                     }
                 }
             }
-            // Constraint expressions - moved, not cloned.
+            let _ = n_before;
             store.extend(constraint_exprs);
             store
         };
@@ -2963,19 +3007,37 @@ impl Processor {
                 });
             }
 
-            // Intermediate (im) symbols from expression labels. The
-            // internal_id references the expression's position in the
-            // exprs variable store, which maps to the intermediate
-            // section of the full air_expression_store.
+            // Intermediate (im) symbols: mirror JS's imSymbols =
+            // packed.expressionLabels.filter(defined). Only emit an IM
+            // symbol when the labelled exprs-store entry survived the
+            // is_symbolic filter into air_expr_store. Use the
+            // packed-position (index in air_expr_store) as the symbol
+            // id so downstream consumers resolve it through the proto
+            // expression array, matching JS behavior.
             for lr in self.exprs.ids.label_ranges.to_vec() {
-                syms.push(air::SymbolEntry {
-                    name: format!("{}.{}", air_name, lr.label),
-                    ref_type_str: "im".to_string(),
-                    internal_id: lr.from,
-                    dim: lr.array_dims.len() as u32,
-                    lengths: lr.array_dims.clone(),
-                    source_ref: String::new(),
-                });
+                let size = lr.array_dims.iter().copied().product::<u32>().max(1);
+                for offset in 0..size {
+                    let eid = (lr.from + offset) as usize;
+                    let Some(Some(store_idx)) = exprs_id_to_store_idx.get(eid).copied().map(Some) else {
+                        continue;
+                    };
+                    let Some(packed_idx) = store_idx else {
+                        continue;
+                    };
+                    let name = if size == 1 {
+                        format!("{}.{}", air_name, lr.label)
+                    } else {
+                        format!("{}.{}[{}]", air_name, lr.label, offset)
+                    };
+                    syms.push(air::SymbolEntry {
+                        name,
+                        ref_type_str: "im".to_string(),
+                        internal_id: packed_idx,
+                        dim: 0,
+                        lengths: Vec::new(),
+                        source_ref: String::new(),
+                    });
+                }
             }
 
             syms
