@@ -34,6 +34,34 @@ pub struct HintEntry {
     pub data: HintValue,
 }
 
+/// An entry in the per-AIR expression store. Wraps the flattened
+/// `RuntimeExpr` tree with optional provenance metadata:
+/// `source_expr_id` identifies the `self.exprs` variable-store id the
+/// expression originated from (if it came from a `const expr X = ...`
+/// declaration or assignment), and `source_label` carries the
+/// declaration/assignment target name. Anonymous constraint / hint
+/// sub-expressions have both fields as None.
+///
+/// This is the provenance path Codex's Round 7 review called for:
+/// IM symbol emission and `(source_expr_id, row_offset)` packed-reuse
+/// both read from these entries rather than walking
+/// `self.exprs.ids.label_ranges` after the fact.
+#[derive(Debug, Clone)]
+pub struct AirExpressionEntry {
+    pub expr: RuntimeExpr,
+    pub source_expr_id: Option<u32>,
+    pub source_label: Option<String>,
+}
+
+impl AirExpressionEntry {
+    pub fn anonymous(expr: RuntimeExpr) -> Self {
+        Self { expr, source_expr_id: None, source_label: None }
+    }
+    pub fn with_source(expr: RuntimeExpr, source_expr_id: u32, source_label: Option<String>) -> Self {
+        Self { expr, source_expr_id: Some(source_expr_id), source_label }
+    }
+}
+
 /// A symbol entry collected per-AIR from label ranges and translation maps.
 /// These are stored in the Air struct so they survive AIR scope clearing.
 #[derive(Debug, Clone)]
@@ -76,7 +104,10 @@ pub struct Air {
     /// Full AIR expression store: ALL expressions created during AIR
     /// execution (intermediate column definitions, constraint
     /// sub-expressions, etc.).  Mirrors the JS `this.expressions` store.
-    pub air_expression_store: Vec<RuntimeExpr>,
+    /// Each entry carries provenance (`source_expr_id`, `source_label`)
+    /// when it originated from a named expr declaration; anonymous
+    /// constraint / hint sub-expressions have both fields as None.
+    pub air_expression_store: Vec<AirExpressionEntry>,
     /// Fixed column ID mappings: dense per-AIR, indexed relative to
     /// `fixed_col_start`.  Entry i corresponds to absolute col ID
     /// `fixed_col_start + i` -> (type char 'F'/'P', proto_index).
@@ -180,7 +211,7 @@ impl Air {
     /// Capture the full AIR expression store (all expressions created
     /// during AIR execution, not just those referenced by constraints).
     /// Takes ownership to avoid cloning large expression trees.
-    pub fn store_air_expressions_owned(&mut self, expressions: Vec<RuntimeExpr>) {
+    pub fn store_air_expressions_owned(&mut self, expressions: Vec<AirExpressionEntry>) {
         self.air_expression_store = expressions;
     }
 }

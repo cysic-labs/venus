@@ -92,7 +92,7 @@ pub struct Processor {
     // -- AIR expression store: accumulates ALL expressions created during
     // AIR execution (intermediate columns, constraint sub-exprs, etc.).
     // Mirrors the JS `this.expressions` store. --
-    pub air_expression_store: Vec<RuntimeExpr>,
+    pub air_expression_store: Vec<air::AirExpressionEntry>,
 
     // -- Global (proof-level) expression store: symbolic expressions from
     // proof-level `expr` variables, mirroring JS `this.globalExpressions`. --
@@ -1056,9 +1056,9 @@ impl Processor {
         // Generate witness_calc hint for `<==` constraints (matching JS behavior).
         if c.is_witness && !is_global {
             let left_idx = self.air_expression_store.len() as u32;
-            self.air_expression_store.push(left.clone());
+            self.air_expression_store.push(air::AirExpressionEntry::anonymous(left.clone()));
             let right_idx = self.air_expression_store.len() as u32;
-            self.air_expression_store.push(right.clone());
+            self.air_expression_store.push(air::AirExpressionEntry::anonymous(right.clone()));
             let hint_data = air::HintValue::Object(vec![
                 ("reference".to_string(), air::HintValue::ExprId(left_idx)),
                 ("expression".to_string(), air::HintValue::ExprId(right_idx)),
@@ -2954,22 +2954,30 @@ impl Processor {
         // may only be emitted for an expression that ends up in the
         // packed store, not for every labelled slot.
         let mut exprs_id_to_store_idx: Vec<Option<u32>> = Vec::new();
-        let air_expr_store: Vec<RuntimeExpr> = {
+        let air_expr_store: Vec<air::AirExpressionEntry> = {
             let mut store = std::mem::take(&mut self.air_expression_store);
-            let n_before = store.len();
             exprs_id_to_store_idx.resize(self.exprs.len() as usize, None);
+            // Capture provenance from self.exprs.ids.label_ranges so
+            // each surviving entry records its source exprs-id and (if
+            // labeled) its declaration target name. Round 8 recovery:
+            // carry provenance on the entry rather than reconstructing
+            // from label_ranges after packing.
             for eid in 0..self.exprs.len() {
                 if let Some(val) = self.exprs.get(eid) {
                     if is_symbolic(val) {
                         let rt = value_to_runtime_expr(val);
                         let idx = store.len() as u32;
-                        store.push(rt);
+                        let source_label = self.exprs.ids.label_ranges
+                            .get_label(eid)
+                            .map(|s| s.to_string());
+                        store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
                         exprs_id_to_store_idx[eid as usize] = Some(idx);
                     }
                 }
             }
-            let _ = n_before;
-            store.extend(constraint_exprs);
+            for expr in constraint_exprs {
+                store.push(air::AirExpressionEntry::anonymous(expr));
+            }
             store
         };
 
@@ -3522,7 +3530,7 @@ impl Processor {
             Value::ColRef { .. } | Value::RuntimeExpr(_) => {
                 let rt = value_to_runtime_expr(val);
                 let idx = self.air_expression_store.len() as u32;
-                self.air_expression_store.push(rt);
+                self.air_expression_store.push(air::AirExpressionEntry::anonymous(rt));
                 air::HintValue::ExprId(idx)
             }
             Value::ArrayRef { ref_type, base_id, dims } => {

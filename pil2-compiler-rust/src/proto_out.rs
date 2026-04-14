@@ -188,17 +188,18 @@ impl<'a> ProtoOutBuilder<'a> {
                 let mut proto_expressions: Vec<pilout_proto::Expression> = Vec::new();
                 let mut expr_id_map: Vec<u32> = Vec::new();
 
-                // Use the full AIR expression store if available, falling
-                // back to constraint-only expressions for backward compat.
-                let expr_source = if !air.air_expression_store.is_empty() {
-                    &air.air_expression_store
-                } else {
-                    &air.stored_expressions
-                };
-
                 let mut rc_cache: HashMap<*const RuntimeExpr, u32> = HashMap::new();
                 let mut sem_cache: HashMap<RuntimeExpr, u32> = HashMap::new();
-                for expr in expr_source {
+                // Collect &RuntimeExpr from either store shape: the
+                // full air_expression_store carries provenance entries
+                // wrapped in AirExpressionEntry; the older
+                // stored_expressions path is plain RuntimeExpr.
+                let exprs: Vec<&RuntimeExpr> = if !air.air_expression_store.is_empty() {
+                    air.air_expression_store.iter().map(|e| &e.expr).collect()
+                } else {
+                    air.stored_expressions.iter().collect()
+                };
+                for expr in exprs {
                     let root_idx = self.flatten_air_expr(
                         expr,
                         &air.fixed_id_map,
@@ -716,6 +717,11 @@ impl<'a> ProtoOutBuilder<'a> {
                 self.current_air_expr_id_map =
                     self.air_expr_id_maps.get(&(air_group_id, air_id)).cloned();
 
+                let air_expr_refs: Vec<&RuntimeExpr> = air
+                    .air_expression_store
+                    .iter()
+                    .map(|e| &e.expr)
+                    .collect();
                 for hint in &air.hints {
                     let hint_fields = self.hint_value_to_fields(
                         &hint.data,
@@ -723,7 +729,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         air.fixed_col_start,
                         &air.witness_id_map,
                         &air.custom_id_map,
-                        &air.air_expression_store,
+                        &air_expr_refs,
                     );
                     result.push(pilout_proto::Hint {
                         name: hint.name.clone(),
@@ -760,7 +766,7 @@ impl<'a> ProtoOutBuilder<'a> {
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
-        expr_store: &[RuntimeExpr],
+        expr_store: &[&RuntimeExpr],
     ) -> Vec<pilout_proto::HintField> {
         match value {
             HintValue::Object(pairs) => {
@@ -789,7 +795,7 @@ impl<'a> ProtoOutBuilder<'a> {
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
-        expr_store: &[RuntimeExpr],
+        expr_store: &[&RuntimeExpr],
     ) -> pilout_proto::HintField {
         match value {
             HintValue::Int(v) => pilout_proto::HintField {
