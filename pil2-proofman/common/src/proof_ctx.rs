@@ -912,6 +912,22 @@ impl<F: PrimeField64> ProofCtx<F> {
             false => 0.0,
         };
 
+        // Reserve headroom for per-SetupCtx ExpressionsGPU small cudaMallocs
+        // (numbers/ops/args/opsConstraints/argsConstraints/mapOffsets/...)
+        // which are allocated AFTER the big unified-buffer + const-pols block
+        // and were previously consuming the last ~40 MB of free VRAM, causing
+        // argsConstraints cudaMalloc to fail when the per-AIR expression graph
+        // grew (observed after the 2026-04-14 pil2c container-expr fix).
+        // Total across ~40 setups historically sits in the 1-2 GB range;
+        // default to 2 GB, overridable for tight-VRAM environments.
+        if cfg!(feature = "gpu") {
+            let reserve_bytes: f64 = std::env::var("ZISK_EXPRESSIONS_GPU_RESERVE_BYTES")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(2.0 * 1024.0 * 1024.0 * 1024.0);
+            free_memory_gpu = (free_memory_gpu - reserve_bytes).max(0.0);
+        }
+
         self.mpi_ctx.barrier();
 
         let n_gpus = get_num_gpus_c();
