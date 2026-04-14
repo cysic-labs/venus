@@ -425,6 +425,43 @@ pub fn gen_final_setup(
             &verifier_loaded,
         )?;
 
+        // Cross-artifact consistency check: the `.exec` file was written by
+        // plonk2pil with `n_cols = s_map.len()`, while the prover reads it
+        // expecting `n_cols = starkinfo.mapSectionsN.cm1` (see pil2-proofman
+        // common/src/setup.rs:set_exec_file_data). If the compiled pilout's
+        // cm1 diverges from the plonk2pil s_map width, the prover rejects
+        // the file at load time with a size mismatch. Catch that now.
+        {
+            let exec_path = files_dir.join("vadcop_final.exec");
+            let exec_bytes = fs::metadata(&exec_path)?.len();
+            if exec_bytes < 16 {
+                anyhow::bail!(
+                    "vadcop_final.exec truncated: {} B (< 16 B header)",
+                    exec_bytes
+                );
+            }
+            let exec_u64 = &plonk_result.exec;
+            let n_adds = exec_u64[0];
+            let n_rows = exec_u64[1];
+            let cm1 = *stark_info_loaded
+                .map_sections_n
+                .get("cm1")
+                .ok_or_else(|| anyhow::anyhow!("starkinfo.mapSectionsN.cm1 missing"))?;
+            let expected_u64 = 2 + n_adds * 4 + n_rows * cm1;
+            let expected_bytes = expected_u64 * 8;
+            if exec_bytes != expected_bytes {
+                anyhow::bail!(
+                    "vadcop_final.exec / starkinfo cm1 mismatch: \
+                     file is {} B but starkinfo.cm1={} expects \
+                     (2 + {}*4 + {}*{})*8 = {} B. The compiled pilout's cm1 \
+                     diverges from the plonk2pil s_map width; the prover \
+                     will reject this PK at load time. This is the same \
+                     class of divergence tracked by BL-20260402-r2-nbits-mismatch.",
+                    exec_bytes, cm1, n_adds, n_rows, cm1, expected_bytes
+                );
+            }
+        }
+
         // Write const file with the correct number of columns from pil_info.
         // plonk2pil gives plonk_n_fixed columns, but the PIL defines
         // n_constants total. Extra columns are zero-filled.
