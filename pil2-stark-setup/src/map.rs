@@ -558,6 +558,7 @@ mod tests {
         res.custom_commits.push(CustomCommitInfo {
             name: "MyCC".to_string(),
             stage_widths: vec![1],
+            public_values: Vec::new(),
         });
         res.custom_commits_map.push(Vec::new());
         res.map_sections_n.insert("MyCC0".to_string(), 0);

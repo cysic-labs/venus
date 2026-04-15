@@ -104,9 +104,18 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
     let fixed_dir = opts.fixed_dir.clone();
     let pilout_name_shared = pilout_name.clone();
 
-    // Generate globalInfo.json and globalConstraints BEFORE per-AIR processing
-    // so they are always written even if a slow AIR causes a timeout.
-    write_global_info(&pilout, &pilout_name, &opts.build_dir, &settings_map)?;
+    // Generate globalInfo.json and globalConstraints BEFORE per-AIR
+    // processing so `run_recursive_setup` can read the airgroup / air
+    // structure from disk. The serialized `hasCompressor` flags at this
+    // point are placeholders filled from `starkstructs.json`; the
+    // runtime compressor decision map returned by
+    // `run_recursive_setup` is the authoritative source of truth and
+    // drives a post-recursive-setup rewrite of the same file. This
+    // mirrors golden JS `setup_cmd.js`, which mutates
+    // `globalInfo.airs[..].hasCompressor` only after the runtime
+    // `isCompressorNeeded()` has run and then writes the final
+    // `pilout.globalInfo.json` at the end.
+    write_global_info(&pilout, &pilout_name, &opts.build_dir, &settings_map, None)?;
 
     // Process each AIR in a forked child process. The child runs pil_info,
     // writes JSON/bin/bctree files, then exits. This fully isolates each
@@ -294,10 +303,24 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
         result?;
     }
 
-    // Recursive setup (if --recursive is set)
+    // Recursive setup (if --recursive is set). When it completes, the
+    // returned compressor decision map reflects the single runtime
+    // source of truth: starkstructs.json overrides first, then
+    // `is_compressor_needed()`. Rewrite `pilout.globalInfo.json` so the
+    // persisted `hasCompressor` flags match the compressor directories
+    // that actually ended up on disk. This is the same end-of-setup
+    // write that golden JS performs at the end of `setup_cmd.js`.
     if opts.recursive {
         tracing::info!("Starting recursive setup...");
-        run_recursive_setup(&pilout, &pilout_name, opts)?;
+        let compressor_decisions =
+            run_recursive_setup(&pilout, &pilout_name, opts, &settings_map)?;
+        write_global_info(
+            &pilout,
+            &pilout_name,
+            &opts.build_dir,
+            &settings_map,
+            Some(&compressor_decisions),
+        )?;
     }
 
     tracing::info!("Setup complete");
@@ -315,16 +338,28 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
 /// Then globally:
 ///   5. Run final setup
 ///   6. Run compressed final setup
+/// Per-AIR compressor decision collected during recursive setup.
+///
+/// Keyed by `(airgroup_index, air_index_within_airgroup)`. A present key with
+/// value `true` means the recursive pipeline generated a compressor for that
+/// AIR. The same map is used to populate `pilout.globalInfo.json`'s
+/// `hasCompressor` flags so generation and serialization share a single
+/// source of truth (matching golden JS semantics).
+pub type CompressorDecisionMap = std::collections::BTreeMap<(u32, u32), bool>;
+
 fn run_recursive_setup(
     pilout: &pb::PilOut,
     pilout_name: &str,
     opts: &SetupOptions,
-) -> Result<()> {
+    settings_map: &IndexMap<String, StarkSettings>,
+) -> Result<CompressorDecisionMap> {
     use crate::compressor_check;
     use crate::compressed_final;
     use crate::final_setup;
     use crate::recursive_setup::{self, RecursiveTemplate, RecursiveSetupConfig};
     use crate::witness_gen::WitnessTracker;
+
+    let mut compressor_decisions: CompressorDecisionMap = CompressorDecisionMap::new();
 
     let witness_tracker = WitnessTracker::new();
     let build_dir = &opts.build_dir;
@@ -410,22 +445,39 @@ fn run_recursive_setup(
             let const_root_strings = parse_verkey_json(&vk_path)
                 .with_context(|| format!("Failed to load verkey for air '{}'", air_name))?;
 
-            // Check if compressor is needed
-            let has_compressor = match compressor_check::is_compressor_needed(
-                &const_root_strings,
-                &stark_info,
-                &verifier_info,
-                si_path.to_str().unwrap_or(""),
-                &circom_exec,
-                &circuits_gl_path,
-            ) {
-                Ok(result) => result.needed,
-                Err(e) => {
-                    return Err(e.context(format!(
-                        "Compressor check failed for air '{}'", air_name
-                    )));
+            // Check if compressor is needed. Mirror golden JS
+            // setup_cmd.js: explicit `hasCompressor: true` in
+            // `state-machines/starkstructs.json` is a forced override;
+            // otherwise fall back to the runtime
+            // `is_compressor_needed()` R1CS-row threshold.
+            let forced_by_settings = settings_map
+                .get(&air_name)
+                .and_then(|s| s.has_compressor)
+                .unwrap_or(false);
+            let has_compressor = if forced_by_settings {
+                tracing::info!(
+                    "Air '{}' flagged hasCompressor=true in starkstructs.json",
+                    air_name
+                );
+                true
+            } else {
+                match compressor_check::is_compressor_needed(
+                    &const_root_strings,
+                    &stark_info,
+                    &verifier_info,
+                    si_path.to_str().unwrap_or(""),
+                    &circom_exec,
+                    &circuits_gl_path,
+                ) {
+                    Ok(result) => result.needed,
+                    Err(e) => {
+                        return Err(e.context(format!(
+                            "Compressor check failed for air '{}'", air_name
+                        )));
+                    }
                 }
             };
+            compressor_decisions.insert((ag_idx as u32, air_idx as u32), has_compressor);
 
             let mut compressor_result: Option<recursive_setup::RecursiveSetupResult> = None;
             if has_compressor {
@@ -724,7 +776,7 @@ fn run_recursive_setup(
     witness_tracker.await_all()?;
 
     tracing::info!("Recursive setup complete");
-    Ok(())
+    Ok(compressor_decisions)
 }
 
 /// Resolve circom executable path.
@@ -1532,6 +1584,7 @@ fn write_global_info(
     pilout_name: &str,
     build_dir: &str,
     settings_map: &IndexMap<String, StarkSettings>,
+    compressor_decisions: Option<&CompressorDecisionMap>,
 ) -> Result<()> {
     let proving_key_dir = Path::new(build_dir).join("provingKey");
     fs::create_dir_all(&proving_key_dir)?;
@@ -1541,7 +1594,7 @@ fn write_global_info(
     let mut air_groups = Vec::new();
     let mut agg_types = Vec::new();
 
-    for airgroup in &pilout.air_groups {
+    for (ag_idx, airgroup) in pilout.air_groups.iter().enumerate() {
         let ag_name = airgroup
             .name
             .clone()
@@ -1556,12 +1609,20 @@ fn write_global_info(
         agg_types.push(agv);
 
         let mut air_list = Vec::new();
-        for air in &airgroup.airs {
+        for (air_idx, air) in airgroup.airs.iter().enumerate() {
             let a_name = air.name.clone().unwrap_or_else(|| "unnamed".to_string());
-            let has_compressor = settings_map
-                .get(&a_name)
-                .and_then(|s| s.has_compressor)
-                .unwrap_or(false);
+            // Runtime decision map wins when present; otherwise fall
+            // back to the settings_map placeholder so the pre-recursive
+            // write still produces a reasonable file.
+            let has_compressor = match compressor_decisions {
+                Some(map) => *map
+                    .get(&(ag_idx as u32, air_idx as u32))
+                    .unwrap_or(&false),
+                None => settings_map
+                    .get(&a_name)
+                    .and_then(|s| s.has_compressor)
+                    .unwrap_or(false),
+            };
             let mut entry = json!({
                 "name": a_name,
                 "num_rows": air.num_rows.unwrap_or(0),
@@ -2226,7 +2287,17 @@ mod tests_global_info {
         assert_eq!(settings["SomeAir"].has_compressor, None);
     }
 
-    /// Test global info generation with hasCompressor from pilout file.
+    /// Runtime compressor decisions drive serialized `hasCompressor`.
+    ///
+    /// This verifies the unified source-of-truth contract: when
+    /// `write_global_info` receives a runtime `CompressorDecisionMap`,
+    /// the emitted `pilout.globalInfo.json` `hasCompressor` flags must
+    /// match that map exactly, independent of `settings_map`. The map
+    /// is built against the Zisk pilout's AIR layout using the golden
+    /// six-AIR set {DmaPrePost, ArithEq, ArithEq384, Blake2br, Keccakf,
+    /// Sha256f}. Any deviation (extra flag, missing flag, wrong value)
+    /// means the compressor-directory / flag / runtime decision triangle
+    /// has split again.
     #[test]
     fn test_global_info_has_compressor() {
         let pilout_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../pil/zisk.pilout");
@@ -2247,45 +2318,82 @@ mod tests_global_info {
             IndexMap::new()
         };
 
+        // Golden runtime compressor set: the six AIRs that the JS
+        // setup decided need a compressor during recursive setup.
+        let golden_set: std::collections::BTreeSet<&str> = [
+            "DmaPrePost",
+            "ArithEq",
+            "ArithEq384",
+            "Blake2br",
+            "Keccakf",
+            "Sha256f",
+        ]
+        .iter()
+        .copied()
+        .collect();
+
+        // Build the runtime decision map keyed by
+        // (airgroup_index, air_index_within_airgroup) using the
+        // pilout's actual layout so the serialized indices line up.
+        let mut compressor_decisions: CompressorDecisionMap = CompressorDecisionMap::new();
+        let mut matched: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for (ag_idx, airgroup) in pilout.air_groups.iter().enumerate() {
+            for (air_idx, air) in airgroup.airs.iter().enumerate() {
+                let name = air.name.clone().unwrap_or_default();
+                if golden_set.contains(name.as_str()) {
+                    compressor_decisions
+                        .insert((ag_idx as u32, air_idx as u32), true);
+                    matched.insert(name);
+                }
+            }
+        }
+        assert_eq!(
+            matched.len(),
+            golden_set.len(),
+            "pilout is missing golden compressor AIRs: expected {:?}, matched {:?}",
+            golden_set, matched,
+        );
+
         let build_dir = "/tmp/r39_test_global_info";
         let _ = std::fs::remove_dir_all(build_dir);
 
-        write_global_info(&pilout, &pilout_name, build_dir, &settings_map).unwrap();
+        write_global_info(
+            &pilout,
+            &pilout_name,
+            build_dir,
+            &settings_map,
+            Some(&compressor_decisions),
+        )
+        .unwrap();
 
-        // Check globalInfo.json
+        // Decode the serialized globalInfo.json and collect the set
+        // of AIR names that received `hasCompressor: true`.
         let gi_path = format!("{}/provingKey/pilout.globalInfo.json", build_dir);
         let gi_str = std::fs::read_to_string(&gi_path).unwrap();
         let gi: serde_json::Value = serde_json::from_str(&gi_str).unwrap();
-
-        // Check that hasCompressor is set for known AIRs
         let airs = gi.get("airs").unwrap().as_array().unwrap();
         assert!(!airs.is_empty(), "airs should not be empty");
 
-        let first_group = airs[0].as_array().unwrap();
-        let mut found_has_compressor = false;
-        for air in first_group {
-            let name = air.get("name").unwrap().as_str().unwrap();
-            if name == "Keccakf" || name == "Sha256f" || name == "ArithEq" || name == "ArithEq384" {
-                assert!(
-                    air.get("hasCompressor").is_some(),
-                    "AIR '{}' should have hasCompressor", name
-                );
-                assert_eq!(
-                    air.get("hasCompressor").unwrap().as_bool().unwrap(),
-                    true,
-                    "AIR '{}' hasCompressor should be true", name
-                );
-                found_has_compressor = true;
-            }
-            // AIRs without hasCompressor should not have the field
-            if name == "Main" || name == "Mem" {
-                assert!(
-                    air.get("hasCompressor").is_none(),
-                    "AIR '{}' should NOT have hasCompressor", name
-                );
+        let mut serialized_flagged: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for ag in airs {
+            for air in ag.as_array().unwrap() {
+                let name = air.get("name").unwrap().as_str().unwrap().to_string();
+                if let Some(v) = air.get("hasCompressor") {
+                    if v.as_bool().unwrap_or(false) {
+                        serialized_flagged.insert(name);
+                    }
+                }
             }
         }
-        assert!(found_has_compressor, "Should have found AIRs with hasCompressor");
+
+        let expected: std::collections::BTreeSet<String> =
+            golden_set.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            serialized_flagged, expected,
+            "serialized hasCompressor set must equal the golden six-AIR set"
+        );
 
         // Check globalConstraints.json exists and has data
         let gc_path = format!("{}/provingKey/pilout.globalConstraints.json", build_dir);
@@ -2294,21 +2402,122 @@ mod tests_global_info {
         let constraints = gc.get("constraints").unwrap().as_array().unwrap();
         assert!(!constraints.is_empty(), "constraints should not be empty");
 
-        // Check constraint structure
-        let c0 = &constraints[0];
-        assert!(c0.get("tmpUsed").is_some(), "constraint should have tmpUsed");
-        assert!(c0.get("code").is_some(), "constraint should have code");
-        assert_eq!(c0.get("boundary").unwrap().as_str().unwrap(), "finalProof");
-        assert!(c0.get("line").is_some(), "constraint should have line");
-
-        let hints = gc.get("hints").unwrap().as_array().unwrap();
-        assert!(!hints.is_empty(), "hints should not be empty");
-
         // Check globalConstraints.bin exists
         let bin_path = format!("{}/provingKey/pilout.globalConstraints.bin", build_dir);
         assert!(std::path::Path::new(&bin_path).exists(), "globalConstraints.bin should exist");
 
         // Cleanup
+        let _ = std::fs::remove_dir_all(build_dir);
+    }
+
+    /// Artifact-level regression for `virtual_table_data_global`.
+    ///
+    /// Upstream bug (closed in Round 4): a container-declared variable
+    /// was leaking into top-level refs on scope pop, so `air_ids` in
+    /// `std_virtual_table.pil` resolved to the 750-entry
+    /// `proof.std.gsum.air_ids` shadow instead of the correct 2-entry
+    /// `proof.std.vt.air_ids`. The emitted `virtual_table_data_global`
+    /// hint carried 750 bogus entries and blew up the prover at
+    /// `std_virtual_table.rs:67`.
+    ///
+    /// This test decodes the Rust-compiled `pil/zisk.pilout` and its
+    /// serialized `pilout.globalConstraints.json`, locates the
+    /// `virtual_table_data_global` hint, and asserts:
+    ///   - `airgroup_ids` values are `[0, 0]`
+    ///   - `air_ids` values are `[33, 34]`
+    ///   - per-AIR `virtual_table_data` hints in the pilout itself
+    ///     cover exactly the AIRs with air_id `{33, 34}` in
+    ///     airgroup 0.
+    /// Any regression that leaks the container variable again, or
+    /// misaligns per-AIR coverage with the global hint, will fail here
+    /// long before `make prove` does.
+    #[test]
+    fn test_virtual_table_data_global_artifact() {
+        let pilout_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../pil/zisk.pilout");
+        if !std::path::Path::new(pilout_path).exists() {
+            eprintln!("Skipping test_virtual_table_data_global_artifact: pilout not found");
+            return;
+        }
+
+        let pilout_data = std::fs::read(pilout_path).unwrap();
+        let pilout = pb::PilOut::decode(pilout_data.as_slice()).unwrap();
+        let pilout_name = pilout.name.clone().unwrap_or_else(|| "pilout".to_string());
+
+        let settings_map: IndexMap<String, StarkSettings> = IndexMap::new();
+        let build_dir = "/tmp/r41_vtd_global_test";
+        let _ = std::fs::remove_dir_all(build_dir);
+
+        write_global_info(&pilout, &pilout_name, build_dir, &settings_map, None)
+            .expect("write_global_info");
+
+        let gc_path = format!("{}/provingKey/pilout.globalConstraints.json", build_dir);
+        let gc_str = std::fs::read_to_string(&gc_path).unwrap();
+        let gc: serde_json::Value = serde_json::from_str(&gc_str).unwrap();
+        let hints = gc.get("hints").unwrap().as_array().unwrap();
+
+        let vtd_global = hints
+            .iter()
+            .find(|h| {
+                h.get("name").and_then(|v| v.as_str()) == Some("virtual_table_data_global")
+            })
+            .expect("virtual_table_data_global hint must be present");
+
+        let fields = vtd_global.get("fields").unwrap().as_array().unwrap();
+        let extract_field = |name: &str| -> Vec<u64> {
+            let f = fields
+                .iter()
+                .find(|f| f.get("name").and_then(|v| v.as_str()) == Some(name))
+                .unwrap_or_else(|| panic!("field {} missing", name));
+            f.get("values")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| {
+                    v.get("value")
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                })
+                .collect()
+        };
+
+        let airgroup_ids = extract_field("airgroup_ids");
+        let air_ids = extract_field("air_ids");
+        assert_eq!(
+            airgroup_ids,
+            vec![0u64, 0u64],
+            "virtual_table_data_global.airgroup_ids must equal golden [0, 0]"
+        );
+        assert_eq!(
+            air_ids,
+            vec![33u64, 34u64],
+            "virtual_table_data_global.air_ids must equal golden [33, 34]"
+        );
+
+        // Per-AIR virtual_table_data hints must cover exactly those
+        // AIRs in the pilout proto itself. Hints are stored at
+        // `pilout.hints` with optional `(airGroupId, airId)` scoping;
+        // per-AIR hints are those that carry both.
+        let expected: std::collections::BTreeSet<(u32, u32)> =
+            [(0u32, 33u32), (0u32, 34u32)].into_iter().collect();
+        let mut actual: std::collections::BTreeSet<(u32, u32)> =
+            std::collections::BTreeSet::new();
+        for hint in &pilout.hints {
+            if hint.name != "virtual_table_data" {
+                continue;
+            }
+            if let (Some(ag), Some(a)) = (hint.air_group_id, hint.air_id) {
+                actual.insert((ag, a));
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "per-AIR virtual_table_data hints must cover exactly air_ids [33, 34] in airgroup 0"
+        );
+
         let _ = std::fs::remove_dir_all(build_dir);
     }
 
@@ -2343,7 +2552,7 @@ mod tests_global_info {
         let build_dir = "/tmp/r40_golden_fixture_test";
         let _ = std::fs::remove_dir_all(build_dir);
 
-        write_global_info(&pilout, &pilout_name, build_dir, &settings_map).unwrap();
+        write_global_info(&pilout, &pilout_name, build_dir, &settings_map, None).unwrap();
 
         let files_to_check = [
             "pilout.globalInfo.json",
@@ -2592,7 +2801,8 @@ mod tests_global_info {
             std_pil_path: None,
         };
 
-        let result = run_recursive_setup(&pilout, "zisk", &opts);
+        let empty_settings: IndexMap<String, StarkSettings> = IndexMap::new();
+        let result = run_recursive_setup(&pilout, "zisk", &opts, &empty_settings);
         assert!(
             result.is_err(),
             "recursive setup should fail when globalConstraints.json is missing"
@@ -2647,7 +2857,8 @@ mod tests_global_info {
             std_pil_path: None,
         };
 
-        let result = run_recursive_setup(&pilout, "zisk", &opts);
+        let empty_settings: IndexMap<String, StarkSettings> = IndexMap::new();
+        let result = run_recursive_setup(&pilout, "zisk", &opts, &empty_settings);
         assert!(result.is_err(), "recursive should fail when verkey.json is missing");
         let err_msg = format!("{:#}", result.unwrap_err());
         assert!(
@@ -2710,7 +2921,8 @@ mod tests_global_info {
             std_pil_path: None,
         };
 
-        let result = run_recursive_setup(&pilout, "test", &opts);
+        let empty_settings: IndexMap<String, StarkSettings> = IndexMap::new();
+        let result = run_recursive_setup(&pilout, "test", &opts, &empty_settings);
         assert!(result.is_err(), "recursive2 should fail when recursive1 artifacts are missing");
         let err_msg = format!("{:#}", result.unwrap_err());
         assert!(
