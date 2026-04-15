@@ -865,7 +865,25 @@ impl Processor {
             }
 
             // Check for an existing binding to save for scope restore.
-            let previous = self.references.get_reference(name).cloned();
+            // Skip the scope-level shadow tracking for container variables:
+            // a `container proof.std.foo { int air_ids[N]; }` declaration is
+            // owned by the container's lifetime, not by the surrounding
+            // function scope, and the container body itself is only run on
+            // the first create_container() call. Letting the function scope
+            // restore-on-pop the bare-name binding leaks the captured
+            // shadow target into the top-level `refs` map, where a later
+            // bare lookup (e.g. `air_ids` inside
+            // `issue_virtual_table_data_global` after `use proof.std.vt;`)
+            // hits the leaked entry directly and bypasses the
+            // use-aliased-container LIFO scan, picking up the wrong-sized
+            // sibling array (proof.std.gsum.air_ids[ARRAY_SIZE=750]
+            // instead of proof.std.vt.air_ids[num_virtual_tables=2]).
+            let inside_container = self.references.inside_container();
+            let previous = if inside_container {
+                None
+            } else {
+                self.references.get_reference(name).cloned()
+            };
             self.references.declare(
                 name,
                 ref_type,
@@ -876,7 +894,9 @@ impl Processor {
                 &self.source_ref,
             );
             // Record in scope so that pop() can unset or restore.
-            self.scope.declare(name, previous);
+            if !inside_container {
+                self.scope.declare(name, previous);
+            }
         }
         FlowSignal::None
     }

@@ -511,4 +511,48 @@ mod tests {
         refs.restore("x", saved);
         assert!(refs.is_defined("x"));
     }
+
+    /// Regression guard: two proof-scope containers can share a bare
+    /// variable name without the last-aliased container's variable
+    /// leaking into the top-level `refs` map and shadowing the other.
+    ///
+    /// Before the fix, a `container proof.a { int users[8]; }` variable
+    /// declared while scope-tracking captured `previous = users-from-c2`
+    /// (or similar) would, on scope pop, `restore("users", previous)`
+    /// into `self.refs`. Subsequent bare `users` lookups hit the
+    /// restored top-level entry directly and bypassed the
+    /// use-aliased-container LIFO scan, returning the wrong variable.
+    ///
+    /// After the fix, container declarations do not participate in
+    /// scope-level shadow tracking, so bare-name lookups consult the
+    /// use-alias stack exactly as the PIL semantics require.
+    #[test]
+    fn test_container_does_not_leak_into_refs_on_scope_pop() {
+        let mut refs = References::new();
+
+        // Two proof-scope containers, both with a `users` variable.
+        refs.create_container("proof.c1", None);
+        refs.declare("users", RefType::Int, 100, &[8], false, 0, "test:c1");
+        refs.close_container();
+
+        refs.create_container("proof.c2", None);
+        refs.declare("users", RefType::Int, 200, &[2], false, 0, "test:c2");
+        refs.close_container();
+
+        // Bare `users` without any `use ...` should not resolve.
+        assert!(!refs.is_defined("users"));
+
+        // With `use proof.c1;` the bare `users` must resolve to the
+        // proof.c1 variant (base_id=100, dims=[8]).
+        refs.add_use("proof.c1", None);
+        let got = refs.get_reference("users").expect("bare users via use proof.c1");
+        assert_eq!(got.id, 100, "bare users must resolve to proof.c1.users base_id");
+        assert_eq!(got.array_dims, vec![8u32], "bare users must carry proof.c1.users dims");
+
+        // After `use proof.c2;`, the most recent use wins.
+        refs.add_use("proof.c2", None);
+        let got = refs.get_reference("users").expect("bare users via use proof.c2");
+        assert_eq!(got.id, 200, "LIFO: use proof.c2 must now resolve bare users to c2");
+        assert_eq!(got.array_dims, vec![2u32], "bare users dims must match proof.c2.users");
+    }
 }
