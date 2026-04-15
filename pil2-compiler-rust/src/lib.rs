@@ -3,7 +3,7 @@ pub mod parser;
 pub mod processor;
 pub mod proto_out;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,8 +22,10 @@ pub struct CompileOptions {
     pub output: Option<String>,
     /// Output directory for fixed column binary files.
     pub output_dir: Option<String>,
-    /// Compile-time defines (name -> value).
-    pub defines: HashMap<String, i128>,
+    /// Compile-time defines (name -> value). `BTreeMap` for
+    /// deterministic iteration order when the processor seeds the
+    /// int store at startup.
+    pub defines: std::collections::BTreeMap<String, i128>,
     /// PIL name (optional).
     pub name: Option<String>,
     /// Whether to write fixed columns to separate binary files.

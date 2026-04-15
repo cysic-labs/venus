@@ -17,7 +17,7 @@ pub mod ids;
 pub mod references;
 pub mod variables;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -108,8 +108,12 @@ pub struct Processor {
     last_air_id: i32,
 
     // -- Functions --
-    /// User-defined functions: name -> (args, body).
-    functions: HashMap<String, FunctionDef>,
+    /// User-defined functions: name -> (args, body). `BTreeMap` so
+    /// iteration order is deterministic across process invocations.
+    /// `std::collections::HashMap` uses a per-process randomized hash
+    /// seed; iterating it to drive compile-time semantics or emission
+    /// order produces non-reproducible pilouts.
+    functions: BTreeMap<String, FunctionDef>,
     function_deep: u32,
     callstack: Vec<CallStackEntry>,
 
@@ -117,7 +121,12 @@ pub struct Processor {
     pub tests: TestTracker,
 
     // -- Deferred calls --
-    deferred_calls: HashMap<String, HashMap<String, Vec<DeferredCallInfo>>>,
+    /// Scope name -> (event name -> deferred calls). `BTreeMap` at
+    /// both levels so deferred-function execution order is
+    /// deterministic and independent of the per-process HashMap seed.
+    /// JS's deferred-call table uses insertion-order Map semantics;
+    /// `BTreeMap` is the closest sorted-iteration match available.
+    deferred_calls: BTreeMap<String, BTreeMap<String, Vec<DeferredCallInfo>>>,
 
     // -- Pragmas --
     pragmas_next_statement: PragmaNextStatement,
@@ -141,11 +150,15 @@ pub struct Processor {
 
     // -- Commit tracking --
     /// Maps commit name to its commit_id (within the current AIR).
-    commit_name_to_id: HashMap<String, u32>,
+    /// `BTreeMap` so the reverse-map iteration at AIR-finalization
+    /// time produces the same commit ordering across runs.
+    commit_name_to_id: BTreeMap<String, u32>,
     /// Next commit_id to assign within the current AIR.
     next_commit_id: u32,
-    /// Maps commit name to resolved public column IDs.
-    commit_publics: HashMap<String, Vec<u32>>,
+    /// Maps commit name to resolved public column IDs. `BTreeMap`
+    /// for deterministic iteration order when emission lists the
+    /// publics associated with each commit.
+    commit_publics: BTreeMap<String, Vec<u32>>,
 
     // -- Hints --
     /// Per-AIR hints collected during air scope execution.
@@ -243,20 +256,20 @@ impl Processor {
             air_group_stack: Vec::new(),
             last_air_group_id: -1,
             last_air_id: -1,
-            functions: HashMap::new(),
+            functions: BTreeMap::new(),
             function_deep: 0,
             callstack: Vec::new(),
             tests: TestTracker::default(),
-            deferred_calls: HashMap::new(),
+            deferred_calls: BTreeMap::new(),
             pragmas_next_statement: PragmaNextStatement::default(),
             pragmas_next_fixed: PragmaNextFixed::default(),
             include_stack: Vec::new(),
             execute_counter: 0,
             error_raised: false,
             error_count: 0,
-            commit_name_to_id: HashMap::new(),
+            commit_name_to_id: BTreeMap::new(),
             next_commit_id: 0,
-            commit_publics: HashMap::new(),
+            commit_publics: BTreeMap::new(),
             air_hints: Vec::new(),
             global_hints: Vec::new(),
         };

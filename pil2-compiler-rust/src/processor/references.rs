@@ -3,7 +3,7 @@
 //! Mirrors the JS `References` class. Manages the mapping from symbolic
 //! names to their type, storage location (ID), and scope information.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 
 /// The type of a declared reference.
@@ -113,14 +113,19 @@ impl Reference {
 /// Mirrors the JS `References` class.
 #[derive(Debug, Clone)]
 pub struct References {
-    /// Primary reference table: name -> Reference.
-    refs: HashMap<String, Reference>,
+    /// Primary reference table: name -> Reference. `BTreeMap` so any
+    /// iteration during emission is deterministic across process
+    /// invocations; lookup cost is O(log n) which is negligible at
+    /// compile time.
+    refs: BTreeMap<String, Reference>,
     /// Container support: container_name -> { inner_name -> Reference }.
-    containers: HashMap<String, HashMap<String, Reference>>,
+    /// Both levels are `BTreeMap` for the same reason.
+    containers: BTreeMap<String, BTreeMap<String, Reference>>,
     /// Currently active container name (if inside a container block).
     current_container: Option<String>,
-    /// "Use" aliases: alias -> container_name.
-    use_aliases: HashMap<String, String>,
+    /// "Use" aliases: alias -> container_name. `BTreeMap` so alias
+    /// resolution walks aliases in stable order.
+    use_aliases: BTreeMap<String, String>,
     /// Visibility scope stack for function calls.
     visibility_scope: (u32, Option<u32>),
     visibility_stack: Vec<(u32, Option<u32>)>,
@@ -129,10 +134,10 @@ pub struct References {
 impl References {
     pub fn new() -> Self {
         Self {
-            refs: HashMap::new(),
-            containers: HashMap::new(),
+            refs: BTreeMap::new(),
+            containers: BTreeMap::new(),
             current_container: None,
-            use_aliases: HashMap::new(),
+            use_aliases: BTreeMap::new(),
             visibility_scope: (0, None),
             visibility_stack: Vec::new(),
         }
@@ -363,7 +368,7 @@ impl References {
         if self.containers.contains_key(name) {
             return false;
         }
-        self.containers.insert(name.to_string(), HashMap::new());
+        self.containers.insert(name.to_string(), BTreeMap::new());
         self.current_container = Some(name.to_string());
         true
     }
@@ -417,7 +422,7 @@ impl References {
     }
 
     /// Get the references inside a specific container, if it exists.
-    pub fn get_container_refs(&self, container_name: &str) -> Option<&HashMap<String, Reference>> {
+    pub fn get_container_refs(&self, container_name: &str) -> Option<&BTreeMap<String, Reference>> {
         self.containers.get(container_name)
     }
 

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 use clap::Parser;
 
@@ -59,7 +58,7 @@ fn main() -> anyhow::Result<()> {
     let fixed_to_file = options_list.iter().any(|o| o == "fixed-to-file");
 
     // Parse defines.
-    let mut defines = HashMap::new();
+    let mut defines = std::collections::BTreeMap::new();
     if let Some(defs) = cli.define {
         for d in defs {
             if let Some((name, val_str)) = d.split_once('=') {

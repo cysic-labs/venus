@@ -16,7 +16,7 @@ pub struct CompilerConfig {
     pub output_file: Option<String>,
     pub output_dir: Option<String>,
     pub fixed_to_file: bool,
-    pub defines: HashMap<String, i128>,
+    pub defines: std::collections::BTreeMap<String, i128>,
     pub verbose: bool,
     pub log_hints: bool,
     pub log_deferred_calls: bool,
