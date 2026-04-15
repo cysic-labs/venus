@@ -810,21 +810,23 @@ impl Processor {
                     (RefType::Str, id)
                 }
                 TypeKind::Expr => {
-                    // Record labels only for AIR-scope expr
-                    // declarations (function_deep == 0). Labels
-                    // captured inside helper bodies bleed into the IM
-                    // symbol set for every intermediate scratch var,
-                    // which never happens on the JS side. Parameters
-                    // are already skipped upstream in
-                    // execute_user_function.
-                    let label_opt: Option<&str> = if self.function_deep == 0 {
-                        Some(name)
-                    } else {
-                        None
-                    };
+                    // Preserve the declaration label unconditionally,
+                    // including inside helper function bodies. IM
+                    // symbol emission is now owned by the proto_out
+                    // packed-expression builder: a label becomes an
+                    // IM symbol only when the builder first saves a
+                    // packed reference keyed by the declaration's
+                    // source_expr_id, and the resulting Symbol.id is
+                    // the packed index the builder assigned. Labels
+                    // that never reach the packed-reference path
+                    // (helper-local scratch like L1, numerator,
+                    // exprs_compressed, etc.) do not surface as an
+                    // IM even though their labels are recorded at
+                    // declaration time, matching JS
+                    // saveAndPushExpressionReference semantics.
                     let id = self.exprs.reserve(
                         size,
-                        label_opt,
+                        Some(name),
                         &array_dims,
                         IdData {
                             source_ref: self.source_ref.clone(),
@@ -3142,7 +3144,7 @@ impl Processor {
         // calls during `airGroupProtoOut`.
         let air_symbols: Vec<air::SymbolEntry> = {
             let mut syms = Vec::new();
-            let air_name = self.air_stack.last().map(|a| a.name.clone()).unwrap_or_default();
+            let _air_name = self.air_stack.last().map(|a| a.name.clone()).unwrap_or_default();
 
             // Witness symbols from label ranges.
             for lr in self.witness_cols.label_ranges.to_vec() {
@@ -3204,27 +3206,19 @@ impl Processor {
                 });
             }
 
-            // Intermediate (im) symbols: read provenance directly off
-            // each air_expr_store entry instead of walking label_ranges
-            // after the fact. One IM symbol per entry whose source_label
-            // is Some; anonymous entries (None source_label: constraint
-            // sub-exprs, witness-calc pairs, value_to_hint_value
-            // lift sites) prune out naturally. The entry's position in
-            // the store is the packed index consumed via
-            // Operand::Expression on downstream hint emission.
-            for (packed_idx, entry) in air_expr_store.iter().enumerate() {
-                if let Some(label) = entry.source_label.as_ref() {
-                    syms.push(air::SymbolEntry {
-                        name: format!("{}.{}", air_name, label),
-                        ref_type_str: "im".to_string(),
-                        internal_id: packed_idx as u32,
-                        dim: 0,
-                        lengths: Vec::new(),
-                        source_ref: String::new(),
-                    });
-                }
-            }
-
+            // IM (intermediate) symbols are NOT emitted here.
+            // Ownership moved to `proto_out::ProtoOutBuilder` in
+            // Round 8: the packed-expression builder records
+            // `(ag, air) -> packed_idx -> label` entries for the
+            // first-save of each provenance key whose
+            // `AirExpressionEntry::source_label` is Some, and emits
+            // an IM SymbolEntry from that side table after the
+            // per-air flatten loop. That gives the builder the
+            // authoritative packed index for each surviving label,
+            // with JS-equivalent first-save-wins semantics and the
+            // natural packed-reference-survival filter that the
+            // processor-side `source_label` walk could not
+            // reproduce.
             syms
         };
 

@@ -120,6 +120,16 @@ pub struct ProtoOutBuilder<'a> {
     /// `HintValue::ExprId` arm can look up the packed index without
     /// threading the map through every hint-value helper.
     current_air_expr_id_map: Option<Vec<u32>>,
+    /// Per-(airgroup_id, air_id) IM symbol emission table populated
+    /// at flatten time. Key: packed_idx. Value: the source label of
+    /// the first AirExpressionEntry whose provenance key became this
+    /// packed slot (first-save-wins; cache hits do not overwrite).
+    /// Mirrors JS `saveAndPushExpressionReference` label-record
+    /// semantics: only the expressions that actually reach a saved
+    /// packed reference key surface as IM symbols, and the symbol's
+    /// `Symbol.id` is the packed index the builder assigned.
+    /// `BTreeMap` for deterministic iteration order at emission time.
+    im_label_by_packed_idx: HashMap<(u32, u32), std::collections::BTreeMap<u32, String>>,
 }
 
 impl<'a> ProtoOutBuilder<'a> {
@@ -132,6 +142,7 @@ impl<'a> ProtoOutBuilder<'a> {
             air_value_id_to_proto: Vec::new(),
             air_expr_id_maps: HashMap::new(),
             current_air_expr_id_map: None,
+            im_label_by_packed_idx: HashMap::new(),
         }
     }
 
@@ -228,19 +239,25 @@ impl<'a> ProtoOutBuilder<'a> {
                 let mut rc_cache: HashMap<*const RuntimeExpr, u32> = HashMap::new();
                 let mut struct_cache: HashMap<RuntimeExpr, u32> = HashMap::new();
                 let mut prov_cache: HashMap<PackedKey, u32> = HashMap::new();
-                // Collect per-entry (&expr, source_expr_id) from either
-                // store shape: the full air_expression_store carries
-                // AirExpressionEntry provenance; the older
-                // stored_expressions path has no provenance.
-                let entries: Vec<(&RuntimeExpr, Option<u32>)> = if !air.air_expression_store.is_empty() {
-                    air.air_expression_store.iter().map(|e| (&e.expr, e.source_expr_id)).collect()
-                } else {
-                    air.stored_expressions.iter().map(|e| (e, None)).collect()
-                };
-                for (expr, source_expr_id) in entries {
+                let mut im_labels: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+                // Collect per-entry (&expr, source_expr_id, source_label)
+                // from either store shape: the full
+                // air_expression_store carries AirExpressionEntry
+                // provenance; the older stored_expressions path has
+                // no provenance.
+                let entries: Vec<(&RuntimeExpr, Option<u32>, Option<&str>)> =
+                    if !air.air_expression_store.is_empty() {
+                        air.air_expression_store.iter()
+                            .map(|e| (&e.expr, e.source_expr_id, e.source_label.as_deref()))
+                            .collect()
+                    } else {
+                        air.stored_expressions.iter().map(|e| (e, None, None)).collect()
+                    };
+                for (expr, source_expr_id, source_label) in entries {
                     let root_idx = self.flatten_air_expr(
                         expr,
                         source_expr_id,
+                        source_label,
                         &air.fixed_id_map,
                         air.fixed_col_start,
                         &air.witness_id_map,
@@ -250,6 +267,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         &mut rc_cache,
                         &mut struct_cache,
                         &mut prov_cache,
+                        &mut im_labels,
                     );
                     expr_id_map.push(root_idx);
                 }
@@ -259,6 +277,11 @@ impl<'a> ProtoOutBuilder<'a> {
                 // serializing `HintValue::ExprId` hint leaves.
                 self.air_expr_id_maps
                     .insert((ag_idx, air_id_counter), expr_id_map.clone());
+                // Record the IM-label side table for this air so
+                // the IM SymbolEntry emission below sees the
+                // first-save (packed_idx -> label) pairs.
+                self.im_label_by_packed_idx
+                    .insert((ag_idx, air_id_counter), im_labels);
                 air_id_counter += 1;
 
                 // Build per-AIR constraints, referencing the flattened
@@ -707,8 +730,12 @@ impl<'a> ProtoOutBuilder<'a> {
                             });
                         }
                         "im" => {
-                            // Emit IM symbols: internal_id is the packed
-                            // expression index in the air_expression_store.
+                            // Legacy processor-side IM emission path.
+                            // Kept for `stored_expressions`-mode airs
+                            // that do not go through the packed-path
+                            // provenance cache. New code goes through
+                            // the builder-side `im_label_by_packed_idx`
+                            // table populated at flatten time.
                             result.push(pilout_proto::Symbol {
                                 name: sym.name.clone(),
                                 air_group_id: Some(air_group_id),
@@ -723,6 +750,32 @@ impl<'a> ProtoOutBuilder<'a> {
                             });
                         }
                         _ => {}
+                    }
+                }
+
+                // Emit IM symbols from the builder-side packed-path
+                // side table. Each entry was recorded at flatten
+                // time when a provenance cache key was first
+                // inserted AND the associated `AirExpressionEntry`
+                // carried a `source_label`; later cache hits do not
+                // overwrite (first-save-wins). The key is
+                // `packed_idx`, which is the authoritative
+                // `Symbol.id` for the IM entry, matching JS
+                // `saveAndPushExpressionReference` semantics.
+                if let Some(labels) = self.im_label_by_packed_idx.get(&(air_group_id, air_id)) {
+                    for (packed_idx, label) in labels {
+                        result.push(pilout_proto::Symbol {
+                            name: format!("{}.{}", air.name, label),
+                            air_group_id: Some(air_group_id),
+                            air_id: Some(air_id),
+                            r#type: REF_TYPE_IM_COL,
+                            id: *packed_idx,
+                            stage: None,
+                            dim: 0,
+                            lengths: Vec::new(),
+                            commit_id: None,
+                            debug_line: Some(String::new()),
+                        });
                     }
                 }
             }
@@ -1171,10 +1224,12 @@ impl<'a> ProtoOutBuilder<'a> {
     /// `custom_id_map` translates internal custom column IDs to
     /// (stage, proto_index, commit_id).
     ///
+    #[allow(clippy::too_many_arguments)]
     fn flatten_air_expr(
         &self,
         expr: &RuntimeExpr,
         source_expr_id: Option<u32>,
+        source_label: Option<&str>,
         fixed_map: &[(char, u32)],
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
@@ -1184,6 +1239,7 @@ impl<'a> ProtoOutBuilder<'a> {
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
         struct_cache: &mut HashMap<RuntimeExpr, u32>,
         prov_cache: &mut HashMap<PackedKey, u32>,
+        im_labels: &mut std::collections::BTreeMap<u32, String>,
     ) -> u32 {
         // Rc-pointer fast path: if this exact node was already flattened,
         // reference the existing proto entry.
@@ -1224,8 +1280,8 @@ impl<'a> ProtoOutBuilder<'a> {
                 // Sub-operands do not carry the top-level store entry's
                 // provenance; they're reused by their own ColRef /
                 // provenance identity when recursed into.
-                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache);
-                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache);
+                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels);
+                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels);
                 match op {
                     RuntimeOp::Add => pilout_proto::expression::Operation::Add(
                         pilout_proto::expression::Add { lhs, rhs },
@@ -1241,7 +1297,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
                     let value =
-                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache);
+                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels);
                     pilout_proto::expression::Operation::Neg(
                         pilout_proto::expression::Neg { value },
                     )
@@ -1273,10 +1329,26 @@ impl<'a> ProtoOutBuilder<'a> {
         if let Some(k) = prov_key {
             prov_cache.insert(k, idx);
         }
+        // First-save-wins IM label recording. Record
+        // `(packed_idx -> label)` only when (a) the store entry has
+        // a source_label, (b) this is a first-insert (we reach here
+        // only on cache miss), and (c) the top-level expression is
+        // a BinOp / UnaryOp tree — not a bare ColRef leaf. JS only
+        // emits an IM symbol for a `const expr X = ...` when X is
+        // bound to a proper expression tree; bare aliases such as
+        // `const expr L1 = get_L1()` (where get_L1 returns a fixed
+        // col reference) are inlined by JS and no IM label surfaces.
+        // Excluding ColRef-leaf entries mirrors that.
+        if let Some(label) = source_label {
+            if matches!(expr, RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. }) {
+                im_labels.entry(idx).or_insert_with(|| label.to_string());
+            }
+        }
         idx
     }
 
     /// Convert a RuntimeExpr to a per-AIR Operand.
+    #[allow(clippy::too_many_arguments)]
     fn flatten_air_operand(
         &self,
         expr: &RuntimeExpr,
@@ -1289,10 +1361,15 @@ impl<'a> ProtoOutBuilder<'a> {
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
         struct_cache: &mut HashMap<RuntimeExpr, u32>,
         prov_cache: &mut HashMap<PackedKey, u32>,
+        im_labels: &mut std::collections::BTreeMap<u32, String>,
     ) -> Option<pilout_proto::Operand> {
         match expr {
             RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
-                let idx = self.flatten_air_expr(expr, None, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache);
+                // Sub-operands recurse without carrying the top-level
+                // entry's source provenance (source_expr_id and
+                // source_label are only authoritative at the air
+                // expression store entry level).
+                let idx = self.flatten_air_expr(expr, None, None, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels);
                 Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Expression(
                         pilout_proto::operand::Expression { idx },
