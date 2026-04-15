@@ -2620,10 +2620,37 @@ impl Processor {
                 &self.namespace_ctx.air_group_name,
                 self.references.inside_container(),
             );
+            // Evaluate each declared array dim into an integer size.
+            // `airval im_direct[num_im]` -> array_dims = [num_im];
+            // for a scalar `airval x;` array_dims is empty.
+            let array_dims: Vec<u32> = item
+                .array_dims
+                .iter()
+                .filter_map(|d| {
+                    d.as_ref().and_then(|e| {
+                        let val = self.eval_expr(e);
+                        match val.as_int() {
+                            Some(v) => Some(v as u32),
+                            None => {
+                                eprintln!(
+                                    "warning: airvalue array dimension for '{}' evaluated to {:?} (not int), dropping dimension",
+                                    item.name, val
+                                );
+                                None
+                            }
+                        }
+                    })
+                })
+                .collect();
+            let count: u32 = if array_dims.is_empty() {
+                1
+            } else {
+                array_dims.iter().product()
+            };
             let id = self.air_values.reserve(
-                1,
+                count,
                 Some(&label),
-                &[],
+                &array_dims,
                 IdData {
                     source_ref: self.source_ref.clone(),
                     stage: avd.stage.map(|s| s as u32),
@@ -2634,7 +2661,7 @@ impl Processor {
                 &full_name,
                 RefType::AirValue,
                 id,
-                &[],
+                &array_dims,
                 false,
                 self.scope.deep,
                 &self.source_ref,
@@ -3228,7 +3255,7 @@ impl Processor {
             if let Some(air_on_stack) = self.air_stack.last() {
                 let air_id = air_on_stack.id;
                 if let Some(ag) = self.air_groups.get_mut(&ag_name) {
-                    if let Some(stored_air) = ag.airs.iter_mut().find(|a| a.id == air_id) {
+                    if let Some(stored_air) = ag.airs.iter_mut().find(|a| a.id == air_id && !a.is_virtual) {
                         // Constraint entries/expressions were already taken
                         // above; constraint exprs are appended at the end of
                         // air_expr_store. Pass just the count to avoid

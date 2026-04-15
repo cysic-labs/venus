@@ -641,7 +641,6 @@ impl<'a> ProtoOutBuilder<'a> {
                 }
                 let air_id = non_virtual_pos;
                 non_virtual_pos += 1;
-                let mut air_value_counter = 0u32;
                 for sym in &air.symbols {
                     match sym.ref_type_str.as_str() {
                         "witness" => {
@@ -710,18 +709,31 @@ impl<'a> ProtoOutBuilder<'a> {
                             });
                         }
                         "airvalue" => {
+                            // Emit Symbol.id = internal_id (the label's
+                            // starting airvalue slot), matching JS
+                            // `symbolType2Proto('airvalue', locator, ...)`
+                            // which returns `{id: airValueId2ProtoId[locator][1]}`
+                            // where `locator = label.from`. For a per-AIR
+                            // airvalue label the relative proto id IS the
+                            // internal id since `air_values` is reset per
+                            // AIR. Consumer `generate_multi_array_symbols`
+                            // then expands array symbols to
+                            // `s.id..s.id+len`, and `map.rs` populates
+                            // `air_values_map` at each of those indices.
+                            // The previous per-label counter collapsed
+                            // array spans so constraints referencing
+                            // later indices panicked in
+                            // `pil2-stark-setup/src/parser_args.rs:594`.
                             let stage = air.air_value_stages
                                 .get(sym.internal_id as usize)
                                 .copied()
                                 .unwrap_or(1);
-                            let av_proto_id = air_value_counter;
-                            air_value_counter += 1;
                             result.push(pilout_proto::Symbol {
                                 name: sym.name.clone(),
                                 air_group_id: Some(air_group_id),
                                 air_id: Some(air_id),
                                 r#type: REF_TYPE_AIR_VALUE,
-                                id: av_proto_id,
+                                id: sym.internal_id,
                                 stage: Some(stage),
                                 dim: sym.dim,
                                 lengths: sym.lengths.clone(),
