@@ -23,6 +23,43 @@ pub mod pilout_proto {
 /// Goldilocks prime: 2^64 - 2^32 + 1
 const GOLDILOCKS_PRIME: u128 = 0xFFFFFFFF00000001;
 
+/// Semantic cache key for per-AIR packed-expression reuse. Mirrors
+/// JS `PackedExpressions.saveAndPushExpressionReference(id, rowOffset)`,
+/// which keys reuse by source identity plus row offset rather than by
+/// structural tree equality. Kept as an additive layer beside the
+/// existing structural cache: the latter still absorbs repeated
+/// Rc-shared subtrees inside stdlib helper bodies, while this cache
+/// bridges tree-shape variations of the same bare reference.
+///
+/// - `ColRef(kind, id, row_offset)` covers bare column references of
+///   every kind (witness / fixed / airgroupval / airvalue /
+///   proofvalue / challenge / public / custom).
+/// - `Provenance(source_expr_id, row_offset)` covers entries lifted
+///   from `self.exprs` whose `AirExpressionEntry::source_expr_id` is
+///   `Some`. Two references to the same `const expr X = ...` at the
+///   same row offset share a packed slot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PackedKey {
+    ColRef(ColRefKind, u32, i32),
+    Provenance(u32, i32),
+}
+
+/// Compute the provenance cache key for a per-AIR store entry at
+/// flatten time. Returns `None` when the expression is a compound
+/// node without usable provenance; in that case only the Rc-pointer
+/// fast path and the structural cache provide reuse. Row offsets
+/// resolve to 0 when unset, matching the JS `rowOffset=0` reuse
+/// branch.
+fn packed_key_for(expr: &RuntimeExpr, source_expr_id: Option<u32>) -> Option<PackedKey> {
+    if let Some(sid) = source_expr_id {
+        return Some(PackedKey::Provenance(sid, 0));
+    }
+    if let RuntimeExpr::ColRef { col_type, id, row_offset } = expr {
+        return Some(PackedKey::ColRef(*col_type, *id, row_offset.unwrap_or(0) as i32));
+    }
+    None
+}
+
 // Symbol type constants matching the protobuf SymbolType enum.
 const REF_TYPE_IM_COL: i32 = 0;
 const REF_TYPE_FIXED_COL: i32 = 1;
@@ -189,19 +226,21 @@ impl<'a> ProtoOutBuilder<'a> {
                 let mut expr_id_map: Vec<u32> = Vec::new();
 
                 let mut rc_cache: HashMap<*const RuntimeExpr, u32> = HashMap::new();
-                let mut sem_cache: HashMap<RuntimeExpr, u32> = HashMap::new();
-                // Collect &RuntimeExpr from either store shape: the
-                // full air_expression_store carries provenance entries
-                // wrapped in AirExpressionEntry; the older
-                // stored_expressions path is plain RuntimeExpr.
-                let exprs: Vec<&RuntimeExpr> = if !air.air_expression_store.is_empty() {
-                    air.air_expression_store.iter().map(|e| &e.expr).collect()
+                let mut struct_cache: HashMap<RuntimeExpr, u32> = HashMap::new();
+                let mut prov_cache: HashMap<PackedKey, u32> = HashMap::new();
+                // Collect per-entry (&expr, source_expr_id) from either
+                // store shape: the full air_expression_store carries
+                // AirExpressionEntry provenance; the older
+                // stored_expressions path has no provenance.
+                let entries: Vec<(&RuntimeExpr, Option<u32>)> = if !air.air_expression_store.is_empty() {
+                    air.air_expression_store.iter().map(|e| (&e.expr, e.source_expr_id)).collect()
                 } else {
-                    air.stored_expressions.iter().collect()
+                    air.stored_expressions.iter().map(|e| (e, None)).collect()
                 };
-                for expr in exprs {
+                for (expr, source_expr_id) in entries {
                     let root_idx = self.flatten_air_expr(
                         expr,
+                        source_expr_id,
                         &air.fixed_id_map,
                         air.fixed_col_start,
                         &air.witness_id_map,
@@ -209,7 +248,8 @@ impl<'a> ProtoOutBuilder<'a> {
                         &expr_id_map,
                         &mut proto_expressions,
                         &mut rc_cache,
-                        &mut sem_cache,
+                        &mut struct_cache,
+                        &mut prov_cache,
                     );
                     expr_id_map.push(root_idx);
                 }
@@ -1134,6 +1174,7 @@ impl<'a> ProtoOutBuilder<'a> {
     fn flatten_air_expr(
         &self,
         expr: &RuntimeExpr,
+        source_expr_id: Option<u32>,
         fixed_map: &[(char, u32)],
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
@@ -1141,7 +1182,8 @@ impl<'a> ProtoOutBuilder<'a> {
         expr_id_map: &[u32],
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
-        sem_cache: &mut HashMap<RuntimeExpr, u32>,
+        struct_cache: &mut HashMap<RuntimeExpr, u32>,
+        prov_cache: &mut HashMap<PackedKey, u32>,
     ) -> u32 {
         // Rc-pointer fast path: if this exact node was already flattened,
         // reference the existing proto entry.
@@ -1149,22 +1191,41 @@ impl<'a> ProtoOutBuilder<'a> {
         if let Some(&cached_idx) = rc_cache.get(&ptr) {
             return cached_idx;
         }
-        // Semantic cache: mirrors JS `PackedExpressions.
-        // saveAndPushExpressionReference` which keys reuse by semantic
-        // expression identity (source id + row offset embedded in the
-        // RuntimeExpr tree itself). Two structurally-identical trees
-        // from different Rc chains — common in stdlib helper expansions
-        // like std_prod's compress_exprs / gsum_e / direct_gsum_e — end
-        // up sharing the same packed index.
-        if let Some(&cached_idx) = sem_cache.get(expr) {
+        // Provenance / ColRef cache (mirrors JS
+        // `saveAndPushExpressionReference(id, rowOffset)`): dedups
+        // references that share a source identity across tree shapes,
+        // e.g. two copies of "witness b" wrapped as `Add(b, 0)` vs
+        // `Add(0, b)` would collapse to one packed slot as soon as an
+        // upstream canonicalization pass normalizes the two shapes.
+        // In the current compiler state this layer fires on
+        // ColRef-leaf entries pushed by `value_to_hint_value` and on
+        // lifted IM expressions that carry `source_expr_id`.
+        let prov_key = packed_key_for(expr, source_expr_id);
+        if let Some(k) = &prov_key {
+            if let Some(&cached_idx) = prov_cache.get(k) {
+                rc_cache.insert(ptr, cached_idx);
+                return cached_idx;
+            }
+        }
+        // Structural cache: full tree equality. Retained as a fallback
+        // beside the provenance cache so that repeated sub-expression
+        // trees produced by stdlib helper expansions (compress_exprs,
+        // gsum_e, direct_gsum_e) continue to collapse.
+        if let Some(&cached_idx) = struct_cache.get(expr) {
             rc_cache.insert(ptr, cached_idx);
+            if let Some(k) = prov_key.clone() {
+                prov_cache.insert(k, cached_idx);
+            }
             return cached_idx;
         }
 
         let op = match expr {
             RuntimeExpr::BinOp { op, left, right } => {
-                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, sem_cache);
-                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, sem_cache);
+                // Sub-operands do not carry the top-level store entry's
+                // provenance; they're reused by their own ColRef /
+                // provenance identity when recursed into.
+                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache);
+                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache);
                 match op {
                     RuntimeOp::Add => pilout_proto::expression::Operation::Add(
                         pilout_proto::expression::Add { lhs, rhs },
@@ -1180,7 +1241,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
                     let value =
-                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, sem_cache);
+                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache);
                     pilout_proto::expression::Operation::Neg(
                         pilout_proto::expression::Neg { value },
                     )
@@ -1208,7 +1269,10 @@ impl<'a> ProtoOutBuilder<'a> {
         let idx = out.len() as u32;
         out.push(proto_expr);
         rc_cache.insert(ptr, idx);
-        sem_cache.insert(expr.clone(), idx);
+        struct_cache.insert(expr.clone(), idx);
+        if let Some(k) = prov_key {
+            prov_cache.insert(k, idx);
+        }
         idx
     }
 
@@ -1223,11 +1287,12 @@ impl<'a> ProtoOutBuilder<'a> {
         expr_id_map: &[u32],
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
-        sem_cache: &mut HashMap<RuntimeExpr, u32>,
+        struct_cache: &mut HashMap<RuntimeExpr, u32>,
+        prov_cache: &mut HashMap<PackedKey, u32>,
     ) -> Option<pilout_proto::Operand> {
         match expr {
             RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
-                let idx = self.flatten_air_expr(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, sem_cache);
+                let idx = self.flatten_air_expr(expr, None, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache);
                 Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Expression(
                         pilout_proto::operand::Expression { idx },
