@@ -123,9 +123,16 @@ pub struct References {
     containers: BTreeMap<String, BTreeMap<String, Reference>>,
     /// Currently active container name (if inside a container block).
     current_container: Option<String>,
-    /// "Use" aliases: alias -> container_name. `BTreeMap` so alias
-    /// resolution walks aliases in stable order.
-    use_aliases: BTreeMap<String, String>,
+    /// "Use" aliases recorded in insertion order as (alias, target)
+    /// pairs. JS resolves bare names in a `use`-aliased container via
+    /// reverse use-stack order: the most recently added alias wins
+    /// when two containers share an inner name (e.g. both
+    /// `proof.std.gsum` and `proof.std.vt` declare `airgroup_ids`,
+    /// and `use proof.std.vt; ... airgroup_ids ...` must resolve to
+    /// the `vt` container). A `Vec<(alias, target)>` preserves
+    /// insertion order; lookup iterates in reverse for LIFO
+    /// semantics.
+    use_aliases: Vec<(String, String)>,
     /// Visibility scope stack for function calls.
     visibility_scope: (u32, Option<u32>),
     visibility_stack: Vec<(u32, Option<u32>)>,
@@ -137,7 +144,7 @@ impl References {
             refs: BTreeMap::new(),
             containers: BTreeMap::new(),
             current_container: None,
-            use_aliases: BTreeMap::new(),
+            use_aliases: Vec::new(),
             visibility_scope: (0, None),
             visibility_stack: Vec::new(),
         }
@@ -229,9 +236,10 @@ impl References {
             }
         }
 
-        // For unqualified names, check use-aliased containers.
+        // For unqualified names, check use-aliased containers in
+        // LIFO order so the most recently added `use` wins.
         if !name.contains('.') {
-            for target in self.use_aliases.values() {
+            for (_alias, target) in self.use_aliases.iter().rev() {
                 if let Some(container) = self.containers.get(target) {
                     if container.contains_key(name) {
                         return Some(target.clone());
@@ -259,10 +267,12 @@ impl References {
         }
 
         if !name.contains('.') {
-            // For unqualified names, also check all use-aliased containers.
-            // `use proof.std.rc` makes inner names of `proof.std.rc` directly
-            // accessible without qualification.
-            for (_alias, target) in &self.use_aliases {
+            // For unqualified names, also check all use-aliased
+            // containers in LIFO order. The most recently-added `use`
+            // wins when two containers share an inner name — the
+            // parity rule for JS `searchDefinition` over the
+            // use-stack.
+            for (_alias, target) in self.use_aliases.iter().rev() {
                 if let Some(container) = self.containers.get(target) {
                     if let Some(r) = container.get(name) {
                         return Some(r);
@@ -278,8 +288,12 @@ impl References {
             let container_candidate = parts[..parts.len() - 1].join(".");
             let inner_name = parts[parts.len() - 1];
 
-            // Check if first part is a use-alias.
-            if let Some(container_name) = self.use_aliases.get(parts[0]) {
+            // Check if first part is a use-alias. LIFO lookup: later
+            // aliases win over earlier ones.
+            let alias_target = self.use_aliases.iter().rev()
+                .find(|(a, _)| a == parts[0])
+                .map(|(_, t)| t.clone());
+            if let Some(container_name) = alias_target {
                 let resolved = format!("{}.{}", container_name, parts[1..].join("."));
                 if let Some(r) = self.refs.get(&resolved) {
                     return Some(r);
@@ -343,7 +357,7 @@ impl References {
             self.containers.remove(key);
         }
         // Remove use-aliases that point to removed containers.
-        self.use_aliases.retain(|_, v| {
+        self.use_aliases.retain(|(_, v)| {
             !v.starts_with("air.") && v != "air"
         });
     }
@@ -361,9 +375,11 @@ impl References {
     /// exists (matching JS behavior where the alias is set before the
     /// existence check).
     pub fn create_container(&mut self, name: &str, alias: Option<&str>) -> bool {
-        // Always install the alias first, even on reopen.
+        // Always install the alias first, even on reopen. Push onto
+        // the LIFO use-stack so subsequent bare-name lookups resolve
+        // to the most recently aliased container.
         if let Some(a) = alias {
-            self.use_aliases.insert(a.to_string(), name.to_string());
+            self.use_aliases.push((a.to_string(), name.to_string()));
         }
         if self.containers.contains_key(name) {
             return false;
@@ -383,13 +399,17 @@ impl References {
         self.current_container.is_some()
     }
 
-    /// Register a `use` alias.
+    /// Current container name, if inside a container block.
+    pub fn current_container_name(&self) -> Option<&str> {
+        self.current_container.as_deref()
+    }
+
+    /// Register a `use` alias. Push onto the LIFO stack; subsequent
+    /// lookups iterate in reverse so the most recently-added alias
+    /// wins when two aliased containers share an inner name.
     pub fn add_use(&mut self, name: &str, alias: Option<&str>) {
-        if let Some(a) = alias {
-            self.use_aliases.insert(a.to_string(), name.to_string());
-        } else {
-            self.use_aliases.insert(name.to_string(), name.to_string());
-        }
+        let key = alias.map(|a| a.to_string()).unwrap_or_else(|| name.to_string());
+        self.use_aliases.push((key, name.to_string()));
     }
 
     /// Check if a container is defined.
