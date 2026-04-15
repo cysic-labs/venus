@@ -1303,6 +1303,34 @@ impl Processor {
                         // so that constraint expressions can be serialized
                         // to protobuf with column references intact.
                         if is_symbolic(&lval) || is_symbolic(&rval) {
+                            // Identity simplifications at tree-construction
+                            // time, matching JS expression-builder behavior:
+                            //
+                            //   Add(x, 0) -> x          Add(0, x) -> x
+                            //   Sub(x, 0) -> x
+                            //   Mul(x, 1) -> x          Mul(1, x) -> x
+                            //
+                            // JS folds these before emission; not folding
+                            // them in Rust produces extra packed expression
+                            // slots (a Mul node wrapping the symbolic
+                            // operand with 1) that diverge from JS output.
+                            // Only literal Int(0)/Int(1)/Fe(0)/Fe(1) count
+                            // as the identity operand; runtime-expression
+                            // constants are NOT folded here.
+                            match op {
+                                BinOp::Add => {
+                                    if is_literal_zero(&rval) { return lval; }
+                                    if is_literal_zero(&lval) { return rval; }
+                                }
+                                BinOp::Sub => {
+                                    if is_literal_zero(&rval) { return lval; }
+                                }
+                                BinOp::Mul => {
+                                    if is_literal_one(&rval) { return lval; }
+                                    if is_literal_one(&lval) { return rval; }
+                                }
+                                _ => {}
+                            }
                             let rt_op = match op {
                                 BinOp::Add => RuntimeOp::Add,
                                 BinOp::Sub => RuntimeOp::Sub,
@@ -3971,6 +3999,23 @@ fn reorder_named_args(
 /// Convert a Value to a RuntimeExpr.
 /// Check if a Value is "symbolic" (a column reference or runtime
 /// expression) rather than a simple compile-time constant.
+/// Whether `val` is the literal integer / field-element zero. Used
+/// to apply identity simplifications (`x + 0`, `x - 0`) at BinOp
+/// construction time. Runtime-expression constants are deliberately
+/// NOT treated as zero: folding them could lose intentional
+/// reference-preservation behavior (e.g. a `const expr Z = 0;`
+/// binding that downstream code might expect to round-trip as an
+/// intermediate reference).
+fn is_literal_zero(val: &Value) -> bool {
+    matches!(val, Value::Int(0) | Value::Fe(0))
+}
+
+/// Whether `val` is the literal integer / field-element one. Used
+/// to apply `Mul(x, 1)` / `Mul(1, x)` identity simplification.
+fn is_literal_one(val: &Value) -> bool {
+    matches!(val, Value::Int(1) | Value::Fe(1))
+}
+
 fn is_symbolic(val: &Value) -> bool {
     matches!(val, Value::ColRef { .. } | Value::RuntimeExpr(_))
 }
