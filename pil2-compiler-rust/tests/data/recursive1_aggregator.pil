@@ -1,0 +1,11 @@
+require "aggregator.pil";
+
+set_std_mode(STD_MODE_ONE_INSTANCE);
+
+set_max_constraint_degree(8);
+
+public publics[473];
+
+airgroup Zisk_Dma_recursive1  {
+    Aggregator (N: 2**17, nPlonkRows: 0, nPoseidonCompressor: 13969, nPoseidonSponge: 4218, nCMulRows: 2107, nEvPol4: 2519, nFFT4: 4833, nTreeSelector4: 4809, nSelectVal1: 9618) alias Zisk_Dma_recursive1;
+}
