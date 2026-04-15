@@ -60,6 +60,39 @@ fn packed_key_for(expr: &RuntimeExpr, source_expr_id: Option<u32>) -> Option<Pac
     None
 }
 
+/// Tree-size threshold (in nodes) above which an expression is not
+/// inserted into or queried from the structural dedup cache. The
+/// derived `Hash`/`Eq` for `RuntimeExpr` walk every Rc-linked child,
+/// so each cache probe and insert is O(tree_size). Without this
+/// guard the recursive PIL aggregator templates blow up the flatten
+/// step into multi-hour runtime; see BL-20260415-struct-cache-blowup.
+const STRUCT_CACHE_NODE_LIMIT: usize = 64;
+
+/// Count nodes in an expression tree, capped at `limit + 1` so the
+/// counter itself stays cheap on very large trees. Returns `> limit`
+/// to indicate the tree is too big for the structural cache.
+fn expr_node_count(expr: &RuntimeExpr, limit: usize) -> usize {
+    fn go(expr: &RuntimeExpr, limit: usize, acc: &mut usize) {
+        if *acc > limit {
+            return;
+        }
+        *acc += 1;
+        match expr {
+            RuntimeExpr::BinOp { left, right, .. } => {
+                go(left, limit, acc);
+                go(right, limit, acc);
+            }
+            RuntimeExpr::UnaryOp { operand, .. } => {
+                go(operand, limit, acc);
+            }
+            _ => {}
+        }
+    }
+    let mut acc = 0;
+    go(expr, limit, &mut acc);
+    acc
+}
+
 // Symbol type constants matching the protobuf SymbolType enum.
 const REF_TYPE_IM_COL: i32 = 0;
 const REF_TYPE_FIXED_COL: i32 = 1;
@@ -162,30 +195,13 @@ impl<'a> ProtoOutBuilder<'a> {
             full[first_nonzero..].to_vec()
         };
 
-        // Build air groups.
         let air_groups = self.build_air_groups();
-
-        // Build num_challenges by stage.
         let num_challenges = self.build_stage_counts(&self.processor.challenges);
-
-        // Build num_proof_values by stage.
         let num_proof_values = self.build_stage_counts(&self.processor.proof_values);
-
-        // Number of public values.
         let num_public_values = self.processor.publics.len();
-
-        // Build global expressions (flattened) and the index mapping.
         let (expressions, expr_id_map) = self.build_global_expressions();
-
-        // Build global constraints using the remapped expression indices.
         let constraints = self.build_global_constraints(&expr_id_map);
-
-        // Build symbols.
         let symbols = self.build_symbols();
-
-        // Build hints (per-AIR and global). Must run after
-        // build_air_groups so the per-air packed expression-id maps are
-        // populated for HintValue::ExprId serialization.
         let hints = self.build_hints();
 
         pilout_proto::PilOut {
@@ -1278,13 +1294,21 @@ impl<'a> ProtoOutBuilder<'a> {
         // Structural cache: full tree equality. Retained as a fallback
         // beside the provenance cache so that repeated sub-expression
         // trees produced by stdlib helper expansions (compress_exprs,
-        // gsum_e, direct_gsum_e) continue to collapse.
-        if let Some(&cached_idx) = struct_cache.get(expr) {
-            rc_cache.insert(ptr, cached_idx);
-            if let Some(k) = prov_key.clone() {
-                prov_cache.insert(k, cached_idx);
+        // gsum_e, direct_gsum_e) continue to collapse.  Skip large
+        // trees because RuntimeExpr's derived Hash/Eq walk every node
+        // through the Rc children, which makes every cache probe and
+        // insert O(tree_size) and turns large recursive PILs (the
+        // 10k+-node aggregator templates) into a quadratic blow-up.
+        let cache_size = expr_node_count(expr, STRUCT_CACHE_NODE_LIMIT);
+        let cache_eligible = cache_size <= STRUCT_CACHE_NODE_LIMIT;
+        if cache_eligible {
+            if let Some(&cached_idx) = struct_cache.get(expr) {
+                rc_cache.insert(ptr, cached_idx);
+                if let Some(k) = prov_key.clone() {
+                    prov_cache.insert(k, cached_idx);
+                }
+                return cached_idx;
             }
-            return cached_idx;
         }
 
         let op = match expr {
@@ -1337,7 +1361,9 @@ impl<'a> ProtoOutBuilder<'a> {
         let idx = out.len() as u32;
         out.push(proto_expr);
         rc_cache.insert(ptr, idx);
-        struct_cache.insert(expr.clone(), idx);
+        if cache_eligible {
+            struct_cache.insert(expr.clone(), idx);
+        }
         if let Some(k) = prov_key {
             prov_cache.insert(k, idx);
         }
@@ -1728,5 +1754,77 @@ mod tests {
         assert_eq!(main.fixed_cols.len(), 3, "Main fixedCols count");
 
         eprintln!("test_decoded_pilout_parity: all assertions passed");
+    }
+
+    #[test]
+    fn test_recursive1_pilout_under_time_budget() {
+        // Compile the aggregator-shaped recursive1 PIL that
+        // pil2-stark-setup shells out to during recursive setup.
+        // Before the structural-cache size guard this run hung for
+        // many minutes inside `ProtoOutBuilder::build()` because the
+        // derived `Hash`/`Eq` for `RuntimeExpr` walks every
+        // Rc-linked child, so each cache probe and insert was
+        // O(tree_size) on a 10k+-node aggregator template. With the
+        // STRUCT_CACHE_NODE_LIMIT guard the same compile finishes
+        // in well under a second; we assert a generous 30 s ceiling
+        // so a reintroduced quadratic regression is caught without
+        // depending on the 18-minute full E2E.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let pil_path = manifest.join("../build/pil/Dma_recursive1.pil");
+        if !pil_path.exists() {
+            eprintln!(
+                "Skipping test_recursive1_pilout_under_time_budget: {:?} not found",
+                pil_path
+            );
+            return;
+        }
+
+        let bin_path = manifest.join("../target/release/pil2c");
+        if !bin_path.exists() {
+            eprintln!(
+                "Skipping test_recursive1_pilout_under_time_budget: pil2c binary not built at {:?}",
+                bin_path
+            );
+            return;
+        }
+
+        let std_pil = manifest.join("../pil2-proofman/pil2-components/lib/std/pil");
+        let recurser_pil = manifest.join("../circom2pil/pil");
+        let include_arg = format!("{},{}", std_pil.display(), recurser_pil.display());
+
+        let out_path = std::env::temp_dir().join("test_recursive1.pilout");
+        let _ = std::fs::remove_file(&out_path);
+
+        let start = std::time::Instant::now();
+        let status = std::process::Command::new(&bin_path)
+            .arg(&pil_path)
+            .arg("-I")
+            .arg(&include_arg)
+            .arg("-o")
+            .arg(&out_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("failed to spawn pil2c");
+        let elapsed = start.elapsed();
+
+        assert!(status.success(), "pil2c exited non-zero on recursive1 input");
+        assert!(
+            out_path.exists(),
+            "pil2c did not produce {:?}",
+            out_path
+        );
+        let metadata = std::fs::metadata(&out_path).expect("stat pilout");
+        assert!(metadata.len() > 0, "recursive1 pilout is empty");
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "recursive1 pil2c took {:?}, expected < 30s",
+            elapsed
+        );
+        eprintln!(
+            "test_recursive1_pilout_under_time_budget: pil2c finished in {:?}, {} bytes",
+            elapsed,
+            metadata.len()
+        );
     }
 }
