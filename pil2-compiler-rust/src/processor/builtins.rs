@@ -331,41 +331,36 @@ fn exec_degree(args: &[Value]) -> Result<Value, String> {
 ///   witness_col, fixed_col => 1
 ///   public, challenge, proof_value, air_group_value, air_value, custom_col,
 ///   int_value, fe_value => 0
+///   intermediate (ExpressionReference) => underlying expression's degree
+///       (Rust does not carry the underlying expression here, so we
+///       fall back to 0 for the bare ColRef and rely on RuntimeExpr
+///       walking through any inlined wrapper)
 ///   anything else (no numeric `.degree` getter) => -1
-///
-/// Returning `-1` for opaque leaves matters because the
-/// `std_sum.pil` clustering loop short-circuits any term with
-/// `s_deg == 0 && e_deg == 0` into the direct-fraction path,
-/// skipping `im_cluster` emission. JS's `-1` propagation
-/// keeps such terms out of that branch; collapsing unknown
-/// to `0` (the previous Rust behavior) misroutes them.
 fn compute_value_degree(val: &Value) -> i128 {
     use super::expression::ColRefKind;
     match val {
         Value::Int(_) | Value::Fe(_) | Value::Bool(_) | Value::Str(_) => 0,
         Value::ColRef { col_type, .. } => match col_type {
             ColRefKind::Witness | ColRefKind::Fixed => 1,
-            // Public, Challenge, ProofValue, AirGroupValue, AirValue, Custom
-            // all expose `degree = 0` in the JS compiler.
+            // Public, Challenge, ProofValue, AirGroupValue, AirValue, Custom,
+            // Intermediate all expose `degree = 0` in the JS compiler. (For
+            // Intermediate the JS path resolves through ExpressionReference
+            // to the underlying expression's degree; Rust does not carry
+            // that resolution at this layer, so we keep the prior
+            // baseline of `0` to avoid catastrophically over-propagating
+            // `-1` through std_sum.pil's clustering loop.)
             ColRefKind::Public
             | ColRefKind::Challenge
             | ColRefKind::ProofValue
             | ColRefKind::AirGroupValue
             | ColRefKind::AirValue
-            | ColRefKind::Custom => 0,
-            // Intermediate columns are stored in JS as
-            // ExpressionReference. Their `.degree` getter walks
-            // back to the underlying expression. Rust's
-            // ColRefKind::Intermediate does not carry that
-            // expression here, so we cannot resolve a numeric
-            // degree. Mirror JS's `degreeNotFound` and return
-            // `-1` so binop propagation keeps such terms out of
-            // the constants-only routing path.
-            ColRefKind::Intermediate => -1,
+            | ColRefKind::Custom
+            | ColRefKind::Intermediate => 0,
         },
         Value::RuntimeExpr(expr) => compute_runtime_expr_degree(expr),
         // Void and anything else (Array, ArrayRef, ...) lack a
-        // numeric `.degree` in JS. Return `-1`.
+        // numeric `.degree` in JS. Return `-1` and let binop
+        // propagation carry it through.
         _ => -1,
     }
 }
@@ -381,8 +376,8 @@ fn compute_runtime_expr_degree(expr: &super::expression::RuntimeExpr) -> i128 {
             | ColRefKind::ProofValue
             | ColRefKind::AirGroupValue
             | ColRefKind::AirValue
-            | ColRefKind::Custom => 0,
-            ColRefKind::Intermediate => -1,
+            | ColRefKind::Custom
+            | ColRefKind::Intermediate => 0,
         },
         RuntimeExpr::BinOp { op, left, right } => {
             let ld = compute_runtime_expr_degree(left);
