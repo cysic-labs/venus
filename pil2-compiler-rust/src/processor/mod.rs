@@ -3023,6 +3023,16 @@ impl Processor {
         // proof-level ones. Matches JS pushAirScope()/popAirScope().
         self.exprs.push();
 
+        // Snapshot the `use_aliases` stack at AIR entry so any `use`
+        // added inside this AIR template body — directly, through
+        // nested helpers, or via `init_air_containers_sum` /
+        // `init_*` initializers — is bounded to the AIR's lifetime
+        // and does not leak into sibling AIRs. Pairs with the
+        // restore at AIR exit below. Matches JS pil2-compiler
+        // behavior where each AIR template call starts with a clean
+        // alias stack inherited from its enclosing scope only.
+        let air_template_use_aliases_mark = self.references.snapshot_use_aliases();
+
         self.namespace_ctx.push(name);
         self.scope.push_instance_type("air");
 
@@ -3474,6 +3484,12 @@ impl Processor {
         self.next_commit_id = 0;
         self.commit_publics.clear();
 
+        // Restore the alias stack to its pre-AIR length. Any alias
+        // that was added during this AIR's body (not already cleaned
+        // by `clear_air_containers`) is now dropped so the next AIR
+        // starts with the same alias inheritance as this one did.
+        self.references.restore_use_aliases_len(air_template_use_aliases_mark);
+
         Value::Int(0)
     }
 
@@ -3497,13 +3513,21 @@ impl Processor {
         let alias = cd.alias.as_deref();
         // JS skips the body entirely when a container already exists
         // (containers.js createContainer returns false, processor.js returns).
+        // Snapshot the alias stack AFTER create_container so the
+        // container's own alias (added by create_container) persists
+        // in the caller's scope, but any aliases added inside the
+        // body (via nested `use` or nested containers) are truncated
+        // on exit. Matches JS pil2-compiler's container-body
+        // lifetime for `use` statements.
         if !self.references.create_container(&name, alias) {
             return FlowSignal::None;
         }
+        let use_aliases_mark = self.references.snapshot_use_aliases();
         if let Some(body) = &cd.body {
             self.execute_statements(body);
         }
         self.references.close_container();
+        self.references.restore_use_aliases_len(use_aliases_mark);
         FlowSignal::None
     }
 
@@ -3515,12 +3539,18 @@ impl Processor {
     }
 
     fn exec_package_block(&mut self, pd: &PackageDef) -> FlowSignal {
+        // Snapshot alias stack so any `use` inside the package body
+        // is lexical to the package. JS pil2-compiler treats
+        // `package ... { ... }` as its own alias scope; without this,
+        // nested `use` statements leak out to sibling packages.
+        let use_aliases_mark = self.references.snapshot_use_aliases();
         self.scope.push();
         self.scope
             .set_value("package", Value::Str(pd.name.clone()));
         let result = self.execute_statements(&pd.body);
         let (to_unset, to_restore) = self.scope.pop();
         self.apply_scope_cleanup(&to_unset, &to_restore);
+        self.references.restore_use_aliases_len(use_aliases_mark);
         result
     }
 
