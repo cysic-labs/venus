@@ -508,7 +508,17 @@ void calculateExpr(SetupCtx& setupCtx, StepsParams &params, ExpressionsCtx& expr
             }
             buff = &params.airValues[pos];
         } else {
-            zklog.error("Only committed pols and airvalues can be set");
+            zklog.error(
+                "Only committed pols and airvalues can be set "
+                "[calculateExpr guard] "
+                "airgroupId=" + to_string(setupCtx.starkInfo.airgroupId) +
+                " airId=" + to_string(setupCtx.starkInfo.airId) +
+                " hintId=" + to_string(hintId[i]) +
+                " hintName=" + hint.name +
+                " hintFieldNameDest=" + hintDest +
+                " destOperand=" + to_string((int)hintFieldDestVal.operand) +
+                " destId=" + to_string(hintFieldDestVal.id)
+            );
             exitProcess();
             exit(-1);
         }
@@ -542,8 +552,8 @@ void multiplyHintFields(SetupCtx& setupCtx, StepsParams &params, ExpressionsCtx&
         uint64_t nRows;
         if(hintFieldDestVal.operand == opType::cm) {
             offset = setupCtx.starkInfo.mapSectionsN["cm" + to_string(setupCtx.starkInfo.cmPolsMap[hintFieldDestVal.id].stage)];
-            uint64_t offsetAuxTrace = setupCtx.starkInfo.mapOffsets[std::make_pair("cm" + to_string(setupCtx.starkInfo.cmPolsMap[hintFieldDestVal.id].stage), false)] + setupCtx.starkInfo.cmPolsMap[hintFieldDestVal.id].stagePos;           
-            buff = &params.aux_trace[offsetAuxTrace];           
+            uint64_t offsetAuxTrace = setupCtx.starkInfo.mapOffsets[std::make_pair("cm" + to_string(setupCtx.starkInfo.cmPolsMap[hintFieldDestVal.id].stage), false)] + setupCtx.starkInfo.cmPolsMap[hintFieldDestVal.id].stagePos;
+            buff = &params.aux_trace[offsetAuxTrace];
             nRows = 1 << setupCtx.starkInfo.starkStruct.nBits;
         } else if (hintFieldDestVal.operand == opType::airvalue) {
             nRows = 1;
@@ -553,7 +563,17 @@ void multiplyHintFields(SetupCtx& setupCtx, StepsParams &params, ExpressionsCtx&
             }
             buff = &params.airValues[pos];
         } else {
-            zklog.error("Only committed pols and airvalues can be set");
+            zklog.error(
+                "Only committed pols and airvalues can be set "
+                "[multiplyHintFields guard] "
+                "airgroupId=" + to_string(setupCtx.starkInfo.airgroupId) +
+                " airId=" + to_string(setupCtx.starkInfo.airId) +
+                " hintId=" + to_string(hintId[i]) +
+                " hintName=" + hint.name +
+                " hintFieldNameDest=" + hintDest +
+                " destOperand=" + to_string((int)hintFieldDestVal.operand) +
+                " destId=" + to_string(hintFieldDestVal.id)
+            );
             exitProcess();
             exit(-1);
         }

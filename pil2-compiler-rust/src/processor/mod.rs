@@ -1103,14 +1103,46 @@ impl Processor {
         let scope_type = self.scope.get_instance_type().to_string();
         let is_global = scope_type == "proof";
 
-        // Generate witness_calc hint for `<==` constraints (matching JS behavior).
+        // Generate witness_calc hint for `<==` constraints (matching
+        // JS behavior). JS pil2-compiler validates that `<==` LHS is
+        // always a bare WitnessCol or AirValue (see
+        // `processor.js::2018-2020`). The `reference` field of the
+        // emitted `witness_calc` hint therefore resolves to a direct
+        // column operand on the consumer side, NOT a wrapping
+        // expression. If we stored the LHS via the air_expression_store
+        // (ExprId) for every case, the bare-col case would serialize
+        // through `Operand::Expression` and land as opType::tmp in the
+        // chelpers binary, which the C++ `calculateExpr` guard at
+        // `pil2-proofman/pil2-stark/src/starkpil/hints.cpp:499-511`
+        // rejects (it only accepts cm or airvalue). We therefore emit
+        // a dedicated `HintValue::ColRef` for the bare-leaf case and
+        // fall back to the ExprId path for any non-leaf LHS.
         if c.is_witness && !is_global {
-            let left_idx = self.air_expression_store.len() as u32;
-            self.air_expression_store.push(air::AirExpressionEntry::anonymous(left.clone()));
+            let reference_value = match &left {
+                RuntimeExpr::ColRef { col_type, id, row_offset }
+                    if matches!(
+                        col_type,
+                        ColRefKind::Witness | ColRefKind::AirValue
+                    ) =>
+                {
+                    air::HintValue::ColRef {
+                        col_type: *col_type,
+                        id: *id,
+                        row_offset: *row_offset,
+                    }
+                }
+                _ => {
+                    let left_idx = self.air_expression_store.len() as u32;
+                    self.air_expression_store.push(
+                        air::AirExpressionEntry::anonymous(left.clone()),
+                    );
+                    air::HintValue::ExprId(left_idx)
+                }
+            };
             let right_idx = self.air_expression_store.len() as u32;
             self.air_expression_store.push(air::AirExpressionEntry::anonymous(right.clone()));
             let hint_data = air::HintValue::Object(vec![
-                ("reference".to_string(), air::HintValue::ExprId(left_idx)),
+                ("reference".to_string(), reference_value),
                 ("expression".to_string(), air::HintValue::ExprId(right_idx)),
             ]);
             self.air_hints.push(air::HintEntry {

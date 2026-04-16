@@ -1,0 +1,19 @@
+// minimal_witness_calc.pil
+//
+// Exercises the `<==` witness-constraint hint path so the
+// emitted pilout's `witness_calc.reference` field can be
+// decoded and asserted to resolve to a direct witness column
+// operand (not a wrapping Expression). Pins the producer-side
+// fix that prevents the `pil2-proofman/pil2-stark/src/starkpil/hints.cpp`
+// calculateExpr guard from rejecting the reference as
+// opType::tmp.
+
+airtemplate MinimalWitnessCalc(const int N) {
+    col witness a;
+    col witness b;
+    b <== a + 1;
+}
+
+airgroup MinimalWitnessCalc {
+    MinimalWitnessCalc(N: 2**4);
+}

@@ -992,6 +992,60 @@ impl<'a> ProtoOutBuilder<'a> {
                     )),
                 }
             }
+            // Direct column reference: emit the matching leaf Operand
+            // (WitnessCol / AirValue / ...) instead of wrapping in an
+            // Expression. This is what the C++ consumer expects for
+            // hint fields like `witness_calc.reference` that must
+            // resolve to cm / airvalue operand class.
+            HintValue::ColRef { col_type, id, row_offset } => {
+                use crate::processor::expression::ColRefKind;
+                let offset = row_offset.unwrap_or(0) as i32;
+                let operand = match col_type {
+                    ColRefKind::Witness => {
+                        let (stage, col_idx) = witness_map
+                            .get(*id as usize)
+                            .copied()
+                            .unwrap_or((1, *id));
+                        pilout_proto::operand::Operand::WitnessCol(
+                            pilout_proto::operand::WitnessCol {
+                                stage,
+                                col_idx,
+                                row_offset: offset,
+                            },
+                        )
+                    }
+                    ColRefKind::AirValue => {
+                        pilout_proto::operand::Operand::AirValue(
+                            pilout_proto::operand::AirValue { idx: *id },
+                        )
+                    }
+                    _ => {
+                        // Other ColRefKinds (Fixed, Public, Challenge,
+                        // ProofValue, AirGroupValue, Custom,
+                        // Intermediate) are not valid destinations for
+                        // the calculateExpr guard; they should never
+                        // land here. Falling back to a stable empty
+                        // Constant keeps the proto well-formed so
+                        // validation errors surface downstream with
+                        // clear context rather than as a type panic.
+                        let _ = fixed_map;
+                        let _ = fixed_col_start;
+                        let _ = custom_map;
+                        let _ = expr_store;
+                        pilout_proto::operand::Operand::Constant(
+                            pilout_proto::operand::Constant {
+                                value: Vec::new(),
+                            },
+                        )
+                    }
+                };
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::Operand(
+                        pilout_proto::Operand { operand: Some(operand) },
+                    )),
+                }
+            }
         }
     }
 
@@ -1078,6 +1132,24 @@ impl<'a> ProtoOutBuilder<'a> {
                     )),
                 }
             }
+            // In global (proof) context we do not expect a bare
+            // column reference from a witness-constraint hint
+            // (witness_calc is air-scoped, never proof-scoped). Fall
+            // through to an empty constant rather than panicking so
+            // any future misroute surfaces with a well-formed proto
+            // and a targeted validation error downstream.
+            HintValue::ColRef { .. } => pilout_proto::HintField {
+                name: None,
+                value: Some(pilout_proto::hint_field::Value::Operand(
+                    pilout_proto::Operand {
+                        operand: Some(pilout_proto::operand::Operand::Constant(
+                            pilout_proto::operand::Constant {
+                                value: Vec::new(),
+                            },
+                        )),
+                    },
+                )),
+            },
         }
     }
 

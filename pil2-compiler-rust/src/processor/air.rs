@@ -25,6 +25,24 @@ pub enum HintValue {
     Array(Vec<HintValue>),
     /// An object (ordered key-value pairs) of hint values.
     Object(Vec<(String, HintValue)>),
+    /// A direct column reference (not wrapped in an expression).
+    ///
+    /// Needed for hints like `witness_calc` whose `reference` field
+    /// must resolve to a `cm` (witness) or `airvalue` operand class
+    /// on the C++ consumer side (see
+    /// `pil2-proofman/pil2-stark/src/starkpil/hints.cpp` calculateExpr
+    /// guard). Emitting those references through `ExprId` routes them
+    /// through `Operand::Expression`, which the chelpers pipeline
+    /// classifies as `tmp`, causing the guard to abort prove.
+    /// A dedicated `ColRef` variant carries the leaf `(col_type, id,
+    /// row_offset)` directly so the proto serializer can emit
+    /// `Operand::WitnessCol` / `Operand::AirValue` without the
+    /// intermediate expression wrap.
+    ColRef {
+        col_type: super::expression::ColRefKind,
+        id: u32,
+        row_offset: Option<i64>,
+    },
 }
 
 /// A collected hint entry, corresponding to a `@name { ... }` statement.
