@@ -423,9 +423,19 @@ uint64_t setHintField(SetupCtx& setupCtx, StepsParams& params, Goldilocks::Eleme
         cout << "hintFieldVal.id = " << hintFieldVal.id << " pos = " << pos << " dim = " << dim << endl;
         std::memcpy(&params.airValues[pos], values, dim * sizeof(Goldilocks::Element));
     } else {
-        zklog.error("Only committed pols and airgroupvalues can be set");
+        zklog.error(
+            "Only committed pols and airgroupvalues can be set "
+            "[setHintField guard] "
+            "airgroupId=" + to_string(setupCtx.starkInfo.airgroupId) +
+            " airId=" + to_string(setupCtx.starkInfo.airId) +
+            " hintId=" + to_string(hintId) +
+            " hintName=" + hint.name +
+            " hintFieldName=" + hintFieldName +
+            " destOperand=" + to_string((int)hintFieldVal.operand) +
+            " destId=" + to_string(hintFieldVal.id)
+        );
         exitProcess();
-        exit(-1);  
+        exit(-1);
     }
 
     return hintFieldVal.id;

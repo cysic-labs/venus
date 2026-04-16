@@ -128,9 +128,19 @@ uint64_t setHintFieldGPU(SetupCtx& setupCtx, StepsParams& params, Goldilocks::El
         uint64_t dim = setupCtx.starkInfo.airValuesMap[hintFieldVal.id].stage == 1 ? 1 : FIELD_EXTENSION;
         copyValueGPU(params.airValues + pos, values, dim, stream);
     } else {
-        zklog.error("Only committed pols and airgroupvalues can be set");
+        zklog.error(
+            "Only committed pols and airgroupvalues can be set "
+            "[setHintFieldGPU guard] "
+            "airgroupId=" + to_string(setupCtx.starkInfo.airgroupId) +
+            " airId=" + to_string(setupCtx.starkInfo.airId) +
+            " hintId=" + to_string(hintId) +
+            " hintName=" + hint.name +
+            " hintFieldName=" + hintFieldName +
+            " destOperand=" + to_string((int)hintFieldVal.operand) +
+            " destId=" + to_string(hintFieldVal.id)
+        );
         exitProcess();
-        exit(-1);  
+        exit(-1);
     }
 
     return hintFieldVal.id;
