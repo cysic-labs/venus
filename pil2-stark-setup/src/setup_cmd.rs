@@ -348,10 +348,19 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
 pub type CompressorDecisionMap = std::collections::BTreeMap<(u32, u32), bool>;
 
 /// Compute the per-AIR compressor decision map from real per-AIR
-/// setup artifacts on disk, without running the rest of recursive
-/// setup. This is the same logic that `run_recursive_setup` uses
-/// internally to build its map, factored out so integration tests
-/// can drive it against a pre-existing `build/provingKey/` tree.
+/// setup artifacts on disk.
+///
+/// **Side effects**: this function calls
+/// `compressor_check::is_compressor_needed`, which on its
+/// `n_bits < 17` branch rewrites the per-AIR
+/// `<air>.starkinfo.json` to bump `nQueries`. That is
+/// intentional and mirrors golden JS, but it means a caller
+/// driving this helper against a `build/provingKey/` tree
+/// they do not own (e.g. an integration test) will mutate
+/// those files in place. The helper is therefore named
+/// `_with_side_effects` to make the impurity explicit, and
+/// the caller is responsible for ensuring the on-disk tree is
+/// either disposable or rebuilt before re-use.
 ///
 /// For each AIR with non-zero rows, this function:
 ///   1. Loads `<build_dir>/provingKey/<pilout>/<airgroup>/airs/<air>/air/<air>.{starkinfo,verifierinfo,verkey}.json`.
@@ -363,7 +372,7 @@ pub type CompressorDecisionMap = std::collections::BTreeMap<(u32, u32), bool>;
 /// Any missing artifact fails the call with a file-level error, so
 /// callers (including integration tests) must guarantee the
 /// per-AIR setup has run first.
-pub fn compute_compressor_decisions(
+pub fn compute_compressor_decisions_with_side_effects(
     pilout: &pb::PilOut,
     pilout_name: &str,
     build_dir: &str,
@@ -534,7 +543,7 @@ fn run_recursive_setup(
                 );
             }
 
-            let stark_info: serde_json::Value =
+            let mut stark_info: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&si_path)?)?;
             let verifier_info: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&vi_path)?)?;
@@ -547,6 +556,16 @@ fn run_recursive_setup(
             // `state-machines/starkstructs.json` is a forced override;
             // otherwise fall back to the runtime
             // `is_compressor_needed()` R1CS-row threshold.
+            //
+            // When `is_compressor_needed` lands in the
+            // `nBits < 17` branch it rewrites the on-disk
+            // `starkinfo.json` to bump `nQueries`. Golden JS
+            // mutates the in-memory `starkInfo` object by
+            // reference, so recursive1 picks up the adjusted
+            // value automatically. We do the same here: when
+            // `starkinfo_updated` is true, reload the file so
+            // the in-memory `stark_info` matches the on-disk
+            // copy before any downstream consumer reads it.
             let forced_by_settings = settings_map
                 .get(&air_name)
                 .and_then(|s| s.has_compressor)
@@ -558,21 +577,25 @@ fn run_recursive_setup(
                 );
                 true
             } else {
-                match compressor_check::is_compressor_needed(
+                let result = compressor_check::is_compressor_needed(
                     &const_root_strings,
                     &stark_info,
                     &verifier_info,
                     si_path.to_str().unwrap_or(""),
                     &circom_exec,
                     &circuits_gl_path,
-                ) {
-                    Ok(result) => result.needed,
-                    Err(e) => {
-                        return Err(e.context(format!(
-                            "Compressor check failed for air '{}'", air_name
-                        )));
-                    }
+                )
+                .with_context(|| format!("Compressor check failed for air '{}'", air_name))?;
+                if result.starkinfo_updated {
+                    stark_info = serde_json::from_str(&fs::read_to_string(&si_path)?)
+                        .with_context(|| {
+                            format!(
+                                "Failed to reload rewritten starkinfo for air '{}'",
+                                air_name
+                            )
+                        })?;
                 }
+                result.needed
             };
             compressor_decisions.insert((ag_idx as u32, air_idx as u32), has_compressor);
 
@@ -2407,7 +2430,7 @@ mod tests_global_info {
     /// Live-runtime regression for the compressor decision path.
     ///
     /// Unlike a manual-map test that hand-builds the expected
-    /// `CompressorDecisionMap`, this drives `compute_compressor_decisions`,
+    /// `CompressorDecisionMap`, this drives `compute_compressor_decisions_with_side_effects`,
     /// which in turn calls `compressor_check::is_compressor_needed`
     /// on real per-AIR starkinfo / verifierinfo / verkey artifacts
     /// from a completed `build/provingKey/` tree. It asserts that
@@ -2482,7 +2505,7 @@ mod tests_global_info {
         );
 
         // Drive the live runtime decision path.
-        let decisions = compute_compressor_decisions(
+        let decisions = compute_compressor_decisions_with_side_effects(
             &pilout,
             &pilout_name,
             build_dir.to_str().unwrap(),
@@ -2490,7 +2513,7 @@ mod tests_global_info {
             &circom_exec,
             &circuits_gl_path,
         )
-        .expect("compute_compressor_decisions");
+        .expect("compute_compressor_decisions_with_side_effects");
 
         let golden_set: std::collections::BTreeSet<String> = [
             "DmaPrePost",

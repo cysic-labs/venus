@@ -168,37 +168,31 @@ fn virtual_table_data_global_matches_fixture_airs() {
     let airgroup_ids = extract_field("airgroup_ids");
     let air_ids = extract_field("air_ids");
 
+    // The fixture's emitted output is deterministic. The
+    // `MinimalVirtualTable` airgroup contains exactly one
+    // virtual `MinimalVirtualTableProducer`, which sits at
+    // `air_id = 1` after the non-virtual
+    // `MinimalVirtualTableConsumer` at `air_id = 0` in the
+    // single airgroup `airgroup_id = 0`. Any drift from
+    // `airgroup_ids == [0]` and `air_ids == [1]` means either
+    // the producer-side resolution of bare `air_ids` regressed
+    // (the Round 4 container-leak class) or the AIR
+    // assignment for virtual templates changed. Pinning the
+    // exact arrays catches coordinated wrong-but-self-
+    // consistent output that would slip through generic
+    // shape checks.
     assert_eq!(
-        airgroup_ids.len(),
-        air_ids.len(),
-        "airgroup_ids ({}) and air_ids ({}) arrays must be the same length",
-        airgroup_ids.len(),
-        air_ids.len()
+        airgroup_ids,
+        vec![0u64],
+        "virtual_table_data_global.airgroup_ids must equal [0] for the fixture; got {:?}",
+        airgroup_ids
     );
-    assert!(
-        !air_ids.is_empty(),
-        "virtual_table_data_global.air_ids must be non-empty (Round 4 leak emitted 750 entries; empty is another kind of regression)"
+    assert_eq!(
+        air_ids,
+        vec![1u64],
+        "virtual_table_data_global.air_ids must equal [1] for the fixture; got {:?}",
+        air_ids
     );
-    assert!(
-        air_ids.len() < 10,
-        "virtual_table_data_global.air_ids grew unexpectedly to {} entries; \
-         the Round 4 container leak produced 750. Any regression that pushes \
-         this past the fixture's actual virtual-table count is the same class \
-         of bug.",
-        air_ids.len()
-    );
-
-    // Sanity: all airgroup_ids point at the single airgroup in the
-    // fixture, and all air_ids point at a real AIR position in that
-    // airgroup.
-    let n_airgroups = pilout.air_groups.len() as u64;
-    for (i, ag) in airgroup_ids.iter().enumerate() {
-        assert!(
-            *ag < n_airgroups,
-            "airgroup_ids[{}] = {} is out of range (n_airgroups = {})",
-            i, ag, n_airgroups
-        );
-    }
 
     // Per-AIR `virtual_table_data` hints must cover exactly the
     // (airgroup_id, air_id) pairs listed in the global hint.
