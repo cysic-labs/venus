@@ -318,7 +318,89 @@ fn exec_degree(args: &[Value]) -> Result<Value, String> {
     if args.len() != 1 {
         return Err("degree: expected 1 argument".to_string());
     }
-    Ok(Value::Int(compute_value_degree(&args[0])))
+    let result = compute_value_degree(&args[0]);
+    // Per-call telemetry for Rust-vs-JS parity diff. Default
+    // OFF; enable with `PIL2C_DEGREE_TRACE=1` so normal
+    // pil2c invocations (including `make setup`) are not
+    // slowed by the per-call logging.
+    if std::env::var_os("PIL2C_DEGREE_TRACE").is_some() {
+        eprintln!(
+            "PIL2C_DEGREE_TRACE: input={} result={}",
+            describe_value_for_trace(&args[0]),
+            result
+        );
+    }
+    Ok(Value::Int(result))
+}
+
+/// Compact one-line description of a `Value` for the
+/// per-call `degree()` telemetry. Designed to line up with
+/// the matching golden JS log so `diff` can pick out the
+/// first divergence.
+fn describe_value_for_trace(val: &Value) -> String {
+    use super::expression::ColRefKind;
+    match val {
+        Value::Int(n) => format!("Int({})", n),
+        Value::Fe(n) => format!("Fe({})", n),
+        Value::Bool(b) => format!("Bool({})", b),
+        Value::Str(s) => format!("Str({:?})", s),
+        Value::ColRef { col_type, id, row_offset } => format!(
+            "ColRef({:?}, id={}, row_offset={:?})",
+            col_type, id, row_offset
+        ),
+        Value::RuntimeExpr(expr) => {
+            format!("RuntimeExpr({})", describe_runtime_expr_for_trace(expr))
+        }
+        Value::Array(_) => "Array(..)".to_string(),
+        Value::ArrayRef { ref_type, base_id, dims } => format!(
+            "ArrayRef(ref_type={:?}, base_id={}, dims={:?})",
+            ref_type, base_id, dims
+        ),
+        Value::Void => "Void".to_string(),
+        // Any new variant lands here; fall back so the
+        // telemetry compiles. This branch is intentionally
+        // last because the compiler will require it to be
+        // exhaustive.
+        #[allow(unreachable_patterns)]
+        _ => {
+            // ColRefKind exhaustiveness check: keep the
+            // import alive so a new ColRefKind variant is
+            // caught at compile time elsewhere.
+            let _ = ColRefKind::Witness;
+            "Unknown".to_string()
+        }
+    }
+}
+
+fn describe_runtime_expr_for_trace(
+    expr: &super::expression::RuntimeExpr,
+) -> String {
+    use super::expression::{RuntimeExpr, RuntimeOp};
+    match expr {
+        RuntimeExpr::Value(v) => format!("Value[{}]", describe_value_for_trace(v)),
+        RuntimeExpr::ColRef { col_type, id, row_offset } => format!(
+            "ColRef({:?}, id={}, row_offset={:?})",
+            col_type, id, row_offset
+        ),
+        RuntimeExpr::BinOp { op, left, right } => {
+            let opname = match op {
+                RuntimeOp::Add => "Add",
+                RuntimeOp::Sub => "Sub",
+                RuntimeOp::Mul => "Mul",
+            };
+            format!(
+                "BinOp({}, {}, {})",
+                opname,
+                describe_runtime_expr_for_trace(left),
+                describe_runtime_expr_for_trace(right)
+            )
+        }
+        RuntimeExpr::UnaryOp { op, operand } => format!(
+            "UnaryOp({:?}, {})",
+            op,
+            describe_runtime_expr_for_trace(operand)
+        ),
+    }
 }
 
 /// Compute the polynomial degree of a Value.
