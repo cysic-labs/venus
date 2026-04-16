@@ -2110,6 +2110,20 @@ impl Processor {
         let fes_mark = self.fes.snapshot();
         let strings_mark = self.strings.snapshot();
 
+        // Snapshot the `use_aliases` stack so any `use` statement run
+        // inside this function body (directly, or transitively through
+        // further calls) is lexical to the function's scope. Prior
+        // behavior accumulated aliases globally across calls; for
+        // example, `gsum_update_global_constraint_data` runs
+        // `use proof.std.gsum;`, and without the restore the proof-scope
+        // alias leaked into every subsequent AIR's template body,
+        // shadowing the air-scope `use air.std.gsum;` and misresolving
+        // `gsum` in `@gsum_col{reference: gsum, ...}` at
+        // `std_sum.pil:694` to either a stale proof-scope binding or
+        // the local `expr gsum = 0` at `std_sum.pil:176`. Matches JS
+        // pil2-compiler, where `use` is function-scoped.
+        let use_aliases_mark = self.references.snapshot_use_aliases();
+
         self.function_deep += 1;
         self.callstack.push(CallStackEntry {
             name: func.name.clone(),
@@ -2210,6 +2224,12 @@ impl Processor {
         // callees, allowing the caller to resume incorrectly.
 
         self.references.pop_visibility_scope();
+        // Restore the `use_aliases` stack to its pre-call length so
+        // aliases introduced inside this function body (or by nested
+        // calls that ran `use`) do not leak into the caller's
+        // resolution. Paired with the `snapshot_use_aliases` at
+        // function entry.
+        self.references.restore_use_aliases_len(use_aliases_mark);
         let (to_unset, to_restore) = self.scope.pop();
         self.apply_scope_cleanup(&to_unset, &to_restore);
         self.callstack.pop();

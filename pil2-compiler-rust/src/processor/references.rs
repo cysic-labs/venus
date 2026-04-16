@@ -412,6 +412,28 @@ impl References {
         self.use_aliases.push((key, name.to_string()));
     }
 
+    /// Snapshot the current `use_aliases` stack length. Pairs with
+    /// [`restore_use_aliases_len`] to bound the lexical lifetime of
+    /// aliases introduced inside a scope (function body, container
+    /// body, scoped statement block). Prior behavior accumulated
+    /// aliases globally across scopes, so a `use proof.std.gsum;`
+    /// added by one AIR's `gsum_update_*` call leaked into every
+    /// subsequent AIR and shadowed later `use air.std.gsum;`
+    /// resolutions — the cross-AIR `gsum_col.reference` misresolution
+    /// Codex's Round 2 review pinned.
+    pub fn snapshot_use_aliases(&self) -> usize {
+        self.use_aliases.len()
+    }
+
+    /// Truncate the `use_aliases` stack back to a previously
+    /// snapshotted length, dropping any aliases added since.
+    /// See [`snapshot_use_aliases`] for rationale.
+    pub fn restore_use_aliases_len(&mut self, len: usize) {
+        if self.use_aliases.len() > len {
+            self.use_aliases.truncate(len);
+        }
+    }
+
     /// Check if a container is defined.
     pub fn is_container_defined(&self, name: &str) -> bool {
         self.containers.contains_key(name)
