@@ -3687,8 +3687,34 @@ impl Processor {
 
     /// Convert a compile-time Value to a HintValue. Symbolic values
     /// (column references, runtime expressions) are inserted into the
-    /// air expression store and referenced by index.
+    /// active expression store and referenced by index.
+    ///
+    /// Scope discipline:
+    /// - **air scope**: symbolic values route through
+    ///   `air_expression_store`; bare `ColRef` leaves become
+    ///   `HintValue::ColRef` so the per-air serializer can emit a
+    ///   direct `Operand::WitnessCol` / `Operand::AirValue` and
+    ///   downstream chelpers does not classify them as `opType::tmp`
+    ///   (the Round 0/1 calculateExprGPU guard failure).
+    /// - **proof scope**: symbolic values must NEVER be pushed into
+    ///   `air_expression_store` because proof-scope hints are
+    ///   serialized against the GLOBAL expression store indices.
+    ///   Pushing a proof-scope value into the air store returned an
+    ///   `ExprId` whose integer did not match any global expression,
+    ///   which caused `gsum_debug_data_global.num_reps` to fall back
+    ///   to `{op: "number", value: "0"}` in Rust
+    ///   (`build/provingKey/pilout.globalConstraints.json`), vs
+    ///   `{op: "proofvalue", ...}` in golden. The downstream
+    ///   `GENERATING_INNER_PROOFS` guard at
+    ///   `pil2-proofman/pil2-stark/src/starkpil/global_constraints.hpp`
+    ///   then aborted with `[ERROR]: Only committed pols and
+    ///   airgroupvalues can be set`. Proof-scope leaves therefore emit
+    ///   `HintValue::ColRef` directly; proof-scope runtime
+    ///   expressions are routed through the global-expression path
+    ///   below.
     fn value_to_hint_value(&mut self, val: &Value) -> air::HintValue {
+        let is_proof_scope =
+            self.scope.get_instance_type() == "proof";
         match val {
             Value::Int(v) => air::HintValue::Int(*v),
             Value::Fe(v) => air::HintValue::Int(*v as i128),
@@ -3699,6 +3725,36 @@ impl Processor {
                     .map(|v| self.value_to_hint_value(v))
                     .collect();
                 air::HintValue::Array(vals)
+            }
+            Value::ColRef { col_type, id, row_offset } if is_proof_scope => {
+                // Bare leaf in proof scope: serialize as the matching
+                // proof-scope operand directly
+                // (ProofValue / AirGroupValue / PublicValue /
+                // Challenge / WitnessCol / AirValue). The global
+                // serializer at
+                // `pil2-compiler-rust/src/proto_out.rs::hint_value_to_single_field_global`
+                // handles each kind explicitly.
+                air::HintValue::ColRef {
+                    col_type: *col_type,
+                    id: *id,
+                    row_offset: *row_offset,
+                }
+            }
+            Value::RuntimeExpr(_) if is_proof_scope => {
+                // Non-leaf symbolic expression in proof scope: push
+                // into the global expression store (which is the
+                // source for `pilout.expressions`, what global
+                // `Operand::Expression(idx)` references). The index
+                // returned by `ExprId` here is interpreted by the
+                // global serializer as a direct global
+                // `Operand::Expression`, matching JS
+                // `pil2-compiler/src/proto_out.js` behavior where
+                // hint-field expressions in proof scope pack into
+                // the global expression pool.
+                let rt = value_to_runtime_expr(val);
+                let idx = self.global_expression_store.len() as u32;
+                self.global_expression_store.push(rt);
+                air::HintValue::ExprId(idx)
             }
             Value::ColRef { .. } | Value::RuntimeExpr(_) => {
                 let rt = value_to_runtime_expr(val);

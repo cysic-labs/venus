@@ -1132,12 +1132,91 @@ impl<'a> ProtoOutBuilder<'a> {
                     )),
                 }
             }
-            // In global (proof) context we do not expect a bare
-            // column reference from a witness-constraint hint
-            // (witness_calc is air-scoped, never proof-scoped). Fall
-            // through to an empty constant rather than panicking so
-            // any future misroute surfaces with a well-formed proto
-            // and a targeted validation error downstream.
+            // Proof-scope bare leaf: emit the matching Operand
+            // variant directly. Proof-scope hints arrive here from
+            // `value_to_hint_value` when the instance type is
+            // "proof" and the hint value is a bare `ColRef`
+            // (typically ProofValue / AirGroupValue / WitnessCol /
+            // Challenge / Public). Previously this arm dropped to an
+            // empty `Constant`, which caused
+            // `gsum_debug_data_global.num_reps` (and similar
+            // proof-scope container-field hints) to serialize as
+            // `{op: "number", value: "0"}` and trip the
+            // `GENERATING_INNER_PROOFS` guard at
+            // `pil2-proofman/pil2-stark/src/starkpil/global_constraints.hpp`.
+            HintValue::ColRef { col_type, id, row_offset } => {
+                use crate::processor::expression::ColRefKind;
+                let offset = row_offset.unwrap_or(0) as i32;
+                let operand = match col_type {
+                    ColRefKind::ProofValue => {
+                        let stage = self
+                            .processor
+                            .proof_values
+                            .get_data(*id)
+                            .and_then(|d| d.stage)
+                            .unwrap_or(1);
+                        pilout_proto::operand::Operand::ProofValue(
+                            pilout_proto::operand::ProofValue {
+                                stage,
+                                idx: *id,
+                            },
+                        )
+                    }
+                    ColRefKind::AirGroupValue => {
+                        pilout_proto::operand::Operand::AirGroupValue(
+                            pilout_proto::operand::AirGroupValue { idx: *id },
+                        )
+                    }
+                    ColRefKind::Public => {
+                        pilout_proto::operand::Operand::PublicValue(
+                            pilout_proto::operand::PublicValue { idx: *id },
+                        )
+                    }
+                    ColRefKind::Challenge => {
+                        let stage = self
+                            .processor
+                            .challenges
+                            .get_data(*id)
+                            .and_then(|d| d.stage)
+                            .unwrap_or(1);
+                        pilout_proto::operand::Operand::Challenge(
+                            pilout_proto::operand::Challenge { stage, idx: *id },
+                        )
+                    }
+                    ColRefKind::Witness => {
+                        // Proof-scope hints occasionally carry a bare
+                        // WitnessCol (e.g. debug hints that reference a
+                        // specific stage-1 column by id). Emit it
+                        // directly; stage/col_idx lookup uses the
+                        // per-air witness map if available, otherwise
+                        // defaults to stage 1 / id.
+                        pilout_proto::operand::Operand::WitnessCol(
+                            pilout_proto::operand::WitnessCol {
+                                stage: 1,
+                                col_idx: *id,
+                                row_offset: offset,
+                            },
+                        )
+                    }
+                    ColRefKind::AirValue => {
+                        pilout_proto::operand::Operand::AirValue(
+                            pilout_proto::operand::AirValue { idx: *id },
+                        )
+                    }
+                    _ => pilout_proto::operand::Operand::Constant(
+                        pilout_proto::operand::Constant {
+                            value: Vec::new(),
+                        },
+                    ),
+                };
+                return pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::Operand(
+                        pilout_proto::Operand { operand: Some(operand) },
+                    )),
+                };
+            }
+            #[allow(unreachable_patterns)]
             HintValue::ColRef { .. } => pilout_proto::HintField {
                 name: None,
                 value: Some(pilout_proto::hint_field::Value::Operand(
