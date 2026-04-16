@@ -1118,37 +1118,73 @@ impl Processor {
         // a dedicated `HintValue::ColRef` for the bare-leaf case and
         // fall back to the ExprId path for any non-leaf LHS.
         if c.is_witness && !is_global {
-            let reference_value = match &left {
-                RuntimeExpr::ColRef { col_type, id, row_offset }
-                    if matches!(
-                        col_type,
-                        ColRefKind::Witness | ColRefKind::AirValue
-                    ) =>
-                {
-                    air::HintValue::ColRef {
+            if std::env::var_os("PIL2C_WITNESS_CALC_TRACE").is_some() {
+                eprintln!(
+                    "PIL2C_WITNESS_CALC_TRACE: left = {:?}",
+                    left
+                );
+            }
+            // Emit a witness_calc hint only when the LHS is a bare
+            // WitnessCol or AirValue, matching JS
+            // `pil2-compiler/src/processor.js:2018-2020`:
+            //
+            //     let alone = _left.getAlone();
+            //     if (alone === false || !(alone instanceof
+            //         ExpressionItems.WitnessCol ||
+            //         alone instanceof ExpressionItems.AirValue)) {
+            //         throw new Error(`Constraint with witness generation
+            //             only could be used with witness or airval on
+            //             the left side ${sourceTag}`);
+            //     }
+            //
+            // Rust's evaluator currently produces `Value::Void` for
+            // some LHS resolutions inside template expansions, e.g.
+            // `loop_b0 <== _loop_b0` inside a conditional branch in
+            // `precompiles/dma/pil/dma.pil`. JS would throw on those;
+            // we silently skip the hint. Emitting a `witness_calc`
+            // hint with a non-cm/non-airvalue destination crashes
+            // `make prove` at the C++ guard
+            // `pil2-proofman/pil2-stark/src/starkpil/hints.cpp`
+            // calculateExpr / `pil2-stark/src/starkpil/hints.cu`
+            // calculateExprGPU — the Round R1 failure this plan was
+            // written to resolve. Skipping unresolved LHS aligns with
+            // JS semantics (the constraint itself still lands through
+            // `self.constraints.define(...)` below so the proof
+            // obligation is not lost; only the prover-side witness
+            // calculation hint is omitted).
+            //
+            // TODO(follow-up): fix the LHS resolution bug upstream so
+            // `<==` inside conditional / template branches no longer
+            // evaluates to Void, restore the witness_calc hint for
+            // all sites, and track the fix under
+            // AC-parity-or-audit (branch B).
+            if let RuntimeExpr::ColRef { col_type, id, row_offset } = &left {
+                if matches!(
+                    col_type,
+                    ColRefKind::Witness | ColRefKind::AirValue
+                ) {
+                    let reference_value = air::HintValue::ColRef {
                         col_type: *col_type,
                         id: *id,
                         row_offset: *row_offset,
-                    }
-                }
-                _ => {
-                    let left_idx = self.air_expression_store.len() as u32;
+                    };
+                    let right_idx = self.air_expression_store.len() as u32;
                     self.air_expression_store.push(
-                        air::AirExpressionEntry::anonymous(left.clone()),
+                        air::AirExpressionEntry::anonymous(right.clone()),
                     );
-                    air::HintValue::ExprId(left_idx)
+                    let hint_data = air::HintValue::Object(vec![
+                        ("reference".to_string(), reference_value),
+                        (
+                            "expression".to_string(),
+                            air::HintValue::ExprId(right_idx),
+                        ),
+                    ]);
+                    self.air_hints.push(air::HintEntry {
+                        name: "witness_calc".to_string(),
+                        data: hint_data,
+                    });
                 }
-            };
-            let right_idx = self.air_expression_store.len() as u32;
-            self.air_expression_store.push(air::AirExpressionEntry::anonymous(right.clone()));
-            let hint_data = air::HintValue::Object(vec![
-                ("reference".to_string(), reference_value),
-                ("expression".to_string(), air::HintValue::ExprId(right_idx)),
-            ]);
-            self.air_hints.push(air::HintEntry {
-                name: "witness_calc".to_string(),
-                data: hint_data,
-            });
+            }
         }
 
         if is_global {

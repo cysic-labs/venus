@@ -177,7 +177,17 @@ void calculateExprGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParams *d_
             buff = NULL;
             buff_gpu = h_params.airValues + pos;
         } else {
-            zklog.error("Only committed pols and airvalues can be set");
+            zklog.error(
+                "Only committed pols and airvalues can be set "
+                "[calculateExprGPU guard] "
+                "airgroupId=" + to_string(setupCtx.starkInfo.airgroupId) +
+                " airId=" + to_string(setupCtx.starkInfo.airId) +
+                " hintId=" + to_string(hintId[i]) +
+                " hintName=" + hint.name +
+                " hintFieldNameDest=" + hintDest +
+                " destOperand=" + to_string((int)hintFieldDestVal.operand) +
+                " destId=" + to_string(hintFieldDestVal.id)
+            );
             exitProcess();
             exit(-1);
         }
@@ -186,7 +196,7 @@ void calculateExprGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParams *d_
         destStruct.dest_gpu = buff_gpu;
 
         addHintField(setupCtx, h_params, hintId[i], destStruct, hintFieldName[i], hintOptions[i]);
-        
+
         opHintFieldsGPU(d_params, destStruct, nRows, false, GPUExpressionsCtx, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
     }
 }
@@ -232,7 +242,17 @@ void multiplyHintFieldsGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParam
             buff = NULL;
             buff_gpu = h_params.airValues + pos;
         } else {
-            zklog.error("Only committed pols and airvalues can be set");
+            zklog.error(
+                "Only committed pols and airvalues can be set "
+                "[multiplyHintFieldsGPU guard] "
+                "airgroupId=" + to_string(setupCtx.starkInfo.airgroupId) +
+                " airId=" + to_string(setupCtx.starkInfo.airId) +
+                " hintId=" + to_string(hintId[i]) +
+                " hintName=" + hint.name +
+                " hintFieldNameDest=" + hintDest +
+                " destOperand=" + to_string((int)hintFieldDestVal.operand) +
+                " destId=" + to_string(hintFieldDestVal.id)
+            );
             exitProcess();
             exit(-1);
         }
