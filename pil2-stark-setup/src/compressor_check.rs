@@ -106,9 +106,8 @@ pub fn is_compressor_needed(
 
     // Use aggregation config (59 committed pols) to count constraints
     let agg_config = aggregation_check_config();
-    let (_, _, _, n_used) = get_number_constraints(&r1cs, &agg_config);
-
-    tracing::info!("Number of rows used: {}", n_used);
+    let (plonk_constraints, _, custom_gates_info, n_used) =
+        get_number_constraints(&r1cs, &agg_config);
 
     let n_bits = if n_used <= 1 {
         1
@@ -117,6 +116,28 @@ pub fn is_compressor_needed(
     };
 
     let recursive_bits: usize = 17;
+
+    // Emit a single line per AIR with everything needed to diagnose
+    // a Rust-vs-JS parity drift on `isCompressorNeeded()`. Shows up
+    // on stderr so it lands in the per-AIR setup log regardless of
+    // tracing filter level.
+    eprintln!(
+        "compressor_check: starkinfo={} n_used={} n_bits={} plonk={} \
+         n_cmul={} n_poseidon12={} n_cust_poseidon12={} n_fft4={} \
+         n_ev_pol4={} n_tree_selector4={} n_select_val1={} n_plonk_rows={}",
+        starkinfo_path,
+        n_used,
+        n_bits,
+        plonk_constraints.len(),
+        custom_gates_info.n_cmul,
+        custom_gates_info.n_poseidon12,
+        custom_gates_info.n_cust_poseidon12,
+        custom_gates_info.n_fft4,
+        custom_gates_info.n_ev_pol4,
+        custom_gates_info.n_tree_selector4,
+        custom_gates_info.n_select_val1,
+        custom_gates_info.n_plonk_rows,
+    );
 
     if n_bits > recursive_bits {
         Ok(CompressorCheckResult {
