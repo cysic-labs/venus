@@ -527,6 +527,10 @@ impl Processor {
         to_unset: &[String],
         to_restore: &[(String, Reference)],
     ) {
+        // PIL2C_TRACE_LEAK hook (tags: cleanup-unset, cleanup-restore). Emits
+        // one line per scope-cleanup action on a watched name, so rescue
+        // rounds can spot bindings that are supposed to vanish on pop but
+        // survive across air/function frames.
         let trace = std::env::var("PIL2C_TRACE_LEAK").is_ok();
         let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];
         for name in to_unset {
@@ -2201,6 +2205,10 @@ impl Processor {
                     &self.source_ref,
                 );
                 self.scope.declare(&arg_def.name, previous);
+                // PIL2C_TRACE_LEAK hook (tag: uf-bind-arrayref). Emits one
+                // line per ArrayRef-typed function-parameter bind for a
+                // watched name, so rescue rounds can correlate declare-time
+                // dims with the dims that search_definition returns later.
                 if std::env::var("PIL2C_TRACE_LEAK").is_ok() {
                     let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];
                     if wl.contains(&arg_def.name.as_str()) {
@@ -3045,6 +3053,12 @@ impl Processor {
             // as stale bindings across airtemplate boundaries, shadowing
             // container fields of the same name in deferred handlers.
             self.scope.declare(&arg_def.name, previous_at);
+            // PIL2C_TRACE_LEAK hook (tag: at-bind-scalar). Emits one line
+            // per scalar airtemplate-arg bind for a watched name, completing
+            // the bind-site coverage that the ArrayRef branch in
+            // execute_user_function starts. Paired with cleanup-unset /
+            // cleanup-restore to verify airtemplate-exit cleanup actually
+            // removes the binding.
             #[allow(clippy::if_same_then_else)]
             if std::env::var("PIL2C_TRACE_LEAK").is_ok() {
                 let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];

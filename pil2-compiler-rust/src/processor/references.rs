@@ -174,6 +174,11 @@ impl References {
             is_static: false,
         };
 
+        // PIL2C_TRACE_LEAK hook (tag: scope-declare). Emits one line per
+        // declaration of a watched name so trace-driven rescue rounds can
+        // pinpoint which declare path inserts into self.refs vs containers.
+        // Watch list is the symbolic-payload names from the opids/num_reps
+        // producer class.
         if std::env::var("PIL2C_TRACE_LEAK").is_ok() {
             let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];
             if wl.contains(&name) {
@@ -259,6 +264,10 @@ impl References {
 
     /// Search for a reference definition by name (mirrors JS `searchDefinition`).
     fn search_definition(&self, name: &str) -> Option<&Reference> {
+        // PIL2C_TRACE_LEAK hook (tag: search-def-refs). Emits one line per
+        // direct-refs hit for a watched name with the visibility verdict, so
+        // trace-driven rescue rounds can see which stale refs beat the
+        // use-alias walk for bare symbolic-payload names.
         let trace = std::env::var("PIL2C_TRACE_LEAK").is_ok();
         let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];
         // Direct lookup, gated on visibility. Out-of-scope leaks
