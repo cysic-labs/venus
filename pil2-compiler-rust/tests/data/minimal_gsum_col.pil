@@ -30,8 +30,19 @@ require "std_constants.pil";
 require "std_lookup.pil";
 
 // Proof-scope container exercised by the inside-if `use` below.
+// The inner field name `gsum` deliberately COLLIDES with the bare
+// `gsum` reference at `std_sum.pil:694 @gsum_col{reference: gsum,
+// ...}`. If the scoped-body `use` leaks past the `if` exit, the
+// alias survives into the later `lookup_proves` call and shadows
+// the `proof.std.gsum.gsum` field that `@gsum_col` is supposed to
+// reference. The leaf-operand assertion in the regression test
+// then fails (int constant where a stage-2 WitnessCol was
+// expected), pinning the Round 5 scoped-body alias-coverage class
+// on its broken state. Without this collision the fixture only
+// proved the fixture contains a scoped-body `use`; it didn't
+// catch the actual leak.
 container proof.test_aux {
-    int marker = 1;
+    int gsum = 0;
 }
 
 airtemplate GsumAssumesAir(const int N, const int opid) {

@@ -252,9 +252,15 @@ impl References {
 
     /// Search for a reference definition by name (mirrors JS `searchDefinition`).
     fn search_definition(&self, name: &str) -> Option<&Reference> {
-        // Direct lookup.
+        // Direct lookup, gated on visibility. Out-of-scope leaks
+        // (e.g. stale function-parameter bindings whose call frame
+        // exited but whose entry survived in `self.refs`) fall
+        // through to the next lookup so the use-aliased container
+        // field can still resolve.
         if let Some(r) = self.refs.get(name) {
-            return Some(r);
+            if self.is_visible(r) {
+                return Some(r);
+            }
         }
 
         // Check current container for unqualified names.
@@ -450,10 +456,24 @@ impl References {
         false
     }
 
-    /// Push visibility scope (for function calls).
-    pub fn push_visibility_scope(&mut self, creation_scope: Option<u32>) {
+    /// Push visibility scope (for function calls). `entry_depth` is
+    /// the scope depth at function-body entry (set by the caller
+    /// after `scope.push()`); `creation_scope` is the lexical
+    /// declaration depth of the function being called (passed
+    /// through from the caller; `None` means "no upper bound" / the
+    /// function may have been declared at the same depth as its
+    /// call site, which is the safe default for top-level
+    /// declarations).
+    ///
+    /// The window stored is `(entry_depth, creation_scope)`. JS
+    /// pil2-compiler `pushVisibilityScope` mirrors this with
+    /// `[Context.scope.deep, creationScope]`. `is_visible` consults
+    /// the window to filter out leaked function-parameter bindings
+    /// that may still sit in `self.refs` after their owning frame
+    /// exited.
+    pub fn push_visibility_scope(&mut self, entry_depth: u32, creation_scope: Option<u32>) {
         self.visibility_stack.push(self.visibility_scope);
-        self.visibility_scope = (0, creation_scope); // simplified
+        self.visibility_scope = (entry_depth, creation_scope);
     }
 
     /// Pop visibility scope.
@@ -461,6 +481,44 @@ impl References {
         if let Some(prev) = self.visibility_stack.pop() {
             self.visibility_scope = prev;
         }
+    }
+
+    /// Whether the given reference is visible from the current
+    /// visibility window. Mirrors JS pil2-compiler's
+    /// `References::isVisible`:
+    ///
+    ///     !def.scopeId || def.scopeId === 1 ||
+    ///     !this.hasScope(def.type) || def.type === 'function' ||
+    ///     def.scopeId >= this.visibilityScope[0] ||
+    ///     (this.visibilityScope[1] !== false &&
+    ///      def.scopeId <= this.visibilityScope[1])
+    ///
+    /// Used by `search_definition` to skip stale function-parameter
+    /// bindings that survived their call frame's exit. Without this
+    /// filter, a deferred handler at proof-final time can resolve
+    /// bare names to leaked param refs (with `array_dims = []`),
+    /// shadowing the proof-scope container fields the handler
+    /// actually needs to read.
+    pub fn is_visible(&self, reference: &Reference) -> bool {
+        if reference.scope_id == 0 || reference.scope_id == 1 {
+            return true;
+        }
+        if !reference.ref_type.has_scope() {
+            return true;
+        }
+        if matches!(reference.ref_type, RefType::Function) {
+            return true;
+        }
+        let (lo, hi) = self.visibility_scope;
+        if reference.scope_id >= lo {
+            return true;
+        }
+        if let Some(upper) = hi {
+            if reference.scope_id <= upper {
+                return true;
+            }
+        }
+        false
     }
 
     /// Get the references inside a specific container, if it exists.

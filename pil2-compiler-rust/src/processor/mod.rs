@@ -2151,8 +2151,19 @@ impl Processor {
             name: func.name.clone(),
             source: self.source_ref.clone(),
         });
+        // Mirror JS pil2-compiler's `pushVisibilityScope(creationScope)`:
+        // `visibilityScope = [Context.scope.deep, creationScope]`.
+        // The lo bound is the scope depth AT call entry (after push).
+        // We use the same depth for the hi bound, which makes the
+        // `is_visible` check trivially true. A tighter hi equal to
+        // the function's declared `creationScope` triggers cascading
+        // Void resolutions inside `std_range_check::print_range_stats`
+        // (bare `mins[i]` / `maxs[i]` fall to Void when the enclosing
+        // call frame's refs are filtered out), so the safer baseline
+        // preserves the wiring without changing resolution behaviour.
         self.scope.push();
-        self.references.push_visibility_scope(Some(self.scope.deep));
+        self.references
+            .push_visibility_scope(self.scope.deep, Some(self.scope.deep));
 
         // Bind arguments.
         for (i, arg_def) in func.args.iter().enumerate() {
