@@ -2033,7 +2033,7 @@ impl Processor {
                 } else {
                     raw_args.clone()
                 };
-                return self.execute_user_function(&func_def, &args);
+                return self.execute_user_function_by_name(&func_def, &args, qualified_name);
             }
         }
 
@@ -2111,7 +2111,7 @@ impl Processor {
                 } else {
                     raw_args.clone()
                 };
-                self.execute_user_function(&func_def, &args);
+                self.execute_user_function_by_name(&func_def, &args, qualified_name);
                 return FlowSignal::None;
             }
         }
@@ -2135,6 +2135,23 @@ impl Processor {
 
     /// Execute a user-defined function.
     fn execute_user_function(&mut self, func: &FunctionDef, args: &[Value]) -> Value {
+        let lookup_name = func.name.clone();
+        self.execute_user_function_by_name(func, args, &lookup_name)
+    }
+
+    /// Variant of `execute_user_function` that accepts the explicit
+    /// lookup key used to resolve the function in `self.functions`.
+    /// This matters for namespaced functions: `exec_function_definition`
+    /// stores air-local functions under a qualified key like
+    /// `<air>.<func>`, and the visibility window's creation_scope lookup
+    /// must consult that qualified key, not the bare AST name carried in
+    /// `func.name`.
+    fn execute_user_function_by_name(
+        &mut self,
+        func: &FunctionDef,
+        args: &[Value],
+        lookup_name: &str,
+    ) -> Value {
         // Snapshot expression stores so we can reclaim function-local
         // expression memory after the call returns. Constraints and
         // hints capture their own copies, so function-scoped expression
@@ -2173,7 +2190,7 @@ impl Processor {
         // their outer closure scope.
         let creation_scope = self
             .references
-            .get_direct_ref(&func.name)
+            .get_direct_ref(lookup_name)
             .map(|r| r.scope_id)
             .unwrap_or(1);
         self.scope.push();
