@@ -1,6 +1,6 @@
 // minimal_gsum_col.pil
 //
-// Pins TWO independent producer-side bugs:
+// Pins THREE independent producer-side bugs:
 //
 // 1. Cross-AIR `gsum_col.reference` resolution under sibling
 //    AIR templates that both invoke `std_lookup` (which routes
@@ -13,15 +13,26 @@
 //    keyword without a word-boundary check. Identifiers such as
 //    `continue_seq_on_l1` and `break_count` were silently parsed
 //    as `Statement::Continue` / `Statement::Break` followed by
-//    leftover, aborting the airtemplate body partway through and
-//    producing an empty / truncated proving key for that AIR.
-//    The fixture below exercises that path inside an `if` body
-//    inside an `airtemplate`, so the test fails on the broken
-//    parser (premature airtemplate-body abort drops the gsum_col
-//    emission) and passes after the grammar fix.
+//    leftover, aborting the airtemplate body partway through.
+//
+// 3. The Round 5 alias-coverage bug where a `use` inside a
+//    control-flow scoped-body runner (e.g. `if`, `for`,
+//    `while`, `switch`, `block`) leaked the alias past the
+//    runner's exit and shadowed the AIR-scope alias. Pinned
+//    here by declaring `container proof.test_aux { ... }` at
+//    proof scope, then issuing `use proof.test_aux;` INSIDE an
+//    `if` body in `GsumProvesAir`'s airtemplate body. Without
+//    Round 5's scoped-body alias snapshot/restore, the
+//    `test_aux` alias would leak past the `if` exit and stack
+//    on top of any later `use` inside the same airtemplate.
 
 require "std_constants.pil";
 require "std_lookup.pil";
+
+// Proof-scope container exercised by the inside-if `use` below.
+container proof.test_aux {
+    int marker = 1;
+}
 
 airtemplate GsumAssumesAir(const int N, const int opid) {
     col witness a;
@@ -32,12 +43,14 @@ airtemplate GsumProvesAir(const int N, const int opid) {
     col fixed A = [0..(N-1)];
     col witness mul;
 
-    // Identifier whose name starts with the `continue` keyword.
-    // On the broken parser, the `if` body's leading reference
-    // tokenizes as `Statement::Continue`, aborts the airtemplate
-    // body, and the lookup_proves below is never reached.
+    // Identifier whose name starts with `continue` to pin the
+    // Round 6 parser-keyword-boundary class. Inside the same
+    // `if` body we also issue `use proof.test_aux;` to pin the
+    // Round 5 scoped-body alias coverage class — the `use`
+    // must NOT leak past the `if` exit.
     const expr continue_seq_on_l1 = 1;
     if (continue_seq_on_l1 == 1) {
+        use proof.test_aux;
         continue_seq_on_l1 * (mul - mul) === 0;
     }
 
