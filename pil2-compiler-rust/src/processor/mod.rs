@@ -900,7 +900,7 @@ impl Processor {
             let previous = if inside_container {
                 None
             } else {
-                self.references.get_reference(name).cloned()
+                self.references.get_direct_ref(name).cloned()
             };
             self.references.declare(
                 name,
@@ -2194,7 +2194,7 @@ impl Processor {
             // Array reference arguments: bind the parameter directly to
             // the same storage as the original array.
             if let Value::ArrayRef { ref_type, base_id, dims } = &value {
-                let previous = self.references.get_reference(&arg_def.name).cloned();
+                let previous = self.references.get_direct_ref(&arg_def.name).cloned();
                 self.references.declare(
                     &arg_def.name,
                     ref_type.clone(),
@@ -2255,7 +2255,7 @@ impl Processor {
                 _ => 0,
             };
 
-            let previous = self.references.get_reference(&arg_def.name).cloned();
+            let previous = self.references.get_direct_ref(&arg_def.name).cloned();
             self.references.declare(
                 &arg_def.name,
                 ref_type,
@@ -3018,7 +3018,7 @@ impl Processor {
             // parameter directly to the same storage location so that
             // indexed access inside the template body works.
             if let Value::ArrayRef { ref_type, base_id, dims } = &value {
-                let previous = self.references.get_reference(&arg_def.name).cloned();
+                let previous = self.references.get_direct_ref(&arg_def.name).cloned();
                 self.references.declare(
                     &arg_def.name,
                     ref_type.clone(),
@@ -3032,7 +3032,7 @@ impl Processor {
                 continue;
             }
 
-            let previous_at = self.references.get_reference(&arg_def.name).cloned();
+            let previous_at = self.references.get_direct_ref(&arg_def.name).cloned();
             let store_id = self
                 .ints
                 .reserve(1, Some(&arg_def.name), &[], IdData::default());

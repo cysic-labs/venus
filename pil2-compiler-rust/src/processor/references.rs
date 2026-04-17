@@ -209,6 +209,17 @@ impl References {
         self.search_definition(name)
     }
 
+    /// Look up a reference by name, restricted to the direct `self.refs`
+    /// map only — no container walk, no use-alias resolution. Intended for
+    /// shadow-on-redeclare capture sites (`scope.declare(name, previous)`)
+    /// so that later `apply_scope_cleanup` does not mirror a container
+    /// field into `self.refs`. Mirrors the JS `searchDefinition` semantic
+    /// where only direct local bindings participate in the shadow chain;
+    /// container fields resolve freshly via the use-alias walk every time.
+    pub fn get_direct_ref(&self, name: &str) -> Option<&Reference> {
+        self.refs.get(name)
+    }
+
     /// Get a mutable reference to a Reference by name.
     pub fn get_reference_mut(&mut self, name: &str) -> Option<&mut Reference> {
         if self.refs.contains_key(name) {
