@@ -527,10 +527,18 @@ impl Processor {
         to_unset: &[String],
         to_restore: &[(String, Reference)],
     ) {
+        let trace = std::env::var("PIL2C_TRACE_LEAK").is_ok();
+        let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];
         for name in to_unset {
+            if trace && wl.contains(&name.as_str()) {
+                eprintln!("[pil2c-trace] [cleanup-unset] name={} depth={}", name, self.scope.deep);
+            }
             self.references.unset(name);
         }
         for (name, reference) in to_restore {
+            if trace && wl.contains(&name.as_str()) {
+                eprintln!("[pil2c-trace] [cleanup-restore] name={} depth={} scope_id={}", name, self.scope.deep, reference.scope_id);
+            }
             self.references.restore(name, reference.clone());
         }
     }
@@ -2193,6 +2201,12 @@ impl Processor {
                     &self.source_ref,
                 );
                 self.scope.declare(&arg_def.name, previous);
+                if std::env::var("PIL2C_TRACE_LEAK").is_ok() {
+                    let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];
+                    if wl.contains(&arg_def.name.as_str()) {
+                        eprintln!("[pil2c-trace] [uf-bind-arrayref] name={} depth={} dims={:?}", arg_def.name, self.scope.deep, dims);
+                    }
+                }
                 continue;
             }
 
@@ -2911,7 +2925,10 @@ impl Processor {
     }
 
     fn suspend_current_air_group(&mut self) {
-        self.scope.pop_instance_type();
+        // Apply scope cleanup for any variables declared at the airgroup-type scope
+        // depth. Previously ignored, which allowed stale bindings to persist.
+        let (ag_unset, ag_restore) = self.scope.pop_instance_type();
+        self.apply_scope_cleanup(&ag_unset, &ag_restore);
         self.namespace_ctx.pop();
         self.current_air_group = self.air_group_stack.pop().flatten();
         let ag_name = self
@@ -3007,6 +3024,7 @@ impl Processor {
                 continue;
             }
 
+            let previous_at = self.references.get_reference(&arg_def.name).cloned();
             let store_id = self
                 .ints
                 .reserve(1, Some(&arg_def.name), &[], IdData::default());
@@ -3020,6 +3038,20 @@ impl Processor {
                 self.scope.deep,
                 &self.source_ref,
             );
+            // Record in scope shadow map so that scope.pop() + apply_scope_cleanup
+            // unsets or restores this binding when the airtemplate exits.
+            // Without this, non-ArrayRef parameters (including Value::Array ones
+            // that fall through to the fallback branch) persist in self.refs
+            // as stale bindings across airtemplate boundaries, shadowing
+            // container fields of the same name in deferred handlers.
+            self.scope.declare(&arg_def.name, previous_at);
+            #[allow(clippy::if_same_then_else)]
+            if std::env::var("PIL2C_TRACE_LEAK").is_ok() {
+                let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];
+                if wl.contains(&arg_def.name.as_str()) {
+                    eprintln!("[pil2c-trace] [at-bind-scalar] name={} depth={} store_id={}", arg_def.name, self.scope.deep, store_id);
+                }
+            }
         }
 
         // Determine rows from N parameter.
@@ -3479,7 +3511,13 @@ impl Processor {
         self.air_hints.clear();
         self.air_expression_store.clear();
         self.constraints.clear();
-        self.scope.pop_instance_type();
+        // Apply the scope cleanup for variables declared at the air-type scope depth
+        // (body-direct declarations like `int acc_heights[opids_count]` in airtemplate
+        // bodies run at this depth). Previously the return value was ignored, leaving
+        // those refs in the flat refs map and causing stale bindings to persist across
+        // airtemplate boundaries.
+        let (air_type_unset, air_type_restore) = self.scope.pop_instance_type();
+        self.apply_scope_cleanup(&air_type_unset, &air_type_restore);
         self.namespace_ctx.pop();
         self.air_stack.pop();
 

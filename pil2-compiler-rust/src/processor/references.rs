@@ -174,6 +174,13 @@ impl References {
             is_static: false,
         };
 
+        if std::env::var("PIL2C_TRACE_LEAK").is_ok() {
+            let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];
+            if wl.contains(&name) {
+                let dest = if self.current_container.is_some() { "container" } else { "refs" };
+                eprintln!("[pil2c-trace] [scope-declare] name={} scope_id={} array_dims={:?} dest={}", name, scope_id, array_dims, dest);
+            }
+        }
         if let Some(container_name) = &self.current_container {
             let container = self
                 .containers
@@ -252,13 +259,19 @@ impl References {
 
     /// Search for a reference definition by name (mirrors JS `searchDefinition`).
     fn search_definition(&self, name: &str) -> Option<&Reference> {
+        let trace = std::env::var("PIL2C_TRACE_LEAK").is_ok();
+        let wl = &["opids","exprs_num","num_reps","mins","maxs","opids_count"];
         // Direct lookup, gated on visibility. Out-of-scope leaks
         // (e.g. stale function-parameter bindings whose call frame
         // exited but whose entry survived in `self.refs`) fall
         // through to the next lookup so the use-aliased container
         // field can still resolve.
         if let Some(r) = self.refs.get(name) {
-            if self.is_visible(r) {
+            let vis = self.is_visible(r);
+            if trace && wl.contains(&name) {
+                eprintln!("[pil2c-trace] [search-def-refs] name={} scope_id={} array_dims={:?} visible={}", name, r.scope_id, r.array_dims, vis);
+            }
+            if vis {
                 return Some(r);
             }
         }
