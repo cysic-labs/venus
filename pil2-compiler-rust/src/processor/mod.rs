@@ -506,10 +506,12 @@ impl Processor {
                 FlowSignal::None
             }
             Statement::Block(stmts) => {
+                let use_aliases_mark = self.references.snapshot_use_aliases();
                 self.scope.push();
                 let result = self.execute_statements(stmts);
                 let (to_unset, to_restore) = self.scope.pop();
                 self.apply_scope_cleanup(&to_unset, &to_restore);
+                self.references.restore_use_aliases_len(use_aliases_mark);
                 result
             }
             Statement::PublicTableDeclaration(_) => {
@@ -1204,29 +1206,35 @@ impl Processor {
     fn exec_if(&mut self, s: &IfStmt) -> FlowSignal {
         let cond = self.eval_expr(&s.condition);
         if cond.as_bool().unwrap_or(false) {
+            let use_aliases_mark = self.references.snapshot_use_aliases();
             self.scope.push();
             let result = self.execute_statements(&s.then_body);
             let (to_unset, to_restore) = self.scope.pop();
             self.apply_scope_cleanup(&to_unset, &to_restore);
+            self.references.restore_use_aliases_len(use_aliases_mark);
             return result;
         }
 
         for elseif in &s.elseif_clauses {
             let cond = self.eval_expr(&elseif.condition);
             if cond.as_bool().unwrap_or(false) {
+                let use_aliases_mark = self.references.snapshot_use_aliases();
                 self.scope.push();
                 let result = self.execute_statements(&elseif.body);
                 let (to_unset, to_restore) = self.scope.pop();
                 self.apply_scope_cleanup(&to_unset, &to_restore);
+                self.references.restore_use_aliases_len(use_aliases_mark);
                 return result;
             }
         }
 
         if let Some(else_body) = &s.else_body {
+            let use_aliases_mark = self.references.snapshot_use_aliases();
             self.scope.push();
             let result = self.execute_statements(else_body);
             let (to_unset, to_restore) = self.scope.pop();
             self.apply_scope_cleanup(&to_unset, &to_restore);
+            self.references.restore_use_aliases_len(use_aliases_mark);
             return result;
         }
 
@@ -1234,6 +1242,7 @@ impl Processor {
     }
 
     fn exec_for(&mut self, s: &ForStmt) -> FlowSignal {
+        let use_aliases_mark = self.references.snapshot_use_aliases();
         self.scope.push();
         self.execute_statement(&s.init);
 
@@ -1264,6 +1273,7 @@ impl Processor {
                 FlowSignal::Return(v) => {
                     let (to_unset, to_restore) = self.scope.pop();
                     self.apply_scope_cleanup(&to_unset, &to_restore);
+                    self.references.restore_use_aliases_len(use_aliases_mark);
                     return FlowSignal::Return(v);
                 }
                 FlowSignal::Continue | FlowSignal::None => {}
@@ -1277,21 +1287,25 @@ impl Processor {
 
         let (to_unset, to_restore) = self.scope.pop();
         self.apply_scope_cleanup(&to_unset, &to_restore);
+        self.references.restore_use_aliases_len(use_aliases_mark);
         FlowSignal::None
     }
 
     fn exec_while(&mut self, s: &WhileStmt) -> FlowSignal {
         loop {
+            let use_aliases_mark = self.references.snapshot_use_aliases();
             self.scope.push();
             let cond = self.eval_expr(&s.condition);
             if !cond.as_bool().unwrap_or(false) {
                 let (to_unset, to_restore) = self.scope.pop();
                 self.apply_scope_cleanup(&to_unset, &to_restore);
+                self.references.restore_use_aliases_len(use_aliases_mark);
                 break;
             }
             let result = self.execute_statements(&s.body);
             let (to_unset, to_restore) = self.scope.pop();
             self.apply_scope_cleanup(&to_unset, &to_restore);
+            self.references.restore_use_aliases_len(use_aliases_mark);
             match result {
                 FlowSignal::Break => break,
                 FlowSignal::Return(v) => return FlowSignal::Return(v),
@@ -1329,20 +1343,24 @@ impl Processor {
                 }
             }
             if matched {
+                let use_aliases_mark = self.references.snapshot_use_aliases();
                 self.scope.push();
                 let result = self.execute_statements(&case_clause.body);
                 let (to_unset, to_restore) = self.scope.pop();
                 self.apply_scope_cleanup(&to_unset, &to_restore);
+                self.references.restore_use_aliases_len(use_aliases_mark);
                 return result;
             }
         }
 
         // Default case.
         if let Some(default_body) = &s.default {
+            let use_aliases_mark = self.references.snapshot_use_aliases();
             self.scope.push();
             let result = self.execute_statements(default_body);
             let (to_unset, to_restore) = self.scope.pop();
             self.apply_scope_cleanup(&to_unset, &to_restore);
+            self.references.restore_use_aliases_len(use_aliases_mark);
             return result;
         }
 
@@ -2846,7 +2864,9 @@ impl Processor {
         let name = &ag.name;
         self.air_groups.get_or_create(name);
         self.open_air_group(name);
+        let use_aliases_mark = self.references.snapshot_use_aliases();
         self.execute_statements(&ag.statements);
+        self.references.restore_use_aliases_len(use_aliases_mark);
         self.suspend_current_air_group();
         FlowSignal::None
     }

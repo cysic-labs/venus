@@ -1,0 +1,38 @@
+// minimal_gsum_col.pil
+//
+// Drives std_sum's @gsum_col emission across two sibling AIRs in
+// the same airgroup. Round 3 traced the cross-AIR
+// `gsum_col.reference` corruption (Dma64AlignedInputCpy as
+// `number 0`, ArithEq as `const 0`, RomData as `tmp 16`, Main
+// as `cm stage 1 dim 1` instead of golden `cm stage 2 dim 3`)
+// to a leaked `use proof.std.gsum;` from a prior AIR's `sum()`
+// invocation overwriting subsequent AIRs' bare-name resolution.
+// Round 4 extended the lexical alias snapshot/restore to
+// container/package/AIR template scopes; Round 5 finished the
+// coverage by also wiring the control-flow scoped-body runners
+// (block/if/for/while/switch/air_group).
+//
+// This fixture is the integration-level guard for that class:
+// two AIRs in one airgroup both invoke std_lookup (which calls
+// std_sum::sum() internally), so each AIR's gsum_col hint is
+// emitted independently and the reference operand must resolve
+// without collapsing to a scalar zero / wrong-column class.
+
+require "std_constants.pil";
+require "std_lookup.pil";
+
+airtemplate GsumAssumesAir(const int N, const int opid) {
+    col witness a;
+    lookup_assumes(opid, [a]);
+}
+
+airtemplate GsumProvesAir(const int N, const int opid) {
+    col fixed A = [0..(N-1)];
+    col witness mul;
+    lookup_proves(opid, [A], mul: mul);
+}
+
+airgroup MinimalGsum {
+    GsumAssumesAir(N: 2**4, opid: 1);
+    GsumProvesAir(N: 2**4, opid: 1);
+}

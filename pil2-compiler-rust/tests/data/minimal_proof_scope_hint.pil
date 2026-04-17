@@ -1,0 +1,40 @@
+// minimal_proof_scope_hint.pil
+//
+// Drives std_sum's deferred `on final proof` global-hint
+// emission across two sibling AIRs in one airgroup. Each AIR
+// invokes std_lookup -> std_sum::sum(), so update_piop_sum
+// populates the proof-scope `proof.std.gsum.hint` container's
+// arrays (airgroup_id, name_piop, type_piop, opids, num_reps,
+// expressions, exprs_num, busid). The deferred handler
+// `piop_gsum_issue_global_hints` then emits
+// `@std_sum_users{num_users, std_mode, airgroup_ids, air_ids}`
+// at proof scope.
+//
+// Round 2 traced the proof-scope global-hint corruption to two
+// coupled gaps in `value_to_hint_value` (proof-scope `Value::ColRef`
+// pushed into `air_expression_store` instead of
+// `global_expression_store`) and `hint_value_to_single_field_global`
+// (`HintValue::ColRef` returned as an empty `Constant` fallback
+// instead of dispatching by `ColRefKind`). Both are landed; this
+// fixture is the integration-level guard so a future change
+// cannot silently re-collapse a proof-scope hint to scalar zero
+// or empty buffer without tripping the test.
+
+require "std_constants.pil";
+require "std_lookup.pil";
+
+airtemplate ProofHintAssumes(const int N, const int opid) {
+    col witness a;
+    lookup_assumes(opid, [a]);
+}
+
+airtemplate ProofHintProves(const int N, const int opid) {
+    col fixed A = [0..(N-1)];
+    col witness mul;
+    lookup_proves(opid, [A], mul: mul);
+}
+
+airgroup MinimalProofScopeHint {
+    ProofHintAssumes(N: 2**4, opid: 1);
+    ProofHintProves(N: 2**4, opid: 1);
+}
