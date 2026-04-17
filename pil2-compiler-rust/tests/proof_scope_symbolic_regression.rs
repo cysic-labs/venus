@@ -106,15 +106,18 @@ fn gsum_debug_data_global_preserves_contract_payload() {
                   && h.air_id.is_none())
         .collect();
 
-    // The fixture has exactly two direct_global_update_* calls,
-    // so we expect 1 header + 2 body entries = 3 entries. On
+    // The fixture has three direct_global_update_* calls (two
+    // direct_global_update_proves from inside the two
+    // ProofScopeAir airtemplate bodies, plus one
+    // direct_global_update_assumes at airgroup top level), so
+    // we expect 1 header + 3 body entries = 4 entries. On
     // the pre-Round-6 grammar bug, the airtemplate body abort
     // path would either drop one of the proof-scope calls or
     // corrupt the deferred handler's iteration count.
     assert_eq!(
         entries.len(),
-        3,
-        "expected 3 gsum_debug_data_global entries (1 header + 2 body); got {}. \
+        4,
+        "expected 4 gsum_debug_data_global entries (1 header + 3 body); got {}. \
          A different count indicates either the proof-scope `direct_global_update_*` \
          dispatch off-by-one regression OR the per-call `num_global_hints` counter \
          drifted.",
@@ -167,9 +170,10 @@ fn gsum_debug_data_global_preserves_contract_payload() {
     };
     let count_value = if count_bytes.is_empty() { 0u64 } else { count_bytes[0] as u64 };
     assert_eq!(
-        count_value, 2,
-        "header num_global_hints must equal 2 for the fixture's two \
-         direct_global_update_* calls; got {}. A different value indicates \
+        count_value, 3,
+        "header num_global_hints must equal 3 for the fixture's three \
+         direct_global_update_* calls (2 prove from airtemplate bodies + 1 \
+         assume from airgroup body); got {}. A different value indicates \
          the proof-scope dispatch off-by-one regression.",
         count_value
     );

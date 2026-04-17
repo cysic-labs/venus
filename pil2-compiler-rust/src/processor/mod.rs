@@ -734,16 +734,29 @@ impl Processor {
                 full_init.clone()
             };
 
+            // Mark slots as container-owned when this declaration runs
+            // inside a `container { ... }` body, so their values survive
+            // the function-exit `trim_values_after` boundary. Container
+            // fields (e.g. `int num_global_hints = 0;`,
+            // `const expr type_piop[ARRAY_SIZE];`,
+            // `int opids[ARRAY_SIZE][64];` declared inside
+            // `container proof.std.gsum.hint { ... }`) must persist
+            // their per-call writes to the deferred handler that reads
+            // them back at proof-final time.
+            let container_owned = self.references.inside_container();
+            let id_data = IdData {
+                source_ref: self.source_ref.clone(),
+                container_owned,
+                ..Default::default()
+            };
+
             let (ref_type, store_id) = match &vd.vtype {
                 TypeKind::Int => {
                     let id = self.ints.reserve(
                         size,
                         Some(name),
                         &array_dims,
-                        IdData {
-                            source_ref: self.source_ref.clone(),
-                            ..Default::default()
-                        },
+                        id_data.clone(),
                     );
                     if let Some(val) = &init_value {
                         // Distribute Array values across element IDs.
@@ -766,10 +779,7 @@ impl Processor {
                         size,
                         Some(name),
                         &array_dims,
-                        IdData {
-                            source_ref: self.source_ref.clone(),
-                            ..Default::default()
-                        },
+                        id_data.clone(),
                     );
                     if let Some(val) = &init_value {
                         if !array_dims.is_empty() {
@@ -791,10 +801,7 @@ impl Processor {
                         size,
                         Some(name),
                         &array_dims,
-                        IdData {
-                            source_ref: self.source_ref.clone(),
-                            ..Default::default()
-                        },
+                        id_data.clone(),
                     );
                     if let Some(val) = &init_value {
                         if !array_dims.is_empty() {
@@ -830,10 +837,7 @@ impl Processor {
                         size,
                         Some(name),
                         &array_dims,
-                        IdData {
-                            source_ref: self.source_ref.clone(),
-                            ..Default::default()
-                        },
+                        id_data.clone(),
                     );
                     if let Some(val) = &init_value {
                         if !array_dims.is_empty() {

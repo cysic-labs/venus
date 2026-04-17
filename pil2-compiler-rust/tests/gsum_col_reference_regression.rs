@@ -35,6 +35,61 @@ use std::process::Command;
 use pil2_compiler_rust::proto_out::pilout_proto as pb;
 use prost::Message;
 
+/// Walk an Operand to its leaf, following `Expression` indirections
+/// through the AIR's `expressions[]` table. The leaf operand is the
+/// LHS of the first `Add` / `Sub` / `Mul` we encounter, recursively.
+/// Returns a clone of the leaf so the caller owns it.
+fn resolve_to_leaf(
+    pilout: &pb::PilOut,
+    ag: u32,
+    air: u32,
+    op: &pb::operand::Operand,
+) -> pb::operand::Operand {
+    let mut current = op.clone();
+    let mut depth = 0;
+    loop {
+        depth += 1;
+        if depth > 32 {
+            panic!("resolve_to_leaf exceeded depth 32 on ag={} air={}", ag, air);
+        }
+        match current {
+            pb::operand::Operand::Expression(expr_ref) => {
+                let air_msg = pilout
+                    .air_groups
+                    .get(ag as usize)
+                    .and_then(|g| g.airs.get(air as usize))
+                    .unwrap_or_else(|| {
+                        panic!("ag={} air={} not present in pilout.air_groups", ag, air)
+                    });
+                let air_expr = air_msg
+                    .expressions
+                    .get(expr_ref.idx as usize)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "ag={} air={} expressions[{}] missing",
+                            ag, air, expr_ref.idx
+                        )
+                    });
+                // Walk into the first sub-operand of the expression's
+                // first arithmetic node. Mul/Add/Sub all have lhs.
+                let next = match air_expr.operation.as_ref() {
+                    Some(pb::expression::Operation::Add(a)) => a.lhs.as_ref(),
+                    Some(pb::expression::Operation::Sub(s)) => s.lhs.as_ref(),
+                    Some(pb::expression::Operation::Mul(m)) => m.lhs.as_ref(),
+                    Some(pb::expression::Operation::Neg(n)) => n.value.as_ref(),
+                    None => panic!("ag={} air={} expressions[{}] has no operation", ag, air, expr_ref.idx),
+                };
+                let next_op = next
+                    .and_then(|nop| nop.operand.as_ref())
+                    .unwrap_or_else(|| panic!("ag={} air={} expressions[{}] sub-operand missing", ag, air, expr_ref.idx))
+                    .clone();
+                current = next_op;
+            }
+            other => return other,
+        }
+    }
+}
+
 #[test]
 fn gsum_col_reference_emits_non_degenerate_operand_per_air() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -155,26 +210,34 @@ fn gsum_col_reference_emits_non_degenerate_operand_per_air() {
             )
         });
 
-        // Pre-fix failure modes (alias leak): the reference
-        // collapses to a Constant (often empty buffer or a
-        // single zero byte), or to a stale Number / fall-through
-        // default operand pointing at the wrong column class.
-        // Post-fix accepts the structural classes below.
-        match inner {
-            pb::operand::Operand::WitnessCol(_)
-            | pb::operand::Operand::AirValue(_)
-            | pb::operand::Operand::Expression(_) => {}
+        // Resolve the reference to its leaf operand. Round 6
+        // contract requires the leaf to be a stage-2 WitnessCol
+        // (`cm` stage 2). The reference may wrap that WitnessCol
+        // inside an air-scope `Expression`, so recursively walk
+        // any `Expression` indirections through the AIR's
+        // `expressions[]` table until we reach a leaf operand.
+        let leaf = resolve_to_leaf(&pilout, ag, air, inner);
+        match leaf {
+            pb::operand::Operand::WitnessCol(wc) => {
+                assert_eq!(
+                    wc.stage, 2,
+                    "gsum_col.reference for ag={} air={} resolved to WitnessCol \
+                     stage={} (expected stage 2). Pre-fix alias-leak class \
+                     surfaced as wrong-stage cm or other operand.",
+                    ag, air, wc.stage
+                );
+            }
             pb::operand::Operand::Constant(c) => {
                 panic!(
                     "gsum_col.reference for ag={} air={} collapsed to Constant({:?}); \
-                     this is the alias-leak failure mode (golden emits a stage-2 cm or \
-                     an Expression wrapping it).",
+                     this is the alias-leak failure mode (golden emits a stage-2 cm \
+                     or an Expression wrapping it).",
                     ag, air, c.value
                 );
             }
             other => panic!(
-                "gsum_col.reference for ag={} air={} resolved to unexpected operand class {:?}; \
-                 expected WitnessCol / AirValue / Expression",
+                "gsum_col.reference for ag={} air={} resolved to leaf operand {:?}; \
+                 expected stage-2 WitnessCol",
                 ag, air, other
             ),
         }

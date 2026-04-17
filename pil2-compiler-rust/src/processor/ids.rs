@@ -59,6 +59,15 @@ pub struct IdData {
     pub external: bool,
     /// Commit ID for custom columns (assigned by commit declaration order).
     pub commit_id: Option<u32>,
+    /// Slot belongs to a container field. Container field values must
+    /// persist across the function-exit `trim_values_after` boundary so
+    /// that `proof.std.gsum.hint`-style accumulators and proof-scope
+    /// arrays carry their stored values to deferred handlers (e.g.
+    /// `piop_gsum_issue_global_debug_hints`). Set by
+    /// `exec_variable_declaration` when the declaration runs inside a
+    /// `container { ... }` body, consulted by
+    /// `VariableStore::trim_values_after`.
+    pub container_owned: bool,
     pub extra: HashMap<String, String>,
 }
 
@@ -153,6 +162,16 @@ impl IdAllocator {
     /// Return the next ID that would be allocated (but don't allocate it).
     pub fn peek_next_id(&self) -> u32 {
         self.next_id
+    }
+
+    /// Bump `next_id` to at least `target` so subsequent reservations
+    /// allocate IDs at or above `target`. Used by
+    /// `VariableStore::push` to reserve the seeded container-owned
+    /// slot range in the new air-scope frame.
+    pub fn advance_next_id_to(&mut self, target: u32) {
+        if self.next_id < target {
+            self.next_id = target;
+        }
     }
 
     /// Clear metadata (datas, label_ranges) but preserve the ID counter

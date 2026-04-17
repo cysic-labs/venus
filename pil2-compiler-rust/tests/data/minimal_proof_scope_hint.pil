@@ -25,7 +25,7 @@ require "std_direct.pil";
 
 const int CONT_OPID = 9001;
 
-airtemplate ProofScopeAir(const int N) {
+airtemplate ProofScopeAir(const int N, const expr enable_flag = 1) {
     col witness a;
     a * (a - 1) === 0;
 
@@ -37,6 +37,18 @@ airtemplate ProofScopeAir(const int N) {
     if (continue_seq_check == 1) {
         continue_seq_check * (a - a) === 0;
     }
+
+    // Drive a proof-scope `direct_global_update_proves` from
+    // INSIDE the airtemplate body. This mirrors golden Zisk's
+    // `dma_64_aligned.pil:363` shape, where the proof-scope
+    // global-hint payload is registered while the AIR-template
+    // call frame is active. On the pre-Round-7 fix the writes
+    // to `proof.std.gsum.hint.{type_piop, opids[][], num_reps}`
+    // happen inside the air-scope `self.exprs` / `self.ints`
+    // frames and are discarded when the airtemplate exits.
+    direct_global_update_proves(CONT_OPID, [0, 0, 1, 0, 0, 0, 0, 0],
+                                sel: enable_flag,
+                                surname: PIOP_SURNAME_DYNAMIC);
 }
 
 // Proof-scope `proofval` so the per-call `sel` parameter
@@ -47,16 +59,15 @@ proofval ps_enable;
 ps_enable * (1 - ps_enable);
 
 airgroup MinimalProofScope {
-    ProofScopeAir(N: 2**4);
+    // Two AIR instances so the airtemplate's
+    // `direct_global_update_proves(... sel: enable_flag)` runs
+    // twice — once per airtemplate call frame. Each call writes
+    // to `proof.std.gsum.hint.num_reps[k]` with a proofval ColRef
+    // that must survive the airtemplate-pop boundary.
+    ProofScopeAir(N: 2**4, enable_flag: ps_enable);
+    ProofScopeAir(N: 2**4, enable_flag: ps_enable);
 
-    // Top-level proof-scope direct_global_update_* calls. Each
-    // increments `proof.std.gsum.hint.num_global_hints` and
-    // produces a body-payload `@gsum_debug_data_global` entry.
-    // `sel` is a proofvalue so the emitted `num_reps` field is
-    // an `op = "proofvalue"` operand, matching golden's shape.
-    direct_global_update_proves(CONT_OPID, [0, 0, 1, 0, 0, 0, 0, 0],
-                                sel: ps_enable,
-                                surname: PIOP_SURNAME_DYNAMIC);
+    // Top-level proof-scope direct_global_update_assumes call.
     direct_global_update_assumes(CONT_OPID, [0, 1, 0, 0, 0, 0, 0, 0],
                                  sel: ps_enable,
                                  surname: PIOP_SURNAME_DYNAMIC);
