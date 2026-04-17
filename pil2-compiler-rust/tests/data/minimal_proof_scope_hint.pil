@@ -1,40 +1,63 @@
 // minimal_proof_scope_hint.pil
 //
-// Drives std_sum's deferred `on final proof` global-hint
-// emission across two sibling AIRs in one airgroup. Each AIR
-// invokes std_lookup -> std_sum::sum(), so update_piop_sum
-// populates the proof-scope `proof.std.gsum.hint` container's
-// arrays (airgroup_id, name_piop, type_piop, opids, num_reps,
-// expressions, exprs_num, busid). The deferred handler
-// `piop_gsum_issue_global_hints` then emits
-// `@std_sum_users{num_users, std_mode, airgroup_ids, air_ids}`
-// at proof scope.
+// Drives `std_direct::direct_global_update_proves` from the
+// proof scope so `std_sum::update_piop_sum(..., update_type =
+// SUM_UPDATE_TYPE_GLOBAL)` runs and the deferred handler
+// `piop_gsum_issue_global_debug_hints` emits a populated
+// proof-scope `@gsum_debug_data_global` entry. This is the
+// hint stream the Rust pre-Round-6 grammar bug truncated
+// (identifiers like `continue_seq_on_l1` parsed as
+// `Statement::Continue` aborted whole airtemplate bodies,
+// dropping the `direct_global_update_*` invocations they
+// contained and leaving the global hint stream short).
 //
-// Round 2 traced the proof-scope global-hint corruption to two
-// coupled gaps in `value_to_hint_value` (proof-scope `Value::ColRef`
-// pushed into `air_expression_store` instead of
-// `global_expression_store`) and `hint_value_to_single_field_global`
-// (`HintValue::ColRef` returned as an empty `Constant` fallback
-// instead of dispatching by `ColRefKind`). Both are landed; this
-// fixture is the integration-level guard so a future change
-// cannot silently re-collapse a proof-scope hint to scalar zero
-// or empty buffer without tripping the test.
+// The fixture has two AIRs that each invoke
+// `direct_global_update_*` so the proof-scope global hint
+// arrays carry > 1 element. The matching test
+// (`proof_scope_symbolic_regression.rs`) decodes
+// `gsum_debug_data_global` directly and asserts the per-call
+// payload preserves the symbolic operand classes the contract
+// requires (`type_piop` non-zero where the call says so,
+// `opids` non-empty, `num_reps.op = "proofvalue"`).
 
 require "std_constants.pil";
-require "std_lookup.pil";
+require "std_direct.pil";
 
-airtemplate ProofHintAssumes(const int N, const int opid) {
+const int CONT_OPID = 9001;
+
+airtemplate ProofScopeAir(const int N) {
     col witness a;
-    lookup_assumes(opid, [a]);
+    a * (a - 1) === 0;
+
+    // Identifier whose name starts with `continue` to also
+    // pin the Round 6 parser-keyword-boundary class. On the
+    // pre-Round-6 grammar, the airtemplate body would abort at
+    // this `if`, dropping the constraints and hints below.
+    const expr continue_seq_check = 1;
+    if (continue_seq_check == 1) {
+        continue_seq_check * (a - a) === 0;
+    }
 }
 
-airtemplate ProofHintProves(const int N, const int opid) {
-    col fixed A = [0..(N-1)];
-    col witness mul;
-    lookup_proves(opid, [A], mul: mul);
-}
+// Proof-scope `proofval` so the per-call `sel` parameter
+// resolves to a `proofvalue` operand (matches golden Zisk's
+// per-AIR `enable_*` proofvals passed to `direct_global_update_*`
+// at the airgroup top level).
+proofval ps_enable;
+ps_enable * (1 - ps_enable);
 
-airgroup MinimalProofScopeHint {
-    ProofHintAssumes(N: 2**4, opid: 1);
-    ProofHintProves(N: 2**4, opid: 1);
+airgroup MinimalProofScope {
+    ProofScopeAir(N: 2**4);
+
+    // Top-level proof-scope direct_global_update_* calls. Each
+    // increments `proof.std.gsum.hint.num_global_hints` and
+    // produces a body-payload `@gsum_debug_data_global` entry.
+    // `sel` is a proofvalue so the emitted `num_reps` field is
+    // an `op = "proofvalue"` operand, matching golden's shape.
+    direct_global_update_proves(CONT_OPID, [0, 0, 1, 0, 0, 0, 0, 0],
+                                sel: ps_enable,
+                                surname: PIOP_SURNAME_DYNAMIC);
+    direct_global_update_assumes(CONT_OPID, [0, 1, 0, 0, 0, 0, 0, 0],
+                                 sel: ps_enable,
+                                 surname: PIOP_SURNAME_DYNAMIC);
 }

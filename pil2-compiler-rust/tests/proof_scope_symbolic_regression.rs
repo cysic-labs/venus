@@ -1,37 +1,32 @@
-//! Regression for proof-scope hint payload preservation.
+//! Regression for proof-scope `gsum_debug_data_global`
+//! payload preservation, plus the Round 6 grammar fix that
+//! lets identifiers like `continue_seq_*` parse as identifiers
+//! instead of being silently re-tokenised as `Statement::Continue`
+//! and aborting the surrounding airtemplate body.
 //!
-//! Round 2 of the 2026-04-16 pk-gen-e2e-recovery loop traced
-//! `make prove` aborts at
-//! `pil2-proofman/pil2-stark/src/starkpil/global_constraints.hpp`
-//! to two coupled producer-side gaps that collapsed every
-//! proof-scope symbolic operand to a scalar fallback:
-//!   * `value_to_hint_value` unconditionally routed
-//!     `Value::ColRef` and `Value::RuntimeExpr` through
-//!     `air_expression_store` regardless of scope, so a
-//!     proof-scope `HintValue::ExprId` indexed the wrong pool
-//!     downstream.
-//!   * `hint_value_to_single_field_global` handled
-//!     `HintValue::ColRef` by returning an empty `Constant`
-//!     fallback, discarding every bare proof-scope leaf
-//!     (ProofValue / AirGroupValue / WitnessCol / AirValue /
-//!     PublicValue / Challenge).
+//! The fixture (`tests/data/minimal_proof_scope_hint.pil`)
+//! drives `direct_global_update_proves` / `direct_global_update_assumes`
+//! at the airgroup top level so each call increments
+//! `proof.std.gsum.hint.num_global_hints` and adds one
+//! body-payload `@gsum_debug_data_global` entry. The fixture's
+//! airtemplate body also contains a `const expr continue_seq_check`
+//! reference inside an `if`, so on the pre-Round-6 grammar the
+//! airtemplate body aborted there, which dropped the registered
+//! AIR's contributions and therefore the deferred handler's
+//! per-call payload count and operand classes diverged.
 //!
-//! Both fixes landed (commit `dae4de4f`); this test is the
-//! contract-required integration-level guard. It compiles a
-//! checked-in fixture that drives `std_sum`'s `on final proof`
-//! handler `piop_gsum_issue_global_hints` and asserts the
-//! emitted `@std_sum_users` proof-scope hint preserves
-//! non-degenerate operand classes for its named fields.
+//! The test asserts the exact contract surface from the Round 6
+//! contract:
+//!   * `len(hints filtered to gsum_debug_data_global) == 3`
+//!     (one header + 2 body entries).
+//!   * Header `num_global_hints` = 2.
+//!   * First body payload has `type_piop = 1`, `opids` non-empty,
+//!     `num_reps.op = "proofvalue"`.
 //!
-//! Pre-fix failure modes the test pins:
-//!   * `num_users` collapsing to an empty `Constant` (no value
-//!     bytes) instead of a populated `Constant`.
-//!   * `airgroup_ids` / `air_ids` collapsing to a top-level
-//!     scalar `Constant` instead of a populated
-//!     `HintFieldArray`.
-//!   * Any per-element operand in those arrays collapsing to
-//!     an unexpected non-`Operand` form, which would crash the
-//!     C++ chelpers consumer the same way the original bug did.
+//! On the pre-Round-6 grammar (HEAD `b16e0865` and earlier),
+//! either the call counts collapse or the airtemplate body abort
+//! corrupts the airgroup's contribution to the global stream,
+//! tripping the contract assertions.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -40,7 +35,7 @@ use pil2_compiler_rust::proto_out::pilout_proto as pb;
 use prost::Message;
 
 #[test]
-fn std_sum_users_global_hint_preserves_symbolic_operands() {
+fn gsum_debug_data_global_preserves_contract_payload() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest.parent().expect("manifest parent");
 
@@ -100,105 +95,151 @@ fn std_sum_users_global_hint_preserves_symbolic_operands() {
     let pilout_bytes = std::fs::read(&out).expect("read pilout");
     let pilout = pb::PilOut::decode(pilout_bytes.as_slice()).expect("decode pilout");
 
-    let users = pilout
+    // Filter to proof-scope `gsum_debug_data_global` entries.
+    // Header entry (only `num_global_hints`) plus one body entry
+    // per registered direct_global_update_* call.
+    let entries: Vec<&pb::Hint> = pilout
         .hints
         .iter()
-        .find(|h| h.name == "std_sum_users" && h.air_group_id.is_none() && h.air_id.is_none())
-        .expect(
-            "std_sum_users proof-scope hint must be present; \
-             std_sum's `on final proof piop_gsum_issue_global_hints` should have emitted it.",
-        );
+        .filter(|h| h.name == "gsum_debug_data_global"
+                  && h.air_group_id.is_none()
+                  && h.air_id.is_none())
+        .collect();
 
-    // Walk to the named sub-fields. The hint's top entry is an
-    // unnamed wrapper around a HintFieldArray of named fields.
-    let top = users
-        .hint_fields
-        .first()
-        .expect("std_sum_users must have at least one hint_field wrapping the named map");
-    let named_fields: Vec<&pb::HintField> = match top.value.as_ref() {
-        Some(pb::hint_field::Value::HintFieldArray(arr)) => {
-            arr.hint_fields.iter().filter(|f| f.name.is_some()).collect()
-        }
-        other => panic!(
-            "std_sum_users top hint_field must be HintFieldArray, got {:?}",
-            other
-        ),
-    };
-    assert!(
-        !named_fields.is_empty(),
-        "std_sum_users exposed no named sub-fields; dump: {:#?}",
-        users
+    // The fixture has exactly two direct_global_update_* calls,
+    // so we expect 1 header + 2 body entries = 3 entries. On
+    // the pre-Round-6 grammar bug, the airtemplate body abort
+    // path would either drop one of the proof-scope calls or
+    // corrupt the deferred handler's iteration count.
+    assert_eq!(
+        entries.len(),
+        3,
+        "expected 3 gsum_debug_data_global entries (1 header + 2 body); got {}. \
+         A different count indicates either the proof-scope `direct_global_update_*` \
+         dispatch off-by-one regression OR the per-call `num_global_hints` counter \
+         drifted.",
+        entries.len()
     );
 
-    let lookup = |name: &str| -> &pb::HintField {
-        named_fields
+    // Helper: walk an entry's named sub-fields.
+    fn named_fields(h: &pb::Hint) -> Vec<&pb::HintField> {
+        let top = match h.hint_fields.first() {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        match top.value.as_ref() {
+            Some(pb::hint_field::Value::HintFieldArray(arr)) => {
+                arr.hint_fields.iter().filter(|f| f.name.is_some()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+    fn lookup<'a>(fields: &[&'a pb::HintField], name: &str) -> &'a pb::HintField {
+        fields
             .iter()
             .find(|f| f.name.as_deref() == Some(name))
             .copied()
-            .unwrap_or_else(|| panic!("std_sum_users missing field '{}'", name))
-    };
+            .unwrap_or_else(|| panic!("missing field '{}' in entry", name))
+    }
+    fn operand_inner(hf: &pb::HintField) -> &pb::operand::Operand {
+        let op = match hf.value.as_ref() {
+            Some(pb::hint_field::Value::Operand(op)) => op,
+            other => panic!(
+                "field {:?} should wrap Operand, got {:?}",
+                hf.name, other
+            ),
+        };
+        op.operand.as_ref().expect("Operand had no inner")
+    }
 
-    // num_users is a scalar Operand. Pre-fix bug: collapsed to
-    // empty Constant {value: []}. Post-fix: populated Constant
-    // (or any non-empty operand class).
-    let num_users = lookup("num_users");
-    let num_users_op = match num_users.value.as_ref() {
-        Some(pb::hint_field::Value::Operand(op)) => op,
+    // Header entry: num_global_hints = 2.
+    let header_fields = named_fields(entries[0]);
+    let header_count = lookup(&header_fields, "num_global_hints");
+    let count_inner = operand_inner(header_count);
+    let count_bytes = match count_inner {
+        pb::operand::Operand::Constant(c) => c.value.clone(),
         other => panic!(
-            "std_sum_users.num_users must be Operand; got {:?}",
+            "header num_global_hints must be Constant; got {:?}. \
+             A non-Constant operand here means the deferred handler is reading \
+             the counter through the wrong scope.",
             other
         ),
     };
-    let num_users_inner = num_users_op
-        .operand
-        .as_ref()
-        .expect("std_sum_users.num_users Operand had no inner");
-    if let pb::operand::Operand::Constant(c) = num_users_inner {
-        assert!(
-            !c.value.is_empty(),
-            "std_sum_users.num_users collapsed to empty Constant; \
-             this is the pre-fix proof-scope ColRef-as-empty-Constant failure mode."
+    let count_value = if count_bytes.is_empty() { 0u64 } else { count_bytes[0] as u64 };
+    assert_eq!(
+        count_value, 2,
+        "header num_global_hints must equal 2 for the fixture's two \
+         direct_global_update_* calls; got {}. A different value indicates \
+         the proof-scope dispatch off-by-one regression.",
+        count_value
+    );
+
+    // First body entry (entries[1]): the contract requires
+    // type_piop = 1, opids non-empty, num_reps.op = "proofvalue".
+    let body_fields = named_fields(entries[1]);
+
+    // type_piop must be a non-zero Constant matching the first
+    // call's type tag (proves -> SUM_TYPE_PROVES = 1).
+    let type_piop = lookup(&body_fields, "type_piop");
+    let type_inner = operand_inner(type_piop);
+    if let pb::operand::Operand::Constant(c) = type_inner {
+        let v = if c.value.is_empty() { 0u64 } else { c.value[0] as u64 };
+        assert_eq!(
+            v, 1,
+            "first gsum_debug_data_global.type_piop must equal 1 (SUM_TYPE_PROVES); \
+             got {}. A zero value here is the pre-fix payload-collapse class \
+             where the deferred handler reads type_piop from an unpopulated slot.",
+            v
+        );
+    } else {
+        panic!(
+            "first gsum_debug_data_global.type_piop must be Constant; got {:?}",
+            type_inner
         );
     }
 
-    // airgroup_ids and air_ids are arrays-of-Operand. Pre-fix
-    // failure mode: the entire field collapsed to a top-level
-    // Constant or an empty HintFieldArray, dropping every per-
-    // user element. Post-fix: HintFieldArray with one Operand
-    // per registered user (the fixture has two AIR users).
-    for field_name in ["airgroup_ids", "air_ids"] {
-        let field = lookup(field_name);
-        let arr = match field.value.as_ref() {
-            Some(pb::hint_field::Value::HintFieldArray(a)) => a,
-            other => panic!(
-                "std_sum_users.{} must be HintFieldArray (preserves per-user element \
-                 operands); got {:?} — this is the pre-fix array-collapse failure mode.",
-                field_name, other
-            ),
-        };
-        assert!(
-            !arr.hint_fields.is_empty(),
-            "std_sum_users.{} HintFieldArray is empty; expected at least one per-user element \
-             for the fixture's two AIR users.",
-            field_name
-        );
-        for (i, elem) in arr.hint_fields.iter().enumerate() {
-            let op = match elem.value.as_ref() {
-                Some(pb::hint_field::Value::Operand(o)) => o,
-                other => panic!(
-                    "std_sum_users.{}[{}] must wrap an Operand (preserves the symbolic \
-                     class); got {:?}",
-                    field_name, i, other
-                ),
-            };
-            assert!(
-                op.operand.is_some(),
-                "std_sum_users.{}[{}] Operand had no inner; this is the pre-fix \
-                 ColRef-as-empty-Constant failure mode.",
-                field_name,
-                i
-            );
-        }
+    // opids must be a HintFieldArray with at least one populated
+    // element. Pre-fix bug collapsed it to an empty array.
+    let opids = lookup(&body_fields, "opids");
+    let opids_arr = match opids.value.as_ref() {
+        Some(pb::hint_field::Value::HintFieldArray(a)) => a,
+        other => panic!(
+            "first gsum_debug_data_global.opids must be HintFieldArray; got {:?}. \
+             A scalar here is the pre-fix array-collapse failure mode.",
+            other
+        ),
+    };
+    let first_opid = opids_arr
+        .hint_fields
+        .first()
+        .expect("opids HintFieldArray must have at least one element");
+    let first_opid_inner = operand_inner(first_opid);
+    let first_opid_bytes = match first_opid_inner {
+        pb::operand::Operand::Constant(c) => c.value.clone(),
+        other => panic!("opids[0] must be Constant; got {:?}", other),
+    };
+    assert!(
+        !first_opid_bytes.is_empty(),
+        "first gsum_debug_data_global.opids[0] must be a populated Constant \
+         (Round 6 contract requires `opids` non-empty for the first body entry); \
+         got empty bytes which is the pre-fix payload-collapse failure mode."
+    );
+
+    // num_reps must be a ProofValue operand. The fixture passes
+    // `sel: ps_enable` where `ps_enable` is a `proofval`, which
+    // mirrors golden Zisk's `enable_*` proofvals fed to
+    // direct_global_update_proves at airgroup top level.
+    let num_reps = lookup(&body_fields, "num_reps");
+    let num_reps_inner = operand_inner(num_reps);
+    match num_reps_inner {
+        pb::operand::Operand::ProofValue(_) => {}
+        other => panic!(
+            "first gsum_debug_data_global.num_reps must be a ProofValue operand \
+             (Round 6 contract: num_reps.op == \"proofvalue\"); got {:?}. \
+             A Constant here is the pre-fix proof-scope ColRef-as-empty-Constant \
+             failure mode.",
+            other
+        ),
     }
 
     let _ = std::fs::remove_file(&out);

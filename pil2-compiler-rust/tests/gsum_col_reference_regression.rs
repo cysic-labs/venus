@@ -1,31 +1,33 @@
 //! Regression for `gsum_col.reference` operand class across
-//! sibling AIRs in the same airgroup.
+//! sibling AIRs in the same airgroup, AND for the Round 6
+//! grammar bug that let identifiers starting with the keywords
+//! `continue` / `break` / `return` be silently parsed as the
+//! corresponding flow-control statement followed by leftover
+//! text, aborting the surrounding airtemplate body partway
+//! through.
 //!
-//! Round 3 of the 2026-04-16 pk-gen-e2e-recovery loop traced the
-//! cross-AIR `gsum_col.reference` corruption to a leaked
-//! `use proof.std.gsum;` overwriting subsequent AIRs' bare-name
-//! resolution. Round 5 finished the lexical alias snapshot/restore
-//! coverage by wiring the control-flow scoped-body runners
-//! (`Statement::Block`, `exec_if`, `exec_for`, `exec_while`,
-//! `exec_switch`, `exec_air_group`) so a `use` run inside any of
-//! those bodies cannot leak into a later AIR template.
+//! The fixture (`tests/data/minimal_gsum_col.pil`) declares
+//! `const expr continue_seq_on_l1 = 1;` inside an
+//! `airtemplate GsumProvesAir` body and uses it inside an
+//! `if (continue_seq_on_l1 == 1) { ... }` block. On the
+//! pre-Round-6 grammar, `continue_seq_on_l1` was parsed as
+//! `Statement::Continue` (matching the `continue` literal
+//! without word-boundary lookahead). The unhandled Continue
+//! signal escaped the airtemplate body via `signal.is_abort()`,
+//! truncating the body before `lookup_proves` ran. Without
+//! `lookup_proves`, the AIR emitted no `gsum_col` hint, and
+//! its sibling `GsumAssumesAir` was the only AIR producing a
+//! gsum_col. The post-fix test asserts BOTH AIRs emit their
+//! own gsum_col with a per-AIR non-degenerate reference operand.
 //!
-//! Per Round 4 contract: this test compiles a checked-in
-//! alias-heavy fixture and asserts that the emitted
-//! `gsum_col.reference` field does NOT collapse to the
-//! pre-fix failure modes (`Constant` zero / empty
-//! `Constant` / fall-through default operand). On the broken
-//! state the operand serialised as `Operand::Constant` with an
-//! empty value buffer or a numeric zero, tripping the
-//! downstream `[ERROR]: Only committed pols and airgroupvalues
-//! can be set` guard during prove. The post-fix operand must be
-//! either a direct `WitnessCol`, an `AirValue`, or an
-//! `Expression` wrapping the air-scope expression for the
-//! reference column.
-//!
-//! Each AIR in the fixture must emit its own gsum_col hint with
-//! a non-degenerate reference operand. Per-AIR independence is
-//! the property the cross-AIR alias leak violated.
+//! Round 5 used a weaker fixture (no control-flow body, no
+//! identifiers colliding with the keyword prefix) so the test
+//! could not fail on either the Round 3 alias-leak class or the
+//! Round 6 parser class. This Round 6 rewrite makes the test
+//! fail on `HEAD 6e2a9fa0` (pre-Round-5 alias coverage) and
+//! also on `HEAD b16e0865` (post-Round-5 alias coverage but
+//! still pre-Round-6 grammar fix), and pass after the grammar
+//! fix lands.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -94,11 +96,12 @@ fn gsum_col_reference_emits_non_degenerate_operand_per_air() {
     let pilout_bytes = std::fs::read(&out).expect("read pilout");
     let pilout = pb::PilOut::decode(pilout_bytes.as_slice()).expect("decode pilout");
 
-    // Collect every gsum_col hint and assert (a) at least one per
-    // air_id in the fixture's airgroup, (b) the reference
-    // sub-field is a non-degenerate operand. The fixture has
-    // two AIRs in a single airgroup; both must produce their
-    // own air-scoped gsum_col hint.
+    // Collect every gsum_col hint and assert exactly one per AIR
+    // in the fixture's airgroup. The fixture has two AIRs in a
+    // single airgroup; both must produce their own air-scoped
+    // gsum_col hint. On the pre-Round-6 broken parser,
+    // `GsumProvesAir` aborts before reaching `lookup_proves`,
+    // so its gsum_col is missing entirely.
     let mut per_air: std::collections::BTreeMap<(u32, u32), &pb::Hint> =
         std::collections::BTreeMap::new();
     for h in &pilout.hints {
@@ -112,7 +115,9 @@ fn gsum_col_reference_emits_non_degenerate_operand_per_air() {
     assert_eq!(
         per_air.len(),
         2,
-        "expected gsum_col emitted for both AIRs in fixture; got {} ({:?})",
+        "expected gsum_col emitted for both AIRs in fixture; got {} ({:?}). \
+         A count of 1 indicates the pre-Round-6 grammar bug truncated \
+         GsumProvesAir's airtemplate body before lookup_proves ran.",
         per_air.len(),
         per_air.keys().collect::<Vec<_>>()
     );
@@ -151,11 +156,10 @@ fn gsum_col_reference_emits_non_degenerate_operand_per_air() {
         });
 
         // Pre-fix failure modes (alias leak): the reference
-        // collapses to a Constant (often empty buffer or a single
-        // zero byte), or to a stale Number / fall-through default
-        // operand pointing at the wrong column class. The
-        // post-fix operand is one of the structural classes
-        // below.
+        // collapses to a Constant (often empty buffer or a
+        // single zero byte), or to a stale Number / fall-through
+        // default operand pointing at the wrong column class.
+        // Post-fix accepts the structural classes below.
         match inner {
             pb::operand::Operand::WitnessCol(_)
             | pb::operand::Operand::AirValue(_)

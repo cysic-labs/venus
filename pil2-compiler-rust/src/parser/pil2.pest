@@ -320,14 +320,23 @@ case_values = { case_value_item ~ ("," ~ case_value_item)* }
 case_value_item = { expression ~ (".." ~ expression)? }
 default_clause = { "default" ~ ":" ~ statement* }
 
+// Keyword tokens that need a word-boundary check so identifiers
+// such as `return_value`, `break_count`, or `continue_seq_on_l1`
+// are not greedily matched as the keyword followed by leftover
+// text. Atomic so the negative lookahead lands immediately after
+// the literal text without an implicit whitespace skip.
+return_kw   = @{ "return"   ~ !(ASCII_ALPHANUMERIC | "_") }
+break_kw    = @{ "break"    ~ !(ASCII_ALPHANUMERIC | "_") }
+continue_kw = @{ "continue" ~ !(ASCII_ALPHANUMERIC | "_") }
+
 return_stmt = {
-    "return" ~ "[" ~ comma_sep_expr ~ "]" ~ semi?
-  | "return" ~ expression ~ semi?
-  | "return" ~ semi?
+    return_kw ~ "[" ~ comma_sep_expr ~ "]" ~ semi?
+  | return_kw ~ expression ~ semi?
+  | return_kw ~ semi?
 }
 
-break_stmt = { "break" ~ semi? }
-continue_stmt = { "continue" ~ semi? }
+break_stmt = { break_kw ~ semi? }
+continue_stmt = { continue_kw ~ semi? }
 
 // ===================================================================
 // Virtual expression
