@@ -2477,7 +2477,6 @@ fn build_sequence_element(pair: pest::iterators::Pair<'_, Rule>) -> Result<Seque
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::ast::*;
 
     #[test]
     fn test_parse_empty() {
