@@ -3779,7 +3779,7 @@ impl Processor {
                 executed_something = true;
                 processed.insert(call.function_name.clone());
                 if let Some(func) = self.functions.get(&call.function_name).cloned() {
-                    self.execute_user_function(&func, &[]);
+                    self.execute_user_function_by_name(&func, &[], &call.function_name);
                 }
                 // Break after each execution for reentrant behavior.
                 break;

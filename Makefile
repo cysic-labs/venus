@@ -88,9 +88,17 @@ compile-key: rom-setup
 	"$(CARGO_ZISK_BIN)" check-setup -k "$(PROVING_KEY)"
 	"$(CARGO_ZISK_BIN)" check-setup -k "$(PROVING_KEY)" -a
 
+SNARK_KEY ?= $(HOME)/.zisk/provingKeySnark
+
 prove: check-key $(PROVE_PREPARE)
 	@if [ ! -f "$(ELF)" ]; then \
 		echo "guest ELF not found at $(ELF), run make setup first"; \
+		exit 1; \
+	fi
+	@if [ ! -e "$(SNARK_KEY)" ]; then \
+		echo "SNARK proving key not found at $(SNARK_KEY)."; \
+		echo "Install it with: ziskup setup_snark"; \
+		echo "(override the expected location with SNARK_KEY=<path> make prove)"; \
 		exit 1; \
 	fi
 	"$(CARGO_ZISK_BIN)" prove -e "$(ELF)" $(PROVE_ARGS) -k "$(PROVING_KEY)" -o "$(PROOF_DIR)" -a -y
@@ -98,6 +106,12 @@ prove: check-key $(PROVE_PREPARE)
 verify: check-key
 	@if [ ! -f "$(PROOF_FILE)" ]; then \
 		echo "proof file not found at $(PROOF_FILE), run make prove first"; \
+		exit 1; \
+	fi
+	@if [ ! -e "$(SNARK_KEY)" ]; then \
+		echo "SNARK proving key not found at $(SNARK_KEY)."; \
+		echo "Install it with: ziskup setup_snark"; \
+		echo "(override the expected location with SNARK_KEY=<path> make verify)"; \
 		exit 1; \
 	fi
 	"$(CARGO_ZISK_BIN)" verify -p "$(PROOF_FILE)" -k "$(PROVING_KEY)"
