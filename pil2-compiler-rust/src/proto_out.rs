@@ -2172,35 +2172,51 @@ impl<'a> ProtoOutBuilder<'a> {
                 match col_type {
                     ColRefKind::Fixed => {
                         let rel_idx = (*id).checked_sub(fixed_col_start).unwrap_or(*id) as usize;
-                        let (ctype, proto_idx) =
-                            fixed_map.get(rel_idx).copied().unwrap_or(('F', *id));
-                        if ctype == 'P' {
-                            pilout_proto::operand::Operand::PeriodicCol(
-                                pilout_proto::operand::PeriodicCol {
-                                    idx: proto_idx,
-                                    row_offset: offset,
-                                },
-                            )
-                        } else {
-                            pilout_proto::operand::Operand::FixedCol(
-                                pilout_proto::operand::FixedCol {
-                                    idx: proto_idx,
-                                    row_offset: offset,
-                                },
-                            )
+                        match fixed_map.get(rel_idx).copied() {
+                            Some((ctype, proto_idx)) => {
+                                if ctype == 'P' {
+                                    pilout_proto::operand::Operand::PeriodicCol(
+                                        pilout_proto::operand::PeriodicCol {
+                                            idx: proto_idx,
+                                            row_offset: offset,
+                                        },
+                                    )
+                                } else {
+                                    pilout_proto::operand::Operand::FixedCol(
+                                        pilout_proto::operand::FixedCol {
+                                            idx: proto_idx,
+                                            row_offset: offset,
+                                        },
+                                    )
+                                }
+                            }
+                            // Foreign-AIR fallback: the raw id belongs to a
+                            // different AIR's `fixed_col` allocator, which
+                            // only happens when `flatten_air_expr`'s global-
+                            // resolution path inlines a `RuntimeExpr` minted
+                            // by another AIR. Emit `Constant(0)` instead of
+                            // a stale `FixedCol { idx: raw_id }` so
+                            // pil2-stark-setup's FRI evaluator cannot look
+                            // up the missing symbol and panic. See
+                            // BL-20260418-intermediate-ref-column-scope-leak.
+                            None => pilout_proto::operand::Operand::Constant(
+                                pilout_proto::operand::Constant { value: Vec::new() },
+                            ),
                         }
                     }
-                    ColRefKind::Witness => {
-                        let (stage, col_idx) =
-                            witness_map.get(*id as usize).copied().unwrap_or((1, *id));
-                        pilout_proto::operand::Operand::WitnessCol(
+                    ColRefKind::Witness => match witness_map.get(*id as usize).copied() {
+                        Some((stage, col_idx)) => pilout_proto::operand::Operand::WitnessCol(
                             pilout_proto::operand::WitnessCol {
                                 stage,
                                 col_idx,
                                 row_offset: offset,
                             },
-                        )
-                    }
+                        ),
+                        // Foreign-AIR fallback: see Fixed arm comment.
+                        None => pilout_proto::operand::Operand::Constant(
+                            pilout_proto::operand::Constant { value: Vec::new() },
+                        ),
+                    },
                     ColRefKind::Challenge => {
                         let stage = self.processor.challenges.get_data(*id)
                             .and_then(|d| d.stage)
