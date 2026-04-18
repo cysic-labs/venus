@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::processor::air::HintValue;
 use crate::processor::expression::{ColRefKind, RuntimeExpr, RuntimeOp, RuntimeUnaryOp, Value};
@@ -65,13 +66,28 @@ fn packed_key_for(expr: &RuntimeExpr, source_expr_id: Option<u32>) -> Option<Pac
 /// derived `Hash`/`Eq` for `RuntimeExpr` walk every Rc-linked child,
 /// so each cache probe and insert is O(tree_size). Without this
 /// guard the recursive PIL aggregator templates blow up the flatten
-/// step into multi-hour runtime; see BL-20260415-struct-cache-blowup.
+/// step into multi-hour runtime; see BL-20260415-struct-cache-blowup
+/// (the `recursive1_pilout_under_time_budget` test pins the floor).
+/// Raising the cap is tempting on Keccakf-scale accumulator trees,
+/// but the recursive1 fixture has 10k+ Rc-linked children whose
+/// derived Hash recursion turns each cache probe into a full tree
+/// walk and pushes the regression budget past 30 s. The Stage 2
+/// associative-canonicalization pass already balances and dedupes
+/// Add / Mul chains in place, so most large producer trees now
+/// arrive here as trees of small balanced subtrees rather than the
+/// hundred-deep left-leaning chains the old serializer saw - 64
+/// stays the right cap with that pre-pass in front.
 const STRUCT_CACHE_NODE_LIMIT: usize = 64;
 
 /// Per-AIR diagnostics emitted to stderr when `PIL2C_CHAIN_SHAPE=1`.
 /// Used to confirm whether an upstream canonicalization fix actually
 /// flattens the left-leaning Add / Mul chains that compound-assign
-/// accumulators inside long for-loop bodies produce.
+/// accumulators inside long for-loop bodies produce. Combines the
+/// pre-serialization tree-shape walk (entry count, total BinOp /
+/// UnaryOp count, longest associative chain length, deepest subtree)
+/// with the cache-hit telemetry threaded through `flatten_air_expr`
+/// so the trace reflects both the input shape and how much reuse the
+/// serializer is actually achieving.
 #[derive(Debug, Default)]
 struct ChainShapeStats {
     entry_count: usize,
@@ -80,6 +96,23 @@ struct ChainShapeStats {
     max_add_chain: usize,
     max_mul_chain: usize,
     max_subtree_depth: usize,
+    rc_cache_probes: usize,
+    rc_cache_hits: usize,
+    struct_cache_probes: usize,
+    struct_cache_hits: usize,
+    prov_cache_probes: usize,
+    prov_cache_hits: usize,
+    proto_emitted: usize,
+}
+
+impl ChainShapeStats {
+    fn ratio(num: usize, den: usize) -> f64 {
+        if den == 0 {
+            0.0
+        } else {
+            (num as f64) / (den as f64)
+        }
+    }
 }
 
 /// Walk a runtime-expression tree and update chain-shape statistics.
@@ -137,6 +170,249 @@ fn chain_shape_trace_enabled() -> bool {
     std::env::var("PIL2C_CHAIN_SHAPE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Identity check for the additive zero operand. Mirrors JS
+/// pil2-compiler's `Add(x, 0) -> x` simplification at expression
+/// build time.
+fn is_runtime_zero(expr: &RuntimeExpr) -> bool {
+    match expr {
+        RuntimeExpr::Value(Value::Int(0)) | RuntimeExpr::Value(Value::Fe(0)) => true,
+        _ => false,
+    }
+}
+
+/// Identity check for the multiplicative one operand. Mirrors JS
+/// pil2-compiler's `Mul(x, 1) -> x` simplification.
+fn is_runtime_one(expr: &RuntimeExpr) -> bool {
+    match expr {
+        RuntimeExpr::Value(Value::Int(1)) | RuntimeExpr::Value(Value::Fe(1)) => true,
+        _ => false,
+    }
+}
+
+/// Walk a `RuntimeExpr` iteratively and append every leaf operand
+/// of the given associative `op` chain into `out`. A node is
+/// treated as part of the chain when its op matches `op`; otherwise
+/// it is captured as a single leaf operand. Identity operands
+/// (`Add` zero, `Mul` one) are dropped while flattening. Iterative
+/// (vs recursive) so the recursive1 aggregator's 100k+-deep chains
+/// do not blow the thread stack.
+fn collect_chain_operands(
+    expr: &Rc<RuntimeExpr>,
+    op: RuntimeOp,
+    out: &mut Vec<Rc<RuntimeExpr>>,
+) {
+    let mut stack: Vec<Rc<RuntimeExpr>> = vec![Rc::clone(expr)];
+    while let Some(node) = stack.pop() {
+        match node.as_ref() {
+            RuntimeExpr::BinOp { op: child_op, left, right } if *child_op == op => {
+                // Push right first so left is processed first
+                // (preserves left-to-right operand order on output).
+                stack.push(Rc::clone(right));
+                stack.push(Rc::clone(left));
+            }
+            _ => {
+                let drop = match op {
+                    RuntimeOp::Add => is_runtime_zero(&node),
+                    RuntimeOp::Mul => is_runtime_one(&node),
+                    RuntimeOp::Sub => false,
+                };
+                if !drop {
+                    out.push(node);
+                }
+            }
+        }
+    }
+}
+
+/// Reduce a list of operands into a balanced binary tree under the
+/// given associative `op`. Preserves left-to-right order so any
+/// non-associative consumer (debug strings, exact byte parity with
+/// JS) stays predictable. Identity-only inputs collapse to the
+/// identity element.
+fn build_balanced_chain(op: RuntimeOp, mut operands: Vec<Rc<RuntimeExpr>>) -> Rc<RuntimeExpr> {
+    if operands.is_empty() {
+        let value = match op {
+            RuntimeOp::Mul => Value::Int(1),
+            _ => Value::Int(0),
+        };
+        return Rc::new(RuntimeExpr::Value(value));
+    }
+    if operands.len() == 1 {
+        return operands.pop().unwrap();
+    }
+    while operands.len() > 1 {
+        let mut next: Vec<Rc<RuntimeExpr>> = Vec::with_capacity((operands.len() + 1) / 2);
+        let mut iter = operands.into_iter();
+        while let Some(left) = iter.next() {
+            match iter.next() {
+                Some(right) => next.push(Rc::new(RuntimeExpr::BinOp {
+                    op,
+                    left,
+                    right,
+                })),
+                None => next.push(left),
+            }
+        }
+        operands = next;
+    }
+    operands.pop().unwrap()
+}
+
+/// Lower threshold for triggering an associative-chain rebalance.
+/// Currently set above `CANONICALIZE_CHAIN_MAX` so the rebalance
+/// path is dormant: the empirical Round-1 trace showed that
+/// rebuilding balanced binary trees lowers max chain depth as
+/// designed (Keccakf 31 -> 6, Main 95 -> 7) but inflates
+/// `proto_emitted` because every rebuilt internal node is a fresh
+/// `Rc` that misses the rc_cache. Codex's targeted review
+/// (`.humanize/skill/2026-04-18_18-36-49-2731688-8e8be4e4/output.md`)
+/// identifies the actual load-bearing gap as missing JS-style
+/// reference-level reuse: JS dedupes by `(source_expr_id,
+/// row_offset)` at the `Expression` boundary
+/// (`packed_expressions.js::saveAndPushExpressionReference`), while
+/// our `packed_key_for` only tags top-level entries and explicitly
+/// strips provenance from recursive sub-operands. The next round
+/// implements that provenance refactor; this constant is left
+/// above the cap so the canonicalization machinery stays compiled
+/// and ready to enable once the reuse layer lands.
+const CANONICALIZE_CHAIN_THRESHOLD: usize = 2_048;
+
+/// Upper bound for chain rebalance. Rebuilding very large chains
+/// allocates new Rcs proportional to chain length; the recursive1
+/// aggregator fixture has individual chains over 100k operands,
+/// where the post-rebuild copy crosses 100 GB of resident memory
+/// and never finishes inside the 30-second pinned-regression
+/// budget (`recursive1_pilout_under_time_budget`). Chains beyond
+/// this cap are left in their producer shape: the aggregator
+/// pipeline relies on its own helper structure rather than the
+/// stdlib accumulator pattern, and the im_polynomials greedy
+/// search handles them without lifting because the compute is
+/// localized to that one large constraint.
+const CANONICALIZE_CHAIN_MAX: usize = 1024;
+
+/// Recursively canonicalize an expression tree before serializer
+/// flattening. Strategy: probe the *input* chain length once at
+/// every Add / Mul node; if the chain is below threshold, recurse
+/// in place (preserving Rc identity wherever possible so the
+/// downstream rc_cache stays effective); if it is at or above
+/// threshold, rebuild a balanced binary tree from the flattened
+/// operand list with identities (`Add` zero, `Mul` one) dropped.
+///
+/// Probing the INPUT tree (not the output of recursive
+/// canonicalization) keeps total work linear in the original tree
+/// size: each BinOp is touched at most twice (once during the
+/// chain probe, once during rebuild). Probing the canonicalized
+/// children would re-walk balanced subtrees and turn the pass
+/// quadratic, which the recursive1 aggregator fixture
+/// (`recursive1_pilout_under_time_budget`) reproduces in seconds.
+///
+/// Mirrors the JS `Expression.insert()` N-ary fusion path with the
+/// added rebalancing step the JS stack form gets implicitly via
+/// its `aIsAlone && allBsAreAlone` operand-list extension. Without
+/// this pass, compound-assign accumulators inside long for-loop
+/// bodies (`sum_ims += im_cluster`, `prods *= e + gamma`,
+/// `sums += _partial`) produce strictly left-leaning binary chains
+/// that `pil2-stark-setup::im_polynomials::calculate_im_pols`
+/// blows past its 10-second deadline on, falling back to
+/// over-lifting - the post-Round-17 bug behind Keccakf's 675
+/// imPols vs gold's 0.
+fn canonicalize_associative(expr: &Rc<RuntimeExpr>) -> Rc<RuntimeExpr> {
+    match expr.as_ref() {
+        RuntimeExpr::BinOp { op, left, right } => match op {
+            RuntimeOp::Add | RuntimeOp::Mul => {
+                // Probe chain length on the *input* (not the
+                // canonicalized children) so the walk stays linear
+                // in the original tree size.
+                let chain_len = count_chain_operands(left, *op)
+                    + count_chain_operands(right, *op);
+                if chain_len > CANONICALIZE_CHAIN_MAX {
+                    // Oversized chain (e.g. recursive1 aggregator
+                    // monoliths). Treat the whole sub-tree as opaque
+                    // - do not even recurse - to keep the pass O(N)
+                    // rather than O(N^2) and avoid the 100 GB
+                    // memory bomb the rebuild would otherwise
+                    // trigger.
+                    return Rc::clone(expr);
+                }
+                if chain_len < CANONICALIZE_CHAIN_THRESHOLD {
+                    // Short chain: recurse in place, preserve Rc
+                    // identity if children did not need to change.
+                    let canon_left = canonicalize_associative(left);
+                    let canon_right = canonicalize_associative(right);
+                    if Rc::ptr_eq(&canon_left, left) && Rc::ptr_eq(&canon_right, right) {
+                        return Rc::clone(expr);
+                    }
+                    return Rc::new(RuntimeExpr::BinOp {
+                        op: *op,
+                        left: canon_left,
+                        right: canon_right,
+                    });
+                }
+                // Long chain: collect leaf operands following only
+                // same-op edges in the *input* tree, canonicalize
+                // each leaf, drop identities, and rebuild balanced.
+                let mut operands: Vec<Rc<RuntimeExpr>> = Vec::with_capacity(chain_len);
+                collect_chain_operands(left, *op, &mut operands);
+                collect_chain_operands(right, *op, &mut operands);
+                let canon_operands: Vec<Rc<RuntimeExpr>> = operands
+                    .iter()
+                    .map(canonicalize_associative)
+                    .collect();
+                build_balanced_chain(*op, canon_operands)
+            }
+            RuntimeOp::Sub => {
+                let canon_left = canonicalize_associative(left);
+                let canon_right = canonicalize_associative(right);
+                if Rc::ptr_eq(&canon_left, left) && Rc::ptr_eq(&canon_right, right) {
+                    Rc::clone(expr)
+                } else {
+                    Rc::new(RuntimeExpr::BinOp {
+                        op: *op,
+                        left: canon_left,
+                        right: canon_right,
+                    })
+                }
+            }
+        },
+        RuntimeExpr::UnaryOp { op, operand } => {
+            let canon = canonicalize_associative(operand);
+            if Rc::ptr_eq(&canon, operand) {
+                Rc::clone(expr)
+            } else {
+                Rc::new(RuntimeExpr::UnaryOp { op: *op, operand: canon })
+            }
+        }
+        _ => Rc::clone(expr),
+    }
+}
+
+/// Iterative cheap operand-count walk that mirrors
+/// `collect_chain_operands` without allocating an operand list;
+/// used as the chain-length probe above. Early-exits when the
+/// running count crosses `CANONICALIZE_CHAIN_MAX + 1` so the
+/// caller can short-circuit to the upper-bound branch without
+/// finishing a 100k-step traversal.
+fn count_chain_operands(expr: &Rc<RuntimeExpr>, op: RuntimeOp) -> usize {
+    let cap = CANONICALIZE_CHAIN_MAX + 1;
+    let mut stack: Vec<&Rc<RuntimeExpr>> = vec![expr];
+    let mut count: usize = 0;
+    while let Some(node) = stack.pop() {
+        if count > cap {
+            break;
+        }
+        match node.as_ref() {
+            RuntimeExpr::BinOp { op: child_op, left, right } if *child_op == op => {
+                stack.push(right);
+                stack.push(left);
+            }
+            _ => {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 /// Count nodes in an expression tree, capped at `limit + 1` so the
@@ -332,7 +608,17 @@ impl<'a> ProtoOutBuilder<'a> {
                 // air_expression_store carries AirExpressionEntry
                 // provenance; the older stored_expressions path has
                 // no provenance.
-                let entries: Vec<(&RuntimeExpr, Option<u32>, Option<&str>)> =
+                // Collect raw entries first, then canonicalize each
+                // expression in place. Canonicalization runs the
+                // associative Add / Mul flattening + balanced rebuild
+                // that mirrors JS Expression.insert's N-ary fusion;
+                // this is what keeps `pil2-stark-setup::im_polynomials`
+                // from blowing past its 10s deadline on Keccakf-scale
+                // accumulator trees and over-lifting intermediate
+                // polynomials. The canonicalized Rc tree is owned by
+                // `entries` for the lifetime of this air loop so the
+                // rc_cache pointer-identity fast path stays valid.
+                let raw_entries: Vec<(&RuntimeExpr, Option<u32>, Option<&str>)> =
                     if !air.air_expression_store.is_empty() {
                         air.air_expression_store.iter()
                             .map(|e| (&e.expr, e.source_expr_id, e.source_label.as_deref()))
@@ -340,33 +626,33 @@ impl<'a> ProtoOutBuilder<'a> {
                     } else {
                         air.stored_expressions.iter().map(|e| (e, None, None)).collect()
                     };
-                if chain_shape_trace_enabled() {
-                    let mut stats = ChainShapeStats {
-                        entry_count: entries.len(),
-                        ..Default::default()
-                    };
+                let entries: Vec<(Rc<RuntimeExpr>, Option<u32>, Option<&str>)> = raw_entries
+                    .into_iter()
+                    .map(|(expr, sid, label)| {
+                        let canon = canonicalize_associative(&Rc::new(expr.clone()));
+                        (canon, sid, label)
+                    })
+                    .collect();
+                let trace_enabled = chain_shape_trace_enabled();
+                let mut stats = ChainShapeStats {
+                    entry_count: entries.len(),
+                    ..Default::default()
+                };
+                if trace_enabled {
+                    // Pre-flatten tree-shape walk on the *canonicalized*
+                    // expressions, so the chain-depth columns reflect
+                    // the producer shape after the associative-rebalance
+                    // pass and let the round contract gate on the
+                    // post-fix metric. Cache hit / probe counts are
+                    // accumulated below by flatten_air_expr while it
+                    // walks the same trees.
                     for (expr, _, _) in &entries {
                         measure_chain_shape(expr, &mut stats, 0, None, 0);
                     }
-                    eprintln!(
-                        "PIL2C_CHAIN_SHAPE air={}/{} airgroup_id={} air_id={} \
-                         entries={} binops={} unaryops={} max_add_chain={} \
-                         max_mul_chain={} max_subtree_depth={}",
-                        ag.name,
-                        air.name,
-                        ag_idx,
-                        air_id_counter,
-                        stats.entry_count,
-                        stats.binop_total,
-                        stats.unaryop_total,
-                        stats.max_add_chain,
-                        stats.max_mul_chain,
-                        stats.max_subtree_depth,
-                    );
                 }
                 for (expr, source_expr_id, source_label) in entries {
                     let root_idx = self.flatten_air_expr(
-                        expr,
+                        expr.as_ref(),
                         source_expr_id,
                         source_label,
                         &air.fixed_id_map,
@@ -379,8 +665,43 @@ impl<'a> ProtoOutBuilder<'a> {
                         &mut struct_cache,
                         &mut prov_cache,
                         &mut im_labels,
+                        &mut stats,
                     );
                     expr_id_map.push(root_idx);
+                }
+                if trace_enabled {
+                    eprintln!(
+                        "PIL2C_CHAIN_SHAPE air={}/{} airgroup_id={} air_id={} \
+                         entries={} binops={} unaryops={} max_add_chain={} \
+                         max_mul_chain={} max_subtree_depth={} \
+                         proto_emitted={} \
+                         rc_cache_hits={}/{} ({:.3}) \
+                         struct_cache_hits={}/{} ({:.3}) \
+                         prov_cache_hits={}/{} ({:.3})",
+                        ag.name,
+                        air.name,
+                        ag_idx,
+                        air_id_counter,
+                        stats.entry_count,
+                        stats.binop_total,
+                        stats.unaryop_total,
+                        stats.max_add_chain,
+                        stats.max_mul_chain,
+                        stats.max_subtree_depth,
+                        stats.proto_emitted,
+                        stats.rc_cache_hits,
+                        stats.rc_cache_probes,
+                        ChainShapeStats::ratio(stats.rc_cache_hits, stats.rc_cache_probes),
+                        stats.struct_cache_hits,
+                        stats.struct_cache_probes,
+                        ChainShapeStats::ratio(
+                            stats.struct_cache_hits,
+                            stats.struct_cache_probes,
+                        ),
+                        stats.prov_cache_hits,
+                        stats.prov_cache_probes,
+                        ChainShapeStats::ratio(stats.prov_cache_hits, stats.prov_cache_probes),
+                    );
                 }
 
                 // Stash the packed expression-id map so `build_hints`
@@ -1514,11 +1835,14 @@ impl<'a> ProtoOutBuilder<'a> {
         struct_cache: &mut HashMap<RuntimeExpr, u32>,
         prov_cache: &mut HashMap<PackedKey, u32>,
         im_labels: &mut std::collections::BTreeMap<u32, String>,
+        stats: &mut ChainShapeStats,
     ) -> u32 {
         // Rc-pointer fast path: if this exact node was already flattened,
         // reference the existing proto entry.
         let ptr = expr as *const RuntimeExpr;
+        stats.rc_cache_probes += 1;
         if let Some(&cached_idx) = rc_cache.get(&ptr) {
+            stats.rc_cache_hits += 1;
             return cached_idx;
         }
         // Provenance / ColRef cache (mirrors JS
@@ -1532,8 +1856,10 @@ impl<'a> ProtoOutBuilder<'a> {
         // lifted IM expressions that carry `source_expr_id`.
         let prov_key = packed_key_for(expr, source_expr_id);
         if let Some(k) = &prov_key {
+            stats.prov_cache_probes += 1;
             if let Some(&cached_idx) = prov_cache.get(k) {
                 rc_cache.insert(ptr, cached_idx);
+                stats.prov_cache_hits += 1;
                 return cached_idx;
             }
         }
@@ -1548,11 +1874,13 @@ impl<'a> ProtoOutBuilder<'a> {
         let cache_size = expr_node_count(expr, STRUCT_CACHE_NODE_LIMIT);
         let cache_eligible = cache_size <= STRUCT_CACHE_NODE_LIMIT;
         if cache_eligible {
+            stats.struct_cache_probes += 1;
             if let Some(&cached_idx) = struct_cache.get(expr) {
                 rc_cache.insert(ptr, cached_idx);
                 if let Some(k) = prov_key.clone() {
                     prov_cache.insert(k, cached_idx);
                 }
+                stats.struct_cache_hits += 1;
                 return cached_idx;
             }
         }
@@ -1562,8 +1890,8 @@ impl<'a> ProtoOutBuilder<'a> {
                 // Sub-operands do not carry the top-level store entry's
                 // provenance; they're reused by their own ColRef /
                 // provenance identity when recursed into.
-                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels);
-                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels);
+                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
+                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
                 match op {
                     RuntimeOp::Add => pilout_proto::expression::Operation::Add(
                         pilout_proto::expression::Add { lhs, rhs },
@@ -1579,7 +1907,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
                     let value =
-                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels);
+                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
                     pilout_proto::expression::Operation::Neg(
                         pilout_proto::expression::Neg { value },
                     )
@@ -1606,6 +1934,7 @@ impl<'a> ProtoOutBuilder<'a> {
 
         let idx = out.len() as u32;
         out.push(proto_expr);
+        stats.proto_emitted += 1;
         rc_cache.insert(ptr, idx);
         if cache_eligible {
             struct_cache.insert(expr.clone(), idx);
@@ -1646,6 +1975,7 @@ impl<'a> ProtoOutBuilder<'a> {
         struct_cache: &mut HashMap<RuntimeExpr, u32>,
         prov_cache: &mut HashMap<PackedKey, u32>,
         im_labels: &mut std::collections::BTreeMap<u32, String>,
+        stats: &mut ChainShapeStats,
     ) -> Option<pilout_proto::Operand> {
         match expr {
             RuntimeExpr::BinOp { .. } | RuntimeExpr::UnaryOp { .. } => {
@@ -1653,7 +1983,7 @@ impl<'a> ProtoOutBuilder<'a> {
                 // entry's source provenance (source_expr_id and
                 // source_label are only authoritative at the air
                 // expression store entry level).
-                let idx = self.flatten_air_expr(expr, None, None, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels);
+                let idx = self.flatten_air_expr(expr, None, None, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
                 Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Expression(
                         pilout_proto::operand::Expression { idx },

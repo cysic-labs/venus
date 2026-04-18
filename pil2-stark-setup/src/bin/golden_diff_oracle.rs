@@ -220,7 +220,8 @@ fn build_row(
 
     let verdict: &'static str = if !cur_present || !gold_present {
         "MISSING"
-    } else if q_deg_cur != q_deg_gold
+    } else if c_exp_id_cur != c_exp_id_gold
+        || q_deg_cur != q_deg_gold
         || n_cons_cur != n_cons_gold
         || cm_stage2_cur != cm_stage2_gold
         || impol_cur != impol_gold
@@ -257,18 +258,20 @@ fn print_table(report: &OracleReport) {
         report.cur_root, report.gold_root, report.airgroup_dir, report.airgroup_name
     );
     println!(
-        "{:<32} {:<7} {:>9} {:>11} {:>11} {:>11} {:>17}",
-        "name", "verdict", "qDeg", "nConstraints", "stage2cm", "imPol", "expressionsCode",
+        "{:<32} {:<7} {:>15} {:>9} {:>11} {:>11} {:>11} {:>17}",
+        "name", "verdict", "cExpId", "qDeg", "nConstraints", "stage2cm", "imPol", "expressionsCode",
     );
-    let bar = "-".repeat(32 + 7 + 9 + 11 + 11 + 11 + 17 + 6);
+    let bar = "-".repeat(32 + 7 + 15 + 9 + 11 + 11 + 11 + 17 + 7);
     println!("{bar}");
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for r in &report.rows {
         *counts.entry(r.verdict).or_insert(0) += 1;
         println!(
-            "{:<32} {:<7} {:>4}/{:<4} {:>5}/{:<5} {:>5}/{:<5} {:>5}/{:<5} {:>8}/{:<8}",
+            "{:<32} {:<7} {:>7}/{:<7} {:>4}/{:<4} {:>5}/{:<5} {:>5}/{:<5} {:>5}/{:<5} {:>8}/{:<8}",
             r.name,
             r.verdict,
+            r.c_exp_id_cur.map(|v| v as i64).unwrap_or(-1),
+            r.c_exp_id_gold.map(|v| v as i64).unwrap_or(-1),
             r.q_deg_cur.map(|v| v as i64).unwrap_or(-1),
             r.q_deg_gold.map(|v| v as i64).unwrap_or(-1),
             r.n_constraints_cur.map(|v| v as i64).unwrap_or(-1),
@@ -287,7 +290,7 @@ fn print_table(report: &OracleReport) {
         report.pass_count, report.fail_count, report.missing_count
     );
     println!(
-        "(qDeg / nConstraints / stage2cm / imPol / expressionsCode columns: cur/gold)"
+        "(cExpId / qDeg / nConstraints / stage2cm / imPol / expressionsCode columns: cur/gold)"
     );
 }
 
