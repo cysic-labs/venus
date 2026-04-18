@@ -1121,7 +1121,13 @@ pub fn build_starkinfo_output(
             dim: p.dim,
             pols_map_id: i,
             stage_id: p.stage_id.unwrap_or(0),
-            lengths: None,
+            // Array-declared fixed columns (e.g. `col fixed OPID[num_groups]`)
+            // carry a per-index `lengths` vector that `generate_multi_array_symbols`
+            // populates on the source SymbolInfo. The golden JS producer emits
+            // that field on every such entry; preserve it here so constPolsMap
+            // round-trips byte-identical with golden for array-backed fixed
+            // columns while scalar columns (lengths None) stay unchanged.
+            lengths: p.lengths.clone(),
             stage_pos: None, // constPolsMap entries don't have stagePos in golden
             im_pol: None,
             exp_id: None,
