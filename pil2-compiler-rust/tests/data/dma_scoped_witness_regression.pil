@@ -1,0 +1,73 @@
+// dma_scoped_witness_regression.pil
+//
+// Reproduces the Round 6 producer class: scoped witness column
+// and const-expr declarations written as `col witness air.NAME` /
+// `const expr air.NAME` were stored in the References map under
+// the prefixed full_name, so bare-name lookups (e.g. `NAME` in
+// `NAME <== expr` or inside `expr _Z = NAME + ...` feeding a
+// `degree(_Z) > 1` conditional) resolved to Value::Void. The Void
+// poisoned the degree computation (returned -1 / degreeNotFound),
+// the conditional branch did not execute, and the `witness_calc`
+// hints for the intermediate witness columns never emitted.
+//
+// The fixture mirrors the Dma airtemplate's pattern without
+// dragging in std / precompiles dependencies:
+//
+//   1. Two flag-gated branches declare `const expr air.sel_a = 0`
+//      or `col witness air.sel_a` depending on a compile-time
+//      `enable_a` parameter, plus a symmetric pair for `sel_b`.
+//   2. Both `sel_a` and `sel_b` feed into an intermediate
+//      expression `_loop_b = src * (sel_a + sel_b)` whose degree
+//      decides whether a witness column `loop_b` is declared and
+//      constrained via `loop_b <== _loop_b`.
+//
+// Pre-Round-6: when either enable flag is 0, the bare `sel_a` /
+// `sel_b` lookup fell through to Void, `degree(_loop_b)` returned
+// -1, the outer `if` did not execute, and `loop_b` witness column
+// and its `witness_calc` hint were missing from the produced
+// AIR. Post-Round-6: the scope prefix (`air.`, `airgroup.`,
+// `proof.`) is stripped from the declaration key so bare
+// references resolve, degree computes correctly, and the witness
+// column lands.
+
+airtemplate DmaScopedWitness(const int N,
+                             const int enable_a = 1,
+                             const int enable_b = 1) {
+    col witness src;
+
+    if (enable_a) {
+        col witness air.sel_a;
+        sel_a * (1 - sel_a) === 0;
+    } else {
+        const expr air.sel_a = 0;
+    }
+
+    if (enable_b) {
+        col witness air.sel_b;
+        sel_b * (1 - sel_b) === 0;
+    } else {
+        const expr air.sel_b = 0;
+    }
+
+    expr _loop_b = src * (sel_a + sel_b);
+
+    if (degree(_loop_b) > 1) {
+        col witness bits(32) air.loop_b;
+        loop_b <== _loop_b;
+    } else {
+        const expr air.loop_b = _loop_b;
+    }
+}
+
+airgroup DmaScoped {
+    // Both flags enabled: sel_a and sel_b are witness cols, so
+    // `src * (sel_a + sel_b)` has degree 2 and loop_b must emit
+    // its witness column + witness_calc hint.
+    DmaScopedWitness(N: 2**4);
+    // Only one flag enabled: the other selects the const expr
+    // path, so bare-name lookup of that selector is the Round 6
+    // resolution test. The product still has degree 2 because
+    // `src * sel_a` remains degree 2.
+    DmaScopedWitness(N: 2**4, enable_a: 1, enable_b: 0) alias DmaScopedA;
+    DmaScopedWitness(N: 2**4, enable_a: 0, enable_b: 1) alias DmaScopedB;
+}

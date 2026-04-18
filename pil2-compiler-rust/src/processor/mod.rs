@@ -897,13 +897,45 @@ impl Processor {
             // sibling array (proof.std.gsum.air_ids[ARRAY_SIZE=750]
             // instead of proof.std.vt.air_ids[num_virtual_tables=2]).
             let inside_container = self.references.inside_container();
-            let previous = if inside_container {
+            // A leading scope prefix (`air.`, `airgroup.`, `proof.`) on a
+            // declared name means "declare this symbol at the named scope",
+            // not at the current lexical scope. PIL writes
+            //   const expr air.sel_memcpy = 0
+            // inside an `if` body to register `sel_memcpy` at AIR scope so
+            // the later constraint-time lookup of bare `sel_memcpy`
+            // resolves after the `if` body has exited. Two concrete
+            // consequences for the Rust producer:
+            //   1. Strip the scope prefix from the reference's storage key
+            //      so bare-name lookup from the same AIR / airgroup / proof
+            //      scope succeeds.
+            //   2. Do NOT tie the declaration to the current scope's
+            //      shadow ledger; if we did, `scope.pop` at the end of
+            //      the enclosing `if` / `for` / code-block body would
+            //      remove the declaration before the constraint site
+            //      reads it.
+            // Mirrors JS pil2-compiler's handling of the scope-qualified
+            // declaration form.
+            let has_scope_prefix = !inside_container
+                && (name.starts_with("air.")
+                    || name.starts_with("airgroup.")
+                    || name.starts_with("proof."));
+            let stored_name: &str = if inside_container {
+                name
+            } else if has_scope_prefix {
+                name.strip_prefix("air.")
+                    .or_else(|| name.strip_prefix("airgroup."))
+                    .or_else(|| name.strip_prefix("proof."))
+                    .unwrap_or(name.as_str())
+            } else {
+                name
+            };
+            let previous = if inside_container || has_scope_prefix {
                 None
             } else {
-                self.references.get_direct_ref(name).cloned()
+                self.references.get_direct_ref(stored_name).cloned()
             };
             self.references.declare(
-                name,
+                stored_name,
                 ref_type,
                 store_id,
                 &array_dims,
@@ -912,8 +944,10 @@ impl Processor {
                 &self.source_ref,
             );
             // Record in scope so that pop() can unset or restore.
-            if !inside_container {
-                self.scope.declare(name, previous);
+            // Scope-prefixed declarations are deliberately skipped here:
+            // they outlive the enclosing control-flow scope.
+            if !inside_container && !has_scope_prefix {
+                self.scope.declare(stored_name, previous);
             }
         }
         FlowSignal::None
