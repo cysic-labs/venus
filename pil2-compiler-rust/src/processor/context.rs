@@ -120,12 +120,28 @@ impl Scope {
     /// Record that `name` was declared at the current scope depth.
     /// If `previous` is Some, it means there was an existing Reference
     /// binding that needs restoring on scope exit.
+    ///
+    /// If a shadow entry already exists at this depth for `name`, keep
+    /// the existing entry instead of overwriting it. This is critical
+    /// for scopes that execute their body more than once (for loops
+    /// whose scope is pushed once at loop entry; while-loop iterations
+    /// with a single surrounding push; code blocks re-entered through
+    /// control flow). Overwriting would replace the original "previous"
+    /// record with whatever was in the refs map AT THE TIME OF THE
+    /// RE-DECLARATION — typically the previous iteration's own
+    /// Reference, which would then be mistakenly restored on pop
+    /// instead of the outer-scope binding or nothing. Mirrors the JS
+    /// `Scope.declare` semantics where re-declare within the same
+    /// scope is a no-op on the shadow ledger.
     pub fn declare(&mut self, name: &str, previous: Option<Reference>) {
-        let entry = match previous {
-            Some(reference) => ShadowEntry::Shadowed(reference),
-            None => ShadowEntry::New,
-        };
         if let Some(shadow_map) = self.shadows.get_mut(self.deep as usize) {
+            if shadow_map.contains_key(name) {
+                return;
+            }
+            let entry = match previous {
+                Some(reference) => ShadowEntry::Shadowed(reference),
+                None => ShadowEntry::New,
+            };
             shadow_map.insert(name.to_string(), entry);
         }
     }
