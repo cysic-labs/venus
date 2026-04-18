@@ -4,14 +4,54 @@
 //! Covers: `exec_variable_declaration`, `exec_assignment`,
 //! `get_var_value`, `set_var_value`, `set_var_value_by_type_and_id`.
 
+use std::rc::Rc;
+
 use crate::parser::ast::*;
 
-use super::expression::{ColRefKind, Value};
+use super::expression::{ColRefKind, RuntimeExpr, RuntimeOp, Value};
 use super::ids::IdData;
-use super::mod_utils::compute_flat_index;
+use super::mod_utils::{
+    compute_flat_index, is_literal_one, is_literal_zero, is_symbolic, value_to_rc_runtime_expr,
+};
 use super::references::{RefType, Reference};
 use super::FlowSignal;
 use super::Processor;
+
+/// Combine `current op value` into a new Value when at least one side
+/// is a symbolic (ColRef / RuntimeExpr) operand. Used by compound
+/// assignments (`+=`, `-=`, `*=`) over `expr`-typed variables, where
+/// JS pil2-compiler builds a fresh symbolic sum / diff / product node
+/// instead of overwriting the accumulator. Applies the same identity
+/// folds as `eval_expr`'s BinaryOp arm (x+0=x, 0+x=x, x-0=x, x*1=x,
+/// 1*x=x).
+fn combine_symbolic(current: Value, op: RuntimeOp, value: Value) -> Value {
+    match op {
+        RuntimeOp::Add => {
+            if is_literal_zero(&value) {
+                return current;
+            }
+            if is_literal_zero(&current) {
+                return value;
+            }
+        }
+        RuntimeOp::Sub => {
+            if is_literal_zero(&value) {
+                return current;
+            }
+        }
+        RuntimeOp::Mul => {
+            if is_literal_one(&value) {
+                return current;
+            }
+            if is_literal_one(&current) {
+                return value;
+            }
+        }
+    }
+    let left = value_to_rc_runtime_expr(&current);
+    let right = value_to_rc_runtime_expr(&value);
+    Value::RuntimeExpr(Rc::new(RuntimeExpr::BinOp { op, left, right }))
+}
 
 impl Processor {
 // -----------------------------------------------------------------------
@@ -327,6 +367,12 @@ pub(super) fn exec_assignment(&mut self, a: &Assignment) -> FlowSignal {
                 };
                 if let (Some(l), Some(r)) = (current.as_int(), value.as_int()) {
                     Value::Int(l + r)
+                } else if is_symbolic(&current) || is_symbolic(&value) {
+                    // `expr`-typed accumulator: build a fresh Add node
+                    // so repeated `sum += term` in a for-loop body
+                    // produces a running sum instead of overwriting
+                    // the previous iteration's value.
+                    combine_symbolic(current, RuntimeOp::Add, value)
                 } else {
                     value
                 }
@@ -339,6 +385,8 @@ pub(super) fn exec_assignment(&mut self, a: &Assignment) -> FlowSignal {
                 };
                 if let (Some(l), Some(r)) = (current.as_int(), value.as_int()) {
                     Value::Int(l - r)
+                } else if is_symbolic(&current) || is_symbolic(&value) {
+                    combine_symbolic(current, RuntimeOp::Sub, value)
                 } else {
                     value
                 }
@@ -351,6 +399,8 @@ pub(super) fn exec_assignment(&mut self, a: &Assignment) -> FlowSignal {
                 };
                 if let (Some(l), Some(r)) = (current.as_int(), value.as_int()) {
                     Value::Int(l * r)
+                } else if is_symbolic(&current) || is_symbolic(&value) {
+                    combine_symbolic(current, RuntimeOp::Mul, value)
                 } else {
                     value
                 }
