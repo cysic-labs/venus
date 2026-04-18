@@ -298,38 +298,68 @@ pub(super) fn execute_air_template_call(
     // the consumer.
     let air_expr_store: Vec<air::AirExpressionEntry> = {
         let mut store = std::mem::take(&mut self.air_expression_store);
-        // Only mirror slots that were allocated in THIS AIR's frame
-        // into the per-AIR expression store. Slots below
-        // `self.exprs.frame_start()` were seeded from proof-scope
-        // container fields at air-entry `push()` time and hold values
-        // that may reference other AIRs' declarations (e.g. a Rom-built
-        // Horner polynomial stored in `proof.std.gsum.direct_gsum_e[i]`);
-        // lifting those into every consumer AIR's expression store was
-        // the exact mechanism producing cross-AIR `ColRefKind::Custom`
-        // leaks (Rounds 10-12 CustomCol class). Proof-scope expressions
-        // stay in the global / deferred-handler emission path.
+        // Iterate every self.exprs slot. Most proof-scope
+        // container-seeded slots (id < frame_start) carry
+        // legitimate pre-declared state that Main / other AIRs
+        // reference back through the per-AIR expressionsCode list
+        // (Round 14: dropping all of them removed 91 valid Main
+        // entries and regressed recursive1). The narrow case we
+        // need to drop is the cross-AIR Custom leak class: a
+        // proof-scope slot populated in a PRIOR AIR's frame that
+        // holds a `ColRefKind::Custom` id not declared in THIS
+        // AIR (e.g. Rom's compress_exprs Horner polynomial stored
+        // into `proof.std.gsum.direct_gsum_e[i]`). Those are the
+        // only slots that must not surface in the consuming AIR's
+        // per-AIR expression store.
         let frame_start = self.exprs.frame_start();
-        for eid in frame_start..self.exprs.len() {
+        let mut leak_visited: std::collections::HashSet<
+            *const super::expression::RuntimeExpr,
+        > = std::collections::HashSet::new();
+        for eid in 0..self.exprs.len() {
             if let Some(val) = self.exprs.get(eid) {
-                if is_symbolic(val) {
-                    let rt = value_to_runtime_expr(val);
-                    let source_label = self.exprs.ids.label_ranges
-                        .to_vec()
-                        .iter()
-                        .find_map(|lr| {
-                            if eid >= lr.from && eid < lr.from + lr.count {
-                                let size = lr.array_dims.iter().copied().product::<u32>().max(1);
-                                if size <= 1 {
-                                    Some(lr.label.clone())
-                                } else {
-                                    Some(format!("{}[{}]", lr.label, eid - lr.from))
-                                }
-                            } else {
-                                None
-                            }
-                        });
-                    store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
+                if !is_symbolic(val) {
+                    continue;
                 }
+                if eid < frame_start {
+                    // Seeded proof-scope slot. Drop it ONLY if
+                    // its expression leaves reference a custom id
+                    // that is not declared in THIS AIR's
+                    // allocator — i.e. a concrete cross-AIR Custom
+                    // leak. Otherwise (legitimate proof-scope
+                    // state re-used in this AIR) keep it so the
+                    // pilout matches JS-golden.
+                    let mut local_ids: std::collections::BTreeSet<u32> =
+                        std::collections::BTreeSet::new();
+                    let rt_probe = value_to_runtime_expr(val);
+                    collect_custom_ids_in_expr(
+                        &rt_probe,
+                        &mut local_ids,
+                        &mut leak_visited,
+                    );
+                    let has_cross_air = local_ids
+                        .iter()
+                        .any(|id| self.custom_cols.get_data(*id).is_none());
+                    if has_cross_air {
+                        continue;
+                    }
+                }
+                let rt = value_to_runtime_expr(val);
+                let source_label = self.exprs.ids.label_ranges
+                    .to_vec()
+                    .iter()
+                    .find_map(|lr| {
+                        if eid >= lr.from && eid < lr.from + lr.count {
+                            let size = lr.array_dims.iter().copied().product::<u32>().max(1);
+                            if size <= 1 {
+                                Some(lr.label.clone())
+                            } else {
+                                Some(format!("{}[{}]", lr.label, eid - lr.from))
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
             }
         }
         for expr in constraint_exprs {
@@ -366,20 +396,16 @@ pub(super) fn execute_air_template_call(
     }
 
     // Build custom column ID mappings and custom_commits from the
-    // local allocator state (Codex's Round 11-review "referenced-set"
-    // invariant). Cross-AIR references survive here as ids that the
-    // referenced-set walk finds but the local allocator does not
-    // register; those degrade to `Operand::Constant(0)` at the proto
-    // serializer (the Round 11 fallback, preserved intentionally
-    // because a receiving AIR does not actually commit to the
-    // declaring AIR's columns — synthesizing per-AIR `custom_commits`
-    // entries for them at this layer propagates bad
-    // `custom_<commit>_<idx>` signals into the downstream verifier
-    // circom and breaks `compressor_check` at Mem). The panic below
-    // is reserved for references that are absent from BOTH the
-    // in-AIR allocator and the cross-AIR `custom_col_meta` registry,
-    // i.e. true "custom column was never declared anywhere"
-    // invariant violations.
+    // local allocator state. Round 13 closed the upstream leak that
+    // made cross-AIR `ColRefKind::Custom` ids appear in consuming
+    // AIRs' air_expr_store (`execute_air_template_call` now bounds
+    // the air-expression lift by `self.exprs.frame_start()`), so
+    // every referenced id in `referenced_custom_ids` should be
+    // covered by `self.custom_cols` at this point. The panic below
+    // is reserved for the remaining correctness floor: any id
+    // absent from BOTH the in-AIR allocator and the cross-AIR
+    // `custom_col_meta` registry is a truly-undeclared column
+    // (never reserved anywhere) and must surface immediately.
     let (custom_id_map, custom_commits) = {
         let mut cid_map: Vec<(u32, u32, u32)> = Vec::new();
         let mut commits: Vec<(String, Vec<u32>, Vec<u32>)> = Vec::new();

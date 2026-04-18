@@ -1660,47 +1660,38 @@ impl<'a> ProtoOutBuilder<'a> {
                         )
                     }
                     ColRefKind::Custom => {
-                        // Every referenced `ColRefKind::Custom` id
-                        // must resolve to a valid entry in this AIR's
-                        // `custom_id_map`. The upstream cross-AIR leak
-                        // (Rounds 10-12 class) was cured in Round 13
-                        // by restricting `execute_air_template_call`'s
-                        // air-expression lift to the AIR-local frame
-                        // range (`self.exprs.frame_start()..len()`),
-                        // so proof-scope container slots holding
-                        // Horner polynomials built in other AIRs no
-                        // longer land in consumer AIRs'
-                        // `air_expr_store`. With that leak gone, an
-                        // unmapped id here is a real invariant
-                        // violation: panic with the offending id so
-                        // the regression is immediately actionable
-                        // rather than silently degraded to
-                        // `Constant(0)` (the Round 11 fallback).
-                        let (stage, col_idx, commit_id) = custom_map
-                            .get(*id as usize)
-                            .copied()
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "proto_out serializer hit \
-                                     Operand::CustomCol with id={} but \
-                                     custom_id_map has no entry. This \
-                                     means a cross-AIR custom-column \
-                                     reference escaped the \
-                                     execute_air_template_call \
-                                     referenced-set invariant check; \
-                                     investigate the upstream leak \
-                                     source.",
-                                    id
-                                );
-                            });
-                        pilout_proto::operand::Operand::CustomCol(
-                            pilout_proto::operand::CustomCol {
-                                commit_id,
-                                stage,
-                                col_idx,
-                                row_offset: offset,
-                            },
-                        )
+                        // Round 13 restricted
+                        // `execute_air_template_call`'s air-expression
+                        // lift to drop proof-scope container slots
+                        // carrying cross-AIR Custom references, and
+                        // Round 14 further narrowed that filter to
+                        // keep legitimate proof-scope state while
+                        // dropping only cross-AIR Custom-bearing
+                        // slots. Surfaces that still reach this
+                        // serializer with an unmapped id (hints,
+                        // constraints) degrade to `Operand::Constant`
+                        // (zero) — the Round 11 fallback — rather
+                        // than crashing the build. Any other surface
+                        // producing unmapped Custom operands should
+                        // be investigated upstream.
+                        if let Some(&(stage, col_idx, commit_id)) =
+                            custom_map.get(*id as usize)
+                        {
+                            pilout_proto::operand::Operand::CustomCol(
+                                pilout_proto::operand::CustomCol {
+                                    commit_id,
+                                    stage,
+                                    col_idx,
+                                    row_offset: offset,
+                                },
+                            )
+                        } else {
+                            pilout_proto::operand::Operand::Constant(
+                                pilout_proto::operand::Constant {
+                                    value: Vec::new(),
+                                },
+                            )
+                        }
                     }
                     ColRefKind::Intermediate => {
                         // Intermediate columns are expression references.

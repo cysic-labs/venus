@@ -148,8 +148,14 @@ fn cross_air_custom_col_refs_have_in_range_commit_ids() {
     let mut producer_expr_count: usize = 0;
     let mut consumer_seen = false;
     let mut producer_seen = false;
-    for ag in &pilout.air_groups {
-        for air in &ag.airs {
+    // Round 14: resolve the CustomAssumeAir instance to its exact
+    // `(air_group_id, air_id)` tuple in the decoded pilout so the
+    // hint walk below can filter by that exact tuple instead of the
+    // prior "any AIR exists somewhere" check (Round 13 bug: the
+    // Some-check passed for every air-scoped hint).
+    let mut consumer_coords: Option<(u32, u32)> = None;
+    for (ag_idx, ag) in pilout.air_groups.iter().enumerate() {
+        for (air_idx, air) in ag.airs.iter().enumerate() {
             match air.name.as_deref() {
                 Some("CustomProveAir") => {
                     producer_seen = true;
@@ -158,6 +164,7 @@ fn cross_air_custom_col_refs_have_in_range_commit_ids() {
                 }
                 Some("CustomAssumeAir") => {
                     consumer_seen = true;
+                    consumer_coords = Some((ag_idx as u32, air_idx as u32));
                     consumer_expr_count = air.expressions.len();
                     for expr in &air.expressions {
                         walk_expression_operands(expr, &mut |op| {
@@ -169,34 +176,22 @@ fn cross_air_custom_col_refs_have_in_range_commit_ids() {
                             }
                         });
                     }
-                    for h in &pilout.hints {
-                        let this_air_scoped = pilout
-                            .air_groups
-                            .iter()
-                            .zip(std::iter::repeat(()))
-                            .any(|_| {
-                                h.air_id.is_some()
-                                    && pilout
-                                        .air_groups
-                                        .iter()
-                                        .flat_map(|g| g.airs.iter())
-                                        .any(|a| {
-                                            a.name.as_deref() == Some("CustomAssumeAir")
-                                        })
-                            });
-                        if this_air_scoped {
-                            walk_hint_fields(h, &mut |op, _| {
-                                if matches!(
-                                    op.operand,
-                                    Some(pb::operand::Operand::CustomCol(_))
-                                ) {
-                                    consumer_custom_ops_in_hints += 1;
-                                }
-                            });
-                        }
-                    }
                 }
                 _ => {}
+            }
+        }
+    }
+    if let Some((want_ag, want_air)) = consumer_coords {
+        for h in &pilout.hints {
+            if h.air_group_id == Some(want_ag) && h.air_id == Some(want_air) {
+                walk_hint_fields(h, &mut |op, _| {
+                    if matches!(
+                        op.operand,
+                        Some(pb::operand::Operand::CustomCol(_))
+                    ) {
+                        consumer_custom_ops_in_hints += 1;
+                    }
+                });
             }
         }
     }
