@@ -1,0 +1,50 @@
+// minimal_cross_air_custom.pil
+//
+// Pins the CustomCol cross-AIR metadata repair landed in Round 12.
+//
+// The Zisk production case: `Rom` airtemplate declares a commit
+// `rom` and several `col rom X` custom columns, and calls
+// `lookup_proves` on a bus. `Mem` (and other consumer AIRs) call
+// `lookup_assumes` on the same bus. The std_lookup proof-scope
+// deferred machinery reifies bus operations into a Horner
+// polynomial that references the custom columns, and that
+// polynomial lands in every participating AIR's pilout expression
+// store. Before the Round 12 fix, `Mem`'s pilout emitted
+// Operand::CustomCol operands whose `id` was not in Mem's local
+// `custom_cols` allocator — the post-Round-11 serializer paperrede
+// over those unmapped ids by emitting `Constant(0)`. That kept
+// pilout-write succeeding but left pilout-level semantics broken:
+// the consumer AIR's proto no longer carried custom_commits for
+// the bus columns. This fixture reproduces the class in miniature
+// using only `std_lookup.pil`.
+//
+// The paired regression test asserts that every `Operand::CustomCol`
+// in the emitted pilout has a `commit_id` that is a valid index
+// into its AIR's `custom_commits` vector. Pre-Round-12 this
+// fixture would either panic at pilout build time (if the proto
+// emission hit the naive `Constant(0)` fallback through the
+// lookup helpers) or emit an AIR with a CustomCol operand and
+// empty custom_commits (which crashes pil2-stark-setup). Post-fix
+// the fixture compiles cleanly and every emission satisfies the
+// in-range commit_id invariant.
+
+require "std_lookup.pil";
+
+airtemplate CustomProveAir(const int N = 2**4, const int bus_id = 123) {
+    commit stage(0) my_commit;
+    col my_commit a;
+    col my_commit b;
+    col witness mul;
+    lookup_proves(bus_id, [a, b], mul: mul);
+}
+
+airtemplate CustomAssumeAir(const int N = 2**4, const int bus_id = 123) {
+    col witness c;
+    col witness d;
+    lookup_assumes(bus_id, [c, d]);
+}
+
+airgroup MinimalCrossAirCustom {
+    CustomProveAir(N: 2**4);
+    CustomAssumeAir(N: 2**4);
+}

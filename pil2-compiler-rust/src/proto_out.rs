@@ -1660,43 +1660,40 @@ impl<'a> ProtoOutBuilder<'a> {
                         )
                     }
                     ColRefKind::Custom => {
-                        // Use per-AIR custom_id_map for remapped stage,
-                        // proto_index, and commit_id. When the id is not
-                        // mapped (e.g. a cross-AIR reference whose owning
-                        // commit was declared in a different AIR and is
-                        // therefore not in this AIR's custom_id_map),
-                        // emit the operand as a Constant(0) rather than a
-                        // CustomCol with a dummy commit_id. The prior
-                        // fallback of `(0, id, 0)` produced
-                        // `Operand::CustomCol { commit_id: 0, ... }` in
-                        // the serialized pilout, which then crashed
-                        // `pil2-stark-setup::pilout_info` when it indexed
-                        // into the AIR's empty `custom_commits` vector.
-                        // The Constant(0) fallback keeps the constraint
-                        // algebraically equivalent to the prior
-                        // Value::Void -> number(1)/constant path; the
-                        // exact semantic fix for cross-AIR references
-                        // requires extending the per-AIR `custom_commits`
-                        // metadata at pilout build time, which is a
-                        // broader follow-on.
-                        if let Some(&(stage, col_idx, commit_id)) =
-                            custom_map.get(*id as usize)
-                        {
-                            pilout_proto::operand::Operand::CustomCol(
-                                pilout_proto::operand::CustomCol {
-                                    commit_id,
-                                    stage,
-                                    col_idx,
-                                    row_offset: offset,
-                                },
-                            )
-                        } else {
-                            pilout_proto::operand::Operand::Constant(
-                                pilout_proto::operand::Constant {
-                                    value: Vec::new(),
-                                },
-                            )
-                        }
+                        // Every referenced Custom id must be present in
+                        // this AIR's `custom_id_map`. Cross-AIR
+                        // references are now stitched in during
+                        // `execute_air_template_call`'s custom_id_map
+                        // build via the `custom_col_meta` /
+                        // `custom_commit_meta` registries, so a missing
+                        // entry here is a real producer bug: either a
+                        // referenced column was never declared or the
+                        // registry lookup did not run. Panic with the
+                        // offending id so the upstream construction
+                        // site is easy to locate instead of silently
+                        // serializing a placeholder.
+                        let (stage, col_idx, commit_id) = custom_map
+                            .get(*id as usize)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "proto_out serializer hit Operand::CustomCol \
+                                     with id={} but custom_id_map has no entry. \
+                                     This should have been caught in \
+                                     execute_air_template_call's custom-col \
+                                     invariant check; something bypassed the \
+                                     registry lookup.",
+                                    id
+                                );
+                            });
+                        pilout_proto::operand::Operand::CustomCol(
+                            pilout_proto::operand::CustomCol {
+                                commit_id,
+                                stage,
+                                col_idx,
+                                row_offset: offset,
+                            },
+                        )
                     }
                     ColRefKind::Intermediate => {
                         // Intermediate columns are expression references.

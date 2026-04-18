@@ -9,7 +9,9 @@ use super::air;
 use super::air::AirTemplateInfo;
 use super::expression::Value;
 use super::ids::IdData;
-use super::mod_utils::{is_symbolic, value_to_runtime_expr};
+use super::mod_utils::{
+    collect_custom_ids_in_expr, collect_custom_ids_in_hint, is_symbolic, value_to_runtime_expr,
+};
 use super::references::RefType;
 use super::CallStackEntry;
 use super::Processor;
@@ -325,24 +327,158 @@ pub(super) fn execute_air_template_call(
         store
     };
 
-    // Build custom column ID mappings and custom_commits.
+    // Collect every `ColRefKind::Custom` id actually referenced by this
+    // AIR's expressions, constraints, and hint payloads. Used below to
+    // validate the per-AIR `custom_id_map` covers every emitted
+    // custom reference. Failing this invariant is what produced the
+    // Round 10 `pilout_info.rs:208` panic at Mem; catching it at pilout
+    // build time here surfaces the gap with an actionable diagnostic
+    // instead of a downstream `index out of bounds`.
+    let mut referenced_custom_ids: std::collections::BTreeSet<u32> =
+        std::collections::BTreeSet::new();
+    let mut visited_expr_ptrs: std::collections::HashSet<
+        *const super::expression::RuntimeExpr,
+    > = std::collections::HashSet::new();
+    for entry in &air_expr_store {
+        collect_custom_ids_in_expr(
+            &entry.expr,
+            &mut referenced_custom_ids,
+            &mut visited_expr_ptrs,
+        );
+    }
+    for hint in &self.air_hints {
+        collect_custom_ids_in_hint(
+            &hint.data,
+            &mut referenced_custom_ids,
+            &mut visited_expr_ptrs,
+        );
+    }
+
+    // Build custom column ID mappings and custom_commits from the
+    // union of (a) allocator state for in-AIR declarations and
+    // (b) the referenced-set walk above. Any referenced id not
+    // covered by in-AIR allocator state is resolved through the
+    // cross-AIR `custom_col_meta` / `custom_commit_meta` registries
+    // populated at declaration time. If a referenced id is absent
+    // from both, panic with a diagnostic pointing at the offending
+    // expression so the producer bug is immediately actionable.
     let (custom_id_map, custom_commits) = {
         let mut cid_map: Vec<(u32, u32, u32)> = Vec::new();
         let mut commits: Vec<(String, Vec<u32>, Vec<u32>)> = Vec::new();
 
-        // Group custom columns by commit_id.
+        // Group local custom columns by commit_id.
         let mut commits_by_id: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
         let mut commit_names: HashMap<u32, String> = HashMap::new();
+        let mut registered_ids: std::collections::BTreeSet<u32> =
+            std::collections::BTreeSet::new();
         for col_id in 0..self.custom_cols.len() {
             if let Some(data) = self.custom_cols.get_data(col_id) {
                 let cid = data.commit_id.unwrap_or(0);
                 let stage = data.stage.unwrap_or(0);
                 commits_by_id.entry(cid).or_default().push((col_id, stage));
+                registered_ids.insert(col_id);
             }
         }
         // Map commit_id -> name from the reverse of commit_name_to_id.
         for (name, &cid) in &self.commit_name_to_id {
             commit_names.insert(cid, name.clone());
+        }
+
+        // Identify cross-AIR referenced ids. These are ids that appear
+        // in this AIR's emitted expressions / hints but were declared
+        // in a previous AIR (their metadata was wiped from
+        // `self.custom_cols` at that AIR's exit).
+        let cross_air_ids: Vec<u32> = referenced_custom_ids
+            .iter()
+            .copied()
+            .filter(|id| !registered_ids.contains(id))
+            .collect();
+
+        // For cross-AIR ids, consult the registry and stage local
+        // metadata entries so this AIR's pilout carries the full
+        // Operand::CustomCol / custom_commits pair. If any cross-AIR
+        // id lacks registry metadata, the leak is real — panic with
+        // the offending tree.
+        let air_name_dbg = self
+            .air_stack
+            .last()
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "?".to_string());
+        let mut unmapped: Vec<u32> = Vec::new();
+        // Synthetic commit_id values allocated in this AIR for
+        // cross-AIR commits. Each entry keyed by commit_name.
+        let mut synthetic_commit_ids: std::collections::BTreeMap<String, u32> =
+            std::collections::BTreeMap::new();
+        // Synthetic (stage, col_idx, commit_id) entries per id.
+        let mut synthetic_cid_map: std::collections::BTreeMap<u32, (u32, u32, u32)> =
+            std::collections::BTreeMap::new();
+
+        for id in &cross_air_ids {
+            if let Some((commit_name, stage, col_idx)) =
+                self.custom_col_meta.get(id).cloned()
+            {
+                // Assign a synthetic commit_id in this AIR's local
+                // numbering space. Pick the next id not already used
+                // by in-AIR commits or prior synthetic assignments.
+                let local_commit_id = match synthetic_commit_ids.get(&commit_name) {
+                    Some(cid) => *cid,
+                    None => {
+                        let mut next = self.next_commit_id;
+                        while commits_by_id.contains_key(&next)
+                            || synthetic_commit_ids.values().any(|v| *v == next)
+                        {
+                            next += 1;
+                        }
+                        commit_names.insert(next, commit_name.clone());
+                        synthetic_commit_ids.insert(commit_name.clone(), next);
+                        next
+                    }
+                };
+                synthetic_cid_map.insert(*id, (stage, col_idx, local_commit_id));
+            } else {
+                unmapped.push(*id);
+            }
+        }
+
+        if !unmapped.is_empty() {
+            let mut offenders: Vec<String> = Vec::new();
+            for (idx, entry) in air_expr_store.iter().enumerate() {
+                let mut local_ids: std::collections::BTreeSet<u32> =
+                    std::collections::BTreeSet::new();
+                let mut local_visited: std::collections::HashSet<
+                    *const super::expression::RuntimeExpr,
+                > = std::collections::HashSet::new();
+                collect_custom_ids_in_expr(
+                    &entry.expr,
+                    &mut local_ids,
+                    &mut local_visited,
+                );
+                let bad: Vec<u32> = local_ids
+                    .into_iter()
+                    .filter(|id| unmapped.contains(id))
+                    .collect();
+                if !bad.is_empty() {
+                    offenders.push(format!(
+                        "expr#{} (source={:?}, source_expr_id={:?}): custom_ids={:?}",
+                        idx,
+                        entry.source_label,
+                        entry.source_expr_id,
+                        bad,
+                    ));
+                }
+            }
+            panic!(
+                "AIR '{}' emits Operand::CustomCol references with ids {:?} \
+                 that are absent from both this AIR's custom_cols allocator \
+                 and the cross-AIR `custom_col_meta` registry. This indicates \
+                 a custom column reference that was never declared (or whose \
+                 declaration metadata was lost before reaching pilout build). \
+                 Registered in-AIR ids: {:?}. Offending expression entries:\n  {}",
+                air_name_dbg,
+                unmapped,
+                registered_ids.iter().copied().collect::<Vec<_>>(),
+                offenders.join("\n  "),
+            );
         }
 
         let mut sorted_cids: Vec<u32> = commits_by_id.keys().cloned().collect();
@@ -381,8 +517,84 @@ pub(super) fn execute_air_template_call(
                 .unwrap_or_default();
             commits.push((commit_name, sw, pub_ids));
         }
+
+        // Merge cross-AIR commits into the per-AIR custom_commits.
+        // We take stage_widths + pub_ids directly from
+        // `custom_commit_meta` so the receiving AIR emits the same
+        // commit shape as the declaring AIR.
+        let mut sorted_synthetic: Vec<(String, u32)> = synthetic_commit_ids
+            .into_iter()
+            .collect();
+        sorted_synthetic.sort_by_key(|(_, cid)| *cid);
+        for (commit_name, _local_cid) in &sorted_synthetic {
+            let (sw, pub_ids) = self
+                .custom_commit_meta
+                .get(commit_name)
+                .cloned()
+                .unwrap_or_default();
+            commits.push((commit_name.clone(), sw, pub_ids));
+        }
+        // Install synthetic cid_map entries at their id positions.
+        for (id, triple) in synthetic_cid_map {
+            while cid_map.len() <= id as usize {
+                cid_map.push((0, 0, 0));
+            }
+            cid_map[id as usize] = triple;
+        }
+
         (cid_map, commits)
     };
+
+    // Snapshot this AIR's custom col metadata into the cross-AIR
+    // registry BEFORE the post-AIR clear wipes `self.custom_cols` and
+    // `self.commit_name_to_id`. Subsequent AIRs that reference these
+    // ids will consult the registry via the cross-AIR branch above.
+    {
+        // Per-commit stage widths so cross-AIR readers can reconstruct
+        // the full commit entry without iterating per-AIR allocator
+        // state.
+        let mut stage_width_by_commit: HashMap<String, Vec<u32>> =
+            HashMap::new();
+        for (col_id, commit_name, stage, col_idx) in custom_id_map
+            .iter()
+            .enumerate()
+            .filter_map(|(id, triple)| {
+                let (stage, col_idx, cid) = *triple;
+                // Only snapshot entries that correspond to actual
+                // declarations in this AIR (registered_ids).
+                let registered: bool = self.custom_cols.get_data(id as u32).is_some();
+                if !registered {
+                    return None;
+                }
+                let commit_name = self
+                    .commit_name_to_id
+                    .iter()
+                    .find(|(_, v)| **v == cid)
+                    .map(|(k, _)| k.clone())?;
+                Some((id as u32, commit_name, stage, col_idx))
+            })
+            .collect::<Vec<_>>()
+        {
+            self.custom_col_meta
+                .insert(col_id, (commit_name.clone(), stage, col_idx));
+            let widths = stage_width_by_commit
+                .entry(commit_name.clone())
+                .or_default();
+            if (stage as usize) >= widths.len() {
+                widths.resize(stage as usize + 1, 0);
+            }
+            widths[stage as usize] = widths[stage as usize].max(col_idx + 1);
+        }
+        for (commit_name, widths) in stage_width_by_commit {
+            let pub_ids = self
+                .commit_publics
+                .get(&commit_name)
+                .cloned()
+                .unwrap_or_default();
+            self.custom_commit_meta
+                .insert(commit_name, (widths, pub_ids));
+        }
+    }
 
     // Build air value stages.
     let air_value_stages: Vec<u32> = {

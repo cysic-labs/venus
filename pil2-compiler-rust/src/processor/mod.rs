@@ -172,6 +172,23 @@ pub struct Processor {
     /// publics associated with each commit.
     commit_publics: BTreeMap<String, Vec<u32>>,
 
+    // -- Cross-AIR custom column registry --
+    /// Persisted metadata for every custom column ever declared in
+    /// any AIR. Keyed by the allocator id assigned at declaration
+    /// time in `exec_col_declaration`'s `ColType::Custom` arm.
+    /// Survives `self.custom_cols.clear()` between AIRs, so any AIR
+    /// that subsequently references a cross-AIR custom column can
+    /// look up the (commit_name, stage, col_idx_in_stage) triple
+    /// needed to synthesize its own per-AIR `custom_id_map` +
+    /// `custom_commits` entry for that commit.
+    pub custom_col_meta: BTreeMap<u32, (String, u32, u32)>,
+    /// Persisted per-commit metadata (stage widths + associated
+    /// public ids). Keyed by commit name. Populated at declaration
+    /// time alongside `custom_col_meta` so cross-AIR references can
+    /// rebuild the commit entry in the receiving AIR without rerunning
+    /// the declaring AIR's `exec_col_declaration` path.
+    pub custom_commit_meta: BTreeMap<String, (Vec<u32>, Vec<u32>)>,
+
     // -- Hints --
     /// Per-AIR hints collected during air scope execution.
     pub air_hints: Vec<air::HintEntry>,
@@ -282,6 +299,8 @@ impl Processor {
             commit_name_to_id: BTreeMap::new(),
             next_commit_id: 0,
             commit_publics: BTreeMap::new(),
+            custom_col_meta: BTreeMap::new(),
+            custom_commit_meta: BTreeMap::new(),
             air_hints: Vec::new(),
             global_hints: Vec::new(),
         };

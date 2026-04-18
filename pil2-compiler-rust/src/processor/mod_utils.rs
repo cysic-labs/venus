@@ -119,6 +119,108 @@ pub(super) fn value_to_rc_runtime_expr(val: &Value) -> Rc<RuntimeExpr> {
     }
 }
 
+/// Walk a `RuntimeExpr` tree and push every `ColRefKind::Custom`
+/// leaf id into `out`. Also descends into `Value::ColRef` /
+/// `Value::RuntimeExpr` wrappers carried by `RuntimeExpr::Value`.
+///
+/// The `visited` set deduplicates shared subtrees by pointer
+/// identity. Without it, recursive1-shaped AIRs (10k+ node trees
+/// with heavily shared Rc subtrees) drive the walk into
+/// exponential time, which blows the
+/// `recursive1_pilout_under_time_budget` regression; with it the
+/// walk is linear in unique-subtree count.
+///
+/// Paired with `collect_custom_ids_in_hint` below: together they
+/// let `execute_air_template_call` verify that every
+/// `Operand::CustomCol` the proto serializer will emit has
+/// corresponding metadata in the emitting AIR's `custom_id_map`
+/// before pilout serialization begins. Catching the mismatch at
+/// build time produces an actionable "cross-AIR custom leak"
+/// diagnostic instead of the downstream pil2-stark-setup
+/// `pilout_info.rs` index-out-of-bounds panic class.
+pub(super) fn collect_custom_ids_in_expr(
+    expr: &super::expression::RuntimeExpr,
+    out: &mut std::collections::BTreeSet<u32>,
+    visited: &mut std::collections::HashSet<*const super::expression::RuntimeExpr>,
+) {
+    use super::expression::{ColRefKind, RuntimeExpr};
+    let ptr = expr as *const RuntimeExpr;
+    if !visited.insert(ptr) {
+        return;
+    }
+    match expr {
+        RuntimeExpr::ColRef { col_type: ColRefKind::Custom, id, .. } => {
+            out.insert(*id);
+        }
+        RuntimeExpr::ColRef { .. } => {}
+        RuntimeExpr::Value(v) => collect_custom_ids_in_value(v, out, visited),
+        RuntimeExpr::BinOp { left, right, .. } => {
+            collect_custom_ids_in_expr(left.as_ref(), out, visited);
+            collect_custom_ids_in_expr(right.as_ref(), out, visited);
+        }
+        RuntimeExpr::UnaryOp { operand, .. } => {
+            collect_custom_ids_in_expr(operand.as_ref(), out, visited);
+        }
+    }
+}
+
+fn collect_custom_ids_in_value(
+    val: &super::expression::Value,
+    out: &mut std::collections::BTreeSet<u32>,
+    visited: &mut std::collections::HashSet<*const super::expression::RuntimeExpr>,
+) {
+    use super::expression::{ColRefKind, Value};
+    match val {
+        Value::ColRef { col_type: ColRefKind::Custom, id, .. } => {
+            out.insert(*id);
+        }
+        Value::RuntimeExpr(rt) => collect_custom_ids_in_expr(rt.as_ref(), out, visited),
+        Value::Array(items) => {
+            for it in items {
+                collect_custom_ids_in_value(it, out, visited);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walk a `HintValue` tree and push every `ColRefKind::Custom` leaf
+/// id into `out`. Hint payloads can carry bare `ColRef` leaves
+/// (through `HintValue::ColRef`) as well as `ExprId` references into
+/// the per-AIR expression store; the caller is responsible for
+/// walking the expression store separately, so this helper only
+/// needs to chase the bare-leaf path.
+///
+/// The `visited` set is shared with
+/// `collect_custom_ids_in_expr` so that any `Value::RuntimeExpr`
+/// tree we happen to re-enter from a different direction is
+/// deduplicated by pointer identity.
+pub(super) fn collect_custom_ids_in_hint(
+    hint: &super::air::HintValue,
+    out: &mut std::collections::BTreeSet<u32>,
+    _visited: &mut std::collections::HashSet<*const super::expression::RuntimeExpr>,
+) {
+    use super::air::HintValue;
+    use super::expression::ColRefKind;
+    match hint {
+        HintValue::ColRef { col_type: ColRefKind::Custom, id, .. } => {
+            out.insert(*id);
+        }
+        HintValue::ColRef { .. } => {}
+        HintValue::Array(items) => {
+            for it in items {
+                collect_custom_ids_in_hint(it, out, _visited);
+            }
+        }
+        HintValue::Object(fields) => {
+            for (_k, v) in fields {
+                collect_custom_ids_in_hint(v, out, _visited);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Recursively remap ExprId values in hint data using the given remap
 /// table. Retained for future use when expression stores require
 /// index remapping.

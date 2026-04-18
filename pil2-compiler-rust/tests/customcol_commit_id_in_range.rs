@@ -145,13 +145,68 @@ fn custom_col_commit_ids_are_in_range_for_their_air() {
         }
     }
 
+    fn walk_hint_field_for_operands(
+        hf: &pb::HintField,
+        air_name: &str,
+        custom_commits_len: usize,
+        violations: &mut Vec<String>,
+    ) {
+        match hf.value.as_ref() {
+            Some(pb::hint_field::Value::Operand(op)) => {
+                check_operand(op, air_name, custom_commits_len, violations);
+            }
+            Some(pb::hint_field::Value::HintFieldArray(arr)) => {
+                for sub in &arr.hint_fields {
+                    walk_hint_field_for_operands(
+                        sub,
+                        air_name,
+                        custom_commits_len,
+                        violations,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     let mut violations: Vec<String> = Vec::new();
-    for ag in &pilout.air_groups {
-        for air in &ag.airs {
+    for (ag_idx, ag) in pilout.air_groups.iter().enumerate() {
+        for (air_idx, air) in ag.airs.iter().enumerate() {
             let air_name = air.name.as_deref().unwrap_or("?").to_string();
             let ccl = air.custom_commits.len();
+            // Expressions.
             for expr in &air.expressions {
                 walk_expression(expr, &air_name, ccl, &mut violations);
+            }
+            // Constraints carry a debug_line + expression index into
+            // air.expressions; those expressions are already walked
+            // above. No inline operand fields to traverse.
+            // Hints: walk every air-scoped hint's operand leaves.
+            for h in &pilout.hints {
+                if h.air_group_id == Some(ag_idx as u32)
+                    && h.air_id == Some(air_idx as u32)
+                {
+                    for hf in &h.hint_fields {
+                        walk_hint_field_for_operands(
+                            hf,
+                            &air_name,
+                            ccl,
+                            &mut violations,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Global constraints: they reference pilout-level expressions,
+    // but CustomCol operands should never appear at the global level.
+    // Still walk global hints for completeness; we can't validate
+    // commit_id range for them (no enclosing AIR) so just assert the
+    // operand does not appear.
+    for h in &pilout.hints {
+        if h.air_group_id.is_none() || h.air_id.is_none() {
+            for hf in &h.hint_fields {
+                walk_hint_field_for_operands(hf, "<global>", 0, &mut violations);
             }
         }
     }
