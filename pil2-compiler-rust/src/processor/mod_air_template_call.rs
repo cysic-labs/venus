@@ -146,6 +146,13 @@ pub(super) fn execute_air_template_call(
     // proof-level ones. Matches JS pushAirScope()/popAirScope().
     self.exprs.push();
 
+    // Reset the per-AIR Intermediate-ref tracker. Round 3 lift / read
+    // consistency layer: AIR finalization must keep every recorded
+    // slot id in `air_expression_store` even if the slot has been
+    // overwritten with a non-symbolic value by then. See
+    // BL-20260418-intermediate-ref-lift-consistency.
+    self.intermediate_refs_emitted.clear();
+
     // Snapshot the `use_aliases` stack at AIR entry so any `use`
     // added inside this AIR template body — directly, through
     // nested helpers, or via `init_air_containers_sum` /
@@ -317,7 +324,18 @@ pub(super) fn execute_air_template_call(
         > = std::collections::HashSet::new();
         for eid in 0..self.exprs.len() {
             if let Some(val) = self.exprs.get(eid) {
-                if !is_symbolic(val) {
+                // Round 3 lift / read consistency: if the producer
+                // emitted an `Intermediate` ref pointing to this
+                // slot via `eval_reference`, the proto serializer
+                // will need an `air_expression_store` entry for
+                // it - even if the slot has since been overwritten
+                // with a non-symbolic value (Int, Array, etc.).
+                // Without the force-include, `pil2-stark-setup`
+                // panics at `helpers.rs:21:19` indexing past
+                // `expressions[]` for the unresolved ref.
+                let force_include = eid >= frame_start
+                    && self.intermediate_refs_emitted.contains(&eid);
+                if !force_include && !is_symbolic(val) {
                     continue;
                 }
                 if eid < frame_start {
@@ -327,7 +345,9 @@ pub(super) fn execute_air_template_call(
                     // allocator — i.e. a concrete cross-AIR Custom
                     // leak. Otherwise (legitimate proof-scope
                     // state re-used in this AIR) keep it so the
-                    // pilout matches JS-golden.
+                    // pilout matches JS-golden. The Intermediate
+                    // force-include only fires for in-frame ids,
+                    // so this branch is unaffected by Round 3.
                     let mut local_ids: std::collections::BTreeSet<u32> =
                         std::collections::BTreeSet::new();
                     let rt_probe = value_to_runtime_expr(val);
@@ -810,6 +830,9 @@ pub(super) fn execute_air_template_call(
     // Clean up air scope.
     self.air_hints.clear();
     self.air_expression_store.clear();
+    // Per-AIR set of `Intermediate` refs the producer minted. Round 3
+    // lift / read consistency layer (BL-20260418-intermediate-ref-lift-consistency).
+    self.intermediate_refs_emitted.clear();
     self.constraints.clear();
     // Apply the scope cleanup for variables declared at the air-type scope depth
     // (body-direct declarations like `int acc_heights[opids_count]` in airtemplate

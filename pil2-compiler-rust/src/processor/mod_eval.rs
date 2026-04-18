@@ -51,18 +51,21 @@ pub(super) fn eval_reference(&mut self, name_id: &NameId) -> Value {
             }
             let flat_idx = compute_flat_index(&indexes, &reference.array_dims);
             let id = reference.id + flat_idx;
-            // Storage read - inlines the stored value tree. The
-            // matching Round 2 reference-read helper
-            // (`get_var_ref_value_by_type_and_id`) is intentionally
-            // NOT called here yet: the in-frame check it relies on
-            // is necessary but not sufficient. Stored values can be
-            // overwritten with non-symbolic shapes between the read
-            // and AIR finalization, leaving the serializer with an
-            // `Intermediate` ref whose source slot is no longer
-            // lifted into `air_expression_store` and indexing past
-            // the per-AIR `expressions[]` vector at
-            // `pil2-stark-setup/src/helpers.rs:21:19`. Round 3
-            // closes that gap and re-routes through the ref helper.
+            // Storage read for now. Round 3 attempt to flip to
+            // `get_var_ref_value_by_type_and_id` plus per-AIR
+            // `intermediate_refs_emitted` force-lift exposed a
+            // deeper cross-AIR reference leak: proof-scope `expr`
+            // values written in one AIR's frame can contain
+            // `Intermediate` refs that another AIR reads inlined
+            // through `get_var_value`, leaving the per-AIR
+            // `source_to_pos` map without an entry for the foreign
+            // id and pil2-stark-setup indexing past `expressions[]`
+            // (`helpers.rs:21:19`). Round 4 plan: either embed
+            // scope info into the ref (so each AIR's serializer
+            // knows when to inline vs resolve) or strip
+            // `Intermediate` refs at AIR boundaries when they
+            // would leak. See
+            // BL-20260418-intermediate-ref-lift-consistency.
             return self.get_var_value_by_type_and_id(&reference.ref_type, id);
         }
         // Bare reference to an array (no indexes): return ArrayRef so
@@ -75,9 +78,10 @@ pub(super) fn eval_reference(&mut self, name_id: &NameId) -> Value {
                 dims: reference.array_dims.clone(),
             };
         }
-        // Bare scalar reference: storage read for now; same Round
-        // 2 reference-cache caveat applies as the indexed path
-        // above. Round 3 re-enables the ref helper.
+        // Bare scalar reference: storage read for now (same Round
+        // 3 cross-AIR reference leak caveat as the indexed path
+        // above). Round 4 plan re-enables the ref helper after
+        // closing the cross-AIR leak class.
         self.get_var_value(&reference)
     } else {
         Value::Void

@@ -534,7 +534,7 @@ pub(super) fn get_var_value(&self, reference: &Reference) -> Value {
 ///
 /// All non-`Expr` ref types fall through to the same per-type
 /// behavior as `get_var_value`.
-pub(super) fn get_var_ref_value(&self, reference: &Reference) -> Value {
+pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
     match reference.ref_type {
         RefType::Expr => {
             let stored = self.exprs.get(reference.id).cloned().unwrap_or(Value::Void);
@@ -557,6 +557,13 @@ pub(super) fn get_var_ref_value(&self, reference: &Reference) -> Value {
                     // expressions[] vector and panic on (see
                     // `pil2-stark-setup/src/helpers.rs:21:19`).
                     if reference.id >= self.exprs.frame_start() {
+                        // Round 3 lift / read consistency: record
+                        // the id so AIR finalization keeps the slot
+                        // in `air_expression_store` even if the
+                        // stored value is overwritten with a
+                        // non-symbolic shape later in the AIR body.
+                        // See BL-20260418-intermediate-ref-lift-consistency.
+                        self.intermediate_refs_emitted.insert(reference.id);
                         Value::ColRef {
                             col_type: ColRefKind::Intermediate,
                             id: reference.id,
@@ -578,7 +585,7 @@ pub(super) fn get_var_ref_value(&self, reference: &Reference) -> Value {
 /// produce an `Intermediate` `ColRef`, everything else inlines
 /// the stored value so compile-time consumers continue working.
 pub(super) fn get_var_ref_value_by_type_and_id(
-    &self,
+    &mut self,
     ref_type: &RefType,
     id: u32,
 ) -> Value {
@@ -588,6 +595,7 @@ pub(super) fn get_var_ref_value_by_type_and_id(
             match &stored {
                 Value::RuntimeExpr(_) => {
                     if id >= self.exprs.frame_start() {
+                        self.intermediate_refs_emitted.insert(id);
                         Value::ColRef {
                             col_type: ColRefKind::Intermediate,
                             id,

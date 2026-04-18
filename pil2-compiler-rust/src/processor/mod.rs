@@ -106,6 +106,20 @@ pub struct Processor {
     // Mirrors the JS `this.expressions` store. --
     pub air_expression_store: Vec<air::AirExpressionEntry>,
 
+    // -- Per-AIR set of `self.exprs` slot ids that `eval_reference`
+    // returned as `Value::ColRef { col_type: Intermediate, id, .. }`
+    // through `get_var_ref_value*` while this AIR was current.
+    // Round 3 lift / read consistency layer: `mod_air_template_call.rs`'s
+    // `air_expression_store` lift filter must keep every id in this set
+    // even if its current stored value no longer passes `is_symbolic`,
+    // because the proto serializer's `source_to_pos` map will need that
+    // entry to resolve any `Intermediate` ref the producer minted.
+    // Without this, an `expr` slot read symbolically and then overwritten
+    // with a non-symbolic value (Int, Array, etc.) before AIR finalization
+    // produces a stale ref that pil2-stark-setup blindly indexes
+    // (panic at `pil2-stark-setup/src/helpers.rs:21:19`).
+    pub intermediate_refs_emitted: std::collections::HashSet<u32>,
+
     // -- Global (proof-level) expression store: symbolic expressions from
     // proof-level `expr` variables, mirroring JS `this.globalExpressions`. --
     pub global_expression_store: Vec<RuntimeExpr>,
@@ -277,6 +291,7 @@ impl Processor {
             constraints: Constraints::new(),
             global_constraints: Constraints::new(),
             air_expression_store: Vec::new(),
+            intermediate_refs_emitted: std::collections::HashSet::new(),
             global_expression_store: Vec::new(),
             air_groups: AirGroups::new(),
             air_templates: AirTemplates::new(),
