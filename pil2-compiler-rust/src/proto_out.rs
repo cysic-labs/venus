@@ -48,15 +48,34 @@ enum PackedKey {
 /// Compute the provenance cache key for a per-AIR store entry at
 /// flatten time. Returns `None` when the expression is a compound
 /// node without usable provenance; in that case only the Rc-pointer
-/// fast path and the structural cache provide reuse. Row offsets
-/// resolve to 0 when unset, matching the JS `rowOffset=0` reuse
-/// branch.
+/// fast path and the structural cache provide reuse.
+///
+/// `Provenance(source_expr_id, row_offset)` keys the cache by the
+/// expression-store id from `AirExpressionEntry::source_expr_id` and
+/// the effective row offset, matching JS
+/// `pil2-compiler/src/packed_expressions.js::saveAndPushExpressionReference`.
+/// Top-level entries always have `row_offset = 0`; non-zero offsets
+/// arrive here only for `Intermediate` `ColRef` leaves whose
+/// `Expr::RowOffset` wrapper has been folded in upstream, and those
+/// take the `Intermediate` branch of `packed_key_for` below.
+///
+/// `ColRef` leaves cover bare column references of every kind
+/// (witness, fixed, custom, public, challenge, etc.). The new
+/// `Intermediate` branch produces `Provenance(id, row_offset)`
+/// rather than `ColRef(Intermediate, id, row_offset)` so that the
+/// JS reuse semantics actually fire: an `Intermediate(id)` is
+/// effectively an expression-reference and shares its packed
+/// proto idx across every use site.
 fn packed_key_for(expr: &RuntimeExpr, source_expr_id: Option<u32>) -> Option<PackedKey> {
     if let Some(sid) = source_expr_id {
         return Some(PackedKey::Provenance(sid, 0));
     }
     if let RuntimeExpr::ColRef { col_type, id, row_offset } = expr {
-        return Some(PackedKey::ColRef(*col_type, *id, row_offset.unwrap_or(0) as i32));
+        let offset = row_offset.unwrap_or(0) as i32;
+        if matches!(col_type, ColRefKind::Intermediate) {
+            return Some(PackedKey::Provenance(*id, offset));
+        }
+        return Some(PackedKey::ColRef(*col_type, *id, offset));
     }
     None
 }
@@ -633,6 +652,19 @@ impl<'a> ProtoOutBuilder<'a> {
                         (canon, sid, label)
                     })
                     .collect();
+                // Index entries by their `source_expr_id` so the
+                // serializer can resolve `ColRef::Intermediate { id, .. }`
+                // leaves (produced by `eval_reference` for `RefType::Expr`)
+                // back to the packed proto idx of the entry that holds
+                // the underlying expression. Mirrors the JS
+                // `(id, rowOffset)` -> packed_idx lookup in
+                // `pil2-compiler/src/packed_expressions.js::pushExpressionReference`.
+                let mut source_to_pos: HashMap<u32, usize> = HashMap::new();
+                for (pos, (_, sid, _)) in entries.iter().enumerate() {
+                    if let Some(s) = sid {
+                        source_to_pos.entry(*s).or_insert(pos);
+                    }
+                }
                 let trace_enabled = chain_shape_trace_enabled();
                 let mut stats = ChainShapeStats {
                     entry_count: entries.len(),
@@ -660,6 +692,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         &air.witness_id_map,
                         &air.custom_id_map,
                         &expr_id_map,
+                        &source_to_pos,
                         &mut proto_expressions,
                         &mut rc_cache,
                         &mut struct_cache,
@@ -1830,6 +1863,7 @@ impl<'a> ProtoOutBuilder<'a> {
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
         expr_id_map: &[u32],
+        source_to_pos: &HashMap<u32, usize>,
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
         struct_cache: &mut HashMap<RuntimeExpr, u32>,
@@ -1890,8 +1924,8 @@ impl<'a> ProtoOutBuilder<'a> {
                 // Sub-operands do not carry the top-level store entry's
                 // provenance; they're reused by their own ColRef /
                 // provenance identity when recursed into.
-                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
-                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
+                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
+                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
                 match op {
                     RuntimeOp::Add => pilout_proto::expression::Operation::Add(
                         pilout_proto::expression::Add { lhs, rhs },
@@ -1907,7 +1941,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
                     let value =
-                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
+                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
                     pilout_proto::expression::Operation::Neg(
                         pilout_proto::expression::Neg { value },
                     )
@@ -1915,7 +1949,7 @@ impl<'a> ProtoOutBuilder<'a> {
             },
             // Leaf node: wrap in Add(x, 0).
             _ => {
-                let leaf = self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map);
+                let leaf = self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos);
                 let zero = Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Constant(
                         pilout_proto::operand::Constant { value: Vec::new() },
@@ -1970,6 +2004,7 @@ impl<'a> ProtoOutBuilder<'a> {
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
         expr_id_map: &[u32],
+        source_to_pos: &HashMap<u32, usize>,
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
         struct_cache: &mut HashMap<RuntimeExpr, u32>,
@@ -1983,14 +2018,14 @@ impl<'a> ProtoOutBuilder<'a> {
                 // entry's source provenance (source_expr_id and
                 // source_label are only authoritative at the air
                 // expression store entry level).
-                let idx = self.flatten_air_expr(expr, None, None, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
+                let idx = self.flatten_air_expr(expr, None, None, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
                 Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Expression(
                         pilout_proto::operand::Expression { idx },
                     )),
                 })
             }
-            _ => self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map),
+            _ => self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos),
         }
     }
 
@@ -2003,6 +2038,7 @@ impl<'a> ProtoOutBuilder<'a> {
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
         expr_id_map: &[u32],
+        source_to_pos: &HashMap<u32, usize>,
     ) -> Option<pilout_proto::Operand> {
         let operand = match expr {
             RuntimeExpr::Value(Value::Int(v)) => {
@@ -2119,13 +2155,39 @@ impl<'a> ProtoOutBuilder<'a> {
                         }
                     }
                     ColRefKind::Intermediate => {
-                        // Intermediate columns are expression references.
-                        // Remap from internal expression-store ID to the
-                        // packed protobuf index via expr_id_map.
-                        let proto_idx = expr_id_map
-                            .get(*id as usize)
-                            .copied()
-                            .unwrap_or(*id);
+                        // Intermediate columns are expression-references
+                        // produced by `eval_reference` for `RefType::Expr`
+                        // reads. The leaf's `id` is the original
+                        // `self.exprs` slot id (i.e.
+                        // `AirExpressionEntry::source_expr_id`); look up
+                        // the entry position via `source_to_pos`, then
+                        // resolve to the packed proto idx through
+                        // `expr_id_map`. Mirrors JS
+                        // `pushExpressionReference(id, rowOffset)` in
+                        // `pil2-compiler/src/packed_expressions.js`.
+                        // Forward-references (entry not yet flattened)
+                        // and unresolved ids fall back to the raw `id`,
+                        // which preserves the legacy behavior. The
+                        // per-AIR `prov_cache` already keys
+                        // `Provenance(id, row_offset)` for this kind, so
+                        // repeated reads at the same offset collapse to
+                        // a single proto Expression entry.
+                        let proto_idx = source_to_pos
+                            .get(id)
+                            .and_then(|&pos| expr_id_map.get(pos).copied())
+                            .unwrap_or_else(|| {
+                                // Legacy fallback: treat `id` as a
+                                // direct expr_id_map index. This used
+                                // to be the only path before
+                                // ColRef::Intermediate started being
+                                // emitted by `eval_reference` and
+                                // remains a safe escape hatch for any
+                                // pre-Round-2 producer surface.
+                                expr_id_map
+                                    .get(*id as usize)
+                                    .copied()
+                                    .unwrap_or(*id)
+                            });
                         pilout_proto::operand::Operand::Expression(
                             pilout_proto::operand::Expression { idx: proto_idx },
                         )

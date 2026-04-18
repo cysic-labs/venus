@@ -437,7 +437,14 @@ pub(super) fn exec_assignment(&mut self, a: &Assignment) -> FlowSignal {
     FlowSignal::None
 }
 
-/// Get a variable's current value using its reference.
+/// Get a variable's current value using its reference. This is the
+/// **storage** read used by compound-assignment paths
+/// (`exec_assignment`'s `+=` / `-=` / `*=` arms): it returns the
+/// inlined `Value` tree from the underlying typed store, including
+/// the still-growing accumulator for `RefType::Expr`. Use-site
+/// reads should go through `get_var_ref_value` instead so the
+/// proto serializer can dedupe them as JS-equivalent
+/// `ExpressionReference(id, rowOffset)` lookups.
 pub(super) fn get_var_value(&self, reference: &Reference) -> Value {
     match reference.ref_type {
         RefType::Int => self.ints.get(reference.id).cloned().unwrap_or(Value::Int(0)),
@@ -493,6 +500,107 @@ pub(super) fn get_var_value(&self, reference: &Reference) -> Value {
             row_offset: None,
         },
         _ => Value::Void,
+    }
+}
+
+/// Get a variable's value as a **reference** suitable for use in
+/// expression context (`eval_reference`). For `RefType::Expr`
+/// slots that hold a symbolic value (`RuntimeExpr` or `ColRef`
+/// leaf), this returns
+/// `Value::ColRef { col_type: Intermediate, id, .. }` so the
+/// proto serializer can dedupe later references to the same
+/// expr-store id via `prov_cache` keyed by `(id, row_offset)` -
+/// matching JS `pushExpressionReference(id, rowOffset)` semantics
+/// in `pil2-compiler/src/expression_packer.js`.
+///
+/// For any other stored shape (notably `Value::Array` produced
+/// by binding an array literal `[a, b]` to a `const expr xs[]`
+/// parameter; `Value::ColRef` produced by `expr v = some_witness`
+/// scoped-witness aliases that the `<==` LHS path inspects via
+/// `RuntimeExpr::ColRef` matching; compile-time `Int` / `Fe` /
+/// `Str` values assigned into an expr slot via `expr v =
+/// some_int_expression`; or an uninitialised `Value::Void`),
+/// this falls back to inlining the stored value. The fallback
+/// preserves the pre-refactor semantics that compile-time
+/// consumers (`length(...)`, function argument forwarding, array
+/// iteration in stdlib helpers like
+/// `std_sum.pil::update_piop_sum`, the scoped-witness `<==`
+/// witness_calc-hint check at `mod.rs::exec_witness_constraint`)
+/// depend on. The dedup benefit is only real for compound
+/// `RuntimeExpr` accumulators - bare `ColRef` leaves are already
+/// caught by the `PackedKey::ColRef(kind, id, offset)` cache, so
+/// not aliasing them through `Intermediate` keeps both layers
+/// correct.
+///
+/// All non-`Expr` ref types fall through to the same per-type
+/// behavior as `get_var_value`.
+pub(super) fn get_var_ref_value(&self, reference: &Reference) -> Value {
+    match reference.ref_type {
+        RefType::Expr => {
+            let stored = self.exprs.get(reference.id).cloned().unwrap_or(Value::Void);
+            match &stored {
+                Value::RuntimeExpr(_) => {
+                    // Only emit an `Intermediate` reference when the
+                    // expr-store slot is within the current AIR's
+                    // frame, i.e. this AIR will lift the slot into
+                    // its `air_expression_store` during finalization.
+                    // Proof-scope / cross-AIR slots (id < frame_start)
+                    // are dropped by the per-AIR lift filter when
+                    // they carry cross-AIR Custom refs, and even when
+                    // kept their `source_expr_id` is the original
+                    // slot id which the proto serializer's
+                    // `source_to_pos` map only resolves for entries
+                    // this AIR actually included. Returning the raw
+                    // id outside the frame would emit a stale
+                    // `Operand::Expression { idx: <large id> }` that
+                    // pil2-stark-setup would index past its
+                    // expressions[] vector and panic on (see
+                    // `pil2-stark-setup/src/helpers.rs:21:19`).
+                    if reference.id >= self.exprs.frame_start() {
+                        Value::ColRef {
+                            col_type: ColRefKind::Intermediate,
+                            id: reference.id,
+                            row_offset: None,
+                        }
+                    } else {
+                        stored
+                    }
+                }
+                _ => stored,
+            }
+        }
+        _ => self.get_var_value(reference),
+    }
+}
+
+/// Indexed-element variant of `get_var_ref_value`. Same fallback
+/// rule as the bare-scalar form: only symbolic stored values
+/// produce an `Intermediate` `ColRef`, everything else inlines
+/// the stored value so compile-time consumers continue working.
+pub(super) fn get_var_ref_value_by_type_and_id(
+    &self,
+    ref_type: &RefType,
+    id: u32,
+) -> Value {
+    match ref_type {
+        RefType::Expr => {
+            let stored = self.exprs.get(id).cloned().unwrap_or(Value::Void);
+            match &stored {
+                Value::RuntimeExpr(_) => {
+                    if id >= self.exprs.frame_start() {
+                        Value::ColRef {
+                            col_type: ColRefKind::Intermediate,
+                            id,
+                            row_offset: None,
+                        }
+                    } else {
+                        stored
+                    }
+                }
+                _ => stored,
+            }
+        }
+        _ => self.get_var_value_by_type_and_id(ref_type, id),
     }
 }
 

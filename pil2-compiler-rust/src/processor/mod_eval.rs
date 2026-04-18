@@ -51,6 +51,18 @@ pub(super) fn eval_reference(&mut self, name_id: &NameId) -> Value {
             }
             let flat_idx = compute_flat_index(&indexes, &reference.array_dims);
             let id = reference.id + flat_idx;
+            // Storage read - inlines the stored value tree. The
+            // matching Round 2 reference-read helper
+            // (`get_var_ref_value_by_type_and_id`) is intentionally
+            // NOT called here yet: the in-frame check it relies on
+            // is necessary but not sufficient. Stored values can be
+            // overwritten with non-symbolic shapes between the read
+            // and AIR finalization, leaving the serializer with an
+            // `Intermediate` ref whose source slot is no longer
+            // lifted into `air_expression_store` and indexing past
+            // the per-AIR `expressions[]` vector at
+            // `pil2-stark-setup/src/helpers.rs:21:19`. Round 3
+            // closes that gap and re-routes through the ref helper.
             return self.get_var_value_by_type_and_id(&reference.ref_type, id);
         }
         // Bare reference to an array (no indexes): return ArrayRef so
@@ -63,6 +75,9 @@ pub(super) fn eval_reference(&mut self, name_id: &NameId) -> Value {
                 dims: reference.array_dims.clone(),
             };
         }
+        // Bare scalar reference: storage read for now; same Round
+        // 2 reference-cache caveat applies as the indexed path
+        // above. Round 3 re-enables the ref helper.
         self.get_var_value(&reference)
     } else {
         Value::Void
@@ -151,6 +166,36 @@ pub(super) fn value_to_label_string(&self, val: &Value) -> String {
             format!("{:?}@{}[{}]", ref_type, base_id, dims_str.join(","))
         }
         _ => val.to_display_string(),
+    }
+}
+
+/// Replace any `Value::ColRef { col_type: Intermediate, id, .. }`
+/// arg with the underlying stored value from `self.exprs[id]`.
+///
+/// `eval_reference` returns an `Intermediate` `ColRef` for AIR-
+/// scope `RefType::Expr` reads of a stored `RuntimeExpr` so that
+/// the proto serializer can dedupe later use sites via the
+/// `(source_expr_id, row_offset)` provenance cache (mirroring JS
+/// `pushExpressionReference`). That wrapper is meaningless to
+/// compile-time consumers like `length(...)`, `degree(...)`,
+/// `dim(...)`, `defined(...)`, and `is_array(...)`; without
+/// dereferencing here those consumers see a single ColRef leaf
+/// and return wrong shape / degree (e.g.
+/// `degree(Intermediate) == 0` would skip the `<==` witness-col
+/// branch in `precompiles/dma/pil/dma.pil` even when the
+/// underlying expression has degree 2).
+///
+/// Only `Intermediate` is dereferenced; other `ColRef` kinds
+/// (Witness, Fixed, Custom, etc.) are real leaves whose builtin
+/// semantics are stable.
+pub(super) fn dereference_intermediate_args(&self, args: &mut [Value]) {
+    use super::expression::ColRefKind;
+    for arg in args.iter_mut() {
+        if let Value::ColRef { col_type: ColRefKind::Intermediate, id, .. } = *arg {
+            if let Some(stored) = self.exprs.get(id).cloned() {
+                *arg = stored;
+            }
+        }
     }
 }
 
@@ -339,10 +384,20 @@ pub(super) fn eval_function_call(&mut self, fc: &FunctionCall) -> Value {
     }
 
     // Evaluate all call arguments (values only).
-    let raw_args: Vec<Value> = fc.args.iter().map(|a| self.eval_expr(&a.value)).collect();
+    let mut raw_args: Vec<Value> = fc.args.iter().map(|a| self.eval_expr(&a.value)).collect();
 
     // Check for builtin (builtins don't use named args).
     if let Some(kind) = BuiltinKind::from_name(name) {
+        // Compile-time builtins (length / dim / degree / defined /
+        // is_array) inspect a value's shape rather than its proto-
+        // serialization identity. Replace any
+        // `ColRef::Intermediate { id, .. }` arg - produced by the
+        // Round 2 expression-reference refactor in
+        // `eval_reference` for `RefType::Expr` reads of a stored
+        // `RuntimeExpr` - with the underlying stored value so
+        // these consumers keep seeing the original tree they used
+        // to inspect pre-refactor.
+        self.dereference_intermediate_args(&mut raw_args);
         match builtins::exec_builtin(kind, &raw_args, &self.source_ref, &mut self.tests) {
             Ok(val) => return val,
             Err(msg) => {
@@ -425,11 +480,16 @@ pub(super) fn eval_function_call_with_alias(
         return FlowSignal::None;
     }
 
-    let raw_args: Vec<Value> = fc.args.iter().map(|a| self.eval_expr(&a.value)).collect();
+    let mut raw_args: Vec<Value> = fc.args.iter().map(|a| self.eval_expr(&a.value)).collect();
     let has_named = fc.args.iter().any(|a| a.name.is_some());
 
     // Check for builtin (builtins can't be aliased, but handle for safety).
     if let Some(kind) = BuiltinKind::from_name(name) {
+        // Same Intermediate-deref policy as the function-call form
+        // above: compile-time builtins must see the underlying
+        // stored tree, not the Round 2 expression-reference
+        // wrapper.
+        self.dereference_intermediate_args(&mut raw_args);
         match builtins::exec_builtin(kind, &raw_args, &self.source_ref, &mut self.tests) {
             Ok(_val) => return FlowSignal::None,
             Err(msg) => {
