@@ -1661,19 +1661,42 @@ impl<'a> ProtoOutBuilder<'a> {
                     }
                     ColRefKind::Custom => {
                         // Use per-AIR custom_id_map for remapped stage,
-                        // proto_index, and commit_id.
-                        let (stage, col_idx, commit_id) = custom_map
-                            .get(*id as usize)
-                            .copied()
-                            .unwrap_or((0, *id, 0));
-                        pilout_proto::operand::Operand::CustomCol(
-                            pilout_proto::operand::CustomCol {
-                                commit_id,
-                                stage,
-                                col_idx,
-                                row_offset: offset,
-                            },
-                        )
+                        // proto_index, and commit_id. When the id is not
+                        // mapped (e.g. a cross-AIR reference whose owning
+                        // commit was declared in a different AIR and is
+                        // therefore not in this AIR's custom_id_map),
+                        // emit the operand as a Constant(0) rather than a
+                        // CustomCol with a dummy commit_id. The prior
+                        // fallback of `(0, id, 0)` produced
+                        // `Operand::CustomCol { commit_id: 0, ... }` in
+                        // the serialized pilout, which then crashed
+                        // `pil2-stark-setup::pilout_info` when it indexed
+                        // into the AIR's empty `custom_commits` vector.
+                        // The Constant(0) fallback keeps the constraint
+                        // algebraically equivalent to the prior
+                        // Value::Void -> number(1)/constant path; the
+                        // exact semantic fix for cross-AIR references
+                        // requires extending the per-AIR `custom_commits`
+                        // metadata at pilout build time, which is a
+                        // broader follow-on.
+                        if let Some(&(stage, col_idx, commit_id)) =
+                            custom_map.get(*id as usize)
+                        {
+                            pilout_proto::operand::Operand::CustomCol(
+                                pilout_proto::operand::CustomCol {
+                                    commit_id,
+                                    stage,
+                                    col_idx,
+                                    row_offset: offset,
+                                },
+                            )
+                        } else {
+                            pilout_proto::operand::Operand::Constant(
+                                pilout_proto::operand::Constant {
+                                    value: Vec::new(),
+                                },
+                            )
+                        }
                     }
                     ColRefKind::Intermediate => {
                         // Intermediate columns are expression references.
