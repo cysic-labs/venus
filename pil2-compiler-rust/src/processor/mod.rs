@@ -2483,7 +2483,7 @@ impl Processor {
                         data,
                     );
                     self.references.declare(
-                        &full_name,
+                        &label,
                         RefType::Witness,
                         id,
                         &array_dims,
