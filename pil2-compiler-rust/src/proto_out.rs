@@ -68,6 +68,77 @@ fn packed_key_for(expr: &RuntimeExpr, source_expr_id: Option<u32>) -> Option<Pac
 /// step into multi-hour runtime; see BL-20260415-struct-cache-blowup.
 const STRUCT_CACHE_NODE_LIMIT: usize = 64;
 
+/// Per-AIR diagnostics emitted to stderr when `PIL2C_CHAIN_SHAPE=1`.
+/// Used to confirm whether an upstream canonicalization fix actually
+/// flattens the left-leaning Add / Mul chains that compound-assign
+/// accumulators inside long for-loop bodies produce.
+#[derive(Debug, Default)]
+struct ChainShapeStats {
+    entry_count: usize,
+    binop_total: usize,
+    unaryop_total: usize,
+    max_add_chain: usize,
+    max_mul_chain: usize,
+    max_subtree_depth: usize,
+}
+
+/// Walk a runtime-expression tree and update chain-shape statistics.
+/// Each node is visited once per textual occurrence; Rc-shared
+/// subtrees are counted on every appearance (we want a faithful
+/// picture of how big the tree is from the proto serializer's
+/// perspective, not how much sharing the in-memory representation
+/// happens to enjoy).
+fn measure_chain_shape(
+    expr: &RuntimeExpr,
+    stats: &mut ChainShapeStats,
+    depth: usize,
+    parent_chain_op: Option<RuntimeOp>,
+    parent_chain_len: usize,
+) {
+    if depth > stats.max_subtree_depth {
+        stats.max_subtree_depth = depth;
+    }
+    match expr {
+        RuntimeExpr::BinOp { op, left, right } => {
+            stats.binop_total += 1;
+            let chain_len = if Some(*op) == parent_chain_op {
+                parent_chain_len + 1
+            } else {
+                1
+            };
+            match op {
+                RuntimeOp::Add => {
+                    if chain_len > stats.max_add_chain {
+                        stats.max_add_chain = chain_len;
+                    }
+                }
+                RuntimeOp::Mul => {
+                    if chain_len > stats.max_mul_chain {
+                        stats.max_mul_chain = chain_len;
+                    }
+                }
+                RuntimeOp::Sub => {}
+            }
+            measure_chain_shape(left, stats, depth + 1, Some(*op), chain_len);
+            measure_chain_shape(right, stats, depth + 1, Some(*op), chain_len);
+        }
+        RuntimeExpr::UnaryOp { operand, .. } => {
+            stats.unaryop_total += 1;
+            measure_chain_shape(operand, stats, depth + 1, None, 0);
+        }
+        _ => {}
+    }
+}
+
+/// True when `PIL2C_CHAIN_SHAPE=1` is set in the environment. The
+/// trace stays dormant by default to keep regular pil2c runs free
+/// of stderr noise.
+fn chain_shape_trace_enabled() -> bool {
+    std::env::var("PIL2C_CHAIN_SHAPE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Count nodes in an expression tree, capped at `limit + 1` so the
 /// counter itself stays cheap on very large trees. Returns `> limit`
 /// to indicate the tree is too big for the structural cache.
@@ -269,6 +340,30 @@ impl<'a> ProtoOutBuilder<'a> {
                     } else {
                         air.stored_expressions.iter().map(|e| (e, None, None)).collect()
                     };
+                if chain_shape_trace_enabled() {
+                    let mut stats = ChainShapeStats {
+                        entry_count: entries.len(),
+                        ..Default::default()
+                    };
+                    for (expr, _, _) in &entries {
+                        measure_chain_shape(expr, &mut stats, 0, None, 0);
+                    }
+                    eprintln!(
+                        "PIL2C_CHAIN_SHAPE air={}/{} airgroup_id={} air_id={} \
+                         entries={} binops={} unaryops={} max_add_chain={} \
+                         max_mul_chain={} max_subtree_depth={}",
+                        ag.name,
+                        air.name,
+                        ag_idx,
+                        air_id_counter,
+                        stats.entry_count,
+                        stats.binop_total,
+                        stats.unaryop_total,
+                        stats.max_add_chain,
+                        stats.max_mul_chain,
+                        stats.max_subtree_depth,
+                    );
+                }
                 for (expr, source_expr_id, source_label) in entries {
                     let root_idx = self.flatten_air_expr(
                         expr,

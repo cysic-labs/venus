@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "venus-bctree"
 path = "src/bctree_main.rs"
 
+[[bin]]
+name = "venus-golden-diff-oracle"
+path = "src/bin/golden_diff_oracle.rs"
+
 [dependencies]
 fields = { workspace = true, features = ["verify"] }
 pilout = { workspace = true }
