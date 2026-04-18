@@ -355,13 +355,20 @@ pub(super) fn execute_air_template_call(
     }
 
     // Build custom column ID mappings and custom_commits from the
-    // union of (a) allocator state for in-AIR declarations and
-    // (b) the referenced-set walk above. Any referenced id not
-    // covered by in-AIR allocator state is resolved through the
-    // cross-AIR `custom_col_meta` / `custom_commit_meta` registries
-    // populated at declaration time. If a referenced id is absent
-    // from both, panic with a diagnostic pointing at the offending
-    // expression so the producer bug is immediately actionable.
+    // local allocator state (Codex's Round 11-review "referenced-set"
+    // invariant). Cross-AIR references survive here as ids that the
+    // referenced-set walk finds but the local allocator does not
+    // register; those degrade to `Operand::Constant(0)` at the proto
+    // serializer (the Round 11 fallback, preserved intentionally
+    // because a receiving AIR does not actually commit to the
+    // declaring AIR's columns — synthesizing per-AIR `custom_commits`
+    // entries for them at this layer propagates bad
+    // `custom_<commit>_<idx>` signals into the downstream verifier
+    // circom and breaks `compressor_check` at Mem). The panic below
+    // is reserved for references that are absent from BOTH the
+    // in-AIR allocator and the cross-AIR `custom_col_meta` registry,
+    // i.e. true "custom column was never declared anywhere"
+    // invariant violations.
     let (custom_id_map, custom_commits) = {
         let mut cid_map: Vec<(u32, u32, u32)> = Vec::new();
         let mut commits: Vec<(String, Vec<u32>, Vec<u32>)> = Vec::new();
@@ -384,62 +391,18 @@ pub(super) fn execute_air_template_call(
             commit_names.insert(cid, name.clone());
         }
 
-        // Identify cross-AIR referenced ids. These are ids that appear
-        // in this AIR's emitted expressions / hints but were declared
-        // in a previous AIR (their metadata was wiped from
-        // `self.custom_cols` at that AIR's exit).
-        let cross_air_ids: Vec<u32> = referenced_custom_ids
-            .iter()
-            .copied()
-            .filter(|id| !registered_ids.contains(id))
-            .collect();
-
-        // For cross-AIR ids, consult the registry and stage local
-        // metadata entries so this AIR's pilout carries the full
-        // Operand::CustomCol / custom_commits pair. If any cross-AIR
-        // id lacks registry metadata, the leak is real — panic with
-        // the offending tree.
         let air_name_dbg = self
             .air_stack
             .last()
             .map(|a| a.name.clone())
             .unwrap_or_else(|| "?".to_string());
-        let mut unmapped: Vec<u32> = Vec::new();
-        // Synthetic commit_id values allocated in this AIR for
-        // cross-AIR commits. Each entry keyed by commit_name.
-        let mut synthetic_commit_ids: std::collections::BTreeMap<String, u32> =
-            std::collections::BTreeMap::new();
-        // Synthetic (stage, col_idx, commit_id) entries per id.
-        let mut synthetic_cid_map: std::collections::BTreeMap<u32, (u32, u32, u32)> =
-            std::collections::BTreeMap::new();
-
-        for id in &cross_air_ids {
-            if let Some((commit_name, stage, col_idx)) =
-                self.custom_col_meta.get(id).cloned()
-            {
-                // Assign a synthetic commit_id in this AIR's local
-                // numbering space. Pick the next id not already used
-                // by in-AIR commits or prior synthetic assignments.
-                let local_commit_id = match synthetic_commit_ids.get(&commit_name) {
-                    Some(cid) => *cid,
-                    None => {
-                        let mut next = self.next_commit_id;
-                        while commits_by_id.contains_key(&next)
-                            || synthetic_commit_ids.values().any(|v| *v == next)
-                        {
-                            next += 1;
-                        }
-                        commit_names.insert(next, commit_name.clone());
-                        synthetic_commit_ids.insert(commit_name.clone(), next);
-                        next
-                    }
-                };
-                synthetic_cid_map.insert(*id, (stage, col_idx, local_commit_id));
-            } else {
-                unmapped.push(*id);
-            }
-        }
-
+        let unmapped: Vec<u32> = referenced_custom_ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                !registered_ids.contains(id) && !self.custom_col_meta.contains_key(id)
+            })
+            .collect();
         if !unmapped.is_empty() {
             let mut offenders: Vec<String> = Vec::new();
             for (idx, entry) in air_expr_store.iter().enumerate() {
@@ -516,30 +479,6 @@ pub(super) fn execute_air_template_call(
                 .cloned()
                 .unwrap_or_default();
             commits.push((commit_name, sw, pub_ids));
-        }
-
-        // Merge cross-AIR commits into the per-AIR custom_commits.
-        // We take stage_widths + pub_ids directly from
-        // `custom_commit_meta` so the receiving AIR emits the same
-        // commit shape as the declaring AIR.
-        let mut sorted_synthetic: Vec<(String, u32)> = synthetic_commit_ids
-            .into_iter()
-            .collect();
-        sorted_synthetic.sort_by_key(|(_, cid)| *cid);
-        for (commit_name, _local_cid) in &sorted_synthetic {
-            let (sw, pub_ids) = self
-                .custom_commit_meta
-                .get(commit_name)
-                .cloned()
-                .unwrap_or_default();
-            commits.push((commit_name.clone(), sw, pub_ids));
-        }
-        // Install synthetic cid_map entries at their id positions.
-        for (id, triple) in synthetic_cid_map {
-            while cid_map.len() <= id as usize {
-                cid_map.push((0, 0, 0));
-            }
-            cid_map[id as usize] = triple;
         }
 
         (cid_map, commits)

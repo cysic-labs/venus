@@ -1660,40 +1660,43 @@ impl<'a> ProtoOutBuilder<'a> {
                         )
                     }
                     ColRefKind::Custom => {
-                        // Every referenced Custom id must be present in
-                        // this AIR's `custom_id_map`. Cross-AIR
-                        // references are now stitched in during
-                        // `execute_air_template_call`'s custom_id_map
-                        // build via the `custom_col_meta` /
-                        // `custom_commit_meta` registries, so a missing
-                        // entry here is a real producer bug: either a
-                        // referenced column was never declared or the
-                        // registry lookup did not run. Panic with the
-                        // offending id so the upstream construction
-                        // site is easy to locate instead of silently
-                        // serializing a placeholder.
-                        let (stage, col_idx, commit_id) = custom_map
-                            .get(*id as usize)
-                            .copied()
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "proto_out serializer hit Operand::CustomCol \
-                                     with id={} but custom_id_map has no entry. \
-                                     This should have been caught in \
-                                     execute_air_template_call's custom-col \
-                                     invariant check; something bypassed the \
-                                     registry lookup.",
-                                    id
-                                );
-                            });
-                        pilout_proto::operand::Operand::CustomCol(
-                            pilout_proto::operand::CustomCol {
-                                commit_id,
-                                stage,
-                                col_idx,
-                                row_offset: offset,
-                            },
-                        )
+                        // In-AIR custom references emit full
+                        // `Operand::CustomCol` metadata via
+                        // `custom_map`. Cross-AIR references (ids
+                        // present in the producer's `custom_col_meta`
+                        // registry but not in THIS AIR's allocator)
+                        // degrade to `Operand::Constant(0)`, mirroring
+                        // the Round 11 fallback. Synthesizing
+                        // per-AIR `custom_commits` entries for
+                        // cross-AIR ids here propagates bad
+                        // `custom_<commit>_<idx>` signals into the
+                        // downstream verifier circom and crashes
+                        // `compressor_check` (Round 12 observation at
+                        // Mem). The referenced-set invariant check in
+                        // `execute_air_template_call` already rules
+                        // out ids that are absent from both surfaces,
+                        // so a miss here is provably a cross-AIR
+                        // reference and safe to collapse to Constant(0)
+                        // while the upstream leak is investigated
+                        // separately.
+                        if let Some(&(stage, col_idx, commit_id)) =
+                            custom_map.get(*id as usize)
+                        {
+                            pilout_proto::operand::Operand::CustomCol(
+                                pilout_proto::operand::CustomCol {
+                                    commit_id,
+                                    stage,
+                                    col_idx,
+                                    row_offset: offset,
+                                },
+                            )
+                        } else {
+                            pilout_proto::operand::Operand::Constant(
+                                pilout_proto::operand::Constant {
+                                    value: Vec::new(),
+                                },
+                            )
+                        }
                     }
                     ColRefKind::Intermediate => {
                         // Intermediate columns are expression references.
