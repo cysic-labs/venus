@@ -104,14 +104,14 @@ prove: check-key $(PROVE_PREPARE)
 	"$(CARGO_ZISK_BIN)" prove -e "$(ELF)" $(PROVE_ARGS) -k "$(PROVING_KEY)" -o "$(PROOF_DIR)" -a -y
 
 verify: check-key
-	@if [ ! -f "$(PROOF_FILE)" ]; then \
-		echo "proof file not found at $(PROOF_FILE), run make prove first"; \
-		exit 1; \
-	fi
 	@if [ ! -e "$(SNARK_KEY)" ]; then \
 		echo "SNARK proving key not found at $(SNARK_KEY)."; \
 		echo "Install it with: ziskup setup_snark"; \
 		echo "(override the expected location with SNARK_KEY=<path> make verify)"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(PROOF_FILE)" ]; then \
+		echo "proof file not found at $(PROOF_FILE), run make prove first"; \
 		exit 1; \
 	fi
 	"$(CARGO_ZISK_BIN)" verify -p "$(PROOF_FILE)" -k "$(PROVING_KEY)"
