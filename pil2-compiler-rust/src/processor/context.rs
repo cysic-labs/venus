@@ -293,6 +293,98 @@ mod tests {
     }
 
     #[test]
+    fn test_scope_declare_same_depth_preserves_initial_shadow_new() {
+        // Pins the Round 4 producer-class fix: same-depth re-declare must
+        // NOT overwrite the initial shadow ledger entry. First declare
+        // records ShadowEntry::New; a second declare at the same depth
+        // with Some(iter_prev_ref) must be a no-op on the ledger so pop
+        // still unsets x instead of restoring the mid-iteration reference.
+        //
+        // Pre-fix failure mode: the second declare overwrote New with
+        // Shadowed(iter_prev_ref), pop returned restore=[(x, iter_prev_ref)],
+        // and apply_scope_cleanup wrote iter_prev_ref into self.refs,
+        // leaking the inner binding past the scope exit.
+        use super::super::references::RefType;
+        let mut scope = Scope::new();
+        scope.push();
+        scope.declare("x", None);
+        let iter_prev_ref = Reference {
+            name: "x".to_string(),
+            ref_type: RefType::Int,
+            is_const: false,
+            id: 99,
+            scope_id: scope.deep,
+            array_dims: Vec::new(),
+            source_ref: String::new(),
+            is_reference: false,
+            label: "x".to_string(),
+            is_static: false,
+        };
+        scope.declare("x", Some(iter_prev_ref));
+        let (unset, restore) = scope.pop();
+        assert!(
+            unset.contains(&"x".to_string()),
+            "x must be unset on pop when the initial declare was New; got unset={:?}, restore={:?}",
+            unset,
+            restore
+                .iter()
+                .map(|(n, r)| (n.clone(), r.id))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            restore.is_empty(),
+            "no restore expected when initial declare was New; got restore={:?}",
+            restore
+                .iter()
+                .map(|(n, r)| (n.clone(), r.id))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_scope_declare_same_depth_preserves_initial_shadow_outer() {
+        // Complement to the same-depth preservation invariant: when the
+        // initial declare captured an outer-scope binding, subsequent
+        // same-depth re-declares must NOT overwrite that outer-binding
+        // shadow with a mid-iteration reference. pop must still restore
+        // the outer binding.
+        use super::super::references::RefType;
+        let mut scope = Scope::new();
+        let outer_ref = Reference {
+            name: "x".to_string(),
+            ref_type: RefType::Int,
+            is_const: false,
+            id: 42,
+            scope_id: 0,
+            array_dims: Vec::new(),
+            source_ref: String::new(),
+            is_reference: false,
+            label: "x".to_string(),
+            is_static: false,
+        };
+        scope.push();
+        scope.declare("x", Some(outer_ref.clone()));
+        let iter_prev_ref = Reference {
+            name: "x".to_string(),
+            ref_type: RefType::Int,
+            is_const: false,
+            id: 99,
+            scope_id: scope.deep,
+            array_dims: Vec::new(),
+            source_ref: String::new(),
+            is_reference: false,
+            label: "x".to_string(),
+            is_static: false,
+        };
+        scope.declare("x", Some(iter_prev_ref));
+        let (unset, restore) = scope.pop();
+        assert!(unset.is_empty(), "outer-shadowed declare must not unset");
+        assert_eq!(restore.len(), 1);
+        assert_eq!(restore[0].0, "x");
+        assert_eq!(restore[0].1.id, 42, "pop must restore the outer binding, not the mid-iteration ref");
+    }
+
+    #[test]
     fn test_scope_labels() {
         let mut scope = Scope::new();
         scope.mark("proof");
