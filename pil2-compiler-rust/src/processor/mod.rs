@@ -120,6 +120,34 @@ pub struct Processor {
     // (panic at `pil2-stark-setup/src/helpers.rs:21:19`).
     pub intermediate_refs_emitted: std::collections::HashSet<u32>,
 
+    // -- Per-AIR snapshot of the `RuntimeExpr` that was live at each slot
+    // when the producer minted an `Intermediate` ref for it. Round 4 uses
+    // this map to substitute AIR-local `Intermediate { id, .. }` leaves
+    // with their underlying expression when a value is about to cross the
+    // AIR boundary (written into a container-owned proof-scope slot) so
+    // downstream AIRs never read a ref whose id they cannot resolve in
+    // their own per-AIR `source_to_pos`. Captured at mint time rather than
+    // looked up from `self.exprs` at write time because the slot may have
+    // been overwritten with a non-symbolic value by then. Cleared on AIR
+    // push and exit alongside `intermediate_refs_emitted`.
+    // See BL-20260418-intermediate-ref-cross-air-leak.
+    pub intermediate_ref_resolution:
+        std::collections::HashMap<u32, std::rc::Rc<RuntimeExpr>>,
+
+    // -- Cross-AIR safety net. Every time the producer mints an
+    // `Intermediate { id, .. }` ref we also store the RuntimeExpr
+    // snapshot in this persistent map, indexed by the self.exprs
+    // slot id (which is globally unique across AIRs because
+    // `IdAllocator::push` advances `next_id` past previous max).
+    // The proto serializer consults this map when `source_to_pos`
+    // for the current AIR has no entry for a leaked Intermediate
+    // id, and re-flattens the underlying expression inline instead
+    // of emitting the raw id (which would panic in pil2-stark-setup
+    // at `helpers.rs:21:19`). Persisted for the whole pilout build.
+    // See BL-20260418-intermediate-ref-cross-air-leak.
+    pub global_intermediate_resolution:
+        std::collections::HashMap<u32, std::rc::Rc<RuntimeExpr>>,
+
     // -- Global (proof-level) expression store: symbolic expressions from
     // proof-level `expr` variables, mirroring JS `this.globalExpressions`. --
     pub global_expression_store: Vec<RuntimeExpr>,
@@ -292,6 +320,8 @@ impl Processor {
             global_constraints: Constraints::new(),
             air_expression_store: Vec::new(),
             intermediate_refs_emitted: std::collections::HashSet::new(),
+            intermediate_ref_resolution: std::collections::HashMap::new(),
+            global_intermediate_resolution: std::collections::HashMap::new(),
             global_expression_store: Vec::new(),
             air_groups: AirGroups::new(),
             air_templates: AirTemplates::new(),

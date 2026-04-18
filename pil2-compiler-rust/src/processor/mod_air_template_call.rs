@@ -152,6 +152,10 @@ pub(super) fn execute_air_template_call(
     // overwritten with a non-symbolic value by then. See
     // BL-20260418-intermediate-ref-lift-consistency.
     self.intermediate_refs_emitted.clear();
+    // Round 4 cross-AIR substitution map: fresh per AIR so refs minted
+    // in a prior AIR's frame cannot resolve here. See
+    // BL-20260418-intermediate-ref-cross-air-leak.
+    self.intermediate_ref_resolution.clear();
 
     // Snapshot the `use_aliases` stack at AIR entry so any `use`
     // added inside this AIR template body — directly, through
@@ -380,6 +384,56 @@ pub(super) fn execute_air_template_call(
                         }
                     });
                 store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
+            }
+        }
+        // Round 4 trimmed-slot fallback: any slot id the producer
+        // minted an `Intermediate` ref for, but whose value has since
+        // been blanked by `trim_values_after` on a function-call
+        // return, is not visible to the `self.exprs.get(eid)` loop
+        // above. Pull those entries in from `intermediate_ref_resolution`
+        // so the proto serializer's `source_to_pos` can still resolve
+        // the ref. Without this, in-AIR constraint trees (anonymous
+        // entries) that reference a trimmed slot fall through to the
+        // legacy raw-id path and pil2-stark-setup panics at
+        // `helpers.rs:21:19`. See
+        // BL-20260418-intermediate-ref-cross-air-leak.
+        {
+            use std::rc::Rc;
+            let mut pending: Vec<u32> =
+                self.intermediate_refs_emitted.iter().copied().collect();
+            pending.sort_unstable();
+            for eid in pending {
+                if eid < frame_start {
+                    continue;
+                }
+                if self.exprs.get(eid).is_some() {
+                    continue;
+                }
+                let rt: Rc<super::expression::RuntimeExpr> =
+                    match self.intermediate_ref_resolution.get(&eid) {
+                        Some(rt) => rt.clone(),
+                        None => continue,
+                    };
+                let source_label = self.exprs.ids.label_ranges
+                    .to_vec()
+                    .iter()
+                    .find_map(|lr| {
+                        if eid >= lr.from && eid < lr.from + lr.count {
+                            let size = lr.array_dims.iter().copied().product::<u32>().max(1);
+                            if size <= 1 {
+                                Some(lr.label.clone())
+                            } else {
+                                Some(format!("{}[{}]", lr.label, eid - lr.from))
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                store.push(air::AirExpressionEntry::with_source(
+                    (*rt).clone(),
+                    eid,
+                    source_label,
+                ));
             }
         }
         for expr in constraint_exprs {
@@ -827,12 +881,30 @@ pub(super) fn execute_air_template_call(
         }
     }
 
+    // Round 4 AIR-boundary sanitization: walk every proof-scope slot
+    // in `self.exprs` (id < frame_start) and substitute any
+    // `ColRef { col_type: Intermediate }` leaves whose id points at
+    // an AIR-local slot with the underlying `RuntimeExpr` captured
+    // at mint time. This catches values that reached a proof-scope
+    // slot via a code path that bypassed `sanitize_expr_store_value`
+    // (e.g. nested function calls that wrote into container_owned
+    // slots with intermediate-ref arguments). After the sweep, the
+    // subsequent `self.exprs.pop()` merge-back carries only ref-free
+    // RuntimeExpr trees across the AIR boundary, so downstream AIRs
+    // never read an `Intermediate` id their own `source_to_pos`
+    // cannot resolve. See
+    // BL-20260418-intermediate-ref-cross-air-leak.
+    self.sanitize_proof_scope_exprs_at_air_exit();
+
     // Clean up air scope.
     self.air_hints.clear();
     self.air_expression_store.clear();
     // Per-AIR set of `Intermediate` refs the producer minted. Round 3
     // lift / read consistency layer (BL-20260418-intermediate-ref-lift-consistency).
     self.intermediate_refs_emitted.clear();
+    // Round 4 cross-AIR substitution map
+    // (BL-20260418-intermediate-ref-cross-air-leak).
+    self.intermediate_ref_resolution.clear();
     self.constraints.clear();
     // Apply the scope cleanup for variables declared at the air-type scope depth
     // (body-direct declarations like `int acc_heights[opids_count]` in airtemplate

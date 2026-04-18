@@ -51,21 +51,22 @@ pub(super) fn eval_reference(&mut self, name_id: &NameId) -> Value {
             }
             let flat_idx = compute_flat_index(&indexes, &reference.array_dims);
             let id = reference.id + flat_idx;
-            // Storage read for now. Round 3 attempt to flip to
-            // `get_var_ref_value_by_type_and_id` plus per-AIR
-            // `intermediate_refs_emitted` force-lift exposed a
-            // deeper cross-AIR reference leak: proof-scope `expr`
-            // values written in one AIR's frame can contain
-            // `Intermediate` refs that another AIR reads inlined
-            // through `get_var_value`, leaving the per-AIR
-            // `source_to_pos` map without an entry for the foreign
-            // id and pil2-stark-setup indexing past `expressions[]`
-            // (`helpers.rs:21:19`). Round 4 plan: either embed
-            // scope info into the ref (so each AIR's serializer
-            // knows when to inline vs resolve) or strip
-            // `Intermediate` refs at AIR boundaries when they
-            // would leak. See
-            // BL-20260418-intermediate-ref-lift-consistency.
+            // Round 4 left the producer flip reverted. The per-AIR
+            // sanitize + air-exit sweep + processor-level
+            // `global_intermediate_resolution` closed the
+            // `helpers.rs:21:19` index-out-of-bounds panic when the
+            // flip was re-enabled, but a deeper cross-AIR semantic
+            // leak surfaces at `pil2-stark-setup/src/fri_poly.rs:300`
+            // with "Symbol not found for ev type=cm id=<N>": a
+            // resolved `RuntimeExpr` minted in AIR X references AIR X's
+            // witness / fixed / custom column ids, and inline-flattening
+            // that tree into AIR Y's proto pollutes Y with foreign
+            // column references. The next round must either scope-
+            // qualify each `Intermediate` ref (so the proto serializer
+            // can detect the foreign-AIR case and emit
+            // `Constant(0)` / drop the tree) or mirror JS's global
+            // `PackedExpressions` layer so references resolve uniformly
+            // regardless of consuming AIR. Flip stays off.
             return self.get_var_value_by_type_and_id(&reference.ref_type, id);
         }
         // Bare reference to an array (no indexes): return ArrayRef so
@@ -78,10 +79,9 @@ pub(super) fn eval_reference(&mut self, name_id: &NameId) -> Value {
                 dims: reference.array_dims.clone(),
             };
         }
-        // Bare scalar reference: storage read for now (same Round
-        // 3 cross-AIR reference leak caveat as the indexed path
-        // above). Round 4 plan re-enables the ref helper after
-        // closing the cross-AIR leak class.
+        // Bare scalar reference: same Round 4 caveat as the indexed
+        // path above. Producer flip stays reverted until the cross-AIR
+        // witness / fixed / custom column leak is closed.
         self.get_var_value(&reference)
     } else {
         Value::Void

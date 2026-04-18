@@ -519,6 +519,10 @@ pub struct ProtoOutBuilder<'a> {
     /// `HintValue::ExprId` arm can look up the packed index without
     /// threading the map through every hint-value helper.
     current_air_expr_id_map: Option<Vec<u32>>,
+    /// Scratch AIR name for diagnostics. Updated at the top of each
+    /// per-AIR serialization loop and consulted by the xair-leak
+    /// trace fallback in `leaf_to_air_operand`.
+    current_air_name: std::cell::RefCell<String>,
     /// Per-(airgroup_id, air_id) IM symbol emission table populated
     /// at flatten time. Key: packed_idx. Value: the source label of
     /// the first AirExpressionEntry whose provenance key became this
@@ -541,6 +545,7 @@ impl<'a> ProtoOutBuilder<'a> {
             air_value_id_to_proto: Vec::new(),
             air_expr_id_maps: HashMap::new(),
             current_air_expr_id_map: None,
+            current_air_name: std::cell::RefCell::new(String::new()),
             im_label_by_packed_idx: HashMap::new(),
         }
     }
@@ -610,6 +615,7 @@ impl<'a> ProtoOutBuilder<'a> {
             let ag_idx = self.processor.air_groups.iter().position(|g| std::ptr::eq(g, ag)).unwrap_or(0) as u32;
             let mut air_id_counter = 0u32;
             for air in ag.airs.iter().filter(|a| !a.is_virtual) {
+                *self.current_air_name.borrow_mut() = air.name.clone();
                 // Flatten the FULL AIR expression store into the protobuf
                 // array. This includes ALL expressions created during AIR
                 // execution (intermediate column definitions, constraint
@@ -1871,6 +1877,65 @@ impl<'a> ProtoOutBuilder<'a> {
         im_labels: &mut std::collections::BTreeMap<u32, String>,
         stats: &mut ChainShapeStats,
     ) -> u32 {
+        // Round 4 cross-AIR safety net: an `Intermediate` ColRef leaf
+        // whose `id` is not in this AIR's `source_to_pos` AND whose raw
+        // id is past the `expr_id_map` range is unresolvable through
+        // the per-AIR path. Substitute the `RuntimeExpr` snapshot the
+        // producer captured in `processor.global_intermediate_resolution`
+        // at ref-mint time, then flatten the resolved tree inline.
+        // Without this, `leaf_to_air_operand`'s legacy fallback emits
+        // the raw slot id as `Operand::Expression { idx }` and
+        // pil2-stark-setup indexes past per-AIR `expressions[]`
+        // (panic at `helpers.rs:21:19`). See
+        // BL-20260418-intermediate-ref-cross-air-leak.
+        if let RuntimeExpr::ColRef {
+            col_type: ColRefKind::Intermediate,
+            id,
+            row_offset: _,
+        } = expr
+        {
+            // Two failure modes funnel into the global-resolution
+            // fallback: (a) `source_to_pos` has no entry for this id
+            // (the slot was never lifted into `air_expression_store`),
+            // or (b) `source_to_pos` returns a position that has not
+            // yet been flattened into `expr_id_map` at this point in
+            // the traversal (forward reference). The legacy raw-id
+            // fallback in `leaf_to_air_operand` would emit an out-of-
+            // bounds idx in either case. Re-flatten inline from the
+            // persistent `global_intermediate_resolution` snapshot so
+            // the emitted proto index is always in-range. See
+            // BL-20260418-intermediate-ref-cross-air-leak.
+            let unresolved = source_to_pos
+                .get(id)
+                .and_then(|&pos| expr_id_map.get(pos).copied())
+                .is_none();
+            if unresolved && expr_id_map.get(*id as usize).is_none() {
+                if let Some(resolved) = self
+                    .processor
+                    .global_intermediate_resolution
+                    .get(id)
+                    .cloned()
+                {
+                    return self.flatten_air_expr(
+                        &resolved,
+                        source_expr_id,
+                        source_label,
+                        fixed_map,
+                        fixed_col_start,
+                        witness_map,
+                        custom_map,
+                        expr_id_map,
+                        source_to_pos,
+                        out,
+                        rc_cache,
+                        struct_cache,
+                        prov_cache,
+                        im_labels,
+                        stats,
+                    );
+                }
+            }
+        }
         // Rc-pointer fast path: if this exact node was already flattened,
         // reference the existing proto entry.
         let ptr = expr as *const RuntimeExpr;
@@ -2024,6 +2089,53 @@ impl<'a> ProtoOutBuilder<'a> {
                         pilout_proto::operand::Expression { idx },
                     )),
                 })
+            }
+            // Round 4 cross-AIR safety net: an `Intermediate` ref whose
+            // `id` is not in this AIR's `source_to_pos` must resolve
+            // through `processor.global_intermediate_resolution` and
+            // re-flatten inline. Without this, the leaf fallback in
+            // `leaf_to_air_operand` emits the raw slot id as
+            // `Operand::Expression { idx }` which pil2-stark-setup
+            // indexes past its per-AIR `expressions[]` array, panicking
+            // at `helpers.rs:21:19`. See
+            // BL-20260418-intermediate-ref-cross-air-leak.
+            RuntimeExpr::ColRef {
+                col_type: ColRefKind::Intermediate,
+                id,
+                row_offset: _,
+            } if source_to_pos
+                .get(id)
+                .and_then(|&pos| expr_id_map.get(pos).copied())
+                .is_none()
+                && expr_id_map.get(*id as usize).is_none() =>
+            {
+                if let Some(resolved) =
+                    self.processor.global_intermediate_resolution.get(id).cloned()
+                {
+                    let idx = self.flatten_air_expr(
+                        &resolved,
+                        None,
+                        None,
+                        fixed_map,
+                        fixed_col_start,
+                        witness_map,
+                        custom_map,
+                        expr_id_map,
+                        source_to_pos,
+                        out,
+                        rc_cache,
+                        struct_cache,
+                        prov_cache,
+                        im_labels,
+                        stats,
+                    );
+                    return Some(pilout_proto::Operand {
+                        operand: Some(pilout_proto::operand::Operand::Expression(
+                            pilout_proto::operand::Expression { idx },
+                        )),
+                    });
+                }
+                self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos)
             }
             _ => self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos),
         }

@@ -214,13 +214,19 @@ pub(super) fn exec_variable_declaration(&mut self, vd: &VariableDeclaration) -> 
                     if !array_dims.is_empty() {
                         if let Value::Array(items) = val {
                             for (i, item) in items.iter().enumerate() {
-                                self.exprs.set(id + i as u32, item.clone());
+                                let slot = id + i as u32;
+                                let sanitized =
+                                    self.sanitize_expr_store_value(slot, item.clone());
+                                self.exprs.set(slot, sanitized);
                             }
                         } else {
-                            self.exprs.set(id, val.clone());
+                            let sanitized =
+                                self.sanitize_expr_store_value(id, val.clone());
+                            self.exprs.set(id, sanitized);
                         }
                     } else {
-                        self.exprs.set(id, val.clone());
+                        let sanitized = self.sanitize_expr_store_value(id, val.clone());
+                        self.exprs.set(id, sanitized);
                     }
                 }
                 (RefType::Expr, id)
@@ -534,12 +540,13 @@ pub(super) fn get_var_value(&self, reference: &Reference) -> Value {
 ///
 /// All non-`Expr` ref types fall through to the same per-type
 /// behavior as `get_var_value`.
+#[allow(dead_code)]
 pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
     match reference.ref_type {
         RefType::Expr => {
             let stored = self.exprs.get(reference.id).cloned().unwrap_or(Value::Void);
             match &stored {
-                Value::RuntimeExpr(_) => {
+                Value::RuntimeExpr(rt) => {
                     // Only emit an `Intermediate` reference when the
                     // expr-store slot is within the current AIR's
                     // frame, i.e. this AIR will lift the slot into
@@ -556,7 +563,20 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                     // pil2-stark-setup would index past its
                     // expressions[] vector and panic on (see
                     // `pil2-stark-setup/src/helpers.rs:21:19`).
-                    if reference.id >= self.exprs.frame_start() {
+                    // Only emit an `Intermediate` ref when we are
+                    // actually inside an AIR template body. At proof
+                    // scope (before the first AIR push and after the
+                    // last AIR pop, e.g. during
+                    // `final_proof_scope`'s deferred handlers),
+                    // `frame_start` is 0 so the `id >= frame_start`
+                    // gate would always pass, minting refs that no
+                    // per-AIR `source_to_pos` map can ever resolve.
+                    // The lifted AirExpressionStore only exists for
+                    // AIR-scoped expressions, so refs into proof
+                    // scope must stay inlined. See
+                    // BL-20260418-intermediate-ref-cross-air-leak.
+                    let in_air = !self.air_stack.is_empty();
+                    if in_air && reference.id >= self.exprs.frame_start() {
                         // Round 3 lift / read consistency: record
                         // the id so AIR finalization keeps the slot
                         // in `air_expression_store` even if the
@@ -564,6 +584,19 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                         // non-symbolic shape later in the AIR body.
                         // See BL-20260418-intermediate-ref-lift-consistency.
                         self.intermediate_refs_emitted.insert(reference.id);
+                        // Round 4: capture the `RuntimeExpr` snapshot
+                        // so `substitute_air_local_intermediate_refs`
+                        // can replace this ref with its underlying
+                        // expression when the containing value is
+                        // stored into a proof-scope slot that will
+                        // be read by another AIR. See
+                        // BL-20260418-intermediate-ref-cross-air-leak.
+                        self.intermediate_ref_resolution
+                            .entry(reference.id)
+                            .or_insert_with(|| rt.clone());
+                        self.global_intermediate_resolution
+                            .entry(reference.id)
+                            .or_insert_with(|| rt.clone());
                         Value::ColRef {
                             col_type: ColRefKind::Intermediate,
                             id: reference.id,
@@ -584,6 +617,7 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
 /// rule as the bare-scalar form: only symbolic stored values
 /// produce an `Intermediate` `ColRef`, everything else inlines
 /// the stored value so compile-time consumers continue working.
+#[allow(dead_code)]
 pub(super) fn get_var_ref_value_by_type_and_id(
     &mut self,
     ref_type: &RefType,
@@ -593,9 +627,16 @@ pub(super) fn get_var_ref_value_by_type_and_id(
         RefType::Expr => {
             let stored = self.exprs.get(id).cloned().unwrap_or(Value::Void);
             match &stored {
-                Value::RuntimeExpr(_) => {
-                    if id >= self.exprs.frame_start() {
+                Value::RuntimeExpr(rt) => {
+                    let in_air = !self.air_stack.is_empty();
+                    if in_air && id >= self.exprs.frame_start() {
                         self.intermediate_refs_emitted.insert(id);
+                        self.intermediate_ref_resolution
+                            .entry(id)
+                            .or_insert_with(|| rt.clone());
+                        self.global_intermediate_resolution
+                            .entry(id)
+                            .or_insert_with(|| rt.clone());
                         Value::ColRef {
                             col_type: ColRefKind::Intermediate,
                             id,
@@ -618,7 +659,10 @@ pub(super) fn set_var_value(&mut self, reference: &Reference, value: Value) {
         RefType::Int => self.ints.set(reference.id, value),
         RefType::Fe => self.fes.set(reference.id, value),
         RefType::Str => self.strings.set(reference.id, value),
-        RefType::Expr => self.exprs.set(reference.id, value),
+        RefType::Expr => {
+            let value = self.sanitize_expr_store_value(reference.id, value);
+            self.exprs.set(reference.id, value);
+        }
         _ => {}
     }
 }
@@ -629,9 +673,192 @@ pub(super) fn set_var_value_by_type_and_id(&mut self, ref_type: &RefType, id: u3
         RefType::Int => self.ints.set(id, value),
         RefType::Fe => self.fes.set(id, value),
         RefType::Str => self.strings.set(id, value),
-        RefType::Expr => self.exprs.set(id, value),
+        RefType::Expr => {
+            let value = self.sanitize_expr_store_value(id, value);
+            self.exprs.set(id, value);
+        }
         _ => {}
     }
 }
 
+/// If `target_id` is a proof-scope slot (below the current AIR frame
+/// start, i.e. a container-owned seed that other AIRs will read back),
+/// walk `value` and replace every `ColRef { col_type: Intermediate }`
+/// whose id points at an AIR-local `self.exprs` slot with the
+/// `RuntimeExpr` snapshot captured at mint time in
+/// `intermediate_ref_resolution`. Without this substitution, the stored
+/// value carries a ref whose id cannot be resolved by a different
+/// AIR's per-AIR `source_to_pos` and pil2-stark-setup panics at
+/// `helpers.rs:21:19`. See
+/// `BL-20260418-intermediate-ref-cross-air-leak`.
+fn sanitize_expr_store_value(&self, target_id: u32, value: Value) -> Value {
+    if target_id >= self.exprs.frame_start() {
+        return value;
+    }
+    if self.intermediate_ref_resolution.is_empty() {
+        return value;
+    }
+    let frame_start = self.exprs.frame_start();
+    substitute_air_local_intermediate_in_value(
+        value,
+        frame_start,
+        &self.intermediate_ref_resolution,
+    )
+}
+
+/// Walk every proof-scope slot (`id < self.exprs.frame_start()`) and
+/// substitute any `Intermediate` ref whose id points at an AIR-local
+/// slot with the `RuntimeExpr` captured at ref-emission time. Called
+/// once at AIR exit, just before the intermediate-ref trackers are
+/// cleared and `self.exprs.pop()` merges proof-scope writes back onto
+/// the restored proof frame. This is the cross-AIR backstop: even if a
+/// leak path bypassed `sanitize_expr_store_value` at set time, the
+/// proof-scope value never leaves the AIR with a dangling
+/// `Intermediate` id. See
+/// `BL-20260418-intermediate-ref-cross-air-leak`.
+pub(super) fn sanitize_proof_scope_exprs_at_air_exit(&mut self) {
+    let frame_start = self.exprs.frame_start();
+    if self.intermediate_ref_resolution.is_empty() {
+        return;
+    }
+    let resolution = self.intermediate_ref_resolution.clone();
+    // Walk every slot in this AIR's `self.exprs` that may survive into
+    // the proof frame via `variables::pop`'s `container_owned` merge.
+    // Seeded proof-scope slots (id < frame_start) plus any slot marked
+    // container_owned inside the AIR body count. Substituting in
+    // within-AIR-only slots is harmless because the lift's
+    // `air_expression_store` entries carry their own RuntimeExpr
+    // clones, so the proto serializer keeps resolving every emitted
+    // `Intermediate` ref via `source_to_pos` regardless of what we
+    // overwrite on `self.exprs.values` here.
+    let total_len = self.exprs.len();
+    for id in 0..total_len {
+        let is_proof_scope = id < frame_start;
+        let is_container = self
+            .exprs
+            .ids
+            .datas
+            .get(id as usize)
+            .map(|d| d.container_owned)
+            .unwrap_or(false);
+        if !is_proof_scope && !is_container {
+            continue;
+        }
+        let current = match self.exprs.get(id) {
+            Some(v) => v.clone(),
+            None => continue,
+        };
+        let rewritten = substitute_air_local_intermediate_in_value(
+            current,
+            frame_start,
+            &resolution,
+        );
+        self.exprs.set(id, rewritten);
+    }
+}
+
+}
+
+fn substitute_air_local_intermediate_in_value(
+    value: Value,
+    frame_start: u32,
+    resolution: &std::collections::HashMap<u32, Rc<RuntimeExpr>>,
+) -> Value {
+    match value {
+        Value::ColRef { col_type: ColRefKind::Intermediate, id, row_offset: _ }
+            if id >= frame_start =>
+        {
+            if let Some(rt) = resolution.get(&id) {
+                let rewritten = substitute_air_local_intermediate_in_rt(
+                    rt.clone(),
+                    frame_start,
+                    resolution,
+                );
+                Value::RuntimeExpr(rewritten)
+            } else {
+                Value::ColRef {
+                    col_type: ColRefKind::Intermediate,
+                    id,
+                    row_offset: None,
+                }
+            }
+        }
+        Value::RuntimeExpr(rt) => Value::RuntimeExpr(
+            substitute_air_local_intermediate_in_rt(rt, frame_start, resolution),
+        ),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|v| substitute_air_local_intermediate_in_value(v, frame_start, resolution))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn substitute_air_local_intermediate_in_rt(
+    rt: Rc<RuntimeExpr>,
+    frame_start: u32,
+    resolution: &std::collections::HashMap<u32, Rc<RuntimeExpr>>,
+) -> Rc<RuntimeExpr> {
+    match &*rt {
+        RuntimeExpr::ColRef { col_type: ColRefKind::Intermediate, id, row_offset: _ }
+            if *id >= frame_start =>
+        {
+            if let Some(replacement) = resolution.get(id) {
+                substitute_air_local_intermediate_in_rt(
+                    replacement.clone(),
+                    frame_start,
+                    resolution,
+                )
+            } else {
+                rt
+            }
+        }
+        RuntimeExpr::BinOp { op, left, right } => {
+            let new_left = substitute_air_local_intermediate_in_rt(
+                left.clone(),
+                frame_start,
+                resolution,
+            );
+            let new_right = substitute_air_local_intermediate_in_rt(
+                right.clone(),
+                frame_start,
+                resolution,
+            );
+            if Rc::ptr_eq(&new_left, left) && Rc::ptr_eq(&new_right, right) {
+                rt
+            } else {
+                Rc::new(RuntimeExpr::BinOp {
+                    op: *op,
+                    left: new_left,
+                    right: new_right,
+                })
+            }
+        }
+        RuntimeExpr::UnaryOp { op, operand } => {
+            let new_operand = substitute_air_local_intermediate_in_rt(
+                operand.clone(),
+                frame_start,
+                resolution,
+            );
+            if Rc::ptr_eq(&new_operand, operand) {
+                rt
+            } else {
+                Rc::new(RuntimeExpr::UnaryOp { op: *op, operand: new_operand })
+            }
+        }
+        RuntimeExpr::Value(inner) => {
+            let rewritten = substitute_air_local_intermediate_in_value(
+                inner.clone(),
+                frame_start,
+                resolution,
+            );
+            match rewritten {
+                Value::RuntimeExpr(inner_rt) => inner_rt,
+                other => Rc::new(RuntimeExpr::Value(other)),
+            }
+        }
+        RuntimeExpr::ColRef { .. } => rt,
+    }
 }
