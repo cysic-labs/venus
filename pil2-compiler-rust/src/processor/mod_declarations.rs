@@ -135,6 +135,20 @@ pub(super) fn exec_col_declaration(&mut self, cd: &ColDeclaration) -> FlowSignal
                     data.external = true;
                     self.pragmas_next_fixed.external = false;
                 }
+                // `col fixed virtual(N) X` carries a `virtual`
+                // col_feature. JS pil2-compiler skips virtual
+                // fixed columns from the per-AIR const pols map
+                // because their values are copied into concrete
+                // columns at compile time via Tables.copy /
+                // Tables.fill; the virtual column itself is a
+                // pure helper declaration that should not surface
+                // in pilout. Mirror that by setting
+                // `temporal=true`, which already has the "drop
+                // from pilout" semantics the proto emitter
+                // requires.
+                if cd.features.iter().any(|f| f.name == "virtual") {
+                    data.temporal = true;
+                }
                 // Consume fixed_load pragma if set.
                 let load_from_file = self.pragmas_next_fixed.load_from_file.take();
 

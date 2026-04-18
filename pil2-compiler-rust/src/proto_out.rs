@@ -1903,9 +1903,14 @@ mod tests {
             assert!(air.constraints.len() > 0, "AIR {} has no constraints", air.name.as_deref().unwrap_or("?"));
         }
 
-        // Key fixed column counts (these drive the .fixed file generation)
+        // Key fixed column counts (these drive the .fixed file generation).
+        // Round 15 dropped `col fixed virtual(N) tmp` helper columns from
+        // pilout emission, bringing SpecifiedRanges in line with JS
+        // pil2-compiler golden (59 concrete fixed cols; the previous 67
+        // counted the 8 virtual tVALS scratch cols that Tables.copy
+        // materialises into VALS[] before emission).
         let sr = find_air("SpecifiedRanges");
-        assert_eq!(sr.fixed_cols.len(), 67, "SpecifiedRanges fixedCols count");
+        assert_eq!(sr.fixed_cols.len(), 59, "SpecifiedRanges fixedCols count");
 
         let vt0 = find_air("VirtualTable0");
         assert_eq!(vt0.fixed_cols.len(), 52, "VirtualTable0 fixedCols count");

@@ -396,16 +396,21 @@ pub(super) fn execute_air_template_call(
     }
 
     // Build custom column ID mappings and custom_commits from the
-    // local allocator state. Round 13 closed the upstream leak that
-    // made cross-AIR `ColRefKind::Custom` ids appear in consuming
-    // AIRs' air_expr_store (`execute_air_template_call` now bounds
-    // the air-expression lift by `self.exprs.frame_start()`), so
-    // every referenced id in `referenced_custom_ids` should be
-    // covered by `self.custom_cols` at this point. The panic below
-    // is reserved for the remaining correctness floor: any id
-    // absent from BOTH the in-AIR allocator and the cross-AIR
-    // `custom_col_meta` registry is a truly-undeclared column
-    // (never reserved anywhere) and must surface immediately.
+    // local allocator state. Round 13 / 14 closed the upstream
+    // air_expr_store leak that made cross-AIR `ColRefKind::Custom`
+    // ids appear in consuming AIRs' serialized expressions: the
+    // lift above now iterates every `self.exprs` slot but applies
+    // a per-value filter that drops only seeded proof-scope slots
+    // whose tree carries a cross-AIR custom leaf. Most referenced
+    // ids should therefore be covered by `self.custom_cols`; any
+    // that still reach pilout serialization through hint /
+    // constraint paths degrade to `Operand::Constant(0)` at the
+    // proto layer (see `pil2-compiler-rust/src/proto_out.rs`
+    // ColRefKind::Custom arm). The panic below is reserved for
+    // the correctness floor: an id absent from BOTH the in-AIR
+    // allocator AND the cross-AIR `custom_col_meta` registry is
+    // a truly-undeclared column (never reserved anywhere) and
+    // must surface immediately.
     let (custom_id_map, custom_commits) = {
         let mut cid_map: Vec<(u32, u32, u32)> = Vec::new();
         let mut commits: Vec<(String, Vec<u32>, Vec<u32>)> = Vec::new();

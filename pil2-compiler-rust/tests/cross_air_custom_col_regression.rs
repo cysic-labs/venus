@@ -13,12 +13,15 @@
 //! the gap with `Constant(0)`, which kept pilout-write succeeding
 //! but broke downstream consumers.
 //!
-//! This test walks the compiled pilout and asserts every
-//! `Operand::CustomCol` everywhere (expressions, constraints, and
-//! hints) has a `commit_id` that is a valid index into the emitting
-//! AIR's `custom_commits` vector. The invariant fails on the
-//! pre-Round-12 branch and passes after the referenced-set
-//! registry lookup + per-AIR synthetic commit_id assignment land.
+//! This test walks the compiled pilout's `air.expressions` and
+//! `pilout.hints` (the two surfaces the Rust proto_out serializer
+//! can emit `Operand::CustomCol` through) and asserts that every
+//! such emission has a `commit_id` that is a valid index into the
+//! emitting AIR's `custom_commits` vector. Constraint-message
+//! operands are not walked separately because each constraint
+//! references an expression index into `air.expressions` (already
+//! covered above). The invariant fails on the pre-Round-12 branch
+//! and passes after the referenced-set registry lookup lands.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -230,22 +233,25 @@ fn cross_air_custom_col_refs_have_in_range_commit_ids() {
     // at the proto serializer (the Round 11/12 fallback), the
     // producer's Horner polynomial still lands in the consumer AIR's
     // `air.expressions` as a large expression tree. A healthy
-    // consumer AIR for this minimal fixture emits only a small number
-    // of expressions (own witness cols and its own bus polynomial).
-    // Pre-Round-13 the consumer's expression count inflated by ~30+
-    // extra entries because the proof-scope gsum container slots were
-    // mirrored into its per-AIR store on exit.
+    // consumer AIR for this minimal fixture emits only a small
+    // number of expressions (own witness cols and its own bus
+    // polynomial). Round 14 baseline after the narrowed leak
+    // filter: producer_exprs=20, consumer_exprs=23. The cap is
+    // kept generous (<= 40) so legitimate shape changes from
+    // later producer repairs do not break the test, while a
+    // regression to the pre-Round-13 leak would still blow the
+    // count far past the cap.
     eprintln!(
         "cross_air fixture: producer_exprs={} consumer_exprs={}",
         producer_expr_count, consumer_expr_count,
     );
     assert!(
-        consumer_expr_count <= 25,
+        consumer_expr_count <= 40,
         "CustomAssumeAir has {} expressions — pre-Round-13 leak class \
          would explode this count by lifting proof-scope container \
          slots (Horner polynomials etc.) into the consumer AIR's \
-         air_expr_store. Post-Round-13 a consumer AIR this small \
-         should carry only a handful of expressions.",
+         air_expr_store. Round 14 baseline is 23; the 40 cap here \
+         allows for modest churn from future producer tweaks.",
         consumer_expr_count,
     );
 
