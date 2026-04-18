@@ -16,6 +16,16 @@ pub struct VariableStore {
     values: Vec<Option<Value>>,
     /// Stack for push/pop across air scopes.
     stack: Vec<Vec<Option<Value>>>,
+    /// First ID allocated in the current air frame. Slots with
+    /// `id < frame_start` are seeded from proof-scope container
+    /// fields (via `push()` below) and belong to the enclosing
+    /// proof frame, not this AIR. AIR-finalization code (pilout
+    /// expression lifting) uses this boundary to avoid mirroring
+    /// cross-AIR state (e.g. a `proof.std.gsum.direct_gsum_e[i]`
+    /// slot that held a `const expr` Horner polynomial built in an
+    /// earlier AIR's frame) into this AIR's per-AIR expression
+    /// store.
+    frame_start: u32,
 }
 
 impl VariableStore {
@@ -24,7 +34,17 @@ impl VariableStore {
             ids: IdAllocator::new(type_name),
             values: Vec::new(),
             stack: Vec::new(),
+            frame_start: 0,
         }
+    }
+
+    /// Return the first ID allocated in the current air frame. Slots
+    /// with `id < frame_start()` were seeded from the enclosing proof
+    /// scope by `push()` and do not belong to this AIR's own
+    /// allocations. Used by AIR-finalization code to avoid lifting
+    /// cross-AIR state into the per-AIR expression store.
+    pub fn frame_start(&self) -> u32 {
+        self.frame_start
     }
 
     pub fn type_name(&self) -> &str {
@@ -135,6 +155,11 @@ impl VariableStore {
                 self.ids.datas[idx].container_owned = true;
             }
         }
+        // Record the AIR-frame start boundary. AIR-local allocations
+        // happen at `id >= frame_start`; anything below was seeded
+        // from proof-scope container slots and must NOT be mirrored
+        // into per-AIR serialized state. See `frame_start()` above.
+        self.frame_start = max_owned_idx;
 
         // Resize values to cover the seeded slot range, then write
         // the seeded values onto it.
@@ -210,6 +235,11 @@ impl VariableStore {
             }
             self.values = vals;
         }
+        // Leaving the air scope: reset `frame_start` to 0 so
+        // subsequent proof-scope code treats every slot as owned by
+        // the proof frame. AIR push/pop is one-level in this project,
+        // so a scalar boundary is sufficient here.
+        self.frame_start = 0;
     }
 
     /// Return a snapshot of the current allocation high-water mark.

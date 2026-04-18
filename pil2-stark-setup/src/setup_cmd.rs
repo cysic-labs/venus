@@ -2491,12 +2491,15 @@ mod tests_global_info {
 
         let circom_exec = std::env::var("CIRCOM_EXEC")
             .unwrap_or_else(|_| workspace.join("circom/circom").display().to_string());
-        let circuits_gl_path = std::env::var("CIRCUITS_GL_PATH").unwrap_or_else(|_| {
-            workspace
-                .join("stark-recurser-rust/src/pil2circom/circuits.gl")
-                .display()
-                .to_string()
-        });
+        // Align with runtime default in `run_recursive_setup`: the
+        // include directory that holds cmul.circom lives at repo-root
+        // `circuits.gl/`, not under a non-existent
+        // `stark-recurser-rust/src/pil2circom/circuits.gl`. Hardcoding
+        // the old path caused the live oracle to fail before reaching
+        // any assertion with `error[P1014] cmul.circom to be included
+        // has not been found`.
+        let circuits_gl_path = std::env::var("CIRCUITS_GL_PATH")
+            .unwrap_or_else(|_| workspace.join("circuits.gl").display().to_string());
 
         assert!(
             std::path::Path::new(&circom_exec).is_file(),

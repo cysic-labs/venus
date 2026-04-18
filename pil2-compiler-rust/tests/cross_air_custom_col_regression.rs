@@ -81,31 +81,16 @@ fn cross_air_custom_col_refs_have_in_range_commit_ids() {
                 .clone()
                 .unwrap_or_else(|| format!("air#{}", air_idx));
             let ccl = air.custom_commits.len();
-            // Walk every expression in this AIR.
             for (eidx, expr) in air.expressions.iter().enumerate() {
                 walk_expression_operands(expr, &mut |op| {
                     check_custom_operand(op, &ag_name, &air_name, ccl, eidx, "expression", &mut violations);
                 });
             }
-            // Walk every constraint's debug_line and first_line.
-            for (cidx, c) in air.constraints.iter().enumerate() {
-                // Constraints carry `e` (expression index). The
-                // expression itself is in air.expressions — already
-                // walked above. But custom-col operand can also
-                // appear inline on the constraint message; check if
-                // any direct operand fields exist.
-                let _ = (cidx, c);
-            }
         }
     }
 
-    // Walk hints (global + air hints) looking for direct Operand
-    // fields that carry Custom refs.
     for h in &pilout.hints {
         walk_hint_fields(h, &mut |op, _name| {
-            // For hints we can only validate commit_id against the
-            // declaring AIR's custom_commits when the hint is
-            // air-scoped. Look up the air's custom_commits len.
             if let (Some(ag_idx), Some(air_idx)) = (h.air_group_id, h.air_id) {
                 let ccl = pilout
                     .air_groups
@@ -131,25 +116,142 @@ fn cross_air_custom_col_refs_have_in_range_commit_ids() {
 
     assert!(
         violations.is_empty(),
-        "found {} Operand::CustomCol emissions with commit_id out of range. \
-         This indicates the Round 12 custom-col cross-AIR metadata repair \
-         regressed: first few violations:\n  {}",
+        "found {} Operand::CustomCol emissions with commit_id out of range: \n  {}",
         violations.len(),
         violations.iter().take(5).cloned().collect::<Vec<_>>().join("\n  ")
     );
 
-    // Additionally: at least one AIR in the fixture's airgroup
-    // should have a non-empty `custom_commits`. If both AIRs are
-    // empty we're not actually exercising the cross-AIR path.
-    let any_has_commits = pilout
-        .air_groups
-        .iter()
-        .flat_map(|g| g.airs.iter())
-        .any(|a| !a.custom_commits.is_empty());
+    // ----------------------------------------------------------------
+    // Round 13 tightening: pin the consumer-AIR surface explicitly.
+    // ----------------------------------------------------------------
+    //
+    // Locate the producer (CustomProveAir, declares the `my_commit`
+    // commit) and consumer (CustomAssumeAir, only emits
+    // `lookup_assumes` on the same bus) by name. The pre-Round-13
+    // state leaked the producer's Horner polynomial into the
+    // consumer's `air_expr_store` via a proof-scope container slot
+    // that survived `self.exprs.push()`. The consumer then either
+    // (a) emitted `Operand::CustomCol` with out-of-range commit_id,
+    // (b) crashed `venus-setup` at `pilout_info.rs:208`, or
+    // (c) after the Round 11 `Operand::Constant(0)` fallback, quietly
+    // downgraded the reference to `Constant(0)` at serialization.
+    //
+    // Post-Round-13 the consumer AIR's expression store should carry
+    // **zero** `Operand::CustomCol` references — the producer's
+    // custom column ids no longer cross the AIR boundary at all. The
+    // producer AIR of course still emits its own in-AIR custom-col
+    // operands.
+    let mut producer_commits: usize = 0;
+    let mut consumer_custom_ops: usize = 0;
+    let mut consumer_custom_ops_in_hints: usize = 0;
+    let mut consumer_expr_count: usize = 0;
+    let mut producer_expr_count: usize = 0;
+    let mut consumer_seen = false;
+    let mut producer_seen = false;
+    for ag in &pilout.air_groups {
+        for air in &ag.airs {
+            match air.name.as_deref() {
+                Some("CustomProveAir") => {
+                    producer_seen = true;
+                    producer_commits = air.custom_commits.len();
+                    producer_expr_count = air.expressions.len();
+                }
+                Some("CustomAssumeAir") => {
+                    consumer_seen = true;
+                    consumer_expr_count = air.expressions.len();
+                    for expr in &air.expressions {
+                        walk_expression_operands(expr, &mut |op| {
+                            if matches!(
+                                op.operand,
+                                Some(pb::operand::Operand::CustomCol(_))
+                            ) {
+                                consumer_custom_ops += 1;
+                            }
+                        });
+                    }
+                    for h in &pilout.hints {
+                        let this_air_scoped = pilout
+                            .air_groups
+                            .iter()
+                            .zip(std::iter::repeat(()))
+                            .any(|_| {
+                                h.air_id.is_some()
+                                    && pilout
+                                        .air_groups
+                                        .iter()
+                                        .flat_map(|g| g.airs.iter())
+                                        .any(|a| {
+                                            a.name.as_deref() == Some("CustomAssumeAir")
+                                        })
+                            });
+                        if this_air_scoped {
+                            walk_hint_fields(h, &mut |op, _| {
+                                if matches!(
+                                    op.operand,
+                                    Some(pb::operand::Operand::CustomCol(_))
+                                ) {
+                                    consumer_custom_ops_in_hints += 1;
+                                }
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     assert!(
-        any_has_commits,
-        "no AIR in the fixture emitted custom_commits; the fixture is not \
-         exercising the cross-AIR CustomCol path"
+        producer_seen,
+        "fixture did not produce a CustomProveAir instance in the decoded pilout"
+    );
+    assert!(
+        consumer_seen,
+        "fixture did not produce a CustomAssumeAir instance in the decoded pilout"
+    );
+    assert!(
+        producer_commits >= 1,
+        "CustomProveAir must retain its own custom_commits entry for `my_commit` \
+         (got {}); the producer AIR should still emit its declared custom columns.",
+        producer_commits,
+    );
+    assert_eq!(
+        consumer_custom_ops, 0,
+        "CustomAssumeAir emitted {} Operand::CustomCol reference(s) in its \
+         expressions — this is the pre-Round-13 cross-AIR leak class. The \
+         consumer AIR must not carry the producer's custom-column leaves; \
+         Round 13 eliminated the leak by restricting \
+         execute_air_template_call's air-expression lift to the AIR-local \
+         frame range.",
+        consumer_custom_ops,
+    );
+    assert_eq!(
+        consumer_custom_ops_in_hints, 0,
+        "CustomAssumeAir's air-scoped hints carry {} Operand::CustomCol \
+         reference(s); same leak class.",
+        consumer_custom_ops_in_hints,
+    );
+
+    // Even when the cross-AIR leak downgrades to `Operand::Constant(0)`
+    // at the proto serializer (the Round 11/12 fallback), the
+    // producer's Horner polynomial still lands in the consumer AIR's
+    // `air.expressions` as a large expression tree. A healthy
+    // consumer AIR for this minimal fixture emits only a small number
+    // of expressions (own witness cols and its own bus polynomial).
+    // Pre-Round-13 the consumer's expression count inflated by ~30+
+    // extra entries because the proof-scope gsum container slots were
+    // mirrored into its per-AIR store on exit.
+    eprintln!(
+        "cross_air fixture: producer_exprs={} consumer_exprs={}",
+        producer_expr_count, consumer_expr_count,
+    );
+    assert!(
+        consumer_expr_count <= 25,
+        "CustomAssumeAir has {} expressions — pre-Round-13 leak class \
+         would explode this count by lifting proof-scope container \
+         slots (Horner polynomials etc.) into the consumer AIR's \
+         air_expr_store. Post-Round-13 a consumer AIR this small \
+         should carry only a handful of expressions.",
+        consumer_expr_count,
     );
 
     let _ = std::fs::remove_file(&out);

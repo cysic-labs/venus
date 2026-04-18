@@ -298,7 +298,18 @@ pub(super) fn execute_air_template_call(
     // the consumer.
     let air_expr_store: Vec<air::AirExpressionEntry> = {
         let mut store = std::mem::take(&mut self.air_expression_store);
-        for eid in 0..self.exprs.len() {
+        // Only mirror slots that were allocated in THIS AIR's frame
+        // into the per-AIR expression store. Slots below
+        // `self.exprs.frame_start()` were seeded from proof-scope
+        // container fields at air-entry `push()` time and hold values
+        // that may reference other AIRs' declarations (e.g. a Rom-built
+        // Horner polynomial stored in `proof.std.gsum.direct_gsum_e[i]`);
+        // lifting those into every consumer AIR's expression store was
+        // the exact mechanism producing cross-AIR `ColRefKind::Custom`
+        // leaks (Rounds 10-12 CustomCol class). Proof-scope expressions
+        // stay in the global / deferred-handler emission path.
+        let frame_start = self.exprs.frame_start();
+        for eid in frame_start..self.exprs.len() {
             if let Some(val) = self.exprs.get(eid) {
                 if is_symbolic(val) {
                     let rt = value_to_runtime_expr(val);
@@ -396,6 +407,59 @@ pub(super) fn execute_air_template_call(
             .last()
             .map(|a| a.name.clone())
             .unwrap_or_else(|| "?".to_string());
+        // Cross-AIR leak diagnostic. Set PIL2C_TRACE_CUSTOMCOL_LEAK=1
+        // to see every AIR that emits a custom-col reference whose
+        // declaring AIR is different from the current AIR. This is
+        // the Round 13 tracing hook for the leak that the Round 11
+        // / 12 `Operand::Constant(0)` fallback papers over.
+        if std::env::var("PIL2C_TRACE_CUSTOMCOL_LEAK").is_ok() {
+            let cross_air: Vec<u32> = referenced_custom_ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    !registered_ids.contains(id)
+                        && self.custom_col_meta.contains_key(id)
+                })
+                .collect();
+            if !cross_air.is_empty() {
+                eprintln!(
+                    "[pil2c-trace] [customcol-leak] air='{}' cross_air_ids={:?} \
+                     (declaring commits: {:?})",
+                    air_name_dbg,
+                    cross_air,
+                    cross_air
+                        .iter()
+                        .filter_map(|id| self.custom_col_meta.get(id).map(|(n, _, _)| n.clone()))
+                        .collect::<std::collections::BTreeSet<_>>(),
+                );
+                for (idx, entry) in air_expr_store.iter().enumerate() {
+                    let mut local_ids: std::collections::BTreeSet<u32> =
+                        std::collections::BTreeSet::new();
+                    let mut local_visited: std::collections::HashSet<
+                        *const super::expression::RuntimeExpr,
+                    > = std::collections::HashSet::new();
+                    collect_custom_ids_in_expr(
+                        &entry.expr,
+                        &mut local_ids,
+                        &mut local_visited,
+                    );
+                    let bad: Vec<u32> = local_ids
+                        .into_iter()
+                        .filter(|id| cross_air.contains(id))
+                        .collect();
+                    if !bad.is_empty() {
+                        eprintln!(
+                            "[pil2c-trace] [customcol-leak]   expr#{} \
+                             (source={:?}, source_expr_id={:?}): ids={:?}",
+                            idx,
+                            entry.source_label,
+                            entry.source_expr_id,
+                            bad,
+                        );
+                    }
+                }
+            }
+        }
         let unmapped: Vec<u32> = referenced_custom_ids
             .iter()
             .copied()

@@ -1660,43 +1660,47 @@ impl<'a> ProtoOutBuilder<'a> {
                         )
                     }
                     ColRefKind::Custom => {
-                        // In-AIR custom references emit full
-                        // `Operand::CustomCol` metadata via
-                        // `custom_map`. Cross-AIR references (ids
-                        // present in the producer's `custom_col_meta`
-                        // registry but not in THIS AIR's allocator)
-                        // degrade to `Operand::Constant(0)`, mirroring
-                        // the Round 11 fallback. Synthesizing
-                        // per-AIR `custom_commits` entries for
-                        // cross-AIR ids here propagates bad
-                        // `custom_<commit>_<idx>` signals into the
-                        // downstream verifier circom and crashes
-                        // `compressor_check` (Round 12 observation at
-                        // Mem). The referenced-set invariant check in
-                        // `execute_air_template_call` already rules
-                        // out ids that are absent from both surfaces,
-                        // so a miss here is provably a cross-AIR
-                        // reference and safe to collapse to Constant(0)
-                        // while the upstream leak is investigated
-                        // separately.
-                        if let Some(&(stage, col_idx, commit_id)) =
-                            custom_map.get(*id as usize)
-                        {
-                            pilout_proto::operand::Operand::CustomCol(
-                                pilout_proto::operand::CustomCol {
-                                    commit_id,
-                                    stage,
-                                    col_idx,
-                                    row_offset: offset,
-                                },
-                            )
-                        } else {
-                            pilout_proto::operand::Operand::Constant(
-                                pilout_proto::operand::Constant {
-                                    value: Vec::new(),
-                                },
-                            )
-                        }
+                        // Every referenced `ColRefKind::Custom` id
+                        // must resolve to a valid entry in this AIR's
+                        // `custom_id_map`. The upstream cross-AIR leak
+                        // (Rounds 10-12 class) was cured in Round 13
+                        // by restricting `execute_air_template_call`'s
+                        // air-expression lift to the AIR-local frame
+                        // range (`self.exprs.frame_start()..len()`),
+                        // so proof-scope container slots holding
+                        // Horner polynomials built in other AIRs no
+                        // longer land in consumer AIRs'
+                        // `air_expr_store`. With that leak gone, an
+                        // unmapped id here is a real invariant
+                        // violation: panic with the offending id so
+                        // the regression is immediately actionable
+                        // rather than silently degraded to
+                        // `Constant(0)` (the Round 11 fallback).
+                        let (stage, col_idx, commit_id) = custom_map
+                            .get(*id as usize)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "proto_out serializer hit \
+                                     Operand::CustomCol with id={} but \
+                                     custom_id_map has no entry. This \
+                                     means a cross-AIR custom-column \
+                                     reference escaped the \
+                                     execute_air_template_call \
+                                     referenced-set invariant check; \
+                                     investigate the upstream leak \
+                                     source.",
+                                    id
+                                );
+                            });
+                        pilout_proto::operand::Operand::CustomCol(
+                            pilout_proto::operand::CustomCol {
+                                commit_id,
+                                stage,
+                                col_idx,
+                                row_offset: offset,
+                            },
+                        )
                     }
                     ColRefKind::Intermediate => {
                         // Intermediate columns are expression references.
