@@ -22,8 +22,18 @@ use super::Processor;
 /// assignments (`+=`, `-=`, `*=`) over `expr`-typed variables, where
 /// JS pil2-compiler builds a fresh symbolic sum / diff / product node
 /// instead of overwriting the accumulator. Applies the same identity
-/// folds as `eval_expr`'s BinaryOp arm (x+0=x, 0+x=x, x-0=x, x*1=x,
-/// 1*x=x).
+/// folds as `eval_expr`'s BinaryOp arm to match JS
+/// `pil2-compiler/src/expression.js`'s reduce step
+/// (`x+0=x`, `0+x=x`, `x-0=x`, `x*1=x`, `1*x=x`, `x*0=0`, `0*x=0`).
+/// The `Mul`-by-zero folds matter for the
+/// `direct_num *= (gsum_e[idx] + std_gamma)` accumulator pattern in
+/// `std_sum.pil::piop_gsum_air`: when `direct_num` is initialized to
+/// literal `0` and gets a `*=` update, the result must collapse to
+/// the literal `0` rather than `Mul(Number(0), key)`. Without this
+/// fold, the resulting pilout carries the redundant `0 * key`
+/// subtree which propagates downstream into `qVerifier.code` as
+/// extra `mul(number=0, ...)` ops, breaking the strict-equality
+/// three-AIR shape regression.
 fn combine_symbolic(current: Value, op: RuntimeOp, value: Value) -> Value {
     match op {
         RuntimeOp::Add => {
@@ -45,6 +55,12 @@ fn combine_symbolic(current: Value, op: RuntimeOp, value: Value) -> Value {
             }
             if is_literal_one(&current) {
                 return value;
+            }
+            if is_literal_zero(&value) {
+                return value;
+            }
+            if is_literal_zero(&current) {
+                return current;
             }
         }
     }

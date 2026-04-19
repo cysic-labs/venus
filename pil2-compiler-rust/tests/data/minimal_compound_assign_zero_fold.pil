@@ -1,0 +1,38 @@
+// minimal_compound_assign_zero_fold.pil
+//
+// Pins the JS-equivalent `mul, 0, x -> 0` / `mul, x, 0 -> 0` fold
+// on the COMPOUND-ASSIGNMENT path
+// (`mod_vardecl.rs::combine_symbolic`).  The Round 20 producer fix
+// added this fold to `eval_expr`'s BinaryOp arm but NOT to
+// `combine_symbolic`, which is what `expr direct_num = 0;
+// direct_num *= (gsum_e[idx] + std_gamma);` actually flows through
+// in `std_sum.pil::piop_gsum_air`. Without the compound-assign
+// fold, the resulting pilout carries a redundant `Mul(Number(0),
+// key)` subtree that propagates into `qVerifier.code` as extra
+// `mul(number=0, ...)` ops.
+//
+// This fixture mirrors the std_sum.pil pattern with one
+// witness column standing in for `(gsum_e[0] + std_gamma)`:
+//
+//   expr accum = 0;
+//   accum *= W;       // *= compound-assign on a literal-0 accumulator
+//   X === accum;      // constraint X = accum should reduce to X = 0
+//
+// If the fold fires, the constraint reduces to `X - 0 = 0` which
+// then folds via `Sub(x, 0) -> x` to `X = 0` (a single witness
+// reference). If the fold does NOT fire, the stored `accum` is a
+// `Mul(0, W)` symbolic node and the constraint serializes with
+// the redundant `Mul(0, W)` subtree.
+
+airtemplate CompoundAssignZeroFoldAir {
+    col witness X;
+    col witness W;
+
+    expr accum = 0;
+    accum *= W;
+    X === accum;
+}
+
+airgroup CompoundAssignZeroFoldGroup {
+    CompoundAssignZeroFoldAir();
+}
