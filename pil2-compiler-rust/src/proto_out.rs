@@ -280,23 +280,22 @@ fn build_balanced_chain(op: RuntimeOp, mut operands: Vec<Rc<RuntimeExpr>>) -> Rc
 }
 
 /// Lower threshold for triggering an associative-chain rebalance.
-/// Currently set above `CANONICALIZE_CHAIN_MAX` so the rebalance
-/// path is dormant: the empirical Round-1 trace showed that
-/// rebuilding balanced binary trees lowers max chain depth as
-/// designed (Keccakf 31 -> 6, Main 95 -> 7) but inflates
-/// `proto_emitted` because every rebuilt internal node is a fresh
-/// `Rc` that misses the rc_cache. Codex's targeted review
-/// (`.humanize/skill/2026-04-18_18-36-49-2731688-8e8be4e4/output.md`)
-/// identifies the actual load-bearing gap as missing JS-style
-/// reference-level reuse: JS dedupes by `(source_expr_id,
-/// row_offset)` at the `Expression` boundary
-/// (`packed_expressions.js::saveAndPushExpressionReference`), while
-/// our `packed_key_for` only tags top-level entries and explicitly
-/// strips provenance from recursive sub-operands. The next round
-/// implements that provenance refactor; this constant is left
-/// above the cap so the canonicalization machinery stays compiled
-/// and ready to enable once the reuse layer lands.
-const CANONICALIZE_CHAIN_THRESHOLD: usize = 2_048;
+/// Round 5 (2026-04-19 loop): enabled at 8 per Codex Round 5
+/// analyze
+/// (`.humanize/skill/2026-04-19_07-20-30-1172757-7d338604/output.md`)
+/// combined with empirical-probe tuning — 256 produced byte-
+/// identical pilouts to the disabled baseline because almost all
+/// stage-2 accumulator chains in Zisk fall well below that bound.
+/// The reference-level reuse refactor that the prior Round 1
+/// trace needed is now in place (origin-authoritative serializer
+/// at commit `d5f39c72`, lift-filter fix at commit `847fa2fc`),
+/// so fresh Rc internal nodes from rebalance are now absorbed by
+/// the `(origin_frame_id, local_id)` composite key in
+/// `global_intermediate_resolution` and the per-AIR
+/// `source_to_pos` map. Stays strictly below
+/// `CANONICALIZE_CHAIN_MAX` so every rebalance path is reachable
+/// before the chain-cap escape hatch.
+const CANONICALIZE_CHAIN_THRESHOLD: usize = 8;
 
 /// Upper bound for chain rebalance. Rebuilding very large chains
 /// allocates new Rcs proportional to chain length; the recursive1
@@ -2335,10 +2334,20 @@ impl<'a> ProtoOutBuilder<'a> {
                             // by another AIR. Emit `Constant(0)` instead of
                             // a stale `FixedCol { idx: raw_id }` so
                             // pil2-stark-setup's FRI evaluator cannot look
-                            // up the missing symbol and panic. Round 3:
-                            // instrument with the shared warning path so a
-                            // future round can decide to keep or remove this
-                            // branch on captured evidence. See
+                            // up the missing symbol and panic. Round 5:
+                            // KEEP as a last-resort correctness backstop.
+                            // Round 4's upstream lift filter in
+                            // `execute_air_template_call` screens foreign
+                            // Fixed leaves before they reach the
+                            // serializer, so this branch is silent on the
+                            // Zisk build at current HEAD. Evidence:
+                            // captured `PIL2C_WARN_FOREIGN_INTERMEDIATE=1`
+                            // trace at `temp/round3-fallback-warnings.log`
+                            // shows zero `[pil2c-warn] foreign-AIR Fixed`
+                            // lines. Branch is retained because removing
+                            // it would re-enable the pre-Round-13 silent
+                            // mis-resolution path for any future shape
+                            // that bypasses the lift filter. See
                             // BL-20260418-intermediate-ref-column-scope-leak.
                             None => {
                                 if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
@@ -2369,7 +2378,14 @@ impl<'a> ProtoOutBuilder<'a> {
                             },
                         ),
                         // Foreign-AIR fallback: see Fixed arm comment.
-                        // Round 3: instrument with the shared warning path.
+                        // Round 5: KEEP as a last-resort correctness
+                        // backstop. Upstream lift filter in
+                        // `execute_air_template_call` screens foreign
+                        // Witness leaves; captured
+                        // `PIL2C_WARN_FOREIGN_INTERMEDIATE=1` trace at
+                        // `temp/round3-fallback-warnings.log` confirms
+                        // zero `[pil2c-warn] foreign-AIR Witness` hits
+                        // on the Zisk build.
                         None => {
                             if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
                                 let air_name = self.current_air_name.borrow();
