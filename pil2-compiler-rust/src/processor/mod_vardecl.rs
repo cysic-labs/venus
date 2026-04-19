@@ -366,18 +366,26 @@ pub(super) fn exec_assignment(&mut self, a: &Assignment) -> FlowSignal {
         let final_value = match a.op {
             AssignOp::Assign => value,
             AssignOp::AddAssign => {
+                // Round 7: compound-assign accumulators use the
+                // ref-helper so `sum += term` stores
+                // `Intermediate(sum_slot) + term` — preserving an
+                // ExpressionReference to the prior slot instead of
+                // inlining the entire prior tree. JS pil_parser.js
+                // case 212 + assign.js::assignTypeExpr does the
+                // equivalent rewrite; Codex Round 7 analyze at
+                // `.humanize/skill/2026-04-19_08-21-25-2723039-7af695b6/output.md`
+                // pinned this as the likely driver of the
+                // `test_global_info_has_compressor` Stage2 / ImPols
+                // inflation on Add256 / Dma64Aligned* / DmaPrePost*
+                // / Main.
                 let current = if let Some(eid) = indexed_id {
-                    self.get_var_value_by_type_and_id(&reference.ref_type, eid)
+                    self.get_var_ref_value_by_type_and_id(&reference.ref_type, eid)
                 } else {
-                    self.get_var_value(&reference)
+                    self.get_var_ref_value(&reference)
                 };
                 if let (Some(l), Some(r)) = (current.as_int(), value.as_int()) {
                     Value::Int(l + r)
                 } else if is_symbolic(&current) || is_symbolic(&value) {
-                    // `expr`-typed accumulator: build a fresh Add node
-                    // so repeated `sum += term` in a for-loop body
-                    // produces a running sum instead of overwriting
-                    // the previous iteration's value.
                     combine_symbolic(current, RuntimeOp::Add, value)
                 } else {
                     value
@@ -385,9 +393,9 @@ pub(super) fn exec_assignment(&mut self, a: &Assignment) -> FlowSignal {
             }
             AssignOp::SubAssign => {
                 let current = if let Some(eid) = indexed_id {
-                    self.get_var_value_by_type_and_id(&reference.ref_type, eid)
+                    self.get_var_ref_value_by_type_and_id(&reference.ref_type, eid)
                 } else {
-                    self.get_var_value(&reference)
+                    self.get_var_ref_value(&reference)
                 };
                 if let (Some(l), Some(r)) = (current.as_int(), value.as_int()) {
                     Value::Int(l - r)
@@ -399,9 +407,9 @@ pub(super) fn exec_assignment(&mut self, a: &Assignment) -> FlowSignal {
             }
             AssignOp::MulAssign => {
                 let current = if let Some(eid) = indexed_id {
-                    self.get_var_value_by_type_and_id(&reference.ref_type, eid)
+                    self.get_var_ref_value_by_type_and_id(&reference.ref_type, eid)
                 } else {
-                    self.get_var_value(&reference)
+                    self.get_var_ref_value(&reference)
                 };
                 if let (Some(l), Some(r)) = (current.as_int(), value.as_int()) {
                     Value::Int(l * r)
