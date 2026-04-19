@@ -191,14 +191,147 @@ pub(super) fn value_to_label_string(&self, val: &Value) -> String {
 /// Only `Intermediate` is dereferenced; other `ColRef` kinds
 /// (Witness, Fixed, Custom, etc.) are real leaves whose builtin
 /// semantics are stable.
+///
+/// Top-level `Value::ColRef { col_type: Intermediate, .. }` args
+/// are substituted with the stored value. Nested
+/// `RuntimeExpr::ColRef { Intermediate, .. }` leaves inside
+/// `Value::RuntimeExpr(..)` arguments are also substituted so
+/// `degree()` walks the underlying expression tree (matching JS
+/// `ExpressionReference` resolution in `operandDegree`). Without
+/// the nested substitution, std_sum.pil's greedy cluster loop
+/// sees `degree(gsum_s[idx]) == 0` everywhere and never emits
+/// any `im_cluster` / `im_single` witness columns.
 pub(super) fn dereference_intermediate_args(&self, args: &mut [Value]) {
     use super::expression::ColRefKind;
     for arg in args.iter_mut() {
-        if let Value::ColRef { col_type: ColRefKind::Intermediate, id, .. } = *arg {
-            if let Some(stored) = self.exprs.get(id).cloned() {
-                *arg = stored;
+        let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        loop {
+            let (next_id, next_origin) = if let Value::ColRef {
+                col_type: ColRefKind::Intermediate,
+                id,
+                origin_frame_id,
+                ..
+            } = *arg
+            {
+                (id, origin_frame_id)
+            } else {
+                break;
+            };
+            let origin = next_origin.unwrap_or(self.current_origin_frame_id);
+            if !visited.insert((origin, next_id)) {
+                break;
             }
+            // Prefer the origin-scoped resolution map (survives AIR
+            // boundaries and the self.exprs self-reference pattern).
+            // Fall back to self.exprs only when the composite key is
+            // not in either resolution map.
+            let resolved: Option<Value> = self
+                .global_intermediate_resolution
+                .get(&(origin, next_id))
+                .or_else(|| self.intermediate_ref_resolution.get(&(origin, next_id)))
+                .map(|rc| Value::RuntimeExpr(rc.clone()))
+                .or_else(|| self.exprs.get(next_id).cloned());
+            let Some(stored) = resolved else {
+                break;
+            };
+            if let Value::ColRef {
+                col_type: ColRefKind::Intermediate,
+                id: same_id,
+                origin_frame_id: same_origin,
+                ..
+            } = &stored
+            {
+                let same_origin_v = same_origin.unwrap_or(origin);
+                if *same_id == next_id && same_origin_v == origin {
+                    break;
+                }
+            }
+            *arg = stored;
         }
+        if let Value::RuntimeExpr(ref mut rc) = *arg {
+            let mut rt_visited: std::collections::HashSet<(u32, u32)> =
+                std::collections::HashSet::new();
+            *rc = self.deref_intermediates_in_runtime_expr(rc, &mut rt_visited);
+        }
+    }
+}
+
+/// Recursive helper: rebuild a `RuntimeExpr` tree substituting
+/// every `RuntimeExpr::ColRef { Intermediate, id, .. }` leaf
+/// with its stored expression from `self.exprs[id]`. Mirrors
+/// JS `operandDegree`'s reference-chasing for `ExpressionReference`.
+/// Tracks visited Intermediate ids to avoid infinite recursion
+/// on any accidental self-reference.
+fn deref_intermediates_in_runtime_expr(
+    &self,
+    expr: &std::rc::Rc<super::expression::RuntimeExpr>,
+    visited: &mut std::collections::HashSet<(u32, u32)>,
+) -> std::rc::Rc<super::expression::RuntimeExpr> {
+    use super::expression::{ColRefKind, RuntimeExpr};
+    use std::rc::Rc;
+    match expr.as_ref() {
+        RuntimeExpr::ColRef {
+            col_type: ColRefKind::Intermediate,
+            id,
+            origin_frame_id,
+            ..
+        } => {
+            let origin = origin_frame_id.unwrap_or(self.current_origin_frame_id);
+            let key = (origin, *id);
+            if !visited.insert(key) {
+                return expr.clone();
+            }
+            // Prefer the origin-scoped resolution map; fall back to
+            // self.exprs if neither resolution map has the key.
+            let resolved: Option<Value> = self
+                .global_intermediate_resolution
+                .get(&key)
+                .or_else(|| self.intermediate_ref_resolution.get(&key))
+                .map(|rc| Value::RuntimeExpr(rc.clone()))
+                .or_else(|| self.exprs.get(*id).cloned());
+            let resolved = match resolved {
+                Some(Value::RuntimeExpr(inner)) => {
+                    let r = self.deref_intermediates_in_runtime_expr(&inner, visited);
+                    visited.remove(&key);
+                    return r;
+                }
+                Some(Value::ColRef {
+                    col_type: ColRefKind::Intermediate,
+                    id: same_id,
+                    origin_frame_id: same_origin,
+                    ..
+                }) if same_id == *id
+                    && same_origin.unwrap_or(origin) == origin =>
+                {
+                    visited.remove(&key);
+                    return expr.clone();
+                }
+                Some(other) => other,
+                None => {
+                    visited.remove(&key);
+                    return expr.clone();
+                }
+            };
+            visited.remove(&key);
+            Rc::new(RuntimeExpr::Value(resolved))
+        }
+        RuntimeExpr::BinOp { op, left, right } => {
+            let new_left = self.deref_intermediates_in_runtime_expr(left, visited);
+            let new_right = self.deref_intermediates_in_runtime_expr(right, visited);
+            Rc::new(RuntimeExpr::BinOp {
+                op: *op,
+                left: new_left,
+                right: new_right,
+            })
+        }
+        RuntimeExpr::UnaryOp { op, operand } => {
+            let new_operand = self.deref_intermediates_in_runtime_expr(operand, visited);
+            Rc::new(RuntimeExpr::UnaryOp {
+                op: *op,
+                operand: new_operand,
+            })
+        }
+        RuntimeExpr::Value(_) | RuntimeExpr::ColRef { .. } => expr.clone(),
     }
 }
 

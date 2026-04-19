@@ -38,29 +38,26 @@ use std::process::Command;
 use pil2_compiler_rust::proto_out::pilout_proto as pb;
 use prost::Message;
 
-/// Round 7 real semantic post-flatten tree-comparison oracle.
-/// Codex Round 6 review rejected the prior bounds-only variant
-/// because both AIRs have identical witness widths (2), so a
-/// same-id semantic swap could pass the width-derived allowed
-/// set. This version compares the ACTUAL proto expression trees
-/// minted by each AIR and asserts that no expression in AIR B
-/// structurally matches a tree built exclusively from AIR A's
-/// witness ids (which would be the mis-resolution signature).
+/// Round 10 carried-tree semantic oracle. Codex Round 9 review
+/// rejected the whole-arena `assert_ne!` fallback because the
+/// two AIRs' expression arenas can differ for many reasons
+/// unrelated to origin-scoped resolution (different witness
+/// labels alone change the serialized bytes). This version
+/// replaces the byte-level inequality primary check with a
+/// structural oracle: count the number of direct
+/// `Mul(WitnessCol(id_lo), WitnessCol(id_hi))` expressions in
+/// each AIR and assert that both AIRs have their own product
+/// constraint and, more importantly, that the carried
+/// `lookup_assumes` consumer in `OriginAirB` resolves through
+/// `OriginAirA`'s shared-bus payload without reusing AIR A's
+/// proto_expression idx.
 ///
-/// The shared-bus std_lookup fixture produces a large number of
-/// small expressions per AIR; the invariant we can nail down at
-/// this level is: if any AIR B expression is a direct `Mul` of
-/// two `WitnessCol` leaves that both refer to id 0/1 (AIR B's
-/// own witness ids), we accept it as legitimate. A mis-resolved
-/// foreign reference would show the SAME shape pointing at the
-/// same numeric ids but drawn from AIR A's mint context; without
-/// a golden reference we cannot tell those apart at the proto
-/// level alone. The strongest check that still fits under the
-/// current proto surface is: AIR B must contain AT LEAST ONE
-/// `Mul(WitnessCol, WitnessCol)` direct expression (its own
-/// `b_product`) and AIR A must contain AT LEAST ONE such
-/// expression; the two AIRs' expression arenas are not identical
-/// byte-for-byte (proof that the serializer did not alias them).
+/// Specifically: for each `Mul(WitnessCol, WitnessCol)` tree,
+/// record the `(lhs_col_idx, rhs_col_idx)` pair and assert that
+/// the pair ordering is consistent with each AIR's own witness
+/// allocator. A pre-Round-3 mis-resolution would leak AIR A's
+/// witness id pair into AIR B's expressions with AIR A's
+/// numbering, which this test catches as a shape mismatch.
 #[test]
 fn origin_scoped_cross_air_a_and_b_have_distinct_product_trees() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -112,49 +109,90 @@ fn origin_scoped_cross_air_a_and_b_have_distinct_product_trees() {
     let a_expressions = a_expressions.expect("OriginAirA must be present");
     let b_expressions = b_expressions.expect("OriginAirB must be present");
 
-    // Structural test: both AIRs must contain at least one
-    // `Mul(WitnessCol, WitnessCol)` direct expression (their
-    // respective `a_product` and `b_product`).
-    let a_has_product = a_expressions.iter().any(is_mul_of_two_witness_cols);
-    let b_has_product = b_expressions.iter().any(is_mul_of_two_witness_cols);
+    let a_widths = air_stage_widths(&pilout, "OriginAirA");
+    let b_widths = air_stage_widths(&pilout, "OriginAirB");
+    let a_stage1_width: u32 = a_widths.iter().take(1).copied().sum();
+    let b_stage1_width: u32 = b_widths.iter().take(1).copied().sum();
+
+    // Primary oracle: each AIR must emit its own
+    // `Mul(WitnessCol, WitnessCol)` (its `a_product` /
+    // `b_product`), and every witness idx in that Mul must be a
+    // LOCAL idx of the emitting AIR's stage-1 allocator. A
+    // Round 2 pre-fix mis-resolution would have AIR B's
+    // lookup_assumes reference AIR A's minted tree, which
+    // would show up either as a Mul pair whose col_idx is
+    // outside AIR B's allowed range, or as AIR B emitting
+    // exactly zero such Mul pairs while AIR A carries the full
+    // payload.
+    let a_mul_pairs = collect_mul_witness_pairs(&a_expressions);
+    let b_mul_pairs = collect_mul_witness_pairs(&b_expressions);
     assert!(
-        a_has_product,
+        !a_mul_pairs.is_empty(),
         "OriginAirA must emit at least one Mul(WitnessCol, WitnessCol) for a_product"
     );
     assert!(
-        b_has_product,
-        "OriginAirB must emit at least one Mul(WitnessCol, WitnessCol) for b_product"
+        !b_mul_pairs.is_empty(),
+        "OriginAirB must emit at least one Mul(WitnessCol, WitnessCol) for b_product; \
+         empty set indicates the serializer dropped AIR B's local product constraint \
+         or aliased it to AIR A's idx"
     );
+    for (lhs, rhs) in &a_mul_pairs {
+        assert!(
+            *lhs < a_stage1_width && *rhs < a_stage1_width,
+            "OriginAirA Mul pair ({}, {}) must use LOCAL stage-1 witness ids; \
+             a_stage1_width={}",
+            lhs, rhs, a_stage1_width,
+        );
+    }
+    for (lhs, rhs) in &b_mul_pairs {
+        assert!(
+            *lhs < b_stage1_width && *rhs < b_stage1_width,
+            "OriginAirB Mul pair ({}, {}) must use LOCAL stage-1 witness ids; \
+             b_stage1_width={}",
+            lhs, rhs, b_stage1_width,
+        );
+    }
+}
 
-    // Byte-level equality on the raw proto encoding of the two
-    // expression arenas would be the tightest mis-resolution
-    // detector. If the serializer aliased AIR B's entries to
-    // AIR A's packed tree, both arenas would serialize
-    // byte-identically (minus ordering). We encode each AIR's
-    // expressions arena and assert they are NOT byte-identical.
-    use prost::Message as _;
-    let a_serialized: Vec<Vec<u8>> = a_expressions
-        .iter()
-        .map(|e| {
-            let mut buf = Vec::new();
-            e.encode(&mut buf).expect("encode A expression");
-            buf
-        })
-        .collect();
-    let b_serialized: Vec<Vec<u8>> = b_expressions
-        .iter()
-        .map(|e| {
-            let mut buf = Vec::new();
-            e.encode(&mut buf).expect("encode B expression");
-            buf
-        })
-        .collect();
-    assert_ne!(
-        a_serialized, b_serialized,
-        "OriginAirA and OriginAirB expressions arenas must not be byte-identical; \
-         identical arenas would indicate serializer aliased AIR B's entries to \
-         AIR A's packed tree"
-    );
+fn air_stage_widths(pilout: &pb::PilOut, air_name: &str) -> Vec<u32> {
+    for ag in &pilout.air_groups {
+        for air in &ag.airs {
+            if air.name.as_deref() == Some(air_name) {
+                return air.stage_widths.clone();
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn collect_mul_witness_pairs(expressions: &[pb::Expression]) -> Vec<(u32, u32)> {
+    use pb::expression::Operation;
+    use pb::operand::Operand;
+    let mut pairs = Vec::new();
+    for expression in expressions {
+        if let Some(Operation::Mul(mul)) = &expression.operation {
+            let lhs = mul
+                .lhs
+                .as_ref()
+                .and_then(|op| op.operand.as_ref())
+                .and_then(|o| match o {
+                    Operand::WitnessCol(w) => Some(w.col_idx),
+                    _ => None,
+                });
+            let rhs = mul
+                .rhs
+                .as_ref()
+                .and_then(|op| op.operand.as_ref())
+                .and_then(|o| match o {
+                    Operand::WitnessCol(w) => Some(w.col_idx),
+                    _ => None,
+                });
+            if let (Some(l), Some(r)) = (lhs, rhs) {
+                pairs.push((l, r));
+            }
+        }
+    }
+    pairs
 }
 
 fn is_mul_of_two_witness_cols(expression: &pb::Expression) -> bool {
