@@ -2099,27 +2099,28 @@ impl<'a> ProtoOutBuilder<'a> {
                 return cached_idx;
             }
         }
-        // Structural cache: full tree equality. Retained as a fallback
-        // beside the provenance cache so that repeated sub-expression
-        // trees produced by stdlib helper expansions (compress_exprs,
-        // gsum_e, direct_gsum_e) continue to collapse.  Skip large
-        // trees because RuntimeExpr's derived Hash/Eq walk every node
-        // through the Rc children, which makes every cache probe and
-        // insert O(tree_size) and turns large recursive PILs (the
-        // 10k+-node aggregator templates) into a quadratic blow-up.
-        let cache_size = expr_node_count(expr, STRUCT_CACHE_NODE_LIMIT);
-        let cache_eligible = cache_size <= STRUCT_CACHE_NODE_LIMIT;
-        if cache_eligible {
-            stats.struct_cache_probes += 1;
-            if let Some(&cached_idx) = struct_cache.get(expr) {
-                rc_cache.insert(ptr, cached_idx);
-                if let Some(k) = prov_key.clone() {
-                    prov_cache.insert(k, cached_idx);
-                }
-                stats.struct_cache_hits += 1;
-                return cached_idx;
-            }
-        }
+        // JS pil2-compiler dedupes only by reference identity
+        // (`pushExpressionReference(id, rowOffset)` in
+        // `packed_expressions.js`), NOT by structural tree equality.
+        // The structural cache previously retained here would
+        // collapse two textually-identical inline subtrees (e.g.
+        // two distinct in-source occurrences of
+        // `(gsum_e[idx] + std_gamma)` inside `piop_gsum_air`'s
+        // cluster prods vs sums products) onto a single packed
+        // proto idx, which then propagates downstream to
+        // `pil2-stark-setup::pil_code_gen` as a single cached tmp
+        // and emits a SHORTER `qVerifier.code` opcode stream than
+        // golden's reference-only-dedup output. The JS reference
+        // generates a fresh `add(prev_tmp, std_gamma)` rebuild op
+        // for every textual occurrence, so the strict-equality
+        // `test_three_air_verifier_artifact_shape_matches_golden`
+        // regression on `qVerifier.code.len` requires us to skip
+        // the structural dedup. The Rc-pointer fast path and the
+        // provenance / ColRef cache (which mirror JS reference
+        // identity correctly) remain in place.
+        let _ = expr_node_count;
+        let _ = STRUCT_CACHE_NODE_LIMIT;
+        let _ = &mut *struct_cache;
 
         let op = match expr {
             RuntimeExpr::BinOp { op, left, right } => {
@@ -2172,9 +2173,6 @@ impl<'a> ProtoOutBuilder<'a> {
         out.push(proto_expr);
         stats.proto_emitted += 1;
         rc_cache.insert(ptr, idx);
-        if cache_eligible {
-            struct_cache.insert(expr.clone(), idx);
-        }
         if let Some(k) = prov_key {
             prov_cache.insert(k, idx);
         }
