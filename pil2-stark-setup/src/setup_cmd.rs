@@ -3373,6 +3373,54 @@ mod tests_global_info {
                     name, cur_q_names, gold_q_names
                 ));
             }
+
+            let cur_ev_map = cur.get("evMap").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let gold_ev_map = gold.get("evMap").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            if cur_ev_map != gold_ev_map {
+                failures.push(format!(
+                    "{}: starkinfo.evMap.len drift cur={} gold={}. A patch \
+                     that restores qDeg and the ImPol/Q shape but leaves \
+                     evMap off golden size would leave the verifier artifact \
+                     wrong; this assertion prevents that.",
+                    name, cur_ev_map, gold_ev_map
+                ));
+            }
+
+            let vi_path = build_airs.join(name).join("air").join(format!("{}.verifierinfo.json", name));
+            let gold_vi_path = gold_airs.join(name).join("air").join(format!("{}.verifierinfo.json", name));
+            if !vi_path.is_file() || !gold_vi_path.is_file() {
+                failures.push(format!(
+                    "{}: verifierinfo.json missing (cur={} gold={})",
+                    name, vi_path.display(), gold_vi_path.display()
+                ));
+                continue;
+            }
+            let cur_vi: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&vi_path).unwrap()).unwrap();
+            let gold_vi: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&gold_vi_path).unwrap()).unwrap();
+
+            let cur_qv = cur_vi.pointer("/qVerifier/code").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let gold_qv = gold_vi.pointer("/qVerifier/code").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            if cur_qv != gold_qv {
+                failures.push(format!(
+                    "{}: verifierinfo.qVerifier.code.len drift cur={} \
+                     gold={}. This is the recursive1 VerifyEvaluations0 \
+                     assertion that fails at make prove.",
+                    name, cur_qv, gold_qv
+                ));
+            }
+
+            let cur_query = cur_vi.pointer("/queryVerifier/code").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let gold_query = gold_vi.pointer("/queryVerifier/code").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            if cur_query != gold_query {
+                failures.push(format!(
+                    "{}: verifierinfo.queryVerifier.code.len drift cur={} \
+                     gold={}. Query verifier code must match golden to keep \
+                     recursive1 verifier in sync.",
+                    name, cur_query, gold_query
+                ));
+            }
         }
 
         assert!(
