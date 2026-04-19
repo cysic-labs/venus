@@ -385,13 +385,24 @@ pub(super) fn execute_air_template_call(
                     if has_cross_air_custom {
                         continue;
                     }
+                    // Round 4 (2026-04-19 loop) fix: the air-col walk
+                    // needs a FRESH visited set. Sharing `leak_visited`
+                    // with the `collect_custom_ids_in_expr` pass above
+                    // made the second walk a no-op because
+                    // `collect_air_col_ids_in_expr` short-circuits when
+                    // the root pointer is already in `visited`. Codex
+                    // Round 3 review caught this. See
+                    // BL-20260419-origin-authoritative-serializer.
+                    let mut air_col_visited: std::collections::HashSet<
+                        *const super::expression::RuntimeExpr,
+                    > = std::collections::HashSet::new();
                     let mut air_col_ids: std::collections::BTreeSet<
                         (super::expression::ColRefKind, u32),
                     > = std::collections::BTreeSet::new();
                     collect_air_col_ids_in_expr(
                         &rt_probe,
                         &mut air_col_ids,
-                        &mut leak_visited,
+                        &mut air_col_visited,
                     );
                     let fixed_start = self.fixed_cols.current_start();
                     let fixed_end = fixed_start + self.fixed_cols.ids.current_len();

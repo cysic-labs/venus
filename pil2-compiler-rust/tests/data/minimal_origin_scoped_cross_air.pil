@@ -1,58 +1,60 @@
 // minimal_origin_scoped_cross_air.pil
 //
-// Round 3 (2026-04-19 loop) fixture for
-// BL-20260419-origin-frame-id-resolution.
+// Round 4 (2026-04-19 loop) real cross-AIR collision fixture.
 //
-// The Round 2 review caught that
-// pil2-compiler-rust/src/proto_out.rs still resolved
-// foreign-origin `Intermediate` refs by bare local id whenever
-// the current AIR had a colliding `source_to_pos` entry. This
-// fixture stages two AIRs inside one airgroup, each declaring a
-// `const expr` that creates an Intermediate expr slot and using
-// it in a constraint. The two AIRs' Intermediate slots land at
-// identical local ids because `IdAllocator::push` resets
-// `next_id` to 0 per AIR frame.
+// Codex Round 3 review rejected the first version of this
+// fixture because the two AIRs were isolated and the test could
+// pass even if the serializer mis-resolved foreign origins. This
+// version follows Codex's pre-plan sketch
+// (`.humanize/skill/2026-04-19_06-05-45-3512560-cb459f7d/output.md`):
+// AIR A and AIR B both call `lookup_proves` and `lookup_assumes`
+// on the same bus, so the std_lookup proof-scope deferred
+// machinery reifies a shared gsum polynomial that actually lives
+// in both AIRs' per-AIR expression store. If the serializer
+// silently mis-resolves foreign-origin Intermediates by local id,
+// AIR B's pilout will carry an Expression that points at AIR A's
+// packed index through AIR B's own local allocator (wrong tree).
 //
-// The paired regression test compiles this fixture with flip ON
-// and walks every AIR's `air.expressions` + constraints +
-// hint-field Expression operands, asserting that every
-// `Operand::Expression { idx }` is within the emitting AIR's
-// `expressions.len()`. A silently mis-resolved foreign ref would
-// emit an idx pointing at the other AIR's packed tree but at a
-// coincidentally-valid index, so the test separately checks that
-// no constraint expression references a Witness leaf whose
-// `col_idx` exceeds the AIR's `witness_id_map.len()` (which is
-// the observable symptom of the pre-Round-3 serializer bug).
+// The fixture intentionally shapes both AIRs so their local
+// Intermediate slot ids collide (same first `const expr`), and
+// uses different witness column names so the collision is
+// observable: AIR A references `a_x`, AIR B references `b_x`;
+// the surviving Intermediate expression in B's pilout is an
+// assertion that foreign-id resolution is routed correctly.
 
-const int N = 2**4;
+require "std_lookup.pil";
 
 airtemplate OriginAirA(const int N = 2**4) {
     col witness a_x;
     col witness a_y;
-    // The multiplication node lands in A's expr slot at a local id
-    // allocated from 0 on AIR push. JS reuses the expression through
-    // a packed reference; Rust mints an Intermediate ColRef whose
-    // `origin_frame_id` must match this AIR when serialized.
+    // Both AIRs mint a `const expr` as their first local expr
+    // slot. Under `IdAllocator::push`'s per-AIR reset this lands
+    // at local id 0 on both sides. The Intermediate ref the
+    // producer emits at the mint site therefore collides on bare
+    // local id.
     const expr a_product = a_x * a_y;
-    a_product === 0;
-    a_product * a_x === 0;
+    // lookup_proves registers the bus with `[a_product]` as the
+    // provable vector, so std_lookup's proof-scope deferred
+    // handler includes the AIR-A-minted Intermediate in the
+    // compressed gsum polynomial.
+    lookup_proves(1234, [a_product]);
 }
 
 airtemplate OriginAirB(const int N = 2**4) {
     col witness b_x;
     col witness b_y;
-    // Same shape as OriginAirA but different witness columns.
-    // After the Round 3 fix, B's serialized pilout must NOT
-    // reference A's witness columns under any Intermediate
-    // re-resolution. Before the fix, a foreign Intermediate
-    // whose local id collided with B's could resolve through
-    // B's source_to_pos and point at the wrong proto tree.
     const expr b_product = b_x * b_y;
-    b_product === 0;
-    b_product * b_y === 0;
+    // lookup_assumes on the same opid pulls the AIR-A-minted
+    // Intermediate into AIR B's proto expression store via the
+    // std_lookup proof-scope Horner reification. The pre-Round-3
+    // serializer resolved the foreign id through AIR B's local
+    // source_to_pos path; post-Round-3 it must route via
+    // (origin_frame_id, id) in `global_intermediate_resolution`
+    // or fall through to `Operand::Constant(0)`.
+    lookup_assumes(1234, [b_product]);
 }
 
-airgroup OriginScopedTest {
-    OriginAirA(N: N);
-    OriginAirB(N: N);
+airgroup OriginScopedCrossAir {
+    OriginAirA(N: 2**4);
+    OriginAirB(N: 2**4);
 }
