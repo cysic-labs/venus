@@ -229,6 +229,97 @@ fn test_compute_flat_index() {
     assert_eq!(compute_flat_index(&[], &[]), 0);
 }
 
+/// Round 7 seeded lift-filter unit test. Exercises
+/// `collect_air_col_ids_in_expr` directly: a RuntimeExpr
+/// containing a `Witness` leaf tagged with a foreign
+/// `origin_frame_id` must be collected with that origin so the
+/// caller (the proof-scope lift filter in
+/// `execute_air_template_call`) can reject it as cross-AIR even
+/// when the numeric id is in-range for the consuming AIR.
+/// Codex Round 6 review explicitly required this test.
+#[test]
+fn test_seeded_foreign_witness_leaf_is_tagged_by_collector() {
+    use super::expression::{ColRefKind, RuntimeExpr, RuntimeOp};
+    use super::mod_utils::collect_air_col_ids_in_expr;
+    use std::collections::{BTreeSet, HashSet};
+    use std::rc::Rc;
+
+    let leaf_a = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::Witness,
+        id: 0,
+        row_offset: None,
+        origin_frame_id: Some(7),
+    });
+    let leaf_b = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::Witness,
+        id: 1,
+        row_offset: None,
+        origin_frame_id: Some(7),
+    });
+    let tree = Rc::new(RuntimeExpr::BinOp {
+        op: RuntimeOp::Mul,
+        left: leaf_a,
+        right: leaf_b,
+    });
+
+    let mut out: BTreeSet<(ColRefKind, u32, Option<u32>)> = BTreeSet::new();
+    let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
+    collect_air_col_ids_in_expr(&tree, &mut out, &mut visited);
+
+    assert!(
+        out.contains(&(ColRefKind::Witness, 0, Some(7))),
+        "foreign Witness id=0 with origin=Some(7) must survive the collector walk \
+         intact; collected set: {:?}",
+        out
+    );
+    assert!(
+        out.contains(&(ColRefKind::Witness, 1, Some(7))),
+        "foreign Witness id=1 with origin=Some(7) must survive the collector walk \
+         intact; collected set: {:?}",
+        out
+    );
+    let current_origin: u32 = 42;
+    let has_foreign = out.iter().any(|(_, _, origin)| {
+        matches!(origin, Some(o) if *o != current_origin)
+    });
+    assert!(
+        has_foreign,
+        "lift filter must detect the foreign origin=Some(7) against current_origin=42; \
+         collected set: {:?}",
+        out
+    );
+}
+
+#[test]
+fn test_seeded_origin_less_witness_leaf_is_not_foreign() {
+    use super::expression::{ColRefKind, RuntimeExpr};
+    use super::mod_utils::collect_air_col_ids_in_expr;
+    use std::collections::{BTreeSet, HashSet};
+    use std::rc::Rc;
+
+    let leaf = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::Witness,
+        id: 3,
+        row_offset: None,
+        origin_frame_id: None,
+    });
+
+    let mut out: BTreeSet<(ColRefKind, u32, Option<u32>)> = BTreeSet::new();
+    let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
+    collect_air_col_ids_in_expr(&leaf, &mut out, &mut visited);
+
+    assert!(out.contains(&(ColRefKind::Witness, 3, None)));
+    let current_origin: u32 = 42;
+    let has_foreign_origin = out.iter().any(|(_, _, origin)| {
+        matches!(origin, Some(o) if *o != current_origin)
+    });
+    assert!(
+        !has_foreign_origin,
+        "origin-less leaves must NOT be flagged foreign; the filter defers to \
+         bounds-only checks for them"
+    );
+}
+
 #[test]
 fn test_expand_templates() {
     let mut p = make_processor();

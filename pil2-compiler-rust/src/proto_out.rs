@@ -2484,10 +2484,22 @@ impl<'a> ProtoOutBuilder<'a> {
                         // stale `AirValue { idx }`. Emit
                         // `Operand::Constant(0)` instead, mirroring
                         // the Witness/Fixed Constant(0) pattern from
-                        // commit `73ebbbfc`. See
-                        // BL-20260419-origin-frame-id-resolution and
-                        // the Round 1 Mem probe which surfaced OOB ids
-                        // 61 / 65 / 78 / 100 vs `airValuesMap.len()` 23.
+                        // commit `73ebbbfc`. Round 7: KEEP as
+                        // last-resort correctness backstop. The
+                        // upstream origin-aware check earlier in
+                        // this function (gated on `current_origin
+                        // != 0`) handles foreign-origin AirValue
+                        // references from AIR-scope serialization.
+                        // This bounds-only check remains for
+                        // proof-scope / origin-less leaves (the
+                        // original Round 2 case that surfaced the
+                        // Mem OOB panic at ids 61/65/78/100 vs
+                        // `airValuesMap.len()` 23). Captured
+                        // `PIL2C_WARN_FOREIGN_INTERMEDIATE=1` trace
+                        // at `temp/round3-fallback-warnings.log`
+                        // confirms zero firings on the Zisk build
+                        // at commit `0c6101f8`. See
+                        // BL-20260419-origin-frame-id-resolution.
                         let count = *self.current_air_value_count.borrow();
                         if (*id as usize) < count {
                             pilout_proto::operand::Operand::AirValue(
@@ -2563,7 +2575,16 @@ impl<'a> ProtoOutBuilder<'a> {
                         // `Constant(0)` is the safe terminal fallback
                         // (rather than the raw-id emission that would
                         // silently mis-resolve to another AIR's packed
-                        // index or panic pil2-stark-setup). See
+                        // index or panic pil2-stark-setup). Round 7:
+                        // KEEP — the captured
+                        // `PIL2C_WARN_FOREIGN_INTERMEDIATE=1` trace at
+                        // `temp/round3-fallback-warnings.log` shows
+                        // zero firings at commit `0c6101f8` because
+                        // the upstream `flatten_air_*` guards handle
+                        // every foreign-origin Intermediate before it
+                        // reaches this leaf arm. Branch retained as
+                        // correctness backstop for any future surface
+                        // that bypasses the upstream guard. See
                         // BL-20260419-origin-frame-id-resolution.
                         let current_origin = *self.current_origin_frame_id.borrow();
                         let is_foreign = matches!(origin_frame_id, Some(o) if *o != current_origin);

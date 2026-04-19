@@ -21,11 +21,22 @@ pub enum Value {
     Bool(bool),
     Array(Vec<Value>),
     /// An opaque reference to a column or other declared entity.
-    /// `origin_frame_id` is populated only for `ColRefKind::Intermediate`
-    /// refs to disambiguate AIR-local slot ids across AIRs
-    /// (`IdAllocator::push` resets `next_id` per frame so bare `u32 id`
-    /// is not globally unique). All other ColRef kinds leave it `None`.
-    /// See BL-20260419-origin-frame-id-resolution.
+    /// `origin_frame_id` carries the execution-frame id of the AIR
+    /// template call that minted this ref. Populated for every
+    /// AIR-local column kind (`ColRefKind::Intermediate`,
+    /// `ColRefKind::Witness`, `ColRefKind::Fixed`,
+    /// `ColRefKind::AirValue`, `ColRefKind::Custom`) when the
+    /// processor is currently inside an AIR body. Proof-scope-only
+    /// kinds (`ColRefKind::Public`, `ColRefKind::Challenge`,
+    /// `ColRefKind::ProofValue`, `ColRefKind::AirGroupValue`)
+    /// leave it `None` because their allocators are proof-global.
+    /// Round 2 (2026-04-19 loop) introduced the field for
+    /// Intermediate only; Round 6 (commit `0c6101f8`) extended it
+    /// to every AIR-local kind so the proof-scope lift filter and
+    /// proto serializer can authoritatively reject foreign-origin
+    /// leaves whose numeric id is in-range for the consuming AIR.
+    /// See BL-20260419-origin-frame-id-resolution and
+    /// BL-20260419-origin-authoritative-serializer.
     ColRef {
         col_type: ColRefKind,
         id: u32,

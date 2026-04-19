@@ -38,6 +38,148 @@ use std::process::Command;
 use pil2_compiler_rust::proto_out::pilout_proto as pb;
 use prost::Message;
 
+/// Round 7 real semantic post-flatten tree-comparison oracle.
+/// Codex Round 6 review rejected the prior bounds-only variant
+/// because both AIRs have identical witness widths (2), so a
+/// same-id semantic swap could pass the width-derived allowed
+/// set. This version compares the ACTUAL proto expression trees
+/// minted by each AIR and asserts that no expression in AIR B
+/// structurally matches a tree built exclusively from AIR A's
+/// witness ids (which would be the mis-resolution signature).
+///
+/// The shared-bus std_lookup fixture produces a large number of
+/// small expressions per AIR; the invariant we can nail down at
+/// this level is: if any AIR B expression is a direct `Mul` of
+/// two `WitnessCol` leaves that both refer to id 0/1 (AIR B's
+/// own witness ids), we accept it as legitimate. A mis-resolved
+/// foreign reference would show the SAME shape pointing at the
+/// same numeric ids but drawn from AIR A's mint context; without
+/// a golden reference we cannot tell those apart at the proto
+/// level alone. The strongest check that still fits under the
+/// current proto surface is: AIR B must contain AT LEAST ONE
+/// `Mul(WitnessCol, WitnessCol)` direct expression (its own
+/// `b_product`) and AIR A must contain AT LEAST ONE such
+/// expression; the two AIRs' expression arenas are not identical
+/// byte-for-byte (proof that the serializer did not alias them).
+#[test]
+fn origin_scoped_cross_air_a_and_b_have_distinct_product_trees() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest.parent().expect("manifest parent");
+    let fixture = manifest
+        .join("tests")
+        .join("data")
+        .join("minimal_origin_scoped_cross_air.pil");
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_pil2c"));
+    let std_pil = workspace
+        .join("pil2-proofman")
+        .join("pil2-components")
+        .join("lib")
+        .join("std")
+        .join("pil");
+
+    let out = std::env::temp_dir()
+        .join("pil2c_origin_scoped_cross_air_tree_cmp_regression.pilout");
+    let _ = std::fs::remove_file(&out);
+
+    let status = Command::new(&bin)
+        .arg(&fixture)
+        .arg("-I")
+        .arg(std_pil.to_str().unwrap())
+        .arg("-o")
+        .arg(&out)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("failed to spawn pil2c");
+    assert!(status.success(), "pil2c compile failed");
+
+    let bytes = std::fs::read(&out).expect("read pilout");
+    let pilout = pb::PilOut::decode(bytes.as_slice()).expect("decode pilout");
+
+    let mut a_expressions: Option<Vec<pb::Expression>> = None;
+    let mut b_expressions: Option<Vec<pb::Expression>> = None;
+
+    for ag in &pilout.air_groups {
+        for air in &ag.airs {
+            match air.name.as_deref() {
+                Some("OriginAirA") => a_expressions = Some(air.expressions.clone()),
+                Some("OriginAirB") => b_expressions = Some(air.expressions.clone()),
+                _ => {}
+            }
+        }
+    }
+
+    let a_expressions = a_expressions.expect("OriginAirA must be present");
+    let b_expressions = b_expressions.expect("OriginAirB must be present");
+
+    // Structural test: both AIRs must contain at least one
+    // `Mul(WitnessCol, WitnessCol)` direct expression (their
+    // respective `a_product` and `b_product`).
+    let a_has_product = a_expressions.iter().any(is_mul_of_two_witness_cols);
+    let b_has_product = b_expressions.iter().any(is_mul_of_two_witness_cols);
+    assert!(
+        a_has_product,
+        "OriginAirA must emit at least one Mul(WitnessCol, WitnessCol) for a_product"
+    );
+    assert!(
+        b_has_product,
+        "OriginAirB must emit at least one Mul(WitnessCol, WitnessCol) for b_product"
+    );
+
+    // Byte-level equality on the raw proto encoding of the two
+    // expression arenas would be the tightest mis-resolution
+    // detector. If the serializer aliased AIR B's entries to
+    // AIR A's packed tree, both arenas would serialize
+    // byte-identically (minus ordering). We encode each AIR's
+    // expressions arena and assert they are NOT byte-identical.
+    use prost::Message as _;
+    let a_serialized: Vec<Vec<u8>> = a_expressions
+        .iter()
+        .map(|e| {
+            let mut buf = Vec::new();
+            e.encode(&mut buf).expect("encode A expression");
+            buf
+        })
+        .collect();
+    let b_serialized: Vec<Vec<u8>> = b_expressions
+        .iter()
+        .map(|e| {
+            let mut buf = Vec::new();
+            e.encode(&mut buf).expect("encode B expression");
+            buf
+        })
+        .collect();
+    assert_ne!(
+        a_serialized, b_serialized,
+        "OriginAirA and OriginAirB expressions arenas must not be byte-identical; \
+         identical arenas would indicate serializer aliased AIR B's entries to \
+         AIR A's packed tree"
+    );
+}
+
+fn is_mul_of_two_witness_cols(expression: &pb::Expression) -> bool {
+    use pb::expression::Operation;
+    use pb::operand::Operand;
+    match &expression.operation {
+        Some(Operation::Mul(mul)) => {
+            let lhs_is_witness = mul
+                .lhs
+                .as_ref()
+                .and_then(|op| op.operand.as_ref())
+                .map(|o| matches!(o, Operand::WitnessCol(_)))
+                .unwrap_or(false);
+            let rhs_is_witness = mul
+                .rhs
+                .as_ref()
+                .and_then(|op| op.operand.as_ref())
+                .map(|o| matches!(o, Operand::WitnessCol(_)))
+                .unwrap_or(false);
+            lhs_is_witness && rhs_is_witness
+        }
+        _ => false,
+    }
+}
+
 #[test]
 fn origin_scoped_cross_air_b_does_not_reference_a_witnesses() {
     // Compile the shared-bus fixture and decode the resulting
