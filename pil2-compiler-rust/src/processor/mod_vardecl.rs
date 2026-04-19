@@ -683,6 +683,7 @@ pub(super) fn set_var_value(&mut self, reference: &Reference, value: Value) {
         RefType::Str => self.strings.set(reference.id, value),
         RefType::Expr => {
             let value = self.sanitize_expr_store_value(reference.id, value);
+            self.refresh_intermediate_resolution_after_store(reference.id, &value);
             self.exprs.set(reference.id, value);
         }
         _ => {}
@@ -697,6 +698,7 @@ pub(super) fn set_var_value_by_type_and_id(&mut self, ref_type: &RefType, id: u3
         RefType::Str => self.strings.set(id, value),
         RefType::Expr => {
             let value = self.sanitize_expr_store_value(id, value);
+            self.refresh_intermediate_resolution_after_store(id, &value);
             self.exprs.set(id, value);
         }
         _ => {}
@@ -713,18 +715,75 @@ pub(super) fn set_var_value_by_type_and_id(&mut self, ref_type: &RefType, id: u3
 /// AIR's per-AIR `source_to_pos` and pil2-stark-setup panics at
 /// `helpers.rs:21:19`. See
 /// `BL-20260418-intermediate-ref-cross-air-leak`.
+///
+/// For AIR-scope writes that overwrite a slot whose `Intermediate` ref
+/// was previously captured into `intermediate_ref_resolution`, also
+/// replace any self-reference (`Intermediate{id == target_id, origin}`)
+/// inside the new value with the prior captured snapshot. Without this,
+/// read-modify-write patterns like `compress_exprs`'s
+/// `exprs_compressed = exprs_compressed + busid` produce a self-
+/// referential stored expression whose serializer-side resolution
+/// returns only the pre-store snapshot (dropping the just-added busid
+/// term) and breaks SpecifiedRanges / VirtualTable0 / VirtualTable1
+/// stage-2 key construction. See
+/// `BL-20260419-intermediate-ref-self-ref-store`.
 fn sanitize_expr_store_value(&self, target_id: u32, value: Value) -> Value {
-    if target_id >= self.exprs.frame_start() {
-        return value;
-    }
     if self.intermediate_ref_resolution.is_empty() {
         return value;
     }
-    substitute_air_local_intermediate_in_value(
-        value,
-        self.current_origin_frame_id,
-        &self.intermediate_ref_resolution,
-    )
+    let origin = self.current_origin_frame_id;
+    if target_id < self.exprs.frame_start() {
+        // Cross-AIR leak guard: substitute every AIR-local Intermediate
+        // ref in the proof-scope-bound value.
+        return substitute_air_local_intermediate_in_value(
+            value,
+            origin,
+            &self.intermediate_ref_resolution,
+        );
+    }
+    // AIR-scope write: only substitute the self-reference for `target_id`
+    // (not arbitrary other Intermediate refs). The captured
+    // resolution at this slot, if any, is the pre-store snapshot whose
+    // semantic role is "the OLD value of this slot" — exactly what the
+    // self-reference inside the read-modify-write RHS should expand to.
+    if !self
+        .intermediate_ref_resolution
+        .contains_key(&(origin, target_id))
+    {
+        return value;
+    }
+    let mut single_entry: std::collections::HashMap<(u32, u32), Rc<RuntimeExpr>> =
+        std::collections::HashMap::new();
+    single_entry.insert(
+        (origin, target_id),
+        self.intermediate_ref_resolution[&(origin, target_id)].clone(),
+    );
+    substitute_air_local_intermediate_in_value(value, origin, &single_entry)
+}
+
+/// After storing a new RuntimeExpr into an AIR-scope `expr` slot whose
+/// `Intermediate` ref was previously emitted (and thus captured into
+/// `intermediate_ref_resolution`), refresh the resolution snapshot to
+/// the just-stored value so downstream readers — including
+/// proof-scope cross-AIR sanitization (`sanitize_expr_store_value`'s
+/// proof-scope branch) and the proto serializer's
+/// `global_intermediate_resolution` lookup — observe the post-store
+/// state instead of the pre-store snapshot. The companion to the
+/// AIR-scope self-ref inline at store time. Together they close
+/// `BL-20260419-intermediate-ref-self-ref-store`.
+fn refresh_intermediate_resolution_after_store(&mut self, target_id: u32, value: &Value) {
+    if target_id < self.exprs.frame_start() {
+        return;
+    }
+    let origin = self.current_origin_frame_id;
+    let key = (origin, target_id);
+    if !self.intermediate_ref_resolution.contains_key(&key) {
+        return;
+    }
+    if let Value::RuntimeExpr(rt) = value {
+        self.intermediate_ref_resolution.insert(key, rt.clone());
+        self.global_intermediate_resolution.insert(key, rt.clone());
+    }
 }
 
 /// Walk every proof-scope slot (`id < self.exprs.frame_start()`) and
