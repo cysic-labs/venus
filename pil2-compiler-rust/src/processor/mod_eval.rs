@@ -51,23 +51,23 @@ pub(super) fn eval_reference(&mut self, name_id: &NameId) -> Value {
             }
             let flat_idx = compute_flat_index(&indexes, &reference.array_dims);
             let id = reference.id + flat_idx;
-            // Round 4 left the producer flip reverted. The per-AIR
-            // sanitize + air-exit sweep + processor-level
-            // `global_intermediate_resolution` closed the
-            // `helpers.rs:21:19` index-out-of-bounds panic when the
-            // flip was re-enabled, but a deeper cross-AIR semantic
-            // leak surfaces at `pil2-stark-setup/src/fri_poly.rs:300`
-            // with "Symbol not found for ev type=cm id=<N>": a
-            // resolved `RuntimeExpr` minted in AIR X references AIR X's
-            // witness / fixed / custom column ids, and inline-flattening
-            // that tree into AIR Y's proto pollutes Y with foreign
-            // column references. The next round must either scope-
-            // qualify each `Intermediate` ref (so the proto serializer
-            // can detect the foreign-AIR case and emit
-            // `Constant(0)` / drop the tree) or mirror JS's global
-            // `PackedExpressions` layer so references resolve uniformly
-            // regardless of consuming AIR. Flip stays off.
-            return self.get_var_value_by_type_and_id(&reference.ref_type, id);
+            // Round 1 (2026-04-19 loop) re-enables the producer flip
+            // at both return points so `eval_reference` emits an
+            // `Intermediate` ColRef for AIR-local `RefType::Expr`
+            // reads of stored symbolic values, matching JS
+            // `pushExpressionReference` semantics. Cross-AIR
+            // resolution relies on the scaffolding already in place
+            // from commits 089d2011, a90f8352, 73ebbbfc (per-AIR
+            // intermediate_refs_emitted force-lift, sanitize at
+            // proof-scope writes, air-exit sweep,
+            // global_intermediate_resolution + inline re-flatten,
+            // Witness/Fixed Constant(0) foreign fallback). Round 2
+            // will re-key the resolution maps by
+            // `(origin_frame_id, local_id)` to close the known
+            // same-local-id / different-AIR collision class Codex
+            // flagged (see
+            // BL-20260418-intermediate-ref-column-scope-leak).
+            return self.get_var_ref_value_by_type_and_id(&reference.ref_type, id);
         }
         // Bare reference to an array (no indexes): return ArrayRef so
         // that callers (function/airtemplate argument binding, further
@@ -79,10 +79,9 @@ pub(super) fn eval_reference(&mut self, name_id: &NameId) -> Value {
                 dims: reference.array_dims.clone(),
             };
         }
-        // Bare scalar reference: same Round 4 caveat as the indexed
-        // path above. Producer flip stays reverted until the cross-AIR
-        // witness / fixed / custom column leak is closed.
-        self.get_var_value(&reference)
+        // Bare scalar reference: same Round 1 flip as the indexed
+        // path above.
+        self.get_var_ref_value(&reference)
     } else {
         Value::Void
     }
