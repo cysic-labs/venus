@@ -141,7 +141,7 @@ pub(super) fn column_label(&self, col_type: &expression::ColRefKind, id: u32) ->
 /// path invoked from `builtin/cast.js`.
 pub(super) fn value_to_label_string(&self, val: &Value) -> String {
     match val {
-        Value::ColRef { col_type, id, row_offset } => {
+        Value::ColRef { col_type, id, row_offset, .. } => {
             let label = self
                 .column_label(col_type, *id)
                 .unwrap_or_else(|| format!("{:?}@{}", col_type, id));
@@ -217,41 +217,49 @@ pub(super) fn get_var_value_by_type_and_id(&self, ref_type: &RefType, id: u32) -
             col_type: ColRefKind::Fixed,
             id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::Witness => Value::ColRef {
             col_type: ColRefKind::Witness,
             id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::Public => Value::ColRef {
             col_type: ColRefKind::Public,
             id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::Challenge => Value::ColRef {
             col_type: ColRefKind::Challenge,
             id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::ProofValue => Value::ColRef {
             col_type: ColRefKind::ProofValue,
             id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::AirGroupValue => Value::ColRef {
             col_type: ColRefKind::AirGroupValue,
             id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::AirValue => Value::ColRef {
             col_type: ColRefKind::AirValue,
             id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::CustomCol => Value::ColRef {
             col_type: ColRefKind::Custom,
             id,
             row_offset: None,
+            origin_frame_id: None,
         },
         _ => Value::Void,
     }

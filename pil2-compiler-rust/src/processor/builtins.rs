@@ -344,7 +344,7 @@ fn describe_value_for_trace(val: &Value) -> String {
         Value::Fe(n) => format!("Fe({})", n),
         Value::Bool(b) => format!("Bool({})", b),
         Value::Str(s) => format!("Str({:?})", s),
-        Value::ColRef { col_type, id, row_offset } => format!(
+        Value::ColRef { col_type, id, row_offset, .. } => format!(
             "ColRef({:?}, id={}, row_offset={:?})",
             col_type, id, row_offset
         ),
@@ -378,7 +378,7 @@ fn describe_runtime_expr_for_trace(
     use super::expression::{RuntimeExpr, RuntimeOp};
     match expr {
         RuntimeExpr::Value(v) => format!("Value[{}]", describe_value_for_trace(v)),
-        RuntimeExpr::ColRef { col_type, id, row_offset } => format!(
+        RuntimeExpr::ColRef { col_type, id, row_offset, .. } => format!(
             "ColRef({:?}, id={}, row_offset={:?})",
             col_type, id, row_offset
         ),

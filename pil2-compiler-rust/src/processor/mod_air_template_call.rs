@@ -156,6 +156,17 @@ pub(super) fn execute_air_template_call(
     // in a prior AIR's frame cannot resolve here. See
     // BL-20260418-intermediate-ref-cross-air-leak.
     self.intermediate_ref_resolution.clear();
+    // Round 2 (2026-04-19 loop) origin-frame-id: bump the monotonic
+    // counter on every AIR entry so `(origin_frame_id, local_id)`
+    // keys in `intermediate_ref_resolution` and
+    // `global_intermediate_resolution` are unique across AIRs. This
+    // disambiguates AIR-local slot ids that would otherwise alias
+    // because `IdAllocator::push` resets `next_id` to 0 per frame.
+    // Virtual AIRs reuse `air_id`, so we cannot key on that; the
+    // execution-frame-scoped counter here is safe. See
+    // BL-20260419-origin-frame-id-resolution.
+    self.next_origin_frame_id = self.next_origin_frame_id.saturating_add(1);
+    self.current_origin_frame_id = self.next_origin_frame_id;
 
     // Snapshot the `use_aliases` stack at AIR entry so any `use`
     // added inside this AIR template body — directly, through
@@ -410,7 +421,10 @@ pub(super) fn execute_air_template_call(
                     continue;
                 }
                 let rt: Rc<super::expression::RuntimeExpr> =
-                    match self.intermediate_ref_resolution.get(&eid) {
+                    match self
+                        .intermediate_ref_resolution
+                        .get(&(self.current_origin_frame_id, eid))
+                    {
                         Some(rt) => rt.clone(),
                         None => continue,
                     };

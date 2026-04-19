@@ -98,10 +98,12 @@ pub(super) fn value_to_runtime_expr(val: &Value) -> RuntimeExpr {
             col_type,
             id,
             row_offset,
+            origin_frame_id,
         } => RuntimeExpr::ColRef {
             col_type: *col_type,
             id: *id,
             row_offset: *row_offset,
+            origin_frame_id: *origin_frame_id,
         },
         Value::RuntimeExpr(expr) => RuntimeExpr::clone(expr),
         _ => RuntimeExpr::Value(val.clone()),

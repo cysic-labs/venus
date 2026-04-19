@@ -21,10 +21,16 @@ pub enum Value {
     Bool(bool),
     Array(Vec<Value>),
     /// An opaque reference to a column or other declared entity.
+    /// `origin_frame_id` is populated only for `ColRefKind::Intermediate`
+    /// refs to disambiguate AIR-local slot ids across AIRs
+    /// (`IdAllocator::push` resets `next_id` per frame so bare `u32 id`
+    /// is not globally unique). All other ColRef kinds leave it `None`.
+    /// See BL-20260419-origin-frame-id-resolution.
     ColRef {
         col_type: ColRefKind,
         id: u32,
         row_offset: Option<i64>,
+        origin_frame_id: Option<u32>,
     },
     /// Expression that cannot be fully evaluated at compile time.
     /// Stored as a tree of operations for later protobuf emission.
@@ -78,6 +84,7 @@ pub enum RuntimeExpr {
         col_type: ColRefKind,
         id: u32,
         row_offset: Option<i64>,
+        origin_frame_id: Option<u32>,
     },
 }
 
@@ -152,7 +159,7 @@ impl Value {
                 let inner: Vec<String> = items.iter().map(|i| i.to_display_string()).collect();
                 format!("[{}]", inner.join(", "))
             }
-            Value::ColRef { col_type, id, row_offset } => {
+            Value::ColRef { col_type, id, row_offset, .. } => {
                 let offset_str = match row_offset {
                     Some(o) if *o != 0 => format!("'{}", o),
                     _ => String::new(),

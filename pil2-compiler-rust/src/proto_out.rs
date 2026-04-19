@@ -70,7 +70,7 @@ fn packed_key_for(expr: &RuntimeExpr, source_expr_id: Option<u32>) -> Option<Pac
     if let Some(sid) = source_expr_id {
         return Some(PackedKey::Provenance(sid, 0));
     }
-    if let RuntimeExpr::ColRef { col_type, id, row_offset } = expr {
+    if let RuntimeExpr::ColRef { col_type, id, row_offset, .. } = expr {
         let offset = row_offset.unwrap_or(0) as i32;
         if matches!(col_type, ColRefKind::Intermediate) {
             return Some(PackedKey::Provenance(*id, offset));
@@ -523,6 +523,14 @@ pub struct ProtoOutBuilder<'a> {
     /// per-AIR serialization loop and consulted by the xair-leak
     /// trace fallback in `leaf_to_air_operand`.
     current_air_name: std::cell::RefCell<String>,
+    /// Scratch AIR-value count for the current AIR. Used by
+    /// `leaf_to_air_operand`'s AirValue arm to emit
+    /// `Operand::Constant(0)` instead of a stale `AirValue { idx }`
+    /// when the raw id exceeds the consuming AIR's `air_value_stages`
+    /// length (the foreign-AIR mirror of the Witness/Fixed leak that
+    /// was patched in commit `73ebbbfc`). Set at the top of each
+    /// per-AIR loop from `air.air_value_stages.len()`.
+    current_air_value_count: std::cell::RefCell<usize>,
     /// Per-(airgroup_id, air_id) IM symbol emission table populated
     /// at flatten time. Key: packed_idx. Value: the source label of
     /// the first AirExpressionEntry whose provenance key became this
@@ -546,6 +554,7 @@ impl<'a> ProtoOutBuilder<'a> {
             air_expr_id_maps: HashMap::new(),
             current_air_expr_id_map: None,
             current_air_name: std::cell::RefCell::new(String::new()),
+            current_air_value_count: std::cell::RefCell::new(0),
             im_label_by_packed_idx: HashMap::new(),
         }
     }
@@ -616,6 +625,7 @@ impl<'a> ProtoOutBuilder<'a> {
             let mut air_id_counter = 0u32;
             for air in ag.airs.iter().filter(|a| !a.is_virtual) {
                 *self.current_air_name.borrow_mut() = air.name.clone();
+                *self.current_air_value_count.borrow_mut() = air.air_value_stages.len();
                 // Flatten the FULL AIR expression store into the protobuf
                 // array. This includes ALL expressions created during AIR
                 // execution (intermediate column definitions, constraint
@@ -1892,29 +1902,27 @@ impl<'a> ProtoOutBuilder<'a> {
             col_type: ColRefKind::Intermediate,
             id,
             row_offset: _,
+            origin_frame_id,
         } = expr
         {
-            // Two failure modes funnel into the global-resolution
-            // fallback: (a) `source_to_pos` has no entry for this id
-            // (the slot was never lifted into `air_expression_store`),
-            // or (b) `source_to_pos` returns a position that has not
-            // yet been flattened into `expr_id_map` at this point in
-            // the traversal (forward reference). The legacy raw-id
-            // fallback in `leaf_to_air_operand` would emit an out-of-
-            // bounds idx in either case. Re-flatten inline from the
-            // persistent `global_intermediate_resolution` snapshot so
-            // the emitted proto index is always in-range. See
-            // BL-20260418-intermediate-ref-cross-air-leak.
+            // Round 2 (2026-04-19) origin-scoped resolution: Intermediate
+            // refs minted in a different AIR's frame must re-flatten
+            // through `global_intermediate_resolution` keyed by
+            // `(origin_frame_id, local_id)`. Local refs whose
+            // `source_to_pos` entry exists but has not yet been flattened
+            // into `expr_id_map` (forward reference) fall through the
+            // same path. Without this, `leaf_to_air_operand`'s legacy
+            // raw-id fallback would emit an out-of-bounds idx and
+            // pil2-stark-setup would panic at `helpers.rs:21:19`. See
+            // BL-20260419-origin-frame-id-resolution.
             let unresolved = source_to_pos
                 .get(id)
                 .and_then(|&pos| expr_id_map.get(pos).copied())
                 .is_none();
-            if unresolved && expr_id_map.get(*id as usize).is_none() {
-                if let Some(resolved) = self
-                    .processor
-                    .global_intermediate_resolution
-                    .get(id)
-                    .cloned()
+            if unresolved {
+                let key = origin_frame_id.map(|o| (o, *id));
+                if let Some(resolved) = key
+                    .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
                 {
                     return self.flatten_air_expr(
                         &resolved,
@@ -2103,14 +2111,15 @@ impl<'a> ProtoOutBuilder<'a> {
                 col_type: ColRefKind::Intermediate,
                 id,
                 row_offset: _,
+                origin_frame_id,
             } if source_to_pos
                 .get(id)
                 .and_then(|&pos| expr_id_map.get(pos).copied())
-                .is_none()
-                && expr_id_map.get(*id as usize).is_none() =>
+                .is_none() =>
             {
-                if let Some(resolved) =
-                    self.processor.global_intermediate_resolution.get(id).cloned()
+                let key = origin_frame_id.map(|o| (o, *id));
+                if let Some(resolved) = key
+                    .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
                 {
                     let idx = self.flatten_air_expr(
                         &resolved,
@@ -2167,6 +2176,7 @@ impl<'a> ProtoOutBuilder<'a> {
                 col_type,
                 id,
                 row_offset,
+                origin_frame_id,
             } => {
                 let offset = row_offset.unwrap_or(0) as i32;
                 match col_type {
@@ -2239,9 +2249,38 @@ impl<'a> ProtoOutBuilder<'a> {
                         )
                     }
                     ColRefKind::AirValue => {
-                        pilout_proto::operand::Operand::AirValue(
-                            pilout_proto::operand::AirValue { idx: *id },
-                        )
+                        // Round 2 (2026-04-19) foreign-AIR airvalue guard.
+                        // `pil2-stark-setup/src/parser_args.rs:594` walks
+                        // `stark_info.air_values_map[0..id]` to compute
+                        // `air_value_pos`, so an id that exceeds the
+                        // consuming AIR's `air_value_stages` length is
+                        // a foreign-AIR leak and must not surface as a
+                        // stale `AirValue { idx }`. Emit
+                        // `Operand::Constant(0)` instead, mirroring
+                        // the Witness/Fixed Constant(0) pattern from
+                        // commit `73ebbbfc`. See
+                        // BL-20260419-origin-frame-id-resolution and
+                        // the Round 1 Mem probe which surfaced OOB ids
+                        // 61 / 65 / 78 / 100 vs `airValuesMap.len()` 23.
+                        let count = *self.current_air_value_count.borrow();
+                        if (*id as usize) < count {
+                            pilout_proto::operand::Operand::AirValue(
+                                pilout_proto::operand::AirValue { idx: *id },
+                            )
+                        } else {
+                            if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
+                                let air_name = self.current_air_name.borrow();
+                                eprintln!(
+                                    "[pil2c-warn] foreign-AIR AirValue ref at leaf: \
+                                     air='{}' id={} (air_value_stages.len={}) \
+                                     emitting Operand::Constant(0)",
+                                    *air_name, id, count,
+                                );
+                            }
+                            pilout_proto::operand::Operand::Constant(
+                                pilout_proto::operand::Constant { value: Vec::new() },
+                            )
+                        }
                     }
                     ColRefKind::Public => {
                         pilout_proto::operand::Operand::PublicValue(
@@ -2283,42 +2322,47 @@ impl<'a> ProtoOutBuilder<'a> {
                         }
                     }
                     ColRefKind::Intermediate => {
-                        // Intermediate columns are expression-references
-                        // produced by `eval_reference` for `RefType::Expr`
-                        // reads. The leaf's `id` is the original
-                        // `self.exprs` slot id (i.e.
-                        // `AirExpressionEntry::source_expr_id`); look up
-                        // the entry position via `source_to_pos`, then
-                        // resolve to the packed proto idx through
-                        // `expr_id_map`. Mirrors JS
-                        // `pushExpressionReference(id, rowOffset)` in
-                        // `pil2-compiler/src/packed_expressions.js`.
-                        // Forward-references (entry not yet flattened)
-                        // and unresolved ids fall back to the raw `id`,
-                        // which preserves the legacy behavior. The
-                        // per-AIR `prov_cache` already keys
-                        // `Provenance(id, row_offset)` for this kind, so
-                        // repeated reads at the same offset collapse to
-                        // a single proto Expression entry.
+                        // Round 2 (2026-04-19 loop): Intermediate refs
+                        // are origin-scoped. Local-AIR refs (whose
+                        // origin_frame_id matches the serializer's
+                        // current AIR) resolve via `source_to_pos`.
+                        // Foreign-AIR refs fall through to
+                        // `global_intermediate_resolution` via the
+                        // `flatten_air_expr` / `flatten_air_operand`
+                        // gate before reaching this leaf. If somehow a
+                        // foreign-origin or origin-less ref slips
+                        // through, emit `Operand::Constant(0)` as the
+                        // safe terminal fallback rather than falling
+                        // back to the raw slot id (which would silently
+                        // mis-resolve to another AIR's packed index or
+                        // panic pil2-stark-setup when indexing past
+                        // `expressions[]`). See
+                        // BL-20260419-origin-frame-id-resolution.
+                        let _ = origin_frame_id;
                         let proto_idx = source_to_pos
                             .get(id)
-                            .and_then(|&pos| expr_id_map.get(pos).copied())
-                            .unwrap_or_else(|| {
-                                // Legacy fallback: treat `id` as a
-                                // direct expr_id_map index. This used
-                                // to be the only path before
-                                // ColRef::Intermediate started being
-                                // emitted by `eval_reference` and
-                                // remains a safe escape hatch for any
-                                // pre-Round-2 producer surface.
-                                expr_id_map
-                                    .get(*id as usize)
-                                    .copied()
-                                    .unwrap_or(*id)
-                            });
-                        pilout_proto::operand::Operand::Expression(
-                            pilout_proto::operand::Expression { idx: proto_idx },
-                        )
+                            .and_then(|&pos| expr_id_map.get(pos).copied());
+                        match proto_idx {
+                            Some(idx) => pilout_proto::operand::Operand::Expression(
+                                pilout_proto::operand::Expression { idx },
+                            ),
+                            None => {
+                                if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
+                                    let air_name = self.current_air_name.borrow();
+                                    eprintln!(
+                                        "[pil2c-warn] foreign-or-unresolved Intermediate \
+                                         ref at leaf: air='{}' id={} origin_frame_id={:?} \
+                                         emitting Operand::Constant(0)",
+                                        *air_name,
+                                        id,
+                                        origin_frame_id,
+                                    );
+                                }
+                                pilout_proto::operand::Operand::Constant(
+                                    pilout_proto::operand::Constant { value: Vec::new() },
+                                )
+                            }
+                        }
                     }
                 }
             }

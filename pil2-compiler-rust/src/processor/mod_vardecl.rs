@@ -469,41 +469,49 @@ pub(super) fn get_var_value(&self, reference: &Reference) -> Value {
             col_type: ColRefKind::Fixed,
             id: reference.id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::Witness => Value::ColRef {
             col_type: ColRefKind::Witness,
             id: reference.id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::Public => Value::ColRef {
             col_type: ColRefKind::Public,
             id: reference.id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::Challenge => Value::ColRef {
             col_type: ColRefKind::Challenge,
             id: reference.id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::ProofValue => Value::ColRef {
             col_type: ColRefKind::ProofValue,
             id: reference.id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::AirGroupValue => Value::ColRef {
             col_type: ColRefKind::AirGroupValue,
             id: reference.id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::AirValue => Value::ColRef {
             col_type: ColRefKind::AirValue,
             id: reference.id,
             row_offset: None,
+            origin_frame_id: None,
         },
         RefType::CustomCol => Value::ColRef {
             col_type: ColRefKind::Custom,
             id: reference.id,
             row_offset: None,
+            origin_frame_id: None,
         },
         _ => Value::Void,
     }
@@ -584,23 +592,26 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                         // non-symbolic shape later in the AIR body.
                         // See BL-20260418-intermediate-ref-lift-consistency.
                         self.intermediate_refs_emitted.insert(reference.id);
-                        // Round 4: capture the `RuntimeExpr` snapshot
-                        // so `substitute_air_local_intermediate_refs`
-                        // can replace this ref with its underlying
-                        // expression when the containing value is
-                        // stored into a proof-scope slot that will
-                        // be read by another AIR. See
-                        // BL-20260418-intermediate-ref-cross-air-leak.
+                        // Round 2 (2026-04-19 loop) origin-frame-id:
+                        // key both resolution maps by the composite
+                        // `(origin_frame_id, local_id)`. The bare
+                        // `u32` key used before this round aliased
+                        // across AIRs because `IdAllocator::push`
+                        // resets `next_id` to 0 per frame.
+                        // See BL-20260419-origin-frame-id-resolution.
+                        let origin = self.current_origin_frame_id;
+                        let key = (origin, reference.id);
                         self.intermediate_ref_resolution
-                            .entry(reference.id)
+                            .entry(key)
                             .or_insert_with(|| rt.clone());
                         self.global_intermediate_resolution
-                            .entry(reference.id)
+                            .entry(key)
                             .or_insert_with(|| rt.clone());
                         Value::ColRef {
                             col_type: ColRefKind::Intermediate,
                             id: reference.id,
                             row_offset: None,
+                            origin_frame_id: Some(origin),
                         }
                     } else {
                         stored
@@ -631,16 +642,19 @@ pub(super) fn get_var_ref_value_by_type_and_id(
                     let in_air = !self.air_stack.is_empty();
                     if in_air && id >= self.exprs.frame_start() {
                         self.intermediate_refs_emitted.insert(id);
+                        let origin = self.current_origin_frame_id;
+                        let key = (origin, id);
                         self.intermediate_ref_resolution
-                            .entry(id)
+                            .entry(key)
                             .or_insert_with(|| rt.clone());
                         self.global_intermediate_resolution
-                            .entry(id)
+                            .entry(key)
                             .or_insert_with(|| rt.clone());
                         Value::ColRef {
                             col_type: ColRefKind::Intermediate,
                             id,
                             row_offset: None,
+                            origin_frame_id: Some(origin),
                         }
                     } else {
                         stored
@@ -698,10 +712,9 @@ fn sanitize_expr_store_value(&self, target_id: u32, value: Value) -> Value {
     if self.intermediate_ref_resolution.is_empty() {
         return value;
     }
-    let frame_start = self.exprs.frame_start();
     substitute_air_local_intermediate_in_value(
         value,
-        frame_start,
+        self.current_origin_frame_id,
         &self.intermediate_ref_resolution,
     )
 }
@@ -722,6 +735,7 @@ pub(super) fn sanitize_proof_scope_exprs_at_air_exit(&mut self) {
         return;
     }
     let resolution = self.intermediate_ref_resolution.clone();
+    let origin = self.current_origin_frame_id;
     // Walk every slot in this AIR's `self.exprs` that may survive into
     // the proof frame via `variables::pop`'s `container_owned` merge.
     // Seeded proof-scope slots (id < frame_start) plus any slot marked
@@ -750,7 +764,7 @@ pub(super) fn sanitize_proof_scope_exprs_at_air_exit(&mut self) {
         };
         let rewritten = substitute_air_local_intermediate_in_value(
             current,
-            frame_start,
+            origin,
             &resolution,
         );
         self.exprs.set(id, rewritten);
@@ -761,17 +775,21 @@ pub(super) fn sanitize_proof_scope_exprs_at_air_exit(&mut self) {
 
 fn substitute_air_local_intermediate_in_value(
     value: Value,
-    frame_start: u32,
-    resolution: &std::collections::HashMap<u32, Rc<RuntimeExpr>>,
+    origin_frame_id: u32,
+    resolution: &std::collections::HashMap<(u32, u32), Rc<RuntimeExpr>>,
 ) -> Value {
     match value {
-        Value::ColRef { col_type: ColRefKind::Intermediate, id, row_offset: _ }
-            if id >= frame_start =>
+        Value::ColRef {
+            col_type: ColRefKind::Intermediate,
+            id,
+            row_offset: _,
+            origin_frame_id: Some(ref_origin),
+        } if ref_origin == origin_frame_id =>
         {
-            if let Some(rt) = resolution.get(&id) {
+            if let Some(rt) = resolution.get(&(ref_origin, id)) {
                 let rewritten = substitute_air_local_intermediate_in_rt(
                     rt.clone(),
-                    frame_start,
+                    origin_frame_id,
                     resolution,
                 );
                 Value::RuntimeExpr(rewritten)
@@ -780,16 +798,17 @@ fn substitute_air_local_intermediate_in_value(
                     col_type: ColRefKind::Intermediate,
                     id,
                     row_offset: None,
+                    origin_frame_id: Some(ref_origin),
                 }
             }
         }
         Value::RuntimeExpr(rt) => Value::RuntimeExpr(
-            substitute_air_local_intermediate_in_rt(rt, frame_start, resolution),
+            substitute_air_local_intermediate_in_rt(rt, origin_frame_id, resolution),
         ),
         Value::Array(items) => Value::Array(
             items
                 .into_iter()
-                .map(|v| substitute_air_local_intermediate_in_value(v, frame_start, resolution))
+                .map(|v| substitute_air_local_intermediate_in_value(v, origin_frame_id, resolution))
                 .collect(),
         ),
         other => other,
@@ -798,17 +817,21 @@ fn substitute_air_local_intermediate_in_value(
 
 fn substitute_air_local_intermediate_in_rt(
     rt: Rc<RuntimeExpr>,
-    frame_start: u32,
-    resolution: &std::collections::HashMap<u32, Rc<RuntimeExpr>>,
+    origin_frame_id: u32,
+    resolution: &std::collections::HashMap<(u32, u32), Rc<RuntimeExpr>>,
 ) -> Rc<RuntimeExpr> {
     match &*rt {
-        RuntimeExpr::ColRef { col_type: ColRefKind::Intermediate, id, row_offset: _ }
-            if *id >= frame_start =>
+        RuntimeExpr::ColRef {
+            col_type: ColRefKind::Intermediate,
+            id,
+            row_offset: _,
+            origin_frame_id: Some(ref_origin),
+        } if *ref_origin == origin_frame_id =>
         {
-            if let Some(replacement) = resolution.get(id) {
+            if let Some(replacement) = resolution.get(&(*ref_origin, *id)) {
                 substitute_air_local_intermediate_in_rt(
                     replacement.clone(),
-                    frame_start,
+                    origin_frame_id,
                     resolution,
                 )
             } else {
@@ -818,12 +841,12 @@ fn substitute_air_local_intermediate_in_rt(
         RuntimeExpr::BinOp { op, left, right } => {
             let new_left = substitute_air_local_intermediate_in_rt(
                 left.clone(),
-                frame_start,
+                origin_frame_id,
                 resolution,
             );
             let new_right = substitute_air_local_intermediate_in_rt(
                 right.clone(),
-                frame_start,
+                origin_frame_id,
                 resolution,
             );
             if Rc::ptr_eq(&new_left, left) && Rc::ptr_eq(&new_right, right) {
@@ -839,7 +862,7 @@ fn substitute_air_local_intermediate_in_rt(
         RuntimeExpr::UnaryOp { op, operand } => {
             let new_operand = substitute_air_local_intermediate_in_rt(
                 operand.clone(),
-                frame_start,
+                origin_frame_id,
                 resolution,
             );
             if Rc::ptr_eq(&new_operand, operand) {
@@ -851,7 +874,7 @@ fn substitute_air_local_intermediate_in_rt(
         RuntimeExpr::Value(inner) => {
             let rewritten = substitute_air_local_intermediate_in_value(
                 inner.clone(),
-                frame_start,
+                origin_frame_id,
                 resolution,
             );
             match rewritten {

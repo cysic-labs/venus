@@ -132,7 +132,7 @@ pub struct Processor {
     // push and exit alongside `intermediate_refs_emitted`.
     // See BL-20260418-intermediate-ref-cross-air-leak.
     pub intermediate_ref_resolution:
-        std::collections::HashMap<u32, std::rc::Rc<RuntimeExpr>>,
+        std::collections::HashMap<(u32, u32), std::rc::Rc<RuntimeExpr>>,
 
     // -- Cross-AIR safety net. Every time the producer mints an
     // `Intermediate { id, .. }` ref we also store the RuntimeExpr
@@ -146,7 +146,18 @@ pub struct Processor {
     // at `helpers.rs:21:19`). Persisted for the whole pilout build.
     // See BL-20260418-intermediate-ref-cross-air-leak.
     pub global_intermediate_resolution:
-        std::collections::HashMap<u32, std::rc::Rc<RuntimeExpr>>,
+        std::collections::HashMap<(u32, u32), std::rc::Rc<RuntimeExpr>>,
+
+    // -- Monotonic counter incremented on every
+    // `execute_air_template_call` entry. Used to disambiguate
+    // AIR-local expr slot ids across AIRs since `IdAllocator::push`
+    // resets `next_id` to 0 per AIR frame. Paired with the local id
+    // as the composite key into `intermediate_ref_resolution` and
+    // `global_intermediate_resolution`. Not decremented on AIR exit:
+    // every call gets a unique id for the life of the pilout build.
+    // Round 2 addition (BL-20260419-origin-frame-id-resolution).
+    pub next_origin_frame_id: u32,
+    pub current_origin_frame_id: u32,
 
     // -- Global (proof-level) expression store: symbolic expressions from
     // proof-level `expr` variables, mirroring JS `this.globalExpressions`. --
@@ -322,6 +333,8 @@ impl Processor {
             intermediate_refs_emitted: std::collections::HashSet::new(),
             intermediate_ref_resolution: std::collections::HashMap::new(),
             global_intermediate_resolution: std::collections::HashMap::new(),
+            next_origin_frame_id: 0,
+            current_origin_frame_id: 0,
             global_expression_store: Vec::new(),
             air_groups: AirGroups::new(),
             air_templates: AirTemplates::new(),
@@ -838,7 +851,7 @@ impl Processor {
             // evaluates to Void, restore the witness_calc hint for
             // all sites, and track the fix under
             // AC-parity-or-audit (branch B).
-            if let RuntimeExpr::ColRef { col_type, id, row_offset } = &left {
+            if let RuntimeExpr::ColRef { col_type, id, row_offset, .. } = &left {
                 if matches!(
                     col_type,
                     ColRefKind::Witness | ColRefKind::AirValue
@@ -1198,6 +1211,7 @@ impl Processor {
                                     col_type: *col_type,
                                     id: id + i as u32,
                                     row_offset: None,
+                                    origin_frame_id: None,
                                 }
                             }
                         }
@@ -1288,11 +1302,12 @@ impl Processor {
                 }
                 match base_val {
                     Value::ColRef {
-                        col_type, id, ..
+                        col_type, id, origin_frame_id, ..
                     } => Value::ColRef {
                         col_type,
                         id,
                         row_offset: Some(offset_val as i64),
+                        origin_frame_id,
                     },
                     _ => base_val,
                 }
