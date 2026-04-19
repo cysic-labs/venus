@@ -1205,6 +1205,20 @@ impl Processor {
                                 BinOp::Mul => {
                                     if is_literal_one(&rval) { return lval; }
                                     if is_literal_one(&lval) { return rval; }
+                                    // JS pil2-compiler folds `mul, 0, x` and
+                                    // `mul, x, 0` to the literal 0 (see
+                                    // pil2-compiler/src/expression.js lines
+                                    // 924-932). Without this fold, sources
+                                    // like std_sum.pil's
+                                    // `(... - sum_ims) * direct_den - direct_num`
+                                    // emit a redundant `0 * (gsum_e[0] +
+                                    // std_gamma)` subtree on AIRs whose
+                                    // direct_num accumulator stays at literal
+                                    // 0 (e.g., SpecifiedRanges /
+                                    // VirtualTable* with
+                                    // SUM_EXPRESSIONS_IM_NON_REDUCED == 0).
+                                    if is_literal_zero(&rval) { return rval; }
+                                    if is_literal_zero(&lval) { return lval; }
                                 }
                                 _ => {}
                             }
