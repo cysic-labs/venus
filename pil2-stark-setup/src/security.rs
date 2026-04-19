@@ -258,6 +258,9 @@ fn calculate_query_num_hashes(
     codeword_length: f64,
     folding_factors: &[u64],
 ) -> f64 {
+    if folding_factors.is_empty() {
+        return 0.0;
+    }
     let mut acc_folding_factor: f64 = 1.0;
     let mut total_hashes: f64 = 0.0;
     for &ff in &folding_factors[..folding_factors.len() - 1] {

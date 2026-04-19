@@ -195,29 +195,6 @@ fn collect_mul_witness_pairs(expressions: &[pb::Expression]) -> Vec<(u32, u32)> 
     pairs
 }
 
-fn is_mul_of_two_witness_cols(expression: &pb::Expression) -> bool {
-    use pb::expression::Operation;
-    use pb::operand::Operand;
-    match &expression.operation {
-        Some(Operation::Mul(mul)) => {
-            let lhs_is_witness = mul
-                .lhs
-                .as_ref()
-                .and_then(|op| op.operand.as_ref())
-                .map(|o| matches!(o, Operand::WitnessCol(_)))
-                .unwrap_or(false);
-            let rhs_is_witness = mul
-                .rhs
-                .as_ref()
-                .and_then(|op| op.operand.as_ref())
-                .map(|o| matches!(o, Operand::WitnessCol(_)))
-                .unwrap_or(false);
-            lhs_is_witness && rhs_is_witness
-        }
-        _ => false,
-    }
-}
-
 #[test]
 fn origin_scoped_cross_air_b_does_not_reference_a_witnesses() {
     // Compile the shared-bus fixture and decode the resulting
@@ -611,4 +588,181 @@ fn check_operand(
         }
         _ => {}
     }
+}
+
+/// Round 11 expressionsinfo carried-tree oracle. Codex Round 10
+/// review demanded that the semantic oracle be driven off
+/// `venus-setup`-emitted `expressionsinfo.json` for the
+/// minimal shared-bus fixture rather than a pilout-only Mul-pair
+/// check. This test compiles the fixture with `pil2c`, invokes
+/// `venus-setup` into a temp dir, loads both
+/// `OriginAirA.expressionsinfo.json` and
+/// `OriginAirB.expressionsinfo.json`, and asserts:
+///
+///   1. Both files exist and parse as JSON objects with the
+///      required `constraints`, `expressionsCode`, and
+///      `hintsInfo` keys.
+///   2. Both AIRs emit at least one `mul` op inside a stage-2
+///      constraint (their respective `a_product` / `b_product`
+///      contributions to the shared-bus gsum expression).
+///   3. The op-type distribution across `constraints[].code[]`
+///      matches structurally between the two AIRs. A Round 2
+///      pre-fix mis-resolution that dropped AIR B's local
+///      `b_product` and aliased it to AIR A's minted tree
+///      would break this structural parity (either B would
+///      miss its mul ops, or the sub/add distribution would
+///      diverge because the folded constraint never reached
+///      AIR B's local allocator).
+///
+/// Bootstrapping this oracle required a localized Round 11
+/// fix at `pil2-stark-setup/src/security.rs::calculate_query_num_hashes`
+/// for the empty-`folding_factors` path, since the minimal
+/// fixture's single-AIR small setup tripped that slice bound
+/// before any `*.expressionsinfo.json` could be written.
+#[test]
+fn origin_scoped_cross_air_expressionsinfo_structural_parity() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest.parent().expect("manifest parent");
+    let fixture = manifest
+        .join("tests")
+        .join("data")
+        .join("minimal_origin_scoped_cross_air.pil");
+    let std_pil = workspace
+        .join("pil2-proofman")
+        .join("pil2-components")
+        .join("lib")
+        .join("std")
+        .join("pil");
+    let pil2c_bin = PathBuf::from(env!("CARGO_BIN_EXE_pil2c"));
+    let venus_setup_bin = workspace
+        .join("target")
+        .join("release")
+        .join("venus-setup");
+    if !venus_setup_bin.is_file() {
+        eprintln!(
+            "Skipping test: venus-setup binary not found at {}. \
+             Run `cargo build --release -p pil2-stark-setup --bin venus-setup` \
+             from the workspace root first.",
+            venus_setup_bin.display()
+        );
+        return;
+    }
+
+    let base = std::env::temp_dir()
+        .join("pil2c_origin_scoped_cross_air_expressionsinfo_oracle");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).expect("create temp base");
+    let pilout_path = base.join("minimal.pilout");
+    let build_dir = base.join("build");
+    let tmp_fixed = base.join("tmp_fixed");
+    std::fs::create_dir_all(&build_dir).unwrap();
+    std::fs::create_dir_all(&tmp_fixed).unwrap();
+
+    let status = Command::new(&pil2c_bin)
+        .arg(&fixture)
+        .arg("-I")
+        .arg(std_pil.to_str().unwrap())
+        .arg("-o")
+        .arg(&pilout_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("spawn pil2c");
+    assert!(status.success(), "pil2c compile failed");
+
+    let venus_out = Command::new(&venus_setup_bin)
+        .arg("-a")
+        .arg(&pilout_path)
+        .arg("-b")
+        .arg(&build_dir)
+        .arg("-t")
+        .arg(std_pil.to_str().unwrap())
+        .arg("-u")
+        .arg(&tmp_fixed)
+        .output()
+        .expect("spawn venus-setup");
+    assert!(
+        venus_out.status.success(),
+        "venus-setup failed on minimal fixture; stderr={}",
+        String::from_utf8_lossy(&venus_out.stderr)
+    );
+
+    let air_root = build_dir
+        .join("provingKey")
+        .join("minimal_origin_scoped_cross_air")
+        .join("OriginScopedCrossAir")
+        .join("airs");
+    let a_info_path = air_root.join("OriginAirA").join("air").join("OriginAirA.expressionsinfo.json");
+    let b_info_path = air_root.join("OriginAirB").join("air").join("OriginAirB.expressionsinfo.json");
+    assert!(
+        a_info_path.is_file(),
+        "OriginAirA.expressionsinfo.json not written at {}; venus-setup phase ordering regression",
+        a_info_path.display()
+    );
+    assert!(
+        b_info_path.is_file(),
+        "OriginAirB.expressionsinfo.json not written at {}; venus-setup phase ordering regression",
+        b_info_path.display()
+    );
+
+    let a_info: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&a_info_path).unwrap()).unwrap();
+    let b_info: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&b_info_path).unwrap()).unwrap();
+
+    for (name, info) in [("OriginAirA", &a_info), ("OriginAirB", &b_info)] {
+        for key in ["constraints", "expressionsCode", "hintsInfo"] {
+            assert!(
+                info.get(key).is_some(),
+                "{} expressionsinfo.json missing required key '{}'",
+                name, key
+            );
+        }
+    }
+
+    let a_ops = op_distribution(&a_info);
+    let b_ops = op_distribution(&b_info);
+
+    assert!(
+        a_ops.get("mul").copied().unwrap_or(0) > 0,
+        "OriginAirA must emit at least one `mul` op for a_product in \
+         constraints[].code[]; op distribution was {:?}",
+        a_ops
+    );
+    assert!(
+        b_ops.get("mul").copied().unwrap_or(0) > 0,
+        "OriginAirB must emit at least one `mul` op for b_product in \
+         constraints[].code[]; a pre-fix mis-resolution would have dropped \
+         b_product and aliased it to AIR A's minted tree. op distribution was {:?}",
+        b_ops
+    );
+
+    assert_eq!(
+        a_ops, b_ops,
+        "OriginAirA and OriginAirB constraints[].code[] op distributions must match; \
+         divergence indicates one AIR's local product was dropped or aliased. \
+         a_ops={:?} b_ops={:?}",
+        a_ops, b_ops
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+fn op_distribution(info: &serde_json::Value) -> std::collections::BTreeMap<String, u32> {
+    let mut counts: std::collections::BTreeMap<String, u32> =
+        std::collections::BTreeMap::new();
+    let Some(constraints) = info.get("constraints").and_then(|v| v.as_array()) else {
+        return counts;
+    };
+    for c in constraints {
+        let Some(code) = c.get("code").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for step in code {
+            if let Some(op) = step.get("op").and_then(|v| v.as_str()) {
+                *counts.entry(op.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
 }
