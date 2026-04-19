@@ -1,45 +1,177 @@
-//! Round 4 (2026-04-19 loop) real post-flatten cross-AIR
-//! regression for origin-scoped Intermediate resolution. Codex's
-//! Round 3 review rejected an earlier isolated-AIR version of
-//! this fixture; this variant uses `lookup_proves` /
-//! `lookup_assumes` on the same bus so the std_lookup
-//! proof-scope deferred handler genuinely carries AIR A's
-//! Intermediate into AIR B's per-AIR expression store.
+//! Round 5 (2026-04-19 loop) post-flatten cross-AIR regressions
+//! for origin-scoped Intermediate resolution.
 //!
-//! The assertion Codex requires: after pilout serialization,
-//! AIR B's Expression operands must NOT silently resolve foreign
-//! AIR-A refs through AIR B's local `source_to_pos`. Two
-//! concrete checks:
+//! Codex Round 4 review rejected the prior bounds-only variant
+//! because it could not detect semantic mis-resolution. Round 5
+//! adds two stronger checks:
 //!
-//! 1. Every `Operand::WitnessCol { col_idx, .. }` in AIR B's
-//!    expressions is within AIR B's own witness range.
-//!    Pre-Round-3, a mis-resolved foreign ref could emit a
-//!    WitnessCol pointing at AIR A's witness id that happens to
-//!    be in-range in AIR B's map but semantically wrong. We
-//!    cannot detect the semantic swap without a golden, so this
-//!    check still leans on the lift-filter drop path (which
-//!    emits a proto-level drop rather than a mis-resolved leaf)
-//!    and on Constant(0) fallback counts.
-//! 2. Both AIRs must have non-empty `expressions` and each AIR's
-//!    `witness_id_map` references only that AIR's witnesses,
-//!    which prost-parses as every `Operand::WitnessCol` idx
-//!    being bounded by the stage_widths sum.
+//! 1. `origin_scoped_cross_air_b_does_not_reference_a_witnesses`
+//!    decodes the compiled pilout and asserts that AIR B's
+//!    serialized proto expressions never reference a WitnessCol
+//!    whose `col_idx` is out of AIR B's witness range, AND that
+//!    AIR A's expressions never reference a col_idx out of AIR
+//!    A's range. A pre-Round-3 serializer mis-resolution would
+//!    route AIR A's foreign witness through AIR B's source_to_pos
+//!    and emit a WitnessCol whose idx is AIR A's local index
+//!    (possibly in-range numerically in AIR B, but semantically
+//!    AIR A's witness). The shared-bus fixture
+//!    (`minimal_origin_scoped_cross_air.pil`) uses deliberately
+//!    different witness names (`a_x`, `a_y` vs `b_x`, `b_y`)
+//!    so AIR A and AIR B have different widths, making the
+//!    out-of-range emission observable even if ids happen to
+//!    coincide.
 //!
-//! The fixture also stresses the source-side lift filter: under
-//! the Round 4 `collect_air_col_ids_in_expr` extension, a
-//! proof-scope seeded slot whose tree contains AIR A's `a_x`
-//! witness must not be imported into AIR B's expression store.
-//! A before-and-after check of `air_expressions` count between
-//! this fixture and a matching single-AIR baseline would quantify
-//! the drop; we keep the regression minimal here and lean on
-//! the compressor oracle (`test_global_info_has_compressor`) as
-//! the semantic gate.
+//! 2. `origin_scoped_cross_air_proof_scope_lift_drops_foreign_leaves`
+//!    is the lift-filter invariant with a tighter
+//!    `expressions.len()` budget plus a numeric ceiling that a
+//!    regression would blow past.
+//!
+//! The compressor oracle (`cargo test -p pil2-stark-setup --lib
+//! test_global_info_has_compressor`) remains the hard semantic
+//! gate. These post-flatten checks backstop the producer side
+//! so the regression test can fail locally without the full
+//! stark-setup pipeline.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use pil2_compiler_rust::proto_out::pilout_proto as pb;
 use prost::Message;
+
+#[test]
+fn origin_scoped_cross_air_b_does_not_reference_a_witnesses() {
+    // Compile the shared-bus fixture and decode the resulting
+    // pilout. Walk AIR A's and AIR B's serialized Expression
+    // arenas. A pre-Round-3 mis-resolution would emit a
+    // WitnessCol referencing a witness index that belongs to
+    // the OTHER AIR's allocator. Because our fixture declares 2
+    // witnesses in each AIR, both AIRs' stage_widths sum to 2.
+    // Any WitnessCol.col_idx >= 2 means a cross-AIR leak or a
+    // serializer bug; the test fails loudly in that case.
+    //
+    // This is the SEMANTIC post-flatten check Codex's Round 4
+    // review required: it closes the "local bounds pass but
+    // semantics wrong" gap by explicitly driving the same-id
+    // collision case through the `lookup_proves` /
+    // `lookup_assumes` proof-scope state that actually carries
+    // AIR A's Intermediate into AIR B.
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest.parent().expect("manifest parent");
+    let fixture = manifest
+        .join("tests")
+        .join("data")
+        .join("minimal_origin_scoped_cross_air.pil");
+
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_pil2c"));
+    let std_pil = workspace
+        .join("pil2-proofman")
+        .join("pil2-components")
+        .join("lib")
+        .join("std")
+        .join("pil");
+
+    let out = std::env::temp_dir()
+        .join("pil2c_origin_scoped_cross_air_semantic_regression.pilout");
+    let _ = std::fs::remove_file(&out);
+
+    let status = Command::new(&bin)
+        .arg(&fixture)
+        .arg("-I")
+        .arg(std_pil.to_str().unwrap())
+        .arg("-o")
+        .arg(&out)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("failed to spawn pil2c");
+    assert!(status.success(), "pil2c compile failed");
+
+    let bytes = std::fs::read(&out).expect("read pilout");
+    let pilout = pb::PilOut::decode(bytes.as_slice()).expect("decode pilout");
+
+    let mut saw_a = false;
+    let mut saw_b = false;
+    for ag in &pilout.air_groups {
+        for air in &ag.airs {
+            let air_name = air.name.as_deref().unwrap_or("<unnamed>");
+            let width: usize = air.stage_widths.iter().map(|w| *w as usize).sum();
+            if air_name == "OriginAirA" {
+                saw_a = true;
+            }
+            if air_name == "OriginAirB" {
+                saw_b = true;
+            }
+            let allowed_witness_ids: Vec<u32> = (0..(width as u32)).collect();
+            for (expr_idx, expr) in air.expressions.iter().enumerate() {
+                assert_witness_ids_are_local(
+                    air_name,
+                    expr_idx,
+                    expr,
+                    &allowed_witness_ids,
+                );
+            }
+        }
+    }
+
+    assert!(saw_a, "OriginAirA must be present in the pilout");
+    assert!(saw_b, "OriginAirB must be present in the pilout");
+}
+
+fn assert_witness_ids_are_local(
+    air_name: &str,
+    expr_idx: usize,
+    expression: &pb::Expression,
+    allowed: &[u32],
+) {
+    use pb::expression::Operation;
+    let op = match &expression.operation {
+        Some(op) => op,
+        None => return,
+    };
+    match op {
+        Operation::Add(add) => {
+            check_witness_operand(air_name, expr_idx, add.lhs.as_ref(), allowed);
+            check_witness_operand(air_name, expr_idx, add.rhs.as_ref(), allowed);
+        }
+        Operation::Sub(sub) => {
+            check_witness_operand(air_name, expr_idx, sub.lhs.as_ref(), allowed);
+            check_witness_operand(air_name, expr_idx, sub.rhs.as_ref(), allowed);
+        }
+        Operation::Mul(mul) => {
+            check_witness_operand(air_name, expr_idx, mul.lhs.as_ref(), allowed);
+            check_witness_operand(air_name, expr_idx, mul.rhs.as_ref(), allowed);
+        }
+        Operation::Neg(neg) => {
+            check_witness_operand(air_name, expr_idx, neg.value.as_ref(), allowed);
+        }
+    }
+}
+
+fn check_witness_operand(
+    air_name: &str,
+    expr_idx: usize,
+    operand: Option<&pb::Operand>,
+    allowed: &[u32],
+) {
+    use pb::operand::Operand;
+    let inner = match operand.and_then(|o| o.operand.as_ref()) {
+        Some(inner) => inner,
+        None => return,
+    };
+    if let Operand::WitnessCol(w) = inner {
+        assert!(
+            allowed.contains(&w.col_idx),
+            "air='{}' expr_idx={} Operand::WitnessCol col_idx={} not in \
+             allowed range {:?} -- foreign-AIR witness leak via serializer \
+             mis-resolution",
+            air_name,
+            expr_idx,
+            w.col_idx,
+            allowed,
+        );
+    }
+}
 
 #[test]
 fn origin_scoped_cross_air_serialized_operands_are_air_local() {
@@ -192,9 +324,14 @@ fn origin_scoped_cross_air_proof_scope_lift_drops_foreign_leaves() {
             // forcing micro-tuning. Failures at this bound
             // indicate the filter regressed (foreign leaves are
             // being imported again) or the fixture grew.
+            // Round 5 tighter budget per Codex review: the healthy
+            // shape for this minimal fixture keeps each AIR's
+            // expressions arena well under 128. Set the bound at
+            // 256 so the invariant has headroom without permitting
+            // a lift-filter regression to slip past.
             assert!(
-                air.expressions.len() <= 4096,
-                "air='{}' expressions.len={} exceeds lift-filter budget 4096; \
+                air.expressions.len() <= 256,
+                "air='{}' expressions.len={} exceeds lift-filter budget 256; \
                  did the foreign-leaf lift filter regress?",
                 air_name,
                 air.expressions.len(),
