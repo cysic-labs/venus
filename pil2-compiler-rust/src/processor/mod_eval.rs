@@ -31,7 +31,40 @@ pub(super) fn eval_reference(&mut self, name_id: &NameId) -> Value {
         let names = self.namespace_ctx.get_names(name);
         self.references.get_reference_multi(&names).cloned()
     });
-    if let Some(reference) = reference_opt {
+    if let Some(mut reference) = reference_opt {
+        // Stale-array-dims recovery for Fixed-col references. When
+        // visibility leak / re-declare paths leave a Reference whose
+        // `array_dims` is empty but the underlying id falls inside an
+        // array-declared range in `fixed_cols.ids.label_ranges`, the
+        // stale entry would otherwise route `OPID[i]` / `UID[i]` /
+        // `name[i]` through the bare-scalar `get_var_ref_value` path
+        // and lose the array-indexing semantic — the eventual
+        // `ArrayIndex(ColRef{Fixed}, i)` then collapses to a row-0
+        // read of the base id (e.g. `Int(102)` for SPECIFIED_RANGES
+        // OPID[0]). Recover the dims from the canonical
+        // `fixed_cols.ids.label_ranges` entry that covers this id, so
+        // the indexing path below sees the same array_dims that the
+        // declaration carried. The recovered dims are NOT written
+        // back to the reference table (the original entry stays
+        // stale); the fix is local to this lookup. See
+        // BL-20260419-stale-array-dims-fixed-col-row-collapse.
+        if reference.array_dims.is_empty() && reference.ref_type == RefType::Fixed {
+            let recovered = self
+                .fixed_cols
+                .ids
+                .label_ranges
+                .to_vec()
+                .iter()
+                .find(|r| {
+                    reference.id >= r.from
+                        && reference.id < r.from + r.count
+                        && !r.array_dims.is_empty()
+                })
+                .map(|r| r.array_dims.clone());
+            if let Some(dims) = recovered {
+                reference.array_dims = dims;
+            }
+        }
         // Handle array indexing.
         if !name_id.indexes.is_empty() && !reference.array_dims.is_empty() {
             let indexes: Vec<i128> = name_id

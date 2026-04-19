@@ -1274,42 +1274,15 @@ impl Processor {
                     (Value::ColRef { col_type, id, .. }, Some(i)) => {
                         match col_type {
                             ColRefKind::Fixed => {
-                                // Disambiguate `FIXED_COL[row]` (row-level
-                                // read of a single fixed column during
-                                // fixed-column generation) from
-                                // `FIXED_ARR[k]` (sub-column index into a
-                                // `col fixed name[N]` array) by checking
-                                // whether the base id falls inside an
-                                // array-declared label range. Without this,
-                                // a stale-alias resolution that returns a
-                                // bare ColRef instead of an ArrayRef (see
-                                // BL-20260419-stale-array-dims-on-search-definition)
-                                // collapses `OPID[i]` / `UID[i]` to the
-                                // row-0 fixed value at the base id, which
-                                // drops the busid term from
-                                // `compress_exprs` output and produces the
-                                // SpecifiedRanges / VirtualTable0 /
-                                // VirtualTable1 stage-2 key drift.
-                                let is_array_decl = self
-                                    .fixed_cols
-                                    .ids
-                                    .label_ranges
-                                    .to_vec()
-                                    .iter()
-                                    .any(|r| {
-                                        *id >= r.from
-                                            && *id < r.from + r.count
-                                            && !r.array_dims.is_empty()
-                                    });
-                                if is_array_decl {
-                                    let origin_frame_id = self.maybe_air_origin_frame_id();
-                                    Value::ColRef {
-                                        col_type: ColRefKind::Fixed,
-                                        id: id + i as u32,
-                                        row_offset: None,
-                                        origin_frame_id,
-                                    }
-                                } else if let Some(v) = self.fixed_cols.get_row_value(*id, i as usize) {
+                                // Row-level read: FIXED_COL[row] during
+                                // fixed-column generation. Sub-column row
+                                // reads (e.g. `CONN_[col][row]` in
+                                // std_connection.pil) also land here once
+                                // the inner ArrayIndex resolves to a
+                                // single Fixed ColRef; treating the
+                                // outer index as another array-of-cols
+                                // step is wrong.
+                                if let Some(v) = self.fixed_cols.get_row_value(*id, i as usize) {
                                     Value::Int(v)
                                 } else {
                                     Value::Int(0)

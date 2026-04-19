@@ -1,0 +1,38 @@
+// minimal_nested_fixed_array.pil
+//
+// Pins the `fixed_arr[col][row]` two-level indexing pattern used
+// by `std_connection.pil`'s `CONN_<opid>[col][row]` reads. The
+// inner `[col]` index must produce a sub-column reference at
+// `arr_base + col`; the outer `[row]` index must produce the
+// scalar value at that row, NOT another array-of-cols offset.
+//
+// Round 18 commit `6a8c7023` added a Fixed-col disambiguation in
+// `eval_expr`'s ArrayIndex match that incorrectly took the
+// array-of-cols path on the outer `[row]` index whenever the
+// base id fell inside an array-declared label range, which
+// would have collapsed `F[0][3]` to `ColRef{Fixed, F_base+0+3}`
+// instead of `Int(3)`. Round 19 moves the stale-array-dims
+// recovery to `eval_reference` so the `ArrayRef` form is
+// produced at reference time and the outer `[row]` index is
+// correctly handled by the existing ColRef row-read branch.
+
+airtemplate NestedFixedArrayAir(const int N = 8) {
+    col witness W;
+    col fixed F[2];
+
+    for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < N; j++) {
+            F[i][j] = i * N + j;
+        }
+    }
+
+    // F[0][3] must resolve to the scalar `3` at compile time.
+    // If the outer `[3]` index were treated as another array-of-
+    // cols offset, this would constrain `W - ColRef{Fixed,...}`
+    // instead of `W - 3`.
+    W === F[0][3];
+}
+
+airgroup NestedFixedArrayGroup {
+    NestedFixedArrayAir(N: 8);
+}
