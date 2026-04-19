@@ -619,8 +619,19 @@ fn check_operand(
 /// for the empty-`folding_factors` path, since the minimal
 /// fixture's single-AIR small setup tripped that slice bound
 /// before any `*.expressionsinfo.json` could be written.
+///
+/// Round 12 strengthens this to a deterministic carried-tree
+/// assertion per Codex Round 11 review: locate the stage-2
+/// shared-bus constraint in each AIR's `constraints[].line`
+/// and assert OriginAirA carries the `a_x * a_y` tree while
+/// OriginAirB carries the `b_x * b_y` tree, and crucially
+/// that the two AIRs do NOT cross-reference each other's
+/// witness labels. A same-id semantic swap that preserved the
+/// op-count histogram but pointed AIR B's minted tree at AIR
+/// A's witnesses would fail this test where the prior
+/// histogram-only check would have passed.
 #[test]
-fn origin_scoped_cross_air_expressionsinfo_structural_parity() {
+fn origin_scoped_cross_air_expressionsinfo_carried_tree_match() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest.parent().expect("manifest parent");
     let fixture = manifest
@@ -634,22 +645,9 @@ fn origin_scoped_cross_air_expressionsinfo_structural_parity() {
         .join("std")
         .join("pil");
     let pil2c_bin = PathBuf::from(env!("CARGO_BIN_EXE_pil2c"));
-    let venus_setup_bin = workspace
-        .join("target")
-        .join("release")
-        .join("venus-setup");
-    if !venus_setup_bin.is_file() {
-        eprintln!(
-            "Skipping test: venus-setup binary not found at {}. \
-             Run `cargo build --release -p pil2-stark-setup --bin venus-setup` \
-             from the workspace root first.",
-            venus_setup_bin.display()
-        );
-        return;
-    }
 
     let base = std::env::temp_dir()
-        .join("pil2c_origin_scoped_cross_air_expressionsinfo_oracle");
+        .join("pil2c_origin_scoped_cross_air_carried_tree_oracle");
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).expect("create temp base");
     let pilout_path = base.join("minimal.pilout");
@@ -670,17 +668,13 @@ fn origin_scoped_cross_air_expressionsinfo_structural_parity() {
         .expect("spawn pil2c");
     assert!(status.success(), "pil2c compile failed");
 
-    let venus_out = Command::new(&venus_setup_bin)
-        .arg("-a")
-        .arg(&pilout_path)
-        .arg("-b")
-        .arg(&build_dir)
-        .arg("-t")
-        .arg(std_pil.to_str().unwrap())
-        .arg("-u")
-        .arg(&tmp_fixed)
-        .output()
-        .expect("spawn venus-setup");
+    let venus_out = invoke_venus_setup(
+        workspace,
+        &pilout_path,
+        &build_dir,
+        &std_pil,
+        &tmp_fixed,
+    );
     assert!(
         venus_out.status.success(),
         "venus-setup failed on minimal fixture; stderr={}",
@@ -720,49 +714,115 @@ fn origin_scoped_cross_air_expressionsinfo_structural_parity() {
         }
     }
 
-    let a_ops = op_distribution(&a_info);
-    let b_ops = op_distribution(&b_info);
+    // Carried-tree oracle: find the stage-2 constraint whose
+    // `line` contains the product subtree `(x * y)` and
+    // verify each AIR carries its LOCAL witness labels.
+    let a_tree = find_stage2_product_line(&a_info).unwrap_or_else(|| {
+        panic!(
+            "OriginAirA expressionsinfo has no stage-2 product line; constraints={:#?}",
+            a_info.get("constraints")
+        )
+    });
+    let b_tree = find_stage2_product_line(&b_info).unwrap_or_else(|| {
+        panic!(
+            "OriginAirB expressionsinfo has no stage-2 product line; constraints={:#?}",
+            b_info.get("constraints")
+        )
+    });
 
     assert!(
-        a_ops.get("mul").copied().unwrap_or(0) > 0,
-        "OriginAirA must emit at least one `mul` op for a_product in \
-         constraints[].code[]; op distribution was {:?}",
-        a_ops
+        a_tree.contains("a_x * a_y"),
+        "OriginAirA stage-2 carried line must reference local witnesses \
+         `a_x * a_y`; got: {}",
+        a_tree
     );
     assert!(
-        b_ops.get("mul").copied().unwrap_or(0) > 0,
-        "OriginAirB must emit at least one `mul` op for b_product in \
-         constraints[].code[]; a pre-fix mis-resolution would have dropped \
-         b_product and aliased it to AIR A's minted tree. op distribution was {:?}",
-        b_ops
+        b_tree.contains("b_x * b_y"),
+        "OriginAirB stage-2 carried line must reference local witnesses \
+         `b_x * b_y`; a pre-Round-3 mis-resolution would have AIR B \
+         carry `a_x * a_y` from AIR A instead. got: {}",
+        b_tree
     );
-
-    assert_eq!(
-        a_ops, b_ops,
-        "OriginAirA and OriginAirB constraints[].code[] op distributions must match; \
-         divergence indicates one AIR's local product was dropped or aliased. \
-         a_ops={:?} b_ops={:?}",
-        a_ops, b_ops
+    assert!(
+        !a_tree.contains("b_x") && !a_tree.contains("b_y"),
+        "OriginAirA stage-2 carried line must NOT reference AIR B \
+         witnesses `b_x`/`b_y`; got: {}",
+        a_tree
+    );
+    assert!(
+        !b_tree.contains("a_x") && !b_tree.contains("a_y"),
+        "OriginAirB stage-2 carried line must NOT reference AIR A \
+         witnesses `a_x`/`a_y`; got: {}",
+        b_tree
     );
 
     let _ = std::fs::remove_dir_all(&base);
 }
 
-fn op_distribution(info: &serde_json::Value) -> std::collections::BTreeMap<String, u32> {
-    let mut counts: std::collections::BTreeMap<String, u32> =
-        std::collections::BTreeMap::new();
-    let Some(constraints) = info.get("constraints").and_then(|v| v.as_array()) else {
-        return counts;
-    };
+fn invoke_venus_setup(
+    workspace: &std::path::Path,
+    pilout: &std::path::Path,
+    build_dir: &std::path::Path,
+    std_pil: &std::path::Path,
+    tmp_fixed: &std::path::Path,
+) -> std::process::Output {
+    // Prefer a pre-built `target/release/venus-setup` binary
+    // for speed; fall back to `cargo run --release -p
+    // pil2-stark-setup --bin venus-setup` so the test is
+    // mandatory (never silently skipped) even on a fresh
+    // checkout that has not run `cargo build` on the setup
+    // crate yet. Codex Round 11 review flagged the prior
+    // "if binary missing, return early" path as a silent
+    // skip that let `cargo test` report green without
+    // exercising the regression.
+    let venus_bin = workspace.join("target").join("release").join("venus-setup");
+    if venus_bin.is_file() {
+        return Command::new(&venus_bin)
+            .arg("-a")
+            .arg(pilout)
+            .arg("-b")
+            .arg(build_dir)
+            .arg("-t")
+            .arg(std_pil)
+            .arg("-u")
+            .arg(tmp_fixed)
+            .output()
+            .expect("spawn venus-setup");
+    }
+    Command::new(env!("CARGO"))
+        .current_dir(workspace)
+        .args([
+            "run",
+            "--release",
+            "-p",
+            "pil2-stark-setup",
+            "--bin",
+            "venus-setup",
+            "--",
+        ])
+        .arg("-a")
+        .arg(pilout)
+        .arg("-b")
+        .arg(build_dir)
+        .arg("-t")
+        .arg(std_pil)
+        .arg("-u")
+        .arg(tmp_fixed)
+        .output()
+        .expect("spawn cargo run venus-setup")
+}
+
+fn find_stage2_product_line(info: &serde_json::Value) -> Option<String> {
+    let constraints = info.get("constraints")?.as_array()?;
     for c in constraints {
-        let Some(code) = c.get("code").and_then(|v| v.as_array()) else {
+        let stage = c.get("stage").and_then(|v| v.as_i64()).unwrap_or(0);
+        if stage != 2 {
             continue;
-        };
-        for step in code {
-            if let Some(op) = step.get("op").and_then(|v| v.as_str()) {
-                *counts.entry(op.to_string()).or_insert(0) += 1;
-            }
+        }
+        let line = c.get("line").and_then(|v| v.as_str())?;
+        if line.contains("_x * ") && line.contains("_y") {
+            return Some(line.to_string());
         }
     }
-    counts
+    None
 }
