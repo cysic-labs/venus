@@ -217,13 +217,13 @@ pub(super) fn get_var_value_by_type_and_id(&self, ref_type: &RefType, id: u32) -
             col_type: ColRefKind::Fixed,
             id,
             row_offset: None,
-            origin_frame_id: None,
+            origin_frame_id: self.maybe_air_origin_frame_id(),
         },
         RefType::Witness => Value::ColRef {
             col_type: ColRefKind::Witness,
             id,
             row_offset: None,
-            origin_frame_id: None,
+            origin_frame_id: self.maybe_air_origin_frame_id(),
         },
         RefType::Public => Value::ColRef {
             col_type: ColRefKind::Public,
@@ -253,13 +253,13 @@ pub(super) fn get_var_value_by_type_and_id(&self, ref_type: &RefType, id: u32) -
             col_type: ColRefKind::AirValue,
             id,
             row_offset: None,
-            origin_frame_id: None,
+            origin_frame_id: self.maybe_air_origin_frame_id(),
         },
         RefType::CustomCol => Value::ColRef {
             col_type: ColRefKind::Custom,
             id,
             row_offset: None,
-            origin_frame_id: None,
+            origin_frame_id: self.maybe_air_origin_frame_id(),
         },
         _ => Value::Void,
     }

@@ -307,6 +307,23 @@ fn js_label_for_declaration(
 }
 
 impl Processor {
+    /// Returns `Some(current_origin_frame_id)` iff the processor is
+    /// currently inside an AIR template body. Used by AIR-local
+    /// column ref construction sites (Witness / Fixed / AirValue /
+    /// Custom) to stamp the origin on the minted ColRef so the
+    /// lift filter and serializer can detect in-range-but-foreign
+    /// leaves across AIR boundaries. Proof-scope / top-level /
+    /// function-body outside an AIR returns None so the refs stay
+    /// origin-less and skip the cross-AIR checks. See
+    /// `BL-20260419-origin-authoritative-serializer`.
+    pub fn maybe_air_origin_frame_id(&self) -> Option<u32> {
+        if self.air_stack.is_empty() {
+            None
+        } else {
+            Some(self.current_origin_frame_id)
+        }
+    }
+
     /// Create a new processor with the given configuration.
     pub fn new(config: CompilerConfig) -> Self {
         let mut processor = Self {
@@ -1208,11 +1225,26 @@ impl Processor {
                             _ => {
                                 // For witness/other column arrays, offset the
                                 // base id to obtain the indexed sub-column.
+                                // Round 6: carry origin_frame_id so
+                                // cross-AIR refs on AIR-local column
+                                // arrays (Witness / Fixed / AirValue /
+                                // Custom) stay detectable at the lift
+                                // filter and serializer. See
+                                // BL-20260419-origin-authoritative-serializer.
+                                let origin_frame_id = match col_type {
+                                    ColRefKind::Witness
+                                    | ColRefKind::Fixed
+                                    | ColRefKind::AirValue
+                                    | ColRefKind::Custom => {
+                                        self.maybe_air_origin_frame_id()
+                                    }
+                                    _ => None,
+                                };
                                 Value::ColRef {
                                     col_type: *col_type,
                                     id: id + i as u32,
                                     row_offset: None,
-                                    origin_frame_id: None,
+                                    origin_frame_id,
                                 }
                             }
                         }

@@ -393,21 +393,39 @@ pub(super) fn execute_air_template_call(
                     // the root pointer is already in `visited`. Codex
                     // Round 3 review caught this. See
                     // BL-20260419-origin-authoritative-serializer.
+                    //
+                    // Round 6 extension: the collector now returns
+                    // `(kind, id, origin_frame_id)` triples. A leaf
+                    // whose `origin_frame_id` differs from the current
+                    // AIR's origin is AUTHORITATIVELY foreign even if
+                    // its id happens to be in-range for the consuming
+                    // AIR. Codex Round 5 review identified this as the
+                    // load-bearing residual leak driving the
+                    // `test_global_info_has_compressor` divergence.
                     let mut air_col_visited: std::collections::HashSet<
                         *const super::expression::RuntimeExpr,
                     > = std::collections::HashSet::new();
                     let mut air_col_ids: std::collections::BTreeSet<
-                        (super::expression::ColRefKind, u32),
+                        (super::expression::ColRefKind, u32, Option<u32>),
                     > = std::collections::BTreeSet::new();
                     collect_air_col_ids_in_expr(
                         &rt_probe,
                         &mut air_col_ids,
                         &mut air_col_visited,
                     );
+                    let current_origin = self.current_origin_frame_id;
                     let fixed_start = self.fixed_cols.current_start();
                     let fixed_end = fixed_start + self.fixed_cols.ids.current_len();
-                    let has_cross_air_col = air_col_ids.iter().any(|(kind, id)| {
+                    let has_cross_air_col = air_col_ids.iter().any(|(kind, id, origin)| {
                         use super::expression::ColRefKind;
+                        // Authoritative foreign-origin check first.
+                        if let Some(o) = origin {
+                            if *o != current_origin {
+                                return true;
+                            }
+                        }
+                        // Bounds check as the bounds-only fallback for
+                        // origin-less (proof-scope-minted) leaves.
                         match kind {
                             ColRefKind::Witness => {
                                 *id >= self.witness_cols.len()
@@ -417,6 +435,9 @@ pub(super) fn execute_air_template_call(
                             }
                             ColRefKind::AirValue => {
                                 (*id as usize) >= self.air_values.len() as usize
+                            }
+                            ColRefKind::Custom => {
+                                self.custom_cols.get_data(*id).is_none()
                             }
                             _ => false,
                         }

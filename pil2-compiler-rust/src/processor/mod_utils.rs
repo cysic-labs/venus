@@ -186,19 +186,24 @@ fn collect_custom_ids_in_value(
     }
 }
 
-/// Round 3 (2026-04-19 loop) companion to
+/// Round 6 (2026-04-19 loop) companion to
 /// `collect_custom_ids_in_expr`. Walks a `RuntimeExpr` tree and
-/// collects `(col_kind, id)` pairs for every `Witness`, `Fixed`, and
-/// `AirValue` leaf. Used by `execute_air_template_call`'s lift
-/// filter to detect proof-scope slots whose expression tree still
-/// carries leaves that belong to a different AIR's column
-/// allocator (the leak class Codex's Round 3 analyze identified as
-/// the likely driver of the `test_global_info_has_compressor`
-/// divergence). `Custom` is handled separately by the existing
-/// `collect_custom_ids_in_expr` + `custom_cols.get_data()` filter.
+/// collects `(col_kind, id, origin_frame_id)` triples for every
+/// `Witness`, `Fixed`, and `AirValue` leaf. Used by
+/// `execute_air_template_call`'s lift filter to detect
+/// proof-scope slots whose expression tree carries leaves from
+/// a different AIR's column allocator. Round 3 was the first
+/// iteration and only collected `(kind, id)` pairs; Codex Round
+/// 5 review found that an in-range-but-foreign leaf still
+/// passed through. Carrying `origin_frame_id` on the tuple
+/// gives the filter an authoritative foreign-leaf signal
+/// instead of relying on the bare `id < allocator.len()`
+/// heuristic. `Custom` is included as well because cross-AIR
+/// custom leaks were the original Round 13 class; carrying
+/// origin on Custom tightens the existing filter.
 pub(super) fn collect_air_col_ids_in_expr(
     expr: &super::expression::RuntimeExpr,
-    out: &mut std::collections::BTreeSet<(super::expression::ColRefKind, u32)>,
+    out: &mut std::collections::BTreeSet<(super::expression::ColRefKind, u32, Option<u32>)>,
     visited: &mut std::collections::HashSet<*const super::expression::RuntimeExpr>,
 ) {
     use super::expression::{ColRefKind, RuntimeExpr};
@@ -207,14 +212,17 @@ pub(super) fn collect_air_col_ids_in_expr(
         return;
     }
     match expr {
-        RuntimeExpr::ColRef { col_type: ColRefKind::Witness, id, .. } => {
-            out.insert((ColRefKind::Witness, *id));
+        RuntimeExpr::ColRef { col_type: ColRefKind::Witness, id, origin_frame_id, .. } => {
+            out.insert((ColRefKind::Witness, *id, *origin_frame_id));
         }
-        RuntimeExpr::ColRef { col_type: ColRefKind::Fixed, id, .. } => {
-            out.insert((ColRefKind::Fixed, *id));
+        RuntimeExpr::ColRef { col_type: ColRefKind::Fixed, id, origin_frame_id, .. } => {
+            out.insert((ColRefKind::Fixed, *id, *origin_frame_id));
         }
-        RuntimeExpr::ColRef { col_type: ColRefKind::AirValue, id, .. } => {
-            out.insert((ColRefKind::AirValue, *id));
+        RuntimeExpr::ColRef { col_type: ColRefKind::AirValue, id, origin_frame_id, .. } => {
+            out.insert((ColRefKind::AirValue, *id, *origin_frame_id));
+        }
+        RuntimeExpr::ColRef { col_type: ColRefKind::Custom, id, origin_frame_id, .. } => {
+            out.insert((ColRefKind::Custom, *id, *origin_frame_id));
         }
         RuntimeExpr::ColRef { .. } => {}
         RuntimeExpr::Value(v) => collect_air_col_ids_in_value(v, out, visited),
@@ -230,19 +238,22 @@ pub(super) fn collect_air_col_ids_in_expr(
 
 fn collect_air_col_ids_in_value(
     val: &super::expression::Value,
-    out: &mut std::collections::BTreeSet<(super::expression::ColRefKind, u32)>,
+    out: &mut std::collections::BTreeSet<(super::expression::ColRefKind, u32, Option<u32>)>,
     visited: &mut std::collections::HashSet<*const super::expression::RuntimeExpr>,
 ) {
     use super::expression::{ColRefKind, Value};
     match val {
-        Value::ColRef { col_type: ColRefKind::Witness, id, .. } => {
-            out.insert((ColRefKind::Witness, *id));
+        Value::ColRef { col_type: ColRefKind::Witness, id, origin_frame_id, .. } => {
+            out.insert((ColRefKind::Witness, *id, *origin_frame_id));
         }
-        Value::ColRef { col_type: ColRefKind::Fixed, id, .. } => {
-            out.insert((ColRefKind::Fixed, *id));
+        Value::ColRef { col_type: ColRefKind::Fixed, id, origin_frame_id, .. } => {
+            out.insert((ColRefKind::Fixed, *id, *origin_frame_id));
         }
-        Value::ColRef { col_type: ColRefKind::AirValue, id, .. } => {
-            out.insert((ColRefKind::AirValue, *id));
+        Value::ColRef { col_type: ColRefKind::AirValue, id, origin_frame_id, .. } => {
+            out.insert((ColRefKind::AirValue, *id, *origin_frame_id));
+        }
+        Value::ColRef { col_type: ColRefKind::Custom, id, origin_frame_id, .. } => {
+            out.insert((ColRefKind::Custom, *id, *origin_frame_id));
         }
         Value::RuntimeExpr(rt) => collect_air_col_ids_in_expr(rt.as_ref(), out, visited),
         Value::Array(items) => {

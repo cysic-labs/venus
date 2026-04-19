@@ -1481,8 +1481,15 @@ impl<'a> ProtoOutBuilder<'a> {
                 // serialized, the bare id belongs to the minting AIR's
                 // column allocator and does not translate here. Emit
                 // `Constant(0)` instead of a stale Witness/AirValue.
+                // Round 6: also require the serializer to BE inside
+                // an AIR context (`current_origin > 0`); without
+                // this, early-in-the-AIR-loop hint serialization
+                // (before `current_origin_frame_id` is populated on
+                // `ProtoOutBuilder`) would false-positive on the
+                // check and zero out legitimate hint refs.
                 let current_origin = *self.current_origin_frame_id.borrow();
-                let is_foreign = matches!(origin_frame_id, Some(o) if *o != current_origin);
+                let is_foreign = current_origin != 0
+                    && matches!(origin_frame_id, Some(o) if *o != current_origin);
                 let operand = if is_foreign {
                     if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
                         let air_name = self.current_air_name.borrow();
@@ -2306,6 +2313,48 @@ impl<'a> ProtoOutBuilder<'a> {
                 origin_frame_id,
             } => {
                 let offset = row_offset.unwrap_or(0) as i32;
+                // Round 6 foreign-origin guard for AIR-local column
+                // kinds. An origin_frame_id that differs from the
+                // serializer's current AIR means this leaf belongs
+                // to a different AIR's column allocator. Only
+                // applies when the serializer IS inside an AIR
+                // (`current_origin > 0`); proof-scope / global
+                // serialization has no AIR context and the ref
+                // should go through its per-kind arm. See
+                // BL-20260419-origin-authoritative-serializer.
+                let current_origin = *self.current_origin_frame_id.borrow();
+                let foreign_origin = current_origin != 0
+                    && matches!(
+                        origin_frame_id,
+                        Some(o) if *o != current_origin,
+                    )
+                    && matches!(
+                        col_type,
+                        ColRefKind::Witness
+                            | ColRefKind::Fixed
+                            | ColRefKind::AirValue
+                            | ColRefKind::Custom,
+                    );
+                if foreign_origin {
+                    if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
+                        let air_name = self.current_air_name.borrow();
+                        eprintln!(
+                            "[pil2c-warn] foreign-origin {:?} leaf: air='{}' id={} \
+                             origin_frame_id={:?} current_origin={} emitting \
+                             Operand::Constant(0)",
+                            col_type,
+                            *air_name,
+                            id,
+                            origin_frame_id,
+                            current_origin,
+                        );
+                    }
+                    return Some(pilout_proto::Operand {
+                        operand: Some(pilout_proto::operand::Operand::Constant(
+                            pilout_proto::operand::Constant { value: Vec::new() },
+                        )),
+                    });
+                }
                 match col_type {
                     ColRefKind::Fixed => {
                         let rel_idx = (*id).checked_sub(fixed_col_start).unwrap_or(*id) as usize;
