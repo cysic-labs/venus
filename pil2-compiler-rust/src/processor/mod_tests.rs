@@ -327,17 +327,26 @@ fn test_seeded_origin_less_witness_leaf_is_not_foreign() {
 /// Round 7 review required proof that the lift filter actually
 /// drops foreign leaves before serialization; prior seeded
 /// tests only exercised the collector, not the drop decision.
+/// Round 9 (strengthened): Codex Round 8 review caught that the
+/// prior version of these tests reserved no in-range slots, so
+/// `id: 0` tripped the bounds-only fallback (`id >=
+/// witness_cols.len() == 0`) and the tests would still pass even
+/// if the origin-mismatch branch were removed. Round 9 reserves
+/// one in-range Witness / Fixed / AirValue slot per test so the
+/// bounds check passes and the foreign-origin branch is the
+/// ONLY reason the helper flags the leaf.
 #[test]
 fn test_proof_scope_slot_drops_foreign_witness_leaf() {
-    use super::expression::{ColRefKind, RuntimeExpr, RuntimeOp};
+    use super::expression::{ColRefKind, RuntimeExpr};
     use std::collections::HashSet;
     use std::rc::Rc;
 
     let mut p = make_processor();
-    // Simulate AIR entry: the helper reads
-    // `self.current_origin_frame_id`. A foreign leaf is one whose
-    // origin differs from this value.
     p.current_origin_frame_id = 42;
+    // Reserve witness id=0 so the bounds-only fallback (id >=
+    // witness_cols.len()) does NOT fire for id=0. The origin
+    // mismatch is now the only reason the helper can flag.
+    p.witness_cols.reserve(1, None, &[], Default::default());
 
     let foreign_witness = Rc::new(RuntimeExpr::ColRef {
         col_type: ColRefKind::Witness,
@@ -348,7 +357,22 @@ fn test_proof_scope_slot_drops_foreign_witness_leaf() {
     let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
     assert!(
         p.proof_scope_slot_has_foreign_leaf(&foreign_witness, &mut visited),
-        "foreign Witness leaf must be flagged; current_origin=42, leaf_origin=Some(7)"
+        "foreign-origin Witness leaf must be flagged EVEN when id is in range; \
+         current_origin=42, leaf_origin=Some(7), witness_cols.len=1"
+    );
+
+    // Matching-origin control: same in-range id, same slot, but
+    // origin matches the current AIR. Helper must NOT flag.
+    let matching_witness = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::Witness,
+        id: 0,
+        row_offset: None,
+        origin_frame_id: Some(42),
+    });
+    let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
+    assert!(
+        !p.proof_scope_slot_has_foreign_leaf(&matching_witness, &mut visited),
+        "matching-origin Witness leaf in range must NOT be flagged"
     );
 }
 
@@ -360,6 +384,9 @@ fn test_proof_scope_slot_drops_foreign_fixed_leaf() {
 
     let mut p = make_processor();
     p.current_origin_frame_id = 42;
+    // Reserve one Fixed slot so fixed_col_start..current_len
+    // covers id=0 and the bounds check does NOT fire on its own.
+    p.fixed_cols.reserve(1, None, &[], Default::default());
 
     let foreign_fixed = Rc::new(RuntimeExpr::ColRef {
         col_type: ColRefKind::Fixed,
@@ -370,7 +397,20 @@ fn test_proof_scope_slot_drops_foreign_fixed_leaf() {
     let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
     assert!(
         p.proof_scope_slot_has_foreign_leaf(&foreign_fixed, &mut visited),
-        "foreign Fixed leaf must be flagged"
+        "foreign-origin Fixed leaf must be flagged EVEN when id is in range; \
+         fixed_cols.current_len=1, current_origin=42, leaf_origin=Some(11)"
+    );
+
+    let matching_fixed = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::Fixed,
+        id: 0,
+        row_offset: None,
+        origin_frame_id: Some(42),
+    });
+    let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
+    assert!(
+        !p.proof_scope_slot_has_foreign_leaf(&matching_fixed, &mut visited),
+        "matching-origin Fixed leaf in range must NOT be flagged"
     );
 }
 
@@ -382,6 +422,8 @@ fn test_proof_scope_slot_drops_foreign_airvalue_leaf() {
 
     let mut p = make_processor();
     p.current_origin_frame_id = 42;
+    // Reserve airvalue id=0.
+    p.air_values.reserve(1, None, &[], Default::default());
 
     let foreign_airvalue = Rc::new(RuntimeExpr::ColRef {
         col_type: ColRefKind::AirValue,
@@ -392,7 +434,20 @@ fn test_proof_scope_slot_drops_foreign_airvalue_leaf() {
     let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
     assert!(
         p.proof_scope_slot_has_foreign_leaf(&foreign_airvalue, &mut visited),
-        "foreign AirValue leaf must be flagged"
+        "foreign-origin AirValue leaf must be flagged EVEN when id is in range; \
+         air_values.len=1, current_origin=42, leaf_origin=Some(13)"
+    );
+
+    let matching_airvalue = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::AirValue,
+        id: 0,
+        row_offset: None,
+        origin_frame_id: Some(42),
+    });
+    let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
+    assert!(
+        !p.proof_scope_slot_has_foreign_leaf(&matching_airvalue, &mut visited),
+        "matching-origin AirValue leaf in range must NOT be flagged"
     );
 }
 
