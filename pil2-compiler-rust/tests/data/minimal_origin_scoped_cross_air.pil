@@ -1,0 +1,58 @@
+// minimal_origin_scoped_cross_air.pil
+//
+// Round 3 (2026-04-19 loop) fixture for
+// BL-20260419-origin-frame-id-resolution.
+//
+// The Round 2 review caught that
+// pil2-compiler-rust/src/proto_out.rs still resolved
+// foreign-origin `Intermediate` refs by bare local id whenever
+// the current AIR had a colliding `source_to_pos` entry. This
+// fixture stages two AIRs inside one airgroup, each declaring a
+// `const expr` that creates an Intermediate expr slot and using
+// it in a constraint. The two AIRs' Intermediate slots land at
+// identical local ids because `IdAllocator::push` resets
+// `next_id` to 0 per AIR frame.
+//
+// The paired regression test compiles this fixture with flip ON
+// and walks every AIR's `air.expressions` + constraints +
+// hint-field Expression operands, asserting that every
+// `Operand::Expression { idx }` is within the emitting AIR's
+// `expressions.len()`. A silently mis-resolved foreign ref would
+// emit an idx pointing at the other AIR's packed tree but at a
+// coincidentally-valid index, so the test separately checks that
+// no constraint expression references a Witness leaf whose
+// `col_idx` exceeds the AIR's `witness_id_map.len()` (which is
+// the observable symptom of the pre-Round-3 serializer bug).
+
+const int N = 2**4;
+
+airtemplate OriginAirA(const int N = 2**4) {
+    col witness a_x;
+    col witness a_y;
+    // The multiplication node lands in A's expr slot at a local id
+    // allocated from 0 on AIR push. JS reuses the expression through
+    // a packed reference; Rust mints an Intermediate ColRef whose
+    // `origin_frame_id` must match this AIR when serialized.
+    const expr a_product = a_x * a_y;
+    a_product === 0;
+    a_product * a_x === 0;
+}
+
+airtemplate OriginAirB(const int N = 2**4) {
+    col witness b_x;
+    col witness b_y;
+    // Same shape as OriginAirA but different witness columns.
+    // After the Round 3 fix, B's serialized pilout must NOT
+    // reference A's witness columns under any Intermediate
+    // re-resolution. Before the fix, a foreign Intermediate
+    // whose local id collided with B's could resolve through
+    // B's source_to_pos and point at the wrong proto tree.
+    const expr b_product = b_x * b_y;
+    b_product === 0;
+    b_product * b_y === 0;
+}
+
+airgroup OriginScopedTest {
+    OriginAirA(N: N);
+    OriginAirB(N: N);
+}

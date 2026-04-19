@@ -186,6 +186,74 @@ fn collect_custom_ids_in_value(
     }
 }
 
+/// Round 3 (2026-04-19 loop) companion to
+/// `collect_custom_ids_in_expr`. Walks a `RuntimeExpr` tree and
+/// collects `(col_kind, id)` pairs for every `Witness`, `Fixed`, and
+/// `AirValue` leaf. Used by `execute_air_template_call`'s lift
+/// filter to detect proof-scope slots whose expression tree still
+/// carries leaves that belong to a different AIR's column
+/// allocator (the leak class Codex's Round 3 analyze identified as
+/// the likely driver of the `test_global_info_has_compressor`
+/// divergence). `Custom` is handled separately by the existing
+/// `collect_custom_ids_in_expr` + `custom_cols.get_data()` filter.
+pub(super) fn collect_air_col_ids_in_expr(
+    expr: &super::expression::RuntimeExpr,
+    out: &mut std::collections::BTreeSet<(super::expression::ColRefKind, u32)>,
+    visited: &mut std::collections::HashSet<*const super::expression::RuntimeExpr>,
+) {
+    use super::expression::{ColRefKind, RuntimeExpr};
+    let ptr = expr as *const RuntimeExpr;
+    if !visited.insert(ptr) {
+        return;
+    }
+    match expr {
+        RuntimeExpr::ColRef { col_type: ColRefKind::Witness, id, .. } => {
+            out.insert((ColRefKind::Witness, *id));
+        }
+        RuntimeExpr::ColRef { col_type: ColRefKind::Fixed, id, .. } => {
+            out.insert((ColRefKind::Fixed, *id));
+        }
+        RuntimeExpr::ColRef { col_type: ColRefKind::AirValue, id, .. } => {
+            out.insert((ColRefKind::AirValue, *id));
+        }
+        RuntimeExpr::ColRef { .. } => {}
+        RuntimeExpr::Value(v) => collect_air_col_ids_in_value(v, out, visited),
+        RuntimeExpr::BinOp { left, right, .. } => {
+            collect_air_col_ids_in_expr(left.as_ref(), out, visited);
+            collect_air_col_ids_in_expr(right.as_ref(), out, visited);
+        }
+        RuntimeExpr::UnaryOp { operand, .. } => {
+            collect_air_col_ids_in_expr(operand.as_ref(), out, visited);
+        }
+    }
+}
+
+fn collect_air_col_ids_in_value(
+    val: &super::expression::Value,
+    out: &mut std::collections::BTreeSet<(super::expression::ColRefKind, u32)>,
+    visited: &mut std::collections::HashSet<*const super::expression::RuntimeExpr>,
+) {
+    use super::expression::{ColRefKind, Value};
+    match val {
+        Value::ColRef { col_type: ColRefKind::Witness, id, .. } => {
+            out.insert((ColRefKind::Witness, *id));
+        }
+        Value::ColRef { col_type: ColRefKind::Fixed, id, .. } => {
+            out.insert((ColRefKind::Fixed, *id));
+        }
+        Value::ColRef { col_type: ColRefKind::AirValue, id, .. } => {
+            out.insert((ColRefKind::AirValue, *id));
+        }
+        Value::RuntimeExpr(rt) => collect_air_col_ids_in_expr(rt.as_ref(), out, visited),
+        Value::Array(items) => {
+            for it in items {
+                collect_air_col_ids_in_value(it, out, visited);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Walk a `HintValue` tree and push every `ColRefKind::Custom` leaf
 /// id into `out`. Hint payloads can carry bare `ColRef` leaves
 /// (through `HintValue::ColRef`) as well as `ExprId` references into

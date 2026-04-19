@@ -42,6 +42,15 @@ pub enum HintValue {
         col_type: super::expression::ColRefKind,
         id: u32,
         row_offset: Option<i64>,
+        /// Round 3 (2026-04-19 loop) origin-frame-id: set when
+        /// the hint leaf originated in a specific AIR's frame.
+        /// Leaves constructed at proof scope leave this `None`.
+        /// The proto serializer consults this field to detect
+        /// foreign-origin hint leaves and emit `Constant(0)`
+        /// instead of a stale `AirValue` / `Witness` operand
+        /// that points at the wrong column in the consuming
+        /// AIR. See BL-20260419-origin-frame-id-resolution.
+        origin_frame_id: Option<u32>,
     },
 }
 
@@ -153,6 +162,14 @@ pub struct Air {
     pub output_fixed_file: Option<String>,
     /// Per-AIR hint entries collected during execution.
     pub hints: Vec<HintEntry>,
+    /// Round 3 (2026-04-19 loop) origin-frame-id: the Processor-
+    /// level monotonic counter that was current when this AIR
+    /// template call entered. Used by `proto_out` to detect
+    /// foreign-origin `Intermediate` refs whose bare local id
+    /// collides with one of this AIR's own slots (the Round 2
+    /// review caught this as a live bug). See
+    /// BL-20260419-origin-frame-id-resolution.
+    pub origin_frame_id: u32,
 }
 
 /// Summary statistics collected after an air instance completes.
@@ -205,6 +222,7 @@ impl Air {
             symbols: Vec::new(),
             output_fixed_file: None,
             hints: Vec::new(),
+            origin_frame_id: 0,
         }
     }
 

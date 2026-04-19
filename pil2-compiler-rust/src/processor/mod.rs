@@ -851,7 +851,7 @@ impl Processor {
             // evaluates to Void, restore the witness_calc hint for
             // all sites, and track the fix under
             // AC-parity-or-audit (branch B).
-            if let RuntimeExpr::ColRef { col_type, id, row_offset, .. } = &left {
+            if let RuntimeExpr::ColRef { col_type, id, row_offset, origin_frame_id } = &left {
                 if matches!(
                     col_type,
                     ColRefKind::Witness | ColRefKind::AirValue
@@ -860,6 +860,7 @@ impl Processor {
                         col_type: *col_type,
                         id: *id,
                         row_offset: *row_offset,
+                        origin_frame_id: *origin_frame_id,
                     };
                     let right_idx = self.air_expression_store.len() as u32;
                     self.air_expression_store.push(

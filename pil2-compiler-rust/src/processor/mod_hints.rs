@@ -100,7 +100,7 @@ pub(super) fn value_to_hint_value(&mut self, val: &Value) -> air::HintValue {
                 .collect();
             air::HintValue::Array(vals)
         }
-        Value::ColRef { col_type, id, row_offset, .. } if is_proof_scope => {
+        Value::ColRef { col_type, id, row_offset, origin_frame_id } if is_proof_scope => {
             // Bare leaf in proof scope: serialize as the matching
             // proof-scope operand directly
             // (ProofValue / AirGroupValue / PublicValue /
@@ -112,6 +112,7 @@ pub(super) fn value_to_hint_value(&mut self, val: &Value) -> air::HintValue {
                 col_type: *col_type,
                 id: *id,
                 row_offset: *row_offset,
+                origin_frame_id: *origin_frame_id,
             }
         }
         Value::RuntimeExpr(_) if is_proof_scope => {

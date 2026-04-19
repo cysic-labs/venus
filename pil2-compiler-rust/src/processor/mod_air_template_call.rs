@@ -10,7 +10,8 @@ use super::air::AirTemplateInfo;
 use super::expression::Value;
 use super::ids::IdData;
 use super::mod_utils::{
-    collect_custom_ids_in_expr, collect_custom_ids_in_hint, is_symbolic, value_to_runtime_expr,
+    collect_air_col_ids_in_expr, collect_custom_ids_in_expr, collect_custom_ids_in_hint,
+    is_symbolic, value_to_runtime_expr,
 };
 use super::references::RefType;
 use super::CallStackEntry;
@@ -139,7 +140,18 @@ pub(super) fn execute_air_template_call(
         ag.create_air(air_id, &tpl.name, name, rows, is_virtual);
     }
 
-    let air = air::Air::new(air_id, 0, &tpl.name, name, rows, is_virtual);
+    let mut air = air::Air::new(air_id, 0, &tpl.name, name, rows, is_virtual);
+    // Round 3 (2026-04-19 loop): persist the origin-frame-id on
+    // this AIR so `proto_out` can detect foreign-origin
+    // `Intermediate` refs whose local id collides with one of
+    // this AIR's own slots. Save the enclosing origin for
+    // restore at AIR exit so nested / virtual AIR calls cannot
+    // corrupt outer-frame state (Codex Round 3 analyze called
+    // this out).
+    let prior_origin_frame_id = self.current_origin_frame_id;
+    self.next_origin_frame_id = self.next_origin_frame_id.saturating_add(1);
+    self.current_origin_frame_id = self.next_origin_frame_id;
+    air.origin_frame_id = self.current_origin_frame_id;
     self.air_stack.push(air);
 
     // Push the expr store so air-level expressions don't mix with
@@ -156,17 +168,10 @@ pub(super) fn execute_air_template_call(
     // in a prior AIR's frame cannot resolve here. See
     // BL-20260418-intermediate-ref-cross-air-leak.
     self.intermediate_ref_resolution.clear();
-    // Round 2 (2026-04-19 loop) origin-frame-id: bump the monotonic
-    // counter on every AIR entry so `(origin_frame_id, local_id)`
-    // keys in `intermediate_ref_resolution` and
-    // `global_intermediate_resolution` are unique across AIRs. This
-    // disambiguates AIR-local slot ids that would otherwise alias
-    // because `IdAllocator::push` resets `next_id` to 0 per frame.
-    // Virtual AIRs reuse `air_id`, so we cannot key on that; the
-    // execution-frame-scoped counter here is safe. See
-    // BL-20260419-origin-frame-id-resolution.
-    self.next_origin_frame_id = self.next_origin_frame_id.saturating_add(1);
-    self.current_origin_frame_id = self.next_origin_frame_id;
+    // The origin-frame-id counter was bumped right before
+    // `self.air_stack.push(air)` above so the Air struct could
+    // persist the value for later proto serialization. No second
+    // bump here.
 
     // Snapshot the `use_aliases` stack at AIR entry so any `use`
     // added inside this AIR template body — directly, through
@@ -354,27 +359,58 @@ pub(super) fn execute_air_template_call(
                     continue;
                 }
                 if eid < frame_start {
-                    // Seeded proof-scope slot. Drop it ONLY if
-                    // its expression leaves reference a custom id
-                    // that is not declared in THIS AIR's
-                    // allocator — i.e. a concrete cross-AIR Custom
-                    // leak. Otherwise (legitimate proof-scope
-                    // state re-used in this AIR) keep it so the
-                    // pilout matches JS-golden. The Intermediate
-                    // force-include only fires for in-frame ids,
-                    // so this branch is unaffected by Round 3.
-                    let mut local_ids: std::collections::BTreeSet<u32> =
-                        std::collections::BTreeSet::new();
+                    // Seeded proof-scope slot. Drop it if the
+                    // expression tree carries column leaves that
+                    // do NOT belong to this AIR's allocators. The
+                    // existing `Custom` filter caught the Round 13
+                    // class; Round 3 (2026-04-19) extends the
+                    // pattern to `Witness` / `Fixed` / `AirValue`
+                    // per Codex Round 3 analyze
+                    // (`.humanize/skill/2026-04-19_06-05-45-3512560-cb459f7d/output.md`):
+                    // those foreign leaves are the likely driver
+                    // of the `test_global_info_has_compressor`
+                    // 13-AIR vs golden-6 divergence, inflating the
+                    // consumer AIR's stage-2 constraint tree.
                     let rt_probe = value_to_runtime_expr(val);
+                    let mut custom_ids: std::collections::BTreeSet<u32> =
+                        std::collections::BTreeSet::new();
                     collect_custom_ids_in_expr(
                         &rt_probe,
-                        &mut local_ids,
+                        &mut custom_ids,
                         &mut leak_visited,
                     );
-                    let has_cross_air = local_ids
+                    let has_cross_air_custom = custom_ids
                         .iter()
                         .any(|id| self.custom_cols.get_data(*id).is_none());
-                    if has_cross_air {
+                    if has_cross_air_custom {
+                        continue;
+                    }
+                    let mut air_col_ids: std::collections::BTreeSet<
+                        (super::expression::ColRefKind, u32),
+                    > = std::collections::BTreeSet::new();
+                    collect_air_col_ids_in_expr(
+                        &rt_probe,
+                        &mut air_col_ids,
+                        &mut leak_visited,
+                    );
+                    let fixed_start = self.fixed_cols.current_start();
+                    let fixed_end = fixed_start + self.fixed_cols.ids.current_len();
+                    let has_cross_air_col = air_col_ids.iter().any(|(kind, id)| {
+                        use super::expression::ColRefKind;
+                        match kind {
+                            ColRefKind::Witness => {
+                                *id >= self.witness_cols.len()
+                            }
+                            ColRefKind::Fixed => {
+                                !(*id >= fixed_start && *id < fixed_end)
+                            }
+                            ColRefKind::AirValue => {
+                                (*id as usize) >= self.air_values.len() as usize
+                            }
+                            _ => false,
+                        }
+                    });
+                    if has_cross_air_col {
                         continue;
                     }
                 }
@@ -919,6 +955,12 @@ pub(super) fn execute_air_template_call(
     // Round 4 cross-AIR substitution map
     // (BL-20260418-intermediate-ref-cross-air-leak).
     self.intermediate_ref_resolution.clear();
+    // Round 3 (2026-04-19 loop): restore the enclosing AIR's
+    // origin-frame-id now that this AIR's template body has
+    // finished. Codex Round 3 analyze flagged nested / virtual
+    // AIR calls as the corruption case if origin were not
+    // restored. See BL-20260419-origin-frame-id-resolution.
+    self.current_origin_frame_id = prior_origin_frame_id;
     self.constraints.clear();
     // Apply the scope cleanup for variables declared at the air-type scope depth
     // (body-direct declarations like `int acc_heights[opids_count]` in airtemplate

@@ -53,7 +53,7 @@ pub enum Value {
     Void,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ColRefKind {
     Witness,
     Fixed,
