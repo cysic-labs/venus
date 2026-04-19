@@ -3266,5 +3266,153 @@ mod tests_global_info {
         let p = std::path::Path::new("/tmp/nonexistent_verkey.json");
         assert!(parse_verkey_json(p).is_err());
     }
+
+    /// Round 16 artifact-level regression per the Codex Round 15
+    /// review. `make prove` fails at recursive1 witness generation
+    /// on instances 63 (SpecifiedRanges) and 64 (VirtualTable0) via
+    /// `VerifyEvaluations0` asserts. The Codex consult pins the
+    /// root cause at Rust pil2c producing drifted verifier
+    /// artifacts on `SpecifiedRanges`, `VirtualTable0`, and
+    /// `VirtualTable1`: an extra stage-2 `*.ImPol`, `qDeg` collapsed
+    /// from 2 to 1, `Q1` missing from `cmPolsMap`, and `nConstraints`
+    /// off by one.
+    ///
+    /// This test reads the current-head `build/provingKey` AIR
+    /// artifacts for those three AIRs AND the checked-in
+    /// `temp/golden_references` copies, asserts the golden shape on
+    /// the first structural drift boundary, and FAILS loudly on the
+    /// current drift. It is the regression lock the Codex Round 15
+    /// review required.
+    ///
+    /// The test skips (not fails) when `build/provingKey/zisk/Zisk/airs`
+    /// is missing, so a fresh checkout without a completed
+    /// `make generate-key` still runs the lib test suite without
+    /// false negatives. It fails loudly when the directory exists
+    /// and contains the drifted shape, which is the current state
+    /// on HEAD `533bc6a7`.
+    #[test]
+    fn test_three_air_verifier_artifact_shape_matches_golden() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest.parent().expect("manifest parent");
+        let build_airs = workspace.join("build/provingKey/zisk/Zisk/airs");
+        let gold_airs = workspace
+            .join("temp/golden_references/provingKey/zisk/Zisk/airs");
+        if !build_airs.is_dir() {
+            eprintln!(
+                "Skipping: {} not present (run `make generate-key` first)",
+                build_airs.display()
+            );
+            return;
+        }
+        assert!(
+            gold_airs.is_dir(),
+            "golden_references missing at {}; this regression requires \
+             the checked-in golden artifacts",
+            gold_airs.display()
+        );
+
+        let air_names = ["SpecifiedRanges", "VirtualTable0", "VirtualTable1"];
+        let mut failures: Vec<String> = Vec::new();
+
+        for name in air_names {
+            let cur_path =
+                build_airs.join(name).join("air").join(format!("{}.starkinfo.json", name));
+            let gold_path =
+                gold_airs.join(name).join("air").join(format!("{}.starkinfo.json", name));
+            if !cur_path.is_file() || !gold_path.is_file() {
+                failures.push(format!(
+                    "{}: starkinfo.json missing (cur={} gold={})",
+                    name,
+                    cur_path.display(),
+                    gold_path.display()
+                ));
+                continue;
+            }
+            let cur: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&cur_path).unwrap()).unwrap();
+            let gold: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&gold_path).unwrap()).unwrap();
+
+            let cur_q_deg = cur.get("qDeg").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let gold_q_deg = gold.get("qDeg").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if cur_q_deg != gold_q_deg {
+                failures.push(format!(
+                    "{}: qDeg drift cur={} gold={}",
+                    name, cur_q_deg, gold_q_deg
+                ));
+            }
+
+            let cur_n_constraints =
+                cur.get("nConstraints").and_then(|v| v.as_u64()).unwrap_or(0);
+            let gold_n_constraints =
+                gold.get("nConstraints").and_then(|v| v.as_u64()).unwrap_or(0);
+            if cur_n_constraints != gold_n_constraints {
+                failures.push(format!(
+                    "{}: nConstraints drift cur={} gold={}",
+                    name, cur_n_constraints, gold_n_constraints
+                ));
+            }
+
+            let cur_stage2_impol = count_stage_impol(&cur, 2);
+            let gold_stage2_impol = count_stage_impol(&gold, 2);
+            if cur_stage2_impol != gold_stage2_impol {
+                failures.push(format!(
+                    "{}: stage-2 ImPol count drift cur={} gold={}. \
+                     Expected to match golden; extra ImPol is the \
+                     Round 16 root cause.",
+                    name, cur_stage2_impol, gold_stage2_impol
+                ));
+            }
+
+            let cur_q_names = stage_pol_names(&cur, 3);
+            let gold_q_names = stage_pol_names(&gold, 3);
+            if cur_q_names != gold_q_names {
+                failures.push(format!(
+                    "{}: stage-3 (Q) polynomial name set drift cur={:?} \
+                     gold={:?}. Expected both Q0 and Q1 in golden.",
+                    name, cur_q_names, gold_q_names
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "Round 16 three-AIR drift regression FAILED on current \
+             build/provingKey. This test must pass before `make prove` \
+             can exit 0 on HEAD.\n{}",
+            failures.join("\n"),
+        );
+    }
+
+    fn count_stage_impol(info: &serde_json::Value, stage: i64) -> usize {
+        info.get("cmPolsMap")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|p| {
+                        p.get("stage").and_then(|s| s.as_i64()) == Some(stage)
+                            && p.get("imPol").and_then(|b| b.as_bool()) == Some(true)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn stage_pol_names(info: &serde_json::Value, stage: i64) -> Vec<String> {
+        info.get("cmPolsMap")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                let mut names: Vec<String> = arr
+                    .iter()
+                    .filter(|p| p.get("stage").and_then(|s| s.as_i64()) == Some(stage))
+                    .filter_map(|p| {
+                        p.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())
+                    })
+                    .collect();
+                names.sort();
+                names
+            })
+            .unwrap_or_default()
+    }
 }
 
