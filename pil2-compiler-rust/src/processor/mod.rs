@@ -307,6 +307,66 @@ fn js_label_for_declaration(
 }
 
 impl Processor {
+    /// Round 8 helper: returns true iff a candidate proof-scope
+    /// `RuntimeExpr` tree (a seeded slot the lift loop is about to
+    /// import into the current AIR's `air_expression_store`) carries
+    /// a foreign-AIR column leaf. The decision combines:
+    /// (a) Custom refs whose id is not in this AIR's `custom_cols`
+    ///     allocator (original Round 13 filter class);
+    /// (b) Witness / Fixed / AirValue / Custom leaves whose
+    ///     `origin_frame_id` is `Some(o) != current_origin_frame_id`
+    ///     (Round 6 origin-authoritative check);
+    /// (c) bounds-only fallback for origin-less leaves whose id is
+    ///     outside the current AIR's allocator range.
+    ///
+    /// Extracted as a free helper so unit tests can drive it with
+    /// synthetic proof-scope slots; Codex Round 7 review required a
+    /// dedicated regression. The caller owns `leak_visited` (for the
+    /// Custom walk) and a fresh pointer-dedup visited set for the
+    /// air-col walk. See BL-20260419-origin-authoritative-serializer.
+    pub fn proof_scope_slot_has_foreign_leaf(
+        &self,
+        rt_probe: &expression::RuntimeExpr,
+        leak_visited: &mut std::collections::HashSet<*const expression::RuntimeExpr>,
+    ) -> bool {
+        use expression::ColRefKind;
+        use mod_utils::{collect_air_col_ids_in_expr, collect_custom_ids_in_expr};
+
+        let mut custom_ids: std::collections::BTreeSet<u32> =
+            std::collections::BTreeSet::new();
+        collect_custom_ids_in_expr(rt_probe, &mut custom_ids, leak_visited);
+        if custom_ids
+            .iter()
+            .any(|id| self.custom_cols.get_data(*id).is_none())
+        {
+            return true;
+        }
+
+        let mut air_col_visited: std::collections::HashSet<*const expression::RuntimeExpr> =
+            std::collections::HashSet::new();
+        let mut air_col_ids: std::collections::BTreeSet<(ColRefKind, u32, Option<u32>)> =
+            std::collections::BTreeSet::new();
+        collect_air_col_ids_in_expr(rt_probe, &mut air_col_ids, &mut air_col_visited);
+
+        let current_origin = self.current_origin_frame_id;
+        let fixed_start = self.fixed_cols.current_start();
+        let fixed_end = fixed_start + self.fixed_cols.ids.current_len();
+        air_col_ids.iter().any(|(kind, id, origin)| {
+            if let Some(o) = origin {
+                if *o != current_origin {
+                    return true;
+                }
+            }
+            match kind {
+                ColRefKind::Witness => *id >= self.witness_cols.len(),
+                ColRefKind::Fixed => !(*id >= fixed_start && *id < fixed_end),
+                ColRefKind::AirValue => (*id as usize) >= self.air_values.len() as usize,
+                ColRefKind::Custom => self.custom_cols.get_data(*id).is_none(),
+                _ => false,
+            }
+        })
+    }
+
     /// Returns `Some(current_origin_frame_id)` iff the processor is
     /// currently inside an AIR template body. Used by AIR-local
     /// column ref construction sites (Witness / Fixed / AirValue /

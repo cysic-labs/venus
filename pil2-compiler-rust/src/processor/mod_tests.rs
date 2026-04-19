@@ -320,6 +320,109 @@ fn test_seeded_origin_less_witness_leaf_is_not_foreign() {
     );
 }
 
+/// Round 8 seeded lift-filter regression. Drives the new
+/// `Processor::proof_scope_slot_has_foreign_leaf` helper
+/// directly with synthetic proof-scope slot trees that carry
+/// foreign `Witness` / `Fixed` / `AirValue` leaves. Codex
+/// Round 7 review required proof that the lift filter actually
+/// drops foreign leaves before serialization; prior seeded
+/// tests only exercised the collector, not the drop decision.
+#[test]
+fn test_proof_scope_slot_drops_foreign_witness_leaf() {
+    use super::expression::{ColRefKind, RuntimeExpr, RuntimeOp};
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    let mut p = make_processor();
+    // Simulate AIR entry: the helper reads
+    // `self.current_origin_frame_id`. A foreign leaf is one whose
+    // origin differs from this value.
+    p.current_origin_frame_id = 42;
+
+    let foreign_witness = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::Witness,
+        id: 0,
+        row_offset: None,
+        origin_frame_id: Some(7),
+    });
+    let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
+    assert!(
+        p.proof_scope_slot_has_foreign_leaf(&foreign_witness, &mut visited),
+        "foreign Witness leaf must be flagged; current_origin=42, leaf_origin=Some(7)"
+    );
+}
+
+#[test]
+fn test_proof_scope_slot_drops_foreign_fixed_leaf() {
+    use super::expression::{ColRefKind, RuntimeExpr};
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    let mut p = make_processor();
+    p.current_origin_frame_id = 42;
+
+    let foreign_fixed = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::Fixed,
+        id: 0,
+        row_offset: None,
+        origin_frame_id: Some(11),
+    });
+    let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
+    assert!(
+        p.proof_scope_slot_has_foreign_leaf(&foreign_fixed, &mut visited),
+        "foreign Fixed leaf must be flagged"
+    );
+}
+
+#[test]
+fn test_proof_scope_slot_drops_foreign_airvalue_leaf() {
+    use super::expression::{ColRefKind, RuntimeExpr};
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    let mut p = make_processor();
+    p.current_origin_frame_id = 42;
+
+    let foreign_airvalue = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::AirValue,
+        id: 0,
+        row_offset: None,
+        origin_frame_id: Some(13),
+    });
+    let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
+    assert!(
+        p.proof_scope_slot_has_foreign_leaf(&foreign_airvalue, &mut visited),
+        "foreign AirValue leaf must be flagged"
+    );
+}
+
+#[test]
+fn test_proof_scope_slot_keeps_origin_less_leaves() {
+    use super::expression::{ColRefKind, RuntimeExpr};
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    let mut p = make_processor();
+    p.current_origin_frame_id = 42;
+    // Make sure the AIR has at least one witness / air_value slot
+    // so the bounds-only fallback does not reject id=0 as
+    // out-of-range.
+    p.witness_cols.reserve(1, None, &[], Default::default());
+    p.air_values.reserve(1, None, &[], Default::default());
+
+    let origin_less_witness = Rc::new(RuntimeExpr::ColRef {
+        col_type: ColRefKind::Witness,
+        id: 0,
+        row_offset: None,
+        origin_frame_id: None,
+    });
+    let mut visited: HashSet<*const RuntimeExpr> = HashSet::new();
+    assert!(
+        !p.proof_scope_slot_has_foreign_leaf(&origin_less_witness, &mut visited),
+        "origin-less Witness leaf within bounds must NOT be flagged foreign"
+    );
+}
+
 #[test]
 fn test_expand_templates() {
     let mut p = make_processor();

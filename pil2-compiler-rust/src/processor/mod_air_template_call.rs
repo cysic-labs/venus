@@ -10,8 +10,7 @@ use super::air::AirTemplateInfo;
 use super::expression::Value;
 use super::ids::IdData;
 use super::mod_utils::{
-    collect_air_col_ids_in_expr, collect_custom_ids_in_expr, collect_custom_ids_in_hint,
-    is_symbolic, value_to_runtime_expr,
+    collect_custom_ids_in_expr, collect_custom_ids_in_hint, is_symbolic, value_to_runtime_expr,
 };
 use super::references::RefType;
 use super::CallStackEntry;
@@ -360,89 +359,18 @@ pub(super) fn execute_air_template_call(
                 }
                 if eid < frame_start {
                     // Seeded proof-scope slot. Drop it if the
-                    // expression tree carries column leaves that
-                    // do NOT belong to this AIR's allocators. The
-                    // existing `Custom` filter caught the Round 13
-                    // class; Round 3 (2026-04-19) extends the
-                    // pattern to `Witness` / `Fixed` / `AirValue`
-                    // per Codex Round 3 analyze
-                    // (`.humanize/skill/2026-04-19_06-05-45-3512560-cb459f7d/output.md`):
-                    // those foreign leaves are the likely driver
-                    // of the `test_global_info_has_compressor`
-                    // 13-AIR vs golden-6 divergence, inflating the
-                    // consumer AIR's stage-2 constraint tree.
-                    let rt_probe = value_to_runtime_expr(val);
-                    let mut custom_ids: std::collections::BTreeSet<u32> =
-                        std::collections::BTreeSet::new();
-                    collect_custom_ids_in_expr(
-                        &rt_probe,
-                        &mut custom_ids,
-                        &mut leak_visited,
-                    );
-                    let has_cross_air_custom = custom_ids
-                        .iter()
-                        .any(|id| self.custom_cols.get_data(*id).is_none());
-                    if has_cross_air_custom {
-                        continue;
-                    }
-                    // Round 4 (2026-04-19 loop) fix: the air-col walk
-                    // needs a FRESH visited set. Sharing `leak_visited`
-                    // with the `collect_custom_ids_in_expr` pass above
-                    // made the second walk a no-op because
-                    // `collect_air_col_ids_in_expr` short-circuits when
-                    // the root pointer is already in `visited`. Codex
-                    // Round 3 review caught this. See
+                    // expression tree carries column leaves that do
+                    // NOT belong to this AIR's allocators. Round 8
+                    // extracts the filter logic into
+                    // `Processor::proof_scope_slot_has_foreign_leaf`
+                    // so unit tests can drive the predicate directly
+                    // (Codex Round 7 review requirement). See
                     // BL-20260419-origin-authoritative-serializer.
-                    //
-                    // Round 6 extension: the collector now returns
-                    // `(kind, id, origin_frame_id)` triples. A leaf
-                    // whose `origin_frame_id` differs from the current
-                    // AIR's origin is AUTHORITATIVELY foreign even if
-                    // its id happens to be in-range for the consuming
-                    // AIR. Codex Round 5 review identified this as the
-                    // load-bearing residual leak driving the
-                    // `test_global_info_has_compressor` divergence.
-                    let mut air_col_visited: std::collections::HashSet<
-                        *const super::expression::RuntimeExpr,
-                    > = std::collections::HashSet::new();
-                    let mut air_col_ids: std::collections::BTreeSet<
-                        (super::expression::ColRefKind, u32, Option<u32>),
-                    > = std::collections::BTreeSet::new();
-                    collect_air_col_ids_in_expr(
+                    let rt_probe = value_to_runtime_expr(val);
+                    if self.proof_scope_slot_has_foreign_leaf(
                         &rt_probe,
-                        &mut air_col_ids,
-                        &mut air_col_visited,
-                    );
-                    let current_origin = self.current_origin_frame_id;
-                    let fixed_start = self.fixed_cols.current_start();
-                    let fixed_end = fixed_start + self.fixed_cols.ids.current_len();
-                    let has_cross_air_col = air_col_ids.iter().any(|(kind, id, origin)| {
-                        use super::expression::ColRefKind;
-                        // Authoritative foreign-origin check first.
-                        if let Some(o) = origin {
-                            if *o != current_origin {
-                                return true;
-                            }
-                        }
-                        // Bounds check as the bounds-only fallback for
-                        // origin-less (proof-scope-minted) leaves.
-                        match kind {
-                            ColRefKind::Witness => {
-                                *id >= self.witness_cols.len()
-                            }
-                            ColRefKind::Fixed => {
-                                !(*id >= fixed_start && *id < fixed_end)
-                            }
-                            ColRefKind::AirValue => {
-                                (*id as usize) >= self.air_values.len() as usize
-                            }
-                            ColRefKind::Custom => {
-                                self.custom_cols.get_data(*id).is_none()
-                            }
-                            _ => false,
-                        }
-                    });
-                    if has_cross_air_col {
+                        &mut leak_visited,
+                    ) {
                         continue;
                     }
                 }
