@@ -2016,11 +2016,36 @@ impl Processor {
         };
 
         // Read source data first to avoid borrow issues.
+        // Track missing rows (silent zero-fill) so the producer can
+        // surface a loud warning. JS pil2-compiler reads source rows
+        // from a fully-populated virtual / fixed col; a Rust producer
+        // with missing rows usually indicates an upstream bug
+        // (e.g. the fix-column source was never written by an earlier
+        // statement). Per
+        // BL-20260420-tables-copy-zerofill-diagnostic, warn loudly
+        // instead of silently substituting `0` to surface this class
+        // of bug locally.
+        let mut missing_count = 0usize;
         let src_values: Vec<i128> = (0..count)
             .map(|i| {
-                self.fixed_cols.get_row_value(src_id, src_offset + i).unwrap_or(0)
+                match self.fixed_cols.get_row_value(src_id, src_offset + i) {
+                    Some(v) => v,
+                    None => {
+                        missing_count += 1;
+                        0
+                    }
+                }
             })
             .collect();
+        if missing_count > 0 {
+            eprintln!(
+                "warning: Tables.copy: {} of {} source rows were missing \
+                 (col_id={}, src_offset={}); silently filled with 0. This \
+                 usually indicates the source col was not populated by an \
+                 earlier statement.",
+                missing_count, count, src_id, src_offset
+            );
+        }
 
         // Write to destination.
         for (i, val) in src_values.into_iter().enumerate() {

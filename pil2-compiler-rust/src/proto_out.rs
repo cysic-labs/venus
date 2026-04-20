@@ -2719,6 +2719,43 @@ pub fn write_fixed_cols_to_file(
     let col_count = col_ids.len() as u32;
     let mut total_values = 0u64;
 
+    // Up-front sanity check: any non-temporal, non-external fixed col
+    // with NO row data at all is almost always a producer bug — the
+    // corresponding `Tables.fill` / `Tables.copy` / direct `F[row]
+    // = ...` writes never executed. Without this loud warning, the
+    // serializer silently zero-pads the entire column, which is what
+    // hid the trio's all-zero `.fixed` files for many rounds. See
+    // BL-20260420-tables-statement-dispatch-missing and
+    // BL-20260420-fixed-col-empty-row-data-diagnostic.
+    let mut empty_col_ids: Vec<u32> = Vec::new();
+    for &id in &col_ids {
+        if fixed_cols.get_row_data(id).map_or(true, |d| d.is_empty()) {
+            empty_col_ids.push(id);
+        }
+    }
+    if !empty_col_ids.is_empty() {
+        let preview: Vec<String> = empty_col_ids
+            .iter()
+            .take(5)
+            .map(|id| id.to_string())
+            .collect();
+        let more = if empty_col_ids.len() > 5 {
+            format!(" ... +{} more", empty_col_ids.len() - 5)
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "warning: write_fixed_cols_to_file({}): {} of {} non-temporal \
+             fixed cols have NO row data; will silently serialize as zeros. \
+             Empty col_ids: [{}]{}",
+            filename.display(),
+            empty_col_ids.len(),
+            col_count,
+            preview.join(", "),
+            more
+        );
+    }
+
     // Write in row-major order (matches the JS FixedFile.saveToFile layout).
     for row in 0..num_rows as usize {
         for &id in &col_ids {
