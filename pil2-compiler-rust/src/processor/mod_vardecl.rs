@@ -679,19 +679,39 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                         stored
                     }
                 }
-                // Round 9 per Codex Round 8 review: current-frame
-                // `const expr X = <ColRef>` aliases (e.g.
-                // `const expr shifted_cx = cx';`) must mint a
-                // packable Intermediate reference so the proto
-                // serializer emits `Operand::Expression { idx }`
-                // for every read of `shifted_cx` instead of
-                // inlining a raw `WitnessCol(cx, row_offset=+1)`
-                // leaf at each read site. Wrap the stored ColRef
-                // in `RuntimeExpr::ColRef` and register it in the
-                // resolution maps so the Phase 3 importer + proto
-                // serializer can walk to the underlying tree.
-                // Out-of-frame ColRef aliases stay inline because
-                // they belong to an enclosing scope's frame.
+                // Round 10 per Codex Round 9 review: split the
+                // current-frame `Value::ColRef` path into the JS-
+                // mirrored two-branch shape. JS
+                // `expression_packer.js::referencePack` routes
+                // `defvalue.isExpression` cases through
+                // `saveAndPushExpressionReference` (save-path,
+                // registers a packed arena idx in
+                // `references[(id, rowOffset)]` for reuse across
+                // references) and `defvalue.isReference` cases
+                // through bare `pushExpressionReference` (no
+                // resolution-map registration; the slot's own
+                // packed arena entry stands alone).
+                //
+                // In Rust, `Value::ColRef{col_type: Intermediate,
+                // ..}` stored on a const-expr slot mirrors the
+                // expression-backed case (the stored value is
+                // itself an intermediate reference chain). Every
+                // other `Value::ColRef{col_type: Witness / Fixed /
+                // Custom / AirValue / PeriodicCol / ..}` is the
+                // bare-reference case. For bare-ref aliases we
+                // still mint `Value::ColRef{Intermediate,
+                // reference.id, ..}` and register the alias slot
+                // with `intermediate_refs_emitted` so the
+                // reachability importer keeps it and proto
+                // `source_to_pos` resolves every read to
+                // `Operand::Expression { idx }`, but we SKIP the
+                // `intermediate_ref_resolution` /
+                // `global_intermediate_resolution` registrations.
+                // The alias slot's own imported arena entry
+                // carries the stored ColRef tree; the serializer
+                // never needs to fall back to the global-
+                // resolution re-flatten path for same-origin
+                // bare-ref aliases.
                 Value::ColRef {
                     col_type,
                     id: stored_id,
@@ -710,22 +730,24 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                         && reference.id >= frame_start
                         && is_const_expr
                     {
-                        let colref_rt = RuntimeExpr::ColRef {
-                            col_type: *col_type,
-                            id: *stored_id,
-                            row_offset: *stored_offset,
-                            origin_frame_id: *stored_origin,
-                        };
-                        let rt_rc = Rc::new(colref_rt);
                         self.intermediate_refs_emitted.insert(reference.id);
                         let origin = self.current_origin_frame_id;
-                        let key = (origin, reference.id);
-                        self.intermediate_ref_resolution
-                            .entry(key)
-                            .or_insert_with(|| rt_rc.clone());
-                        self.global_intermediate_resolution
-                            .entry(key)
-                            .or_insert_with(|| rt_rc.clone());
+                        if matches!(col_type, ColRefKind::Intermediate) {
+                            let colref_rt = RuntimeExpr::ColRef {
+                                col_type: *col_type,
+                                id: *stored_id,
+                                row_offset: *stored_offset,
+                                origin_frame_id: *stored_origin,
+                            };
+                            let rt_rc = Rc::new(colref_rt);
+                            let key = (origin, reference.id);
+                            self.intermediate_ref_resolution
+                                .entry(key)
+                                .or_insert_with(|| rt_rc.clone());
+                            self.global_intermediate_resolution
+                                .entry(key)
+                                .or_insert_with(|| rt_rc);
+                        }
                         Value::ColRef {
                             col_type: ColRefKind::Intermediate,
                             id: reference.id,
@@ -799,13 +821,15 @@ pub(super) fn get_var_ref_value_by_type_and_id(
                         stored
                     }
                 }
-                // Round 9 per Codex Round 8 review: current-frame
-                // `const expr X = <ColRef>` aliases (including
-                // array-element form) mint a packable Intermediate
-                // reference so proto emits
-                // `Operand::Expression { idx }`. See the matching
-                // branch in `get_var_ref_value` for the full
-                // rationale.
+                // Round 10 per Codex Round 9 review: array-element
+                // form of the JS-mirrored ColRef-alias split. See
+                // the matching branch in `get_var_ref_value` for
+                // the full rationale. Expression-backed aliases
+                // (stored `Value::ColRef{col_type: Intermediate,
+                // ..}`) go through the Round 9 save-path;
+                // bare-reference aliases skip the resolution-map
+                // registration and rely on the alias slot's own
+                // imported arena entry via `source_to_pos`.
                 Value::ColRef {
                     col_type,
                     id: stored_id,
@@ -821,22 +845,24 @@ pub(super) fn get_var_ref_value_by_type_and_id(
                         .map(|d| d.is_const_expr)
                         .unwrap_or(false);
                     if in_air && id >= frame_start && is_const_expr {
-                        let colref_rt = RuntimeExpr::ColRef {
-                            col_type: *col_type,
-                            id: *stored_id,
-                            row_offset: *stored_offset,
-                            origin_frame_id: *stored_origin,
-                        };
-                        let rt_rc = Rc::new(colref_rt);
                         self.intermediate_refs_emitted.insert(id);
                         let origin = self.current_origin_frame_id;
-                        let key = (origin, id);
-                        self.intermediate_ref_resolution
-                            .entry(key)
-                            .or_insert_with(|| rt_rc.clone());
-                        self.global_intermediate_resolution
-                            .entry(key)
-                            .or_insert_with(|| rt_rc.clone());
+                        if matches!(col_type, ColRefKind::Intermediate) {
+                            let colref_rt = RuntimeExpr::ColRef {
+                                col_type: *col_type,
+                                id: *stored_id,
+                                row_offset: *stored_offset,
+                                origin_frame_id: *stored_origin,
+                            };
+                            let rt_rc = Rc::new(colref_rt);
+                            let key = (origin, id);
+                            self.intermediate_ref_resolution
+                                .entry(key)
+                                .or_insert_with(|| rt_rc.clone());
+                            self.global_intermediate_resolution
+                                .entry(key)
+                                .or_insert_with(|| rt_rc);
+                        }
                         Value::ColRef {
                             col_type: ColRefKind::Intermediate,
                             id,
