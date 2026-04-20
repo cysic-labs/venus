@@ -855,59 +855,18 @@ impl<'a> ProtoOutBuilder<'a> {
                         measure_chain_shape(expr, &mut stats, 0, None, 0);
                     }
                 }
-                // Preallocate expr_id_map to the full entries length;
-                // each slot is filled exactly once across the two
-                // flatten passes below. JS packs per-AIR hints (late)
-                // against the same `PackedExpressions` context as
-                // constraints so hint-only expressions land at arena
-                // positions AFTER constraint roots. The pass-1 /
-                // pass-2 split here mirrors that late-pack ordering:
-                // pass 1 flattens non-`is_late_pack` entries in
-                // source order (intermediates and constraints);
-                // pass 2 flattens `is_late_pack` entries (hint-only
-                // runtime expressions) in source order. Non-late
-                // entries never reference late positions via
-                // `source_to_pos` because late entries are anonymous
-                // (`source_expr_id = None`), so pass 1's reads of
-                // `expr_id_map[pos]` only ever touch slots already
-                // filled within pass 1. Pass 2's reads touch slots
-                // filled in either pass. See
-                // BL-20260420-late-pack-hint-parity.
+                // Constraint-root-driven packing (Round 3, Codex
+                // directed). No blanket pre-pass over non-late
+                // entries. `expr_id_map` is preallocated to
+                // `entries.len()` so constraint emission below and
+                // `resolve_or_pack_air_hint_expr` above can fill
+                // specific slots on demand. JS
+                // `PackedExpressions.pack()` walks constraint roots
+                // and inlines referenced intermediates as they are
+                // encountered — intermediates that no constraint /
+                // hint reaches never land in the arena. Removing the
+                // pre-pass mirrors that behavior.
                 let mut expr_id_map: Vec<Option<u32>> = vec![None; entries.len()];
-                for (pos, (expr, source_expr_id, source_label, is_late)) in
-                    entries.iter().enumerate()
-                {
-                    if *is_late {
-                        continue;
-                    }
-                    let root_idx = self.flatten_air_expr(
-                        expr.as_ref(),
-                        *source_expr_id,
-                        *source_label,
-                        &air.fixed_id_map,
-                        air.fixed_col_start,
-                        &air.witness_id_map,
-                        &air.custom_id_map,
-                        &expr_id_map,
-                        &source_to_pos,
-                        &mut proto_expressions,
-                        &mut rc_cache,
-                        &mut struct_cache,
-                        &mut prov_cache,
-                        &mut im_labels,
-                        &mut stats,
-                    );
-                    expr_id_map[pos] = Some(root_idx);
-                }
-                // Late-pack entries (`is_late_pack == true`, hint-
-                // scoped `Value::RuntimeExpr` trees) are NOT flattened
-                // up front. They pack on demand below when an
-                // air-scope hint's `HintValue::ExprId(raw_id)`
-                // references them. Unreferenced late entries are
-                // never packed, matching JS: `addHints(packed)` only
-                // appends packed entries for hint fields that are
-                // actually emitted, not for every stored runtime
-                // expression the processor happened to create.
                 if trace_enabled {
                     eprintln!(
                         "PIL2C_CHAIN_SHAPE air={}/{} airgroup_id={} air_id={} \
@@ -974,11 +933,43 @@ impl<'a> ProtoOutBuilder<'a> {
                 for entry in &air.stored_constraints {
                     // Offset the expression ID by the intermediate prefix.
                     let store_idx = (entry.expr_id as usize) + im_expr_count;
-                    let expr_idx = expr_id_map
-                        .get(store_idx)
-                        .copied()
-                        .flatten()
-                        .unwrap_or(entry.expr_id);
+                    // Constraint-root-driven materialization: if the
+                    // slot has not been filled yet (no prior
+                    // reference from another constraint via
+                    // `source_to_pos`), flatten the entry now. That
+                    // places the constraint tree's referenced
+                    // intermediates into the arena INLINE (via
+                    // `global_intermediate_resolution` inside
+                    // `flatten_air_expr`), matching JS pack-walk
+                    // ordering. Subsequent references reuse the
+                    // idx via `prov_cache`.
+                    let expr_idx = if let Some(Some(idx)) =
+                        expr_id_map.get(store_idx).copied()
+                    {
+                        idx
+                    } else if let Some((expr, sid, label, _)) = entries.get(store_idx) {
+                        let idx = self.flatten_air_expr(
+                            expr.as_ref(),
+                            *sid,
+                            *label,
+                            &air.fixed_id_map,
+                            air.fixed_col_start,
+                            &air.witness_id_map,
+                            &air.custom_id_map,
+                            &expr_id_map,
+                            &source_to_pos,
+                            &mut proto_expressions,
+                            &mut rc_cache,
+                            &mut struct_cache,
+                            &mut prov_cache,
+                            &mut im_labels,
+                            &mut stats,
+                        );
+                        expr_id_map[store_idx] = Some(idx);
+                        idx
+                    } else {
+                        entry.expr_id
+                    };
                     let debug_line = Some(entry.source_ref.clone());
                     let expression_idx =
                         Some(pilout_proto::operand::Expression { idx: expr_idx });

@@ -38,18 +38,19 @@
 //!    locks the Phase 2 ExprRef / Intermediate identity path.
 
 /// First and second instance's expected `air.expressions.len()`
-/// under Round 9 JS-parity: both instances pack only their own
-/// reachable set through the constraint/hint roots. The
-/// `MARKER_UNUSED_OPID` payload is never reachable (no
-/// `direct_global_update_assumes` at airgroup scope and neither
-/// instance's constraint/hint roots reference it), so the
-/// payload's proof-scope state is dropped from both arenas. Each
-/// instance then packs: local_alias_1 lift, local_alias_2
-/// reference wrap, shifted_cx lift, and constraint[3]'s
-/// `shifted_cx + cy` tree — 4 entries total. JS's lazy packing
-/// symmetry is preserved.
-const LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED_FIRST: usize = 4;
-const LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED_SECOND: usize = 4;
+/// under Round 3 JS-parity constraint-root-driven packing: both
+/// instances pack only their own reachable set, driven from
+/// constraint roots rather than a non-late pre-pass. Round 3 move:
+/// intermediate refs resolved via `global_intermediate_resolution`
+/// now emit their tree INLINE at the point of first reference
+/// (with `prov_cache` handling dedup for subsequent refs) rather
+/// than as a separate lifted arena entry. The per-instance count
+/// therefore drops by one compared to the pre-Round-3 count
+/// (the lift entry that used to be pre-packed is now the inlined
+/// root of the first reference's tree). See
+/// BL-20260420-constraint-root-driven-packing.
+const LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED_FIRST: usize = 3;
+const LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED_SECOND: usize = 3;
 /// Distinctive literal coefficient inside the never-consumed
 /// `MARKER_UNUSED_OPID` payload's `[987654321, 0, 0, 0, 0, 0, 0,
 /// 0]` expression-array argument. If the lazy reification drops
