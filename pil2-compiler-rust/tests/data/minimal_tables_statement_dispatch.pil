@@ -27,9 +27,13 @@
 
 airtemplate TablesStatementDispatchAir(const int N = 2**4) {
     col fixed F;
+    col fixed G;
+    col fixed virtual(2) src = [7, 11];
     Tables.fill(42, F, 0, 4);
+    Tables.copy(src, 0, G, 0, 2);
     col witness W;
     W === F[0];
+    W === G[0];
 }
 
 airgroup TablesStatementDispatchGroup {

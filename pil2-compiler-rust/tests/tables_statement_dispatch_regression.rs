@@ -14,10 +14,13 @@
 //! fixed cols and the recursive1 verifier rejected the basic
 //! proof at `VerifyEvaluations0`.
 //!
-//! This test compiles a single-AIR fixture that invokes
-//! `Tables.fill(42, F, 0, 4);` as a statement on a `col fixed F`
-//! declaration. The post-fix `.fixed` file must contain the
-//! literal value 42 at the first 4 rows.
+//! This test compiles a single-AIR fixture that invokes BOTH
+//! `Tables.fill(42, F, 0, 4)` AND `Tables.copy(src, 0, G, 0, 2)`
+//! as statements on `col fixed F` and `col fixed G` declarations.
+//! The post-fix `.fixed` file must contain the Tables.fill literal
+//! value 42 at row 0 of column F, and the Tables.copy source
+//! value 7 at row 0 of column G. Strengthens the Round 24 lock to
+//! cover both `Tables.*` surfaces used by the trio AIRs.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -74,30 +77,42 @@ fn tables_fill_statement_form_populates_fixed_file() {
     let bytes = std::fs::read(&fixed_file).expect("fixed file read failed");
     assert!(
         bytes.len() >= 32,
-        "fixed file too small ({} bytes); expected at least 32 bytes for 4 rows of 1 col at 8 bytes per value",
+        "fixed file too small ({} bytes); expected at least 32 bytes for the populated rows",
         bytes.len()
     );
 
-    // Each row is one u64 (col x row layout, single col).
-    // Row 0 should be the literal 42.
-    let row0_bytes: [u8; 8] = bytes[..8].try_into().unwrap();
-    let row0 = u64::from_le_bytes(row0_bytes);
+    // Layout is row-major (per write_fixed_cols_to_file): for each
+    // row r in 0..N, write 8 bytes per non-temporal-non-external
+    // fixed col in column order. F is column 0, G is column 1
+    // (declaration order in the fixture).
+    // Row 0 col 0 is at offset 0; row 0 col 1 is at offset 8.
+    let f_row0 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let g_row0 = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+
     assert_eq!(
-        row0, 42,
-        "row 0 of fixed col F should be 42 (set by statement-form `Tables.fill(42, F, 0, 4);`); \
-         got {}. A zero here means the Tables.fill statement was silently dropped because \
-         eval_function_call_with_alias does not dispatch Tables.* builtins.",
-        row0
+        f_row0, 42,
+        "row 0 of fixed col F should be 42 (set by statement-form \
+         `Tables.fill(42, F, 0, 4);`); got {}. A zero here means the \
+         Tables.fill statement was silently dropped because \
+         eval_function_call_with_alias does not dispatch Tables.* \
+         builtins.",
+        f_row0
+    );
+    assert_eq!(
+        g_row0, 7,
+        "row 0 of fixed col G should be 7 (copied from src=[7,11] by \
+         statement-form `Tables.copy(src, 0, G, 0, 2);`); got {}. A \
+         zero here means the Tables.copy statement was silently \
+         dropped (Tables.* dispatcher missing in \
+         eval_function_call_with_alias). This Tables.copy surface is \
+         the one std_range_check.pil's VALS-fill loop uses for the \
+         trio AIRs (SpecifiedRanges / VirtualTable0 / VirtualTable1).",
+        g_row0
     );
 
-    // Rows 1..3 should also be 42.
-    for row in 1..4 {
-        let bytes_at = &bytes[row * 8..(row + 1) * 8];
-        let val = u64::from_le_bytes(bytes_at.try_into().unwrap());
-        assert_eq!(
-            val, 42,
-            "row {} of fixed col F should be 42; got {}",
-            row, val
-        );
-    }
+    // Row 1: col F still 42 (Tables.fill writes 4 rows), col G should be 11.
+    let f_row1 = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+    let g_row1 = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+    assert_eq!(f_row1, 42, "row 1 col F: expected 42, got {}", f_row1);
+    assert_eq!(g_row1, 11, "row 1 col G (Tables.copy 2nd source row): expected 11, got {}", g_row1);
 }

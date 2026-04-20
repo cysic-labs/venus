@@ -223,7 +223,7 @@ pub(super) fn execute_air_template_call(
     {
         let num_rows = self.air_stack.last().map(|a| a.rows).unwrap_or(0);
         let mut fixed_proto_idx = 0u32;
-        let mut periodic_proto_idx = 0u32;
+        let periodic_proto_idx = 0u32;
         let fc_end = fc_start + self.fixed_cols.ids.current_len();
         for col_id in fc_start..fc_end {
             if let Some(data) = self.fixed_cols.ids.get_data(col_id) {
@@ -234,19 +234,27 @@ pub(super) fn execute_air_template_call(
                     continue;
                 }
             }
-            // Detect periodic: column has fewer rows than the AIR
-            let is_periodic = if let Some(row_data) = self.fixed_cols.get_row_data(col_id) {
-                row_data.len() > 0 && (row_data.len() as u64) < num_rows
-            } else {
-                false
-            };
-            if is_periodic {
-                fixed_id_map.push(('P', periodic_proto_idx));
-                periodic_proto_idx += 1;
-            } else {
-                fixed_id_map.push(('F', fixed_proto_idx));
-                fixed_proto_idx += 1;
-            }
+            // All non-temporal fixed columns are emitted as `F` (regular
+            // fixed). The auto-detect-periodic-by-row-data-length heuristic
+            // previously here misclassified cols whose row data was less
+            // than num_rows but were declared as plain `col fixed` (not
+            // explicitly periodic). The trio AIRs (SpecifiedRanges /
+            // VirtualTable0 / VirtualTable1) populate `col fixed name[N]`
+            // sub-columns via Tables.fill / Tables.copy: when the last
+            // group's coverage is shorter than num_rows, the auto-detect
+            // moved 2-8 trio sub-cols from F to P, breaking the post-Round-15
+            // golden parity (59/52/73 fixed cols vs golden) and changing
+            // downstream evMap / queryVerifier code shape. PIL does not
+            // currently have explicit periodic declaration syntax — virtual
+            // cols are marked temporal at declaration time and dropped
+            // before reaching here. Without a producer-side signal that
+            // the col is genuinely periodic, default to `F` and let
+            // write_fixed_cols_to_file zero-pad missing rows.
+            // See BL-20260420-fixed-col-auto-periodic-misclassify.
+            let _ = num_rows;
+            let _ = periodic_proto_idx;
+            fixed_id_map.push(('F', fixed_proto_idx));
+            fixed_proto_idx += 1;
         }
     }
 
