@@ -3448,6 +3448,73 @@ mod tests_global_info {
                 ));
             }
 
+            // Round 31 (per Codex Round 30 review step 2): also
+            // check expressionsCode[].expId and
+            // qVerifier.code[*].src[].expId for the trio AIRs.
+            // The id chain fans out from the upstream expressions
+            // arena layout; locking just cExpId/friExpId is too
+            // narrow because the arena drift propagates into
+            // every emitted expressionsCode entry and every
+            // verifier-side tmp src reference.
+            let ei_path = build_airs.join(name).join("air").join(format!("{}.expressionsinfo.json", name));
+            let gold_ei_path = gold_airs.join(name).join("air").join(format!("{}.expressionsinfo.json", name));
+            if ei_path.is_file() && gold_ei_path.is_file() {
+                let cur_ei: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(&ei_path).unwrap()
+                ).unwrap();
+                let gold_ei: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(&gold_ei_path).unwrap()
+                ).unwrap();
+                let cur_codes = cur_ei.get("expressionsCode").and_then(|v| v.as_array());
+                let gold_codes = gold_ei.get("expressionsCode").and_then(|v| v.as_array());
+                if let (Some(cur_codes), Some(gold_codes)) = (cur_codes, gold_codes) {
+                    let n = std::cmp::min(cur_codes.len(), gold_codes.len()).min(6);
+                    for i in 0..n {
+                        let cur_exp_id = cur_codes[i].get("expId").and_then(|v| v.as_u64());
+                        let gold_exp_id = gold_codes[i].get("expId").and_then(|v| v.as_u64());
+                        if cur_exp_id != gold_exp_id {
+                            failures.push(format!(
+                                "{}: expressionsinfo.expressionsCode[{}].expId drift \
+                                 cur={:?} gold={:?}. The per-AIR expressions arena layout \
+                                 differs from golden, propagating into every emitted \
+                                 expressionsCode entry.",
+                                name, i, cur_exp_id, gold_exp_id
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // qVerifier tmp src expId checks: the first few add/mul ops
+            // in qVerifier.code reference expIds via tmp src operands.
+            // If the upstream arena differs, these references differ.
+            if let Some(cur_qv_code) = cur_vi.pointer("/qVerifier/code").and_then(|v| v.as_array()) {
+                if let Some(gold_qv_code) = gold_vi.pointer("/qVerifier/code").and_then(|v| v.as_array()) {
+                    let n = std::cmp::min(cur_qv_code.len(), gold_qv_code.len()).min(8);
+                    'outer: for i in 0..n {
+                        let cur_srcs = cur_qv_code[i].get("src").and_then(|v| v.as_array());
+                        let gold_srcs = gold_qv_code[i].get("src").and_then(|v| v.as_array());
+                        if let (Some(cs), Some(gs)) = (cur_srcs, gold_srcs) {
+                            for j in 0..std::cmp::min(cs.len(), gs.len()) {
+                                let cur_e = cs[j].get("expId").and_then(|v| v.as_u64());
+                                let gold_e = gs[j].get("expId").and_then(|v| v.as_u64());
+                                if cur_e.is_some() && cur_e != gold_e {
+                                    failures.push(format!(
+                                        "{}: verifierinfo.qVerifier.code[{}].src[{}].expId drift \
+                                         cur={:?} gold={:?}. The verifier-side tmp src reference \
+                                         carries the upstream arena layout drift; every recursive1 \
+                                         id-wired evaluation step is misaligned.",
+                                        name, i, j, cur_e, gold_e
+                                    ));
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             let cur_query = cur_vi.pointer("/queryVerifier/code").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
             let gold_query = gold_vi.pointer("/queryVerifier/code").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
             if cur_query != gold_query {
