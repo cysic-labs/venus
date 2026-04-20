@@ -2149,6 +2149,52 @@ impl<'a> ProtoOutBuilder<'a> {
                     if let Some(resolved) = key
                         .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
                     {
+                        // Round 12 per Codex Round 11 review: when
+                        // the resolved tree is a bare non-Intermediate
+                        // ColRef leaf (the Round 11 importer skip
+                        // path drops these alias slots from the
+                        // top-level lift but registers the stored
+                        // leaf in `global_intermediate_resolution`),
+                        // cache the Add(leaf, 0) arena wrapper by the
+                        // ALIAS identity `(id, row_offset)`, not the
+                        // leaf's own `ColRef(kind, col_id,
+                        // col_offset)` key. JS `packed_expressions
+                        // .js::saveAndPushExpressionReference` keys
+                        // `references[]` by the ExpressionReference
+                        // id + rowOffset pair, not the underlying
+                        // column. Matching that keying is the Codex
+                        // directive step for closing the remaining
+                        // trio `expressionsCode[0].expId` offset.
+                        if matches!(
+                            resolved.as_ref(),
+                            RuntimeExpr::ColRef { col_type, .. } if !matches!(col_type, ColRefKind::Intermediate)
+                        ) {
+                            let alias_key = PackedKey::Provenance(*id, offset_i32);
+                            stats.prov_cache_probes += 1;
+                            if let Some(&cached_idx) = prov_cache.get(&alias_key) {
+                                stats.prov_cache_hits += 1;
+                                return cached_idx;
+                            }
+                            let idx = self.flatten_air_expr(
+                                &resolved,
+                                source_expr_id,
+                                source_label,
+                                fixed_map,
+                                fixed_col_start,
+                                witness_map,
+                                custom_map,
+                                expr_id_map,
+                                source_to_pos,
+                                out,
+                                rc_cache,
+                                struct_cache,
+                                prov_cache,
+                                im_labels,
+                                stats,
+                            );
+                            prov_cache.insert(alias_key, idx);
+                            return idx;
+                        }
                         return self.flatten_air_expr(
                             &resolved,
                             source_expr_id,
@@ -2449,6 +2495,59 @@ impl<'a> ProtoOutBuilder<'a> {
                 if let Some(resolved) = key
                     .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
                 {
+                    // Round 12 per Codex Round 11 review: same
+                    // alias-keyed prov_cache as the
+                    // `flatten_air_expr` path. When the resolved
+                    // tree is a bare non-Intermediate ColRef
+                    // leaf, cache the Add(leaf, 0) arena wrapper
+                    // by `Provenance(alias_id, row_offset)` so
+                    // operand-level reads of the same alias share
+                    // the arena idx (matching JS
+                    // `references[(id, rowOffset)]` keying). This
+                    // also keeps the `Phase 1 row-offset`
+                    // assertion's strict `Operand::Expression`
+                    // oracle green because operand sites still
+                    // emit `Operand::Expression(shared_idx)`.
+                    if !is_foreign
+                        && matches!(
+                            resolved.as_ref(),
+                            RuntimeExpr::ColRef { col_type, .. } if !matches!(col_type, ColRefKind::Intermediate)
+                        )
+                    {
+                        let alias_key = PackedKey::Provenance(*id, offset_i32);
+                        stats.prov_cache_probes += 1;
+                        if let Some(&cached_idx) = prov_cache.get(&alias_key) {
+                            stats.prov_cache_hits += 1;
+                            return Some(pilout_proto::Operand {
+                                operand: Some(pilout_proto::operand::Operand::Expression(
+                                    pilout_proto::operand::Expression { idx: cached_idx },
+                                )),
+                            });
+                        }
+                        let idx = self.flatten_air_expr(
+                            &resolved,
+                            None,
+                            None,
+                            fixed_map,
+                            fixed_col_start,
+                            witness_map,
+                            custom_map,
+                            expr_id_map,
+                            source_to_pos,
+                            out,
+                            rc_cache,
+                            struct_cache,
+                            prov_cache,
+                            im_labels,
+                            stats,
+                        );
+                        prov_cache.insert(alias_key, idx);
+                        return Some(pilout_proto::Operand {
+                            operand: Some(pilout_proto::operand::Operand::Expression(
+                                pilout_proto::operand::Expression { idx },
+                            )),
+                        });
+                    }
                     let idx = self.flatten_air_expr(
                         &resolved,
                         None,

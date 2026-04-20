@@ -679,39 +679,32 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                         stored
                     }
                 }
-                // Round 10 per Codex Round 9 review: split the
-                // current-frame `Value::ColRef` path into the JS-
-                // mirrored two-branch shape. JS
-                // `expression_packer.js::referencePack` routes
-                // `defvalue.isExpression` cases through
-                // `saveAndPushExpressionReference` (save-path,
-                // registers a packed arena idx in
-                // `references[(id, rowOffset)]` for reuse across
-                // references) and `defvalue.isReference` cases
-                // through bare `pushExpressionReference` (no
-                // resolution-map registration; the slot's own
-                // packed arena entry stands alone).
-                //
-                // In Rust, `Value::ColRef{col_type: Intermediate,
-                // ..}` stored on a const-expr slot mirrors the
-                // expression-backed case (the stored value is
-                // itself an intermediate reference chain). Every
-                // other `Value::ColRef{col_type: Witness / Fixed /
-                // Custom / AirValue / PeriodicCol / ..}` is the
-                // bare-reference case. For bare-ref aliases we
-                // still mint `Value::ColRef{Intermediate,
-                // reference.id, ..}` and register the alias slot
-                // with `intermediate_refs_emitted` so the
-                // reachability importer keeps it and proto
-                // `source_to_pos` resolves every read to
-                // `Operand::Expression { idx }`, but we SKIP the
-                // `intermediate_ref_resolution` /
-                // `global_intermediate_resolution` registrations.
-                // The alias slot's own imported arena entry
-                // carries the stored ColRef tree; the serializer
-                // never needs to fall back to the global-
-                // resolution re-flatten path for same-origin
-                // bare-ref aliases.
+                // Round 11+12 per Codex Round 10 and Round 11
+                // reviews: current-frame `const expr X = <ColRef>`
+                // aliases mint `Value::ColRef{Intermediate,
+                // reference.id, ..}` so downstream proto
+                // serialization emits `Operand::Expression { idx }`
+                // for every read, and the alias's stored ColRef
+                // is registered in BOTH
+                // `intermediate_ref_resolution` and
+                // `global_intermediate_resolution` regardless of
+                // whether the stored `col_type` is
+                // `ColRefKind::Intermediate` (expression-backed
+                // chain) or a bare column kind (Witness, Fixed,
+                // Custom, AirValue, PeriodicCol, ...). The
+                // resolution-map snapshot is required by the
+                // serializer's unresolved-Intermediate path:
+                // Round 11 removed the alias's top-level
+                // per-AIR `air_expression_store` entry via an
+                // explicit skip in `execute_air_template_call()`,
+                // so reads now rehydrate the alias through
+                // `global_intermediate_resolution` -> bare leaf.
+                // Round 12 then lands a proto_out.rs-side helper
+                // that detects bare non-Intermediate resolved
+                // leaves and emits them via `leaf_to_air_operand`
+                // at operand sites (no new arena entry) or a
+                // leaf-specific cached path keyed by the alias
+                // identity and row offset at expression sites.
                 Value::ColRef {
                     col_type,
                     id: stored_id,
@@ -838,15 +831,17 @@ pub(super) fn get_var_ref_value_by_type_and_id(
                         stored
                     }
                 }
-                // Round 10 per Codex Round 9 review: array-element
-                // form of the JS-mirrored ColRef-alias split. See
-                // the matching branch in `get_var_ref_value` for
-                // the full rationale. Expression-backed aliases
-                // (stored `Value::ColRef{col_type: Intermediate,
-                // ..}`) go through the Round 9 save-path;
-                // bare-reference aliases skip the resolution-map
-                // registration and rely on the alias slot's own
-                // imported arena entry via `source_to_pos`.
+                // Round 11+12: array-element form of the
+                // same-origin const-expr ColRef alias handling.
+                // See the matching branch in `get_var_ref_value`
+                // for the full rationale — always register both
+                // resolution maps, always insert the alias slot
+                // into `intermediate_refs_emitted`, always return
+                // `Value::ColRef{ColRefKind::Intermediate,
+                // reference.id, ..}`. Bare vs expression-backed
+                // differentiation happens downstream in
+                // `execute_air_template_call()` importer skip
+                // and in `proto_out.rs`'s serializer helper.
                 Value::ColRef {
                     col_type,
                     id: stored_id,
