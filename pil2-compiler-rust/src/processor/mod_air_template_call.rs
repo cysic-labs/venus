@@ -346,6 +346,14 @@ pub(super) fn execute_air_template_call(
         // only slots that must not surface in the consuming AIR's
         // per-AIR expression store.
         let frame_start = self.exprs.frame_start();
+        let trace_lift_breakdown = std::env::var("PIL2C_LIFT_BREAKDOWN")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let mut lift_proof_scope = 0usize;
+        let mut lift_proof_scope_dropped_foreign = 0usize;
+        let mut lift_in_frame_symbolic_labeled = 0usize;
+        let mut lift_in_frame_symbolic_unlabeled = 0usize;
+        let mut lift_in_frame_force_include = 0usize;
         let mut leak_visited: std::collections::HashSet<
             *const super::expression::RuntimeExpr,
         > = std::collections::HashSet::new();
@@ -379,6 +387,7 @@ pub(super) fn execute_air_template_call(
                         &rt_probe,
                         &mut leak_visited,
                     ) {
+                        lift_proof_scope_dropped_foreign += 1;
                         continue;
                     }
                 }
@@ -398,6 +407,15 @@ pub(super) fn execute_air_template_call(
                             None
                         }
                     });
+                if eid < frame_start {
+                    lift_proof_scope += 1;
+                } else if force_include && !is_symbolic(val) {
+                    lift_in_frame_force_include += 1;
+                } else if source_label.is_some() {
+                    lift_in_frame_symbolic_labeled += 1;
+                } else {
+                    lift_in_frame_symbolic_unlabeled += 1;
+                }
                 store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
             }
         }
@@ -454,8 +472,41 @@ pub(super) fn execute_air_template_call(
                 ));
             }
         }
+        let lift_trimmed_fallback_count = store.len()
+            - lift_proof_scope
+            - lift_in_frame_force_include
+            - lift_in_frame_symbolic_labeled
+            - lift_in_frame_symbolic_unlabeled;
+        let lift_constraint_count = constraint_exprs.len();
         for expr in constraint_exprs {
             store.push(air::AirExpressionEntry::anonymous(expr));
+        }
+        if trace_lift_breakdown {
+            let air_name_trace = self
+                .air_stack
+                .last()
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "?".to_string());
+            eprintln!(
+                "PIL2C_LIFT_BREAKDOWN air={}/{} frame_start={} total={} \
+                 proof_scope={} proof_scope_dropped_foreign={} \
+                 in_frame_force_include={} \
+                 in_frame_symbolic_labeled={} \
+                 in_frame_symbolic_unlabeled={} \
+                 trimmed_fallback={} \
+                 constraint_exprs={}",
+                ag_name,
+                air_name_trace,
+                frame_start,
+                store.len(),
+                lift_proof_scope,
+                lift_proof_scope_dropped_foreign,
+                lift_in_frame_force_include,
+                lift_in_frame_symbolic_labeled,
+                lift_in_frame_symbolic_unlabeled,
+                lift_trimmed_fallback_count,
+                lift_constraint_count,
+            );
         }
         store
     };
