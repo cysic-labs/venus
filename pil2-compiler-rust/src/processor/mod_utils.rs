@@ -163,6 +163,11 @@ pub(super) fn collect_custom_ids_in_expr(
         RuntimeExpr::UnaryOp { operand, .. } => {
             collect_custom_ids_in_expr(operand.as_ref(), out, visited);
         }
+        // An ExprRef carries no Custom-col leaf itself. Resolving
+        // the referenced tree requires
+        // `Processor::global_intermediate_resolution`; callers
+        // that need the transitive set must resolve the ref first.
+        RuntimeExpr::ExprRef { .. } => {}
     }
 }
 
@@ -233,6 +238,16 @@ pub(super) fn collect_air_col_ids_in_expr(
         RuntimeExpr::UnaryOp { operand, .. } => {
             collect_air_col_ids_in_expr(operand.as_ref(), out, visited);
         }
+        // An ExprRef is a by-id indirection, not an air-col leaf.
+        // The proof-scope foreign-leaf filter in
+        // `execute_air_template_call` uses this walker on stored
+        // trees; once Phase 3's importer resolves ExprRef through
+        // `global_intermediate_resolution`, the referenced tree
+        // flows through this walker directly. Treat the ExprRef
+        // itself as no-leaf so we do not double-count during the
+        // transitional Phase 2 where ExprRef can also appear in
+        // stored trees before Phase 3 resolves them.
+        RuntimeExpr::ExprRef { .. } => {}
     }
 }
 

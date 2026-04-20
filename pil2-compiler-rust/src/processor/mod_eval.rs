@@ -364,6 +364,37 @@ fn deref_intermediates_in_runtime_expr(
                 operand: new_operand,
             })
         }
+        RuntimeExpr::ExprRef { id, origin_frame_id, .. } => {
+            // Resolve the ExprRef through the same origin-scoped
+            // resolution path the Intermediate branch uses, so
+            // consumers of the deref'd tree see the actual
+            // expression rather than a bare by-id indirection.
+            let origin = origin_frame_id.unwrap_or(self.current_origin_frame_id);
+            let key = (origin, *id);
+            if !visited.insert(key) {
+                return expr.clone();
+            }
+            let resolved: Option<Value> = self
+                .global_intermediate_resolution
+                .get(&key)
+                .or_else(|| self.intermediate_ref_resolution.get(&key))
+                .map(|rc| Value::RuntimeExpr(rc.clone()))
+                .or_else(|| self.exprs.get(*id).cloned());
+            let resolved = match resolved {
+                Some(Value::RuntimeExpr(inner)) => {
+                    let r = self.deref_intermediates_in_runtime_expr(&inner, visited);
+                    visited.remove(&key);
+                    return r;
+                }
+                Some(other) => other,
+                None => {
+                    visited.remove(&key);
+                    return expr.clone();
+                }
+            };
+            visited.remove(&key);
+            Rc::new(RuntimeExpr::Value(resolved))
+        }
         RuntimeExpr::Value(_) | RuntimeExpr::ColRef { .. } => expr.clone(),
     }
 }

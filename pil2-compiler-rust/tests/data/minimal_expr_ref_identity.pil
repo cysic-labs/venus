@@ -1,0 +1,52 @@
+// minimal_expr_ref_identity.pil
+//
+// Round 2 fixture for Phase 2 of plan-rustify-pkgen-e2e-0420.
+// Exercises the `RuntimeExpr::ExprRef` producer surface by reading
+// a proof-scope symbolic `expr` multiple times from inside one
+// airtemplate instance, then again from a second instance. After
+// Phase 2 producer surface work both reads must produce a
+// `Value::RuntimeExpr(RuntimeExpr::ExprRef { id, row_offset,
+// origin_frame_id })` node with the same `(id, row_offset)`
+// reference identity, not a fresh inlined clone of the stored
+// tree.
+
+require "std_constants.pil";
+require "std_direct.pil";
+
+const int EXPR_REF_OPID = 55555;
+
+proofval er_enable;
+er_enable * (1 - er_enable);
+
+airtemplate ExprRefIdentityAir(const int N = 2**4,
+                               const expr enable_flag = 1,
+                               const int populate_state = 0) {
+    col witness ex;
+    col witness ey;
+
+    // Pair of AIR-local constraints that pull in the same logical
+    // expression twice. The `consumer_product === 0` plus
+    // `consumer_product + ey === 0` bindings give us two read
+    // sites of `consumer_product` inside ONE instance.
+    const expr consumer_product = ex * ey;
+    consumer_product === 0;
+    consumer_product + ey === 0;
+
+    if (populate_state == 1) {
+        direct_global_update_proves(EXPR_REF_OPID,
+                                    [1, 0, 0, 0, 0, 0, 0, 0],
+                                    sel: enable_flag,
+                                    surname: PIOP_SURNAME_DYNAMIC);
+    }
+}
+
+airgroup ExprRefIdentity {
+    // First instance populates proof-scope state. The second
+    // instance inherits the proof-scope state without re-emitting.
+    ExprRefIdentityAir(N: 2**4, enable_flag: er_enable, populate_state: 1);
+    ExprRefIdentityAir(N: 2**4, enable_flag: er_enable, populate_state: 0);
+
+    direct_global_update_assumes(EXPR_REF_OPID, [1, 0, 0, 0, 0, 0, 0, 0],
+                                 sel: er_enable,
+                                 surname: PIOP_SURNAME_DYNAMIC);
+}

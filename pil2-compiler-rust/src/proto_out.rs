@@ -2121,6 +2121,68 @@ impl<'a> ProtoOutBuilder<'a> {
                 }
             }
         }
+        // Round 2 of plan-rustify-pkgen-e2e-0420: RuntimeExpr::ExprRef
+        // is a by-id reference to a symbolic `expr` variable. Resolve
+        // it through `Processor::global_intermediate_resolution` and
+        // flatten the resolved tree inline, reusing the
+        // `PackedKey::ForeignIntermediate` cache so repeated reads
+        // of the same `(origin, id, row_offset)` share one packed
+        // arena idx (JS `pushExpressionReference` first-seen
+        // semantics). Same-AIR refs that already have a local
+        // `source_to_pos` entry also resolve through this path so the
+        // reference-identity shape is preserved across same-origin
+        // reads too.
+        if let RuntimeExpr::ExprRef { id, row_offset, origin_frame_id } = expr {
+            let current_origin = *self.current_origin_frame_id.borrow();
+            let origin = origin_frame_id.unwrap_or(current_origin);
+            let offset_i32 = row_offset.unwrap_or(0) as i32;
+            let cache_key = PackedKey::ForeignIntermediate(origin, *id, offset_i32);
+            stats.foreign_intermediate_probes += 1;
+            if let Some(&cached_idx) = prov_cache.get(&cache_key) {
+                stats.foreign_intermediate_hits += 1;
+                return cached_idx;
+            }
+            // Same-AIR in-frame slots that are already lifted
+            // resolve through `source_to_pos` -> `expr_id_map`.
+            if origin == current_origin {
+                if let Some(&pos) = source_to_pos.get(id) {
+                    if let Some(&idx) = expr_id_map.get(pos) {
+                        prov_cache.insert(cache_key, idx);
+                        return idx;
+                    }
+                }
+            }
+            if let Some(resolved) = self
+                .processor
+                .global_intermediate_resolution
+                .get(&(origin, *id))
+                .cloned()
+            {
+                let idx = self.flatten_air_expr(
+                    &resolved,
+                    source_expr_id,
+                    source_label,
+                    fixed_map,
+                    fixed_col_start,
+                    witness_map,
+                    custom_map,
+                    expr_id_map,
+                    source_to_pos,
+                    out,
+                    rc_cache,
+                    struct_cache,
+                    prov_cache,
+                    im_labels,
+                    stats,
+                );
+                prov_cache.insert(cache_key, idx);
+                return idx;
+            }
+            // Unresolved ExprRef: fall through to the leaf path which
+            // emits Constant(0). This should only happen if the
+            // referenced slot was never populated, a shape
+            // pil2-stark-setup treats as a zero constant.
+        }
         // Rc-pointer fast path: if this exact node was already flattened,
         // reference the existing proto entry.
         let ptr = expr as *const RuntimeExpr;
@@ -2346,6 +2408,71 @@ impl<'a> ProtoOutBuilder<'a> {
                     if let Some(k) = foreign_key {
                         prov_cache.insert(k, idx);
                     }
+                    return Some(pilout_proto::Operand {
+                        operand: Some(pilout_proto::operand::Operand::Expression(
+                            pilout_proto::operand::Expression { idx },
+                        )),
+                    });
+                }
+                self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos)
+            }
+            // Round 2 of plan-rustify-pkgen-e2e-0420: operand-level
+            // handling for `RuntimeExpr::ExprRef`. Mirrors the
+            // `flatten_air_expr` path so the by-id reference
+            // resolves through `source_to_pos` for same-AIR refs and
+            // through `global_intermediate_resolution` for foreign
+            // refs, reusing `PackedKey::ForeignIntermediate` for
+            // dedup.
+            RuntimeExpr::ExprRef { id, row_offset, origin_frame_id } => {
+                let current_origin = *self.current_origin_frame_id.borrow();
+                let origin = origin_frame_id.unwrap_or(current_origin);
+                let offset_i32 = row_offset.unwrap_or(0) as i32;
+                let cache_key = PackedKey::ForeignIntermediate(origin, *id, offset_i32);
+                stats.foreign_intermediate_probes += 1;
+                if let Some(&cached_idx) = prov_cache.get(&cache_key) {
+                    stats.foreign_intermediate_hits += 1;
+                    return Some(pilout_proto::Operand {
+                        operand: Some(pilout_proto::operand::Operand::Expression(
+                            pilout_proto::operand::Expression { idx: cached_idx },
+                        )),
+                    });
+                }
+                if origin == current_origin {
+                    if let Some(&pos) = source_to_pos.get(id) {
+                        if let Some(&idx) = expr_id_map.get(pos) {
+                            prov_cache.insert(cache_key, idx);
+                            return Some(pilout_proto::Operand {
+                                operand: Some(pilout_proto::operand::Operand::Expression(
+                                    pilout_proto::operand::Expression { idx },
+                                )),
+                            });
+                        }
+                    }
+                }
+                if let Some(resolved) = self
+                    .processor
+                    .global_intermediate_resolution
+                    .get(&(origin, *id))
+                    .cloned()
+                {
+                    let idx = self.flatten_air_expr(
+                        &resolved,
+                        None,
+                        None,
+                        fixed_map,
+                        fixed_col_start,
+                        witness_map,
+                        custom_map,
+                        expr_id_map,
+                        source_to_pos,
+                        out,
+                        rc_cache,
+                        struct_cache,
+                        prov_cache,
+                        im_labels,
+                        stats,
+                    );
+                    prov_cache.insert(cache_key, idx);
                     return Some(pilout_proto::Operand {
                         operand: Some(pilout_proto::operand::Operand::Expression(
                             pilout_proto::operand::Expression { idx },
@@ -2707,6 +2834,33 @@ impl<'a> ProtoOutBuilder<'a> {
                         }
                     }
                 }
+            }
+            // Round 2 of plan-rustify-pkgen-e2e-0420: last-resort
+            // resolution for `RuntimeExpr::ExprRef`. The Phase 2
+            // design routes ExprRef through
+            // `flatten_air_expr` / `flatten_air_operand` with a
+            // cache and global-resolution lookup; reaching
+            // `leaf_to_air_operand` means the upstream guards
+            // missed. Emit `Constant(0)` as the safe terminal
+            // fallback, matching the Intermediate foreign-origin
+            // branch above.
+            RuntimeExpr::ExprRef { id, origin_frame_id, .. } => {
+                if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
+                    let air_name = self.current_air_name.borrow();
+                    let current_origin = *self.current_origin_frame_id.borrow();
+                    eprintln!(
+                        "[pil2c-warn] unresolved ExprRef at leaf: air='{}' \
+                         id={} origin_frame_id={:?} current_origin={} \
+                         emitting Operand::Constant(0)",
+                        *air_name,
+                        id,
+                        origin_frame_id,
+                        current_origin,
+                    );
+                }
+                pilout_proto::operand::Operand::Constant(
+                    pilout_proto::operand::Constant { value: Vec::new() },
+                )
             }
             _ => return None,
         };

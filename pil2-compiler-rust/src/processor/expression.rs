@@ -79,6 +79,17 @@ pub enum ColRefKind {
 
 /// An expression node that cannot be fully folded at compile time.
 /// Preserved for protobuf serialization.
+///
+/// `ExprRef` models a JS `ExpressionReference`: a by-id reference to
+/// a previously-declared `expr` variable (proof-scope `const expr`
+/// declaration, proof-scope container slot, or any symbolic `expr`
+/// variable read outside its declaring AIR's in-frame id range).
+/// It preserves the producer's reference identity so downstream
+/// lifting / serialization can match JS `PackedExpressions` lazy
+/// packing semantics, which deduplicate by `(expr_id, row_offset)`
+/// at the reference-identity boundary. Introduced in Round 2 of
+/// plan-rustify-pkgen-e2e-0420 as the enabling change for Phase 3's
+/// reachability-driven importer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RuntimeExpr {
     Value(Value),
@@ -93,6 +104,19 @@ pub enum RuntimeExpr {
     },
     ColRef {
         col_type: ColRefKind,
+        id: u32,
+        row_offset: Option<i64>,
+        origin_frame_id: Option<u32>,
+    },
+    /// By-id reference to a symbolic `expr` variable. `id` is the
+    /// `self.exprs` variable-store slot id; `row_offset` is the
+    /// composed JS-style row shift (matching the `(id, rowOffset)`
+    /// key in `temp/golden_references/pil2-compiler/src/packed_expressions.js::getReferenceKey`);
+    /// `origin_frame_id` is the execution frame that minted the
+    /// reference so the serializer can resolve the referenced tree
+    /// through `Processor::global_intermediate_resolution` when the
+    /// current AIR differs from the declaring AIR.
+    ExprRef {
         id: u32,
         row_offset: Option<i64>,
         origin_frame_id: Option<u32>,

@@ -52,7 +52,9 @@ const int MARKER_UNUSED_OPID = 9871234;
 proofval ps_enable;
 ps_enable * (1 - ps_enable);
 
-airtemplate LazyReifyAir(const int N = 2**4, const expr enable_flag = 1) {
+airtemplate LazyReifyAir(const int N = 2**4,
+                         const expr enable_flag = 1,
+                         const int emit_marker_unused = 0) {
     col witness cx;
     col witness cy;
 
@@ -76,24 +78,28 @@ airtemplate LazyReifyAir(const int N = 2**4, const expr enable_flag = 1) {
                                 surname: PIOP_SURNAME_DYNAMIC);
 
     // Case 2 - Unused proof-scope payload with distinctive marker
-    // coefficient 987654321 in the expression array. Only the first
-    // airtemplate instance emits this (gated via `enable_flag` on
-    // the shape of the call, but really via a separate opid). The
-    // second instance inherits the proof-scope state from the first
-    // and, under lazy reification, should drop it because the
-    // second instance never consumes MARKER_UNUSED_OPID.
-    direct_global_update_proves(MARKER_UNUSED_OPID,
-                                [987654321, 0, 0, 0, 0, 0, 0, 0],
-                                sel: enable_flag,
-                                surname: PIOP_SURNAME_DYNAMIC);
+    // coefficient 987654321 in the expression array. Gated by
+    // `emit_marker_unused` so only the first airtemplate instance
+    // actually writes this payload; the second instance inherits
+    // the proof-scope state from the first and, under lazy
+    // reification, should drop it because the second instance
+    // never consumes MARKER_UNUSED_OPID and does not re-populate
+    // it either.
+    if (emit_marker_unused == 1) {
+        direct_global_update_proves(MARKER_UNUSED_OPID,
+                                    [987654321, 0, 0, 0, 0, 0, 0, 0],
+                                    sel: enable_flag,
+                                    surname: PIOP_SURNAME_DYNAMIC);
+    }
 }
 
 airgroup LazyReify {
-    // Two instances so the second inherits proof-scope state from
-    // the first. JS lazy reification drops the inherited slots the
-    // second instance does not reference; Rust bulk-lift keeps them.
-    LazyReifyAir(N: 2**4, enable_flag: ps_enable);
-    LazyReifyAir(N: 2**4, enable_flag: ps_enable);
+    // First instance emits the unused marker payload. The second
+    // instance inherits the resulting proof-scope state. JS lazy
+    // reification drops the inherited slots the second instance
+    // does not reference; Rust bulk-lift keeps them.
+    LazyReifyAir(N: 2**4, enable_flag: ps_enable, emit_marker_unused: 1);
+    LazyReifyAir(N: 2**4, enable_flag: ps_enable, emit_marker_unused: 0);
 
     // Balance USED_OPID but NOT MARKER_UNUSED_OPID.
     direct_global_update_assumes(USED_OPID, [0, 1, 0, 0, 0, 0, 0, 0],

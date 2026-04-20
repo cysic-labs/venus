@@ -203,35 +203,6 @@ fn constraint_expression_idx(c: &pb::Constraint) -> Option<u32> {
     }).map(|e| e.idx)
 }
 
-/// Build the complete set of root indices for each instance of
-/// `air_name` in the airgroup. Roots come from the AIR's constraints
-/// (constraint expressions are the authoritative AIR roots).
-/// Hint-expression roots would add more, but per-AIR hints in the
-/// fixture are sparse; the DAG walker below still transitively
-/// reaches every arena idx the constraints depend on.
-fn collect_air_roots(pilout: &pb::PilOut, air_name: &str) -> Vec<Vec<u32>> {
-    let mut all_roots: Vec<Vec<u32>> = Vec::new();
-    for ag in &pilout.air_groups {
-        for air in &ag.airs {
-            if air.name.as_deref() != Some(air_name) {
-                continue;
-            }
-            let roots: Vec<u32> = air
-                .constraints
-                .iter()
-                .filter_map(constraint_expression_idx)
-                .collect();
-            all_roots.push(roots);
-        }
-    }
-    assert!(
-        !all_roots.is_empty(),
-        "AIR {} not found for collecting roots",
-        air_name
-    );
-    all_roots
-}
-
 /// Assertion 1: both instances of `LazyReifyAir` have IDENTICAL
 /// `air.expressions.len()`. The two instances share an identical
 /// airtemplate body; JS lazy reification produces the same per-AIR

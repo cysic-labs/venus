@@ -400,6 +400,10 @@ fn describe_runtime_expr_for_trace(
             op,
             describe_runtime_expr_for_trace(operand)
         ),
+        RuntimeExpr::ExprRef { id, row_offset, origin_frame_id } => format!(
+            "ExprRef(id={}, row_offset={:?}, origin_frame_id={:?})",
+            id, row_offset, origin_frame_id
+        ),
     }
 }
 
@@ -477,6 +481,12 @@ fn compute_runtime_expr_degree(expr: &super::expression::RuntimeExpr) -> i128 {
             }
         }
         RuntimeExpr::UnaryOp { operand, .. } => compute_runtime_expr_degree(operand),
+        // JS `ExpressionReference.degree` walks the referenced
+        // expression's stored tree. Rust does not have that tree
+        // readily available here; fall back to 0 (the same as the
+        // Intermediate ColRef branch above) and rely on RuntimeExpr
+        // walking through any inlined wrapper.
+        RuntimeExpr::ExprRef { .. } => 0,
     }
 }
 

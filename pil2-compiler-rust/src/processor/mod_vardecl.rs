@@ -608,7 +608,8 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                     // scope must stay inlined. See
                     // BL-20260418-intermediate-ref-cross-air-leak.
                     let in_air = !self.air_stack.is_empty();
-                    if in_air && reference.id >= self.exprs.frame_start() {
+                    let frame_start = self.exprs.frame_start();
+                    if in_air && reference.id >= frame_start {
                         // Round 3 lift / read consistency: record
                         // the id so AIR finalization keeps the slot
                         // in `air_expression_store` even if the
@@ -637,6 +638,32 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                             row_offset: None,
                             origin_frame_id: Some(origin),
                         }
+                    } else if in_air {
+                        // Round 2 of plan-rustify-pkgen-e2e-0420:
+                        // symbolic proof-scope `expr` reads (in-air
+                        // AND id < frame_start) mint a
+                        // `RuntimeExpr::ExprRef` node so the
+                        // producer preserves the JS-style by-id
+                        // reference identity instead of inlining
+                        // the stored tree at every use site.
+                        // Register the reference in both resolution
+                        // maps so the Phase 3 importer (and the
+                        // current proto serializer) can resolve
+                        // `(origin, id)` back to the underlying
+                        // expression.
+                        let origin = self.current_origin_frame_id;
+                        let key = (origin, reference.id);
+                        self.intermediate_ref_resolution
+                            .entry(key)
+                            .or_insert_with(|| rt.clone());
+                        self.global_intermediate_resolution
+                            .entry(key)
+                            .or_insert_with(|| rt.clone());
+                        Value::RuntimeExpr(Rc::new(RuntimeExpr::ExprRef {
+                            id: reference.id,
+                            row_offset: None,
+                            origin_frame_id: Some(origin),
+                        }))
                     } else {
                         stored
                     }
@@ -664,7 +691,8 @@ pub(super) fn get_var_ref_value_by_type_and_id(
             match &stored {
                 Value::RuntimeExpr(rt) => {
                     let in_air = !self.air_stack.is_empty();
-                    if in_air && id >= self.exprs.frame_start() {
+                    let frame_start = self.exprs.frame_start();
+                    if in_air && id >= frame_start {
                         self.intermediate_refs_emitted.insert(id);
                         let origin = self.current_origin_frame_id;
                         let key = (origin, id);
@@ -680,6 +708,25 @@ pub(super) fn get_var_ref_value_by_type_and_id(
                             row_offset: None,
                             origin_frame_id: Some(origin),
                         }
+                    } else if in_air {
+                        // See the matching branch in
+                        // `get_var_ref_value` above for the full
+                        // rationale. Proof-scope symbolic `expr`
+                        // reads mint an `ExprRef` so the JS-style
+                        // reference identity survives downstream.
+                        let origin = self.current_origin_frame_id;
+                        let key = (origin, id);
+                        self.intermediate_ref_resolution
+                            .entry(key)
+                            .or_insert_with(|| rt.clone());
+                        self.global_intermediate_resolution
+                            .entry(key)
+                            .or_insert_with(|| rt.clone());
+                        Value::RuntimeExpr(Rc::new(RuntimeExpr::ExprRef {
+                            id,
+                            row_offset: None,
+                            origin_frame_id: Some(origin),
+                        }))
                     } else {
                         stored
                     }
@@ -966,5 +1013,11 @@ fn substitute_air_local_intermediate_in_rt(
             }
         }
         RuntimeExpr::ColRef { .. } => rt,
+        // The substitute pass targets Intermediate `ColRef`s only.
+        // An ExprRef is a deliberate by-id indirection; resolving
+        // it here would defeat the Phase 2 design. Keep the node
+        // intact and let the proto serializer / Phase 3 importer
+        // resolve it through `global_intermediate_resolution`.
+        RuntimeExpr::ExprRef { .. } => rt,
     }
 }
