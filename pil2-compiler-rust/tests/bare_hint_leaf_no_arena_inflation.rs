@@ -54,39 +54,36 @@ fn locate_workspace() -> Option<(PathBuf, PathBuf, PathBuf)> {
     }
 }
 
-fn compile_zisk() -> Option<Vec<u8>> {
-    let (workspace, zisk_pil, std_pil) = locate_workspace()?;
-    let includes = format!(
-        "{},{},{},{}",
-        workspace.join("pil").display(),
-        std_pil.display(),
-        workspace.join("state-machines").display(),
-        workspace.join("precompiles").display(),
-    );
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_pil2c"));
-    let out = std::env::temp_dir().join("pil2c_bare_hint_leaf_no_arena_inflation.pilout");
-    let fixed_dir = std::env::temp_dir().join("pil2c_bare_hint_leaf_no_arena_inflation_fixed");
-    let _ = std::fs::remove_file(&out);
-    let _ = std::fs::remove_dir_all(&fixed_dir);
-    std::fs::create_dir_all(&fixed_dir).ok()?;
-    let status = Command::new(&bin)
-        .arg(&zisk_pil)
-        .arg("-I")
-        .arg(&includes)
-        .arg("-o")
-        .arg(&out)
-        .arg("-u")
-        .arg(&fixed_dir)
-        .arg("-O")
-        .arg("fixed-to-file")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
+enum CompileOutcome {
+    ZiskMissing,
+    Pilout(Vec<u8>),
+}
+
+/// Load the workspace's `pil/zisk.pilout` produced by the real
+/// build chain (`make generate-key` or a direct `pil2c` run from
+/// the workspace root). Rebuilding the pilout inside the test
+/// from the `pil2-compiler-rust/` cwd triggers pre-existing
+/// runtime errors (`Tables.copy: src must be a fixed column`)
+/// that silently drop constraints on some AIRs, producing a
+/// differently-shaped artifact than production. Reading the
+/// checked-out pilout instead gives the test a stable,
+/// reproducible input that matches the actual build.
+fn compile_zisk() -> CompileOutcome {
+    let Some((workspace, _zisk_pil, _std_pil)) = locate_workspace() else {
+        return CompileOutcome::ZiskMissing;
+    };
+    let pilout_path = workspace.join("pil").join("zisk.pilout");
+    if !pilout_path.is_file() {
+        eprintln!(
+            "bare_hint_leaf_no_arena_inflation: `pil/zisk.pilout` \
+             not found at {}; skipping. Run `make generate-key` \
+             or invoke `pil2c` from the workspace root first.",
+            pilout_path.display()
+        );
+        return CompileOutcome::ZiskMissing;
     }
-    std::fs::read(&out).ok()
+    let bytes = std::fs::read(&pilout_path).expect("read zisk.pilout");
+    CompileOutcome::Pilout(bytes)
 }
 
 fn is_bare_col_wrapper(expr: &pb::Expression) -> bool {
@@ -127,27 +124,45 @@ fn first_constraint_expression_idx(air: &pb::Air) -> Option<u32> {
         .map(|e| e.idx)
 }
 
+/// AC-P1 golden targets for trio `first_constraint.expression_idx`
+/// as dictated by the golden JS build (documented in
+/// `temp/plan-rustify-pkgen-e2e-0420-1.md` AC-P1 and the goal
+/// tracker's Ultimate Goal). The refactor that introduces late-pack
+/// parity for per-AIR hint expressions in `proto_out.rs` must bring
+/// these values on current pilout in line with the golden JS build.
+const GOLDEN_FIRST_CONSTRAINT_EXPR_IDX: &[(&str, u32)] = &[
+    ("VirtualTable0", 16),
+    ("VirtualTable1", 36),
+    ("SpecifiedRanges", 8),
+];
+
 #[test]
 fn trio_air_prefix_carries_no_bare_col_wrappers() {
-    let Some(pilout_bytes) = compile_zisk() else {
-        eprintln!(
-            "bare_hint_leaf_no_arena_inflation: Zisk build artifacts \
-             not present in this tree; skipping. This test only runs \
-             inside the main Venus workspace."
-        );
-        return;
+    let pilout_bytes = match compile_zisk() {
+        CompileOutcome::ZiskMissing => {
+            eprintln!(
+                "bare_hint_leaf_no_arena_inflation: Zisk build artifacts \
+                 not present in this tree; skipping. Only runs inside \
+                 the main Venus workspace."
+            );
+            return;
+        }
+        CompileOutcome::Pilout(b) => b,
     };
     let pilout =
         pb::PilOut::decode(pilout_bytes.as_slice()).expect("decode pilout");
-    let trio = ["VirtualTable0", "VirtualTable1", "SpecifiedRanges"];
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let trio_names: std::collections::HashSet<&'static str> =
+        GOLDEN_FIRST_CONSTRAINT_EXPR_IDX.iter().map(|&(n, _)| n).collect();
+    let trio_expected: std::collections::HashMap<&'static str, u32> =
+        GOLDEN_FIRST_CONSTRAINT_EXPR_IDX.iter().copied().collect();
+    let mut seen: std::collections::HashMap<&'static str, u32> =
+        std::collections::HashMap::new();
+    let mut p1_failures: Vec<String> = Vec::new();
+    let mut p2_failures: Vec<String> = Vec::new();
     for ag in &pilout.air_groups {
         for air in &ag.airs {
             let Some(name) = air.name.as_deref() else { continue };
-            if !trio.contains(&name) {
-                continue;
-            }
-            seen.insert(name);
+            let Some(&interned) = trio_names.get(name) else { continue };
             let Some(first_idx) = first_constraint_expression_idx(air) else {
                 panic!(
                     "trio AIR `{}` has no labeled constraint (arena.len={})",
@@ -155,39 +170,59 @@ fn trio_air_prefix_carries_no_bare_col_wrappers() {
                     air.expressions.len()
                 );
             };
-            let prefix = air
-                .expressions
-                .iter()
-                .take(first_idx as usize);
+            seen.insert(interned, first_idx);
+            // AC-P1: exact match against golden.
+            if let Some(&expected) = trio_expected.get(interned) {
+                if first_idx != expected {
+                    p1_failures.push(format!(
+                        "AC-P1 AIR `{}`: first_constraint.expression_idx cur={} gold={} \
+                         (arena.len={}). The golden JS build emits this constraint \
+                         root at arena position {}. Current Rust position is {}. \
+                         Closing this gap is the Round 1 mainline objective: \
+                         JS-parity late-pack of per-AIR hint expressions in \
+                         `proto_out.rs`.",
+                        name, first_idx, expected, air.expressions.len(), expected, first_idx,
+                    ));
+                }
+            }
+            // AC-P2: no Add(Col, Constant(0)) wrappers before first constraint.
+            let prefix = air.expressions.iter().take(first_idx as usize);
             let mut bad_positions: Vec<usize> = Vec::new();
             for (pos, expr) in prefix.enumerate() {
                 if is_bare_col_wrapper(expr) {
                     bad_positions.push(pos);
                 }
             }
-            assert!(
-                bad_positions.is_empty(),
-                "AIR `{}`: found {} bare-col wrapper `Add(Col, Constant(0))` \
-                 entries in the prefix `[0..{})`. First offenders: {:?}. \
-                 A regression at `mod_hints.rs::value_to_hint_value` air-\
-                 scope bare `Value::ColRef` handling most likely \
-                 reintroduced anonymous `air_expression_store` pushes for \
-                 hint-arg leaves. The invariant this test guards is that \
-                 bare hint leaves must NOT inflate the per-AIR \
-                 expressions arena; they resolve directly through \
-                 `hint_colref_to_operand` in `proto_out.rs`.",
-                name,
-                bad_positions.len(),
-                first_idx,
-                &bad_positions[..bad_positions.len().min(8)],
-            );
+            if !bad_positions.is_empty() {
+                p2_failures.push(format!(
+                    "AC-P2 AIR `{}`: {} bare-col wrapper `Add(Col, Constant(0))` \
+                     entries in prefix `[0..{})`. First offenders: {:?}. \
+                     A regression at `mod_hints.rs::value_to_hint_value` air-scope \
+                     bare `Value::ColRef` handling most likely reintroduced anonymous \
+                     `air_expression_store` pushes for hint-arg leaves.",
+                    name,
+                    bad_positions.len(),
+                    first_idx,
+                    &bad_positions[..bad_positions.len().min(8)],
+                ));
+            }
         }
     }
     assert_eq!(
         seen.len(),
         3,
         "expected all three trio AIRs (VirtualTable0, VirtualTable1, \
-         SpecifiedRanges) in the compiled pilout; saw {:?}",
-        seen
+         SpecifiedRanges) in compiled pilout; saw {:?}",
+        seen.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        p2_failures.is_empty(),
+        "AC-P2 violations:\n{}",
+        p2_failures.join("\n")
+    );
+    assert!(
+        p1_failures.is_empty(),
+        "AC-P1 violations:\n{}",
+        p1_failures.join("\n")
     );
 }

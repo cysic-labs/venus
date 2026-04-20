@@ -78,14 +78,42 @@ pub struct AirExpressionEntry {
     pub expr: RuntimeExpr,
     pub source_expr_id: Option<u32>,
     pub source_label: Option<String>,
+    /// True when the entry was pushed from an air-scope hint's
+    /// `Value::RuntimeExpr` (via `mod_hints::value_to_hint_value`).
+    /// The proto serializer flattens such entries LAST within the
+    /// per-AIR pass so they land at arena positions matching the
+    /// golden JS build (`temp/golden_references/pil2-compiler/src/
+    /// processor.js` calls `addHints(.., packed)` on the live
+    /// `PackedExpressions` context AFTER all constraints are packed,
+    /// right before `setExpressions(packed)`). Non-hint entries
+    /// keep `false` and are flattened first.
+    pub is_late_pack: bool,
 }
 
 impl AirExpressionEntry {
     pub fn anonymous(expr: RuntimeExpr) -> Self {
-        Self { expr, source_expr_id: None, source_label: None }
+        Self {
+            expr,
+            source_expr_id: None,
+            source_label: None,
+            is_late_pack: false,
+        }
+    }
+    pub fn anonymous_late_pack(expr: RuntimeExpr) -> Self {
+        Self {
+            expr,
+            source_expr_id: None,
+            source_label: None,
+            is_late_pack: true,
+        }
     }
     pub fn with_source(expr: RuntimeExpr, source_expr_id: u32, source_label: Option<String>) -> Self {
-        Self { expr, source_expr_id: Some(source_expr_id), source_label }
+        Self {
+            expr,
+            source_expr_id: Some(source_expr_id),
+            source_label,
+            is_late_pack: false,
+        }
     }
 }
 

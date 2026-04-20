@@ -153,13 +153,22 @@ pub(super) fn value_to_hint_value(&mut self, val: &Value) -> air::HintValue {
             }
         }
         Value::RuntimeExpr(_) => {
-            // Air-scope non-leaf symbolic expression: push into the
-            // air expression store and reference by index. Kept
-            // deliberately narrow: only bare `Value::ColRef` migrates
-            // to the direct `HintValue::ColRef` path in this change.
+            // Air-scope non-leaf symbolic expression. Push into the
+            // air expression store tagged as `is_late_pack=true` so
+            // `proto_out.rs::build_air_groups` flattens the tree
+            // LAST within the per-AIR pass, matching the JS golden
+            // build's `addHints(.., packed)` ordering (packed AFTER
+            // constraints, right before `setExpressions(packed)`
+            // in `temp/golden_references/pil2-compiler/src/
+            // processor.js`). Prior to the late-pack flag,
+            // hint-backed entries flattened in source order and
+            // landed intermingled with (often BEFORE) constraint
+            // roots, inflating the per-AIR arena head on the Zisk
+            // trio. See BL-20260420-late-pack-hint-parity.
             let rt = value_to_runtime_expr(val);
             let idx = self.air_expression_store.len() as u32;
-            self.air_expression_store.push(air::AirExpressionEntry::anonymous(rt));
+            self.air_expression_store
+                .push(air::AirExpressionEntry::anonymous_late_pack(rt));
             air::HintValue::ExprId(idx)
         }
         Value::ArrayRef { ref_type, base_id, dims } => {

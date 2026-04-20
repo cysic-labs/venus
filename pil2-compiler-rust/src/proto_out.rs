@@ -748,7 +748,6 @@ impl<'a> ProtoOutBuilder<'a> {
                 // sub-expressions, etc.), matching the JS compiler's
                 // `this.expressions.pack(...)` behavior.
                 let mut proto_expressions: Vec<pilout_proto::Expression> = Vec::new();
-                let mut expr_id_map: Vec<u32> = Vec::new();
 
                 let mut rc_cache: HashMap<*const RuntimeExpr, u32> = HashMap::new();
                 let mut struct_cache: HashMap<RuntimeExpr, u32> = HashMap::new();
@@ -769,19 +768,25 @@ impl<'a> ProtoOutBuilder<'a> {
                 // polynomials. The canonicalized Rc tree is owned by
                 // `entries` for the lifetime of this air loop so the
                 // rc_cache pointer-identity fast path stays valid.
-                let raw_entries: Vec<(&RuntimeExpr, Option<u32>, Option<&str>)> =
+                let raw_entries: Vec<(&RuntimeExpr, Option<u32>, Option<&str>, bool)> =
                     if !air.air_expression_store.is_empty() {
-                        air.air_expression_store.iter()
-                            .map(|e| (&e.expr, e.source_expr_id, e.source_label.as_deref()))
+                        air.air_expression_store
+                            .iter()
+                            .map(|e| {
+                                (&e.expr, e.source_expr_id, e.source_label.as_deref(), e.is_late_pack)
+                            })
                             .collect()
                     } else {
-                        air.stored_expressions.iter().map(|e| (e, None, None)).collect()
+                        air.stored_expressions
+                            .iter()
+                            .map(|e| (e, None, None, false))
+                            .collect()
                     };
-                let entries: Vec<(Rc<RuntimeExpr>, Option<u32>, Option<&str>)> = raw_entries
+                let entries: Vec<(Rc<RuntimeExpr>, Option<u32>, Option<&str>, bool)> = raw_entries
                     .into_iter()
-                    .map(|(expr, sid, label)| {
+                    .map(|(expr, sid, label, is_late)| {
                         let canon = canonicalize_associative(&Rc::new(expr.clone()));
-                        (canon, sid, label)
+                        (canon, sid, label, is_late)
                     })
                     .collect();
                 // Index entries by their `source_expr_id` so the
@@ -792,7 +797,7 @@ impl<'a> ProtoOutBuilder<'a> {
                 // `(id, rowOffset)` -> packed_idx lookup in
                 // `pil2-compiler/src/packed_expressions.js::pushExpressionReference`.
                 let mut source_to_pos: HashMap<u32, usize> = HashMap::new();
-                for (pos, (_, sid, _)) in entries.iter().enumerate() {
+                for (pos, (_, sid, _, _)) in entries.iter().enumerate() {
                     if let Some(s) = sid {
                         source_to_pos.entry(*s).or_insert(pos);
                     }
@@ -810,15 +815,39 @@ impl<'a> ProtoOutBuilder<'a> {
                     // post-fix metric. Cache hit / probe counts are
                     // accumulated below by flatten_air_expr while it
                     // walks the same trees.
-                    for (expr, _, _) in &entries {
+                    for (expr, _, _, _) in &entries {
                         measure_chain_shape(expr, &mut stats, 0, None, 0);
                     }
                 }
-                for (expr, source_expr_id, source_label) in entries {
+                // Preallocate expr_id_map to the full entries length;
+                // each slot is filled exactly once across the two
+                // flatten passes below. JS packs per-AIR hints (late)
+                // against the same `PackedExpressions` context as
+                // constraints so hint-only expressions land at arena
+                // positions AFTER constraint roots. The pass-1 /
+                // pass-2 split here mirrors that late-pack ordering:
+                // pass 1 flattens non-`is_late_pack` entries in
+                // source order (intermediates and constraints);
+                // pass 2 flattens `is_late_pack` entries (hint-only
+                // runtime expressions) in source order. Non-late
+                // entries never reference late positions via
+                // `source_to_pos` because late entries are anonymous
+                // (`source_expr_id = None`), so pass 1's reads of
+                // `expr_id_map[pos]` only ever touch slots already
+                // filled within pass 1. Pass 2's reads touch slots
+                // filled in either pass. See
+                // BL-20260420-late-pack-hint-parity.
+                let mut expr_id_map: Vec<Option<u32>> = vec![None; entries.len()];
+                for (pos, (expr, source_expr_id, source_label, is_late)) in
+                    entries.iter().enumerate()
+                {
+                    if *is_late {
+                        continue;
+                    }
                     let root_idx = self.flatten_air_expr(
                         expr.as_ref(),
-                        source_expr_id,
-                        source_label,
+                        *source_expr_id,
+                        *source_label,
                         &air.fixed_id_map,
                         air.fixed_col_start,
                         &air.witness_id_map,
@@ -832,7 +861,32 @@ impl<'a> ProtoOutBuilder<'a> {
                         &mut im_labels,
                         &mut stats,
                     );
-                    expr_id_map.push(root_idx);
+                    expr_id_map[pos] = Some(root_idx);
+                }
+                for (pos, (expr, source_expr_id, source_label, is_late)) in
+                    entries.iter().enumerate()
+                {
+                    if !*is_late {
+                        continue;
+                    }
+                    let root_idx = self.flatten_air_expr(
+                        expr.as_ref(),
+                        *source_expr_id,
+                        *source_label,
+                        &air.fixed_id_map,
+                        air.fixed_col_start,
+                        &air.witness_id_map,
+                        &air.custom_id_map,
+                        &expr_id_map,
+                        &source_to_pos,
+                        &mut proto_expressions,
+                        &mut rc_cache,
+                        &mut struct_cache,
+                        &mut prov_cache,
+                        &mut im_labels,
+                        &mut stats,
+                    );
+                    expr_id_map[pos] = Some(root_idx);
                 }
                 if trace_enabled {
                     eprintln!(
@@ -879,8 +933,16 @@ impl<'a> ProtoOutBuilder<'a> {
                 // Stash the packed expression-id map so `build_hints`
                 // can look up packed indices for this air when
                 // serializing `HintValue::ExprId` hint leaves.
+                // Collapse Option slots: unfilled positions degrade to
+                // `u32::MAX` sentinel so the build_hints consumer can
+                // detect an unresolved ExprId without triggering a
+                // panic.
+                let flattened: Vec<u32> = expr_id_map
+                    .iter()
+                    .map(|slot| slot.unwrap_or(u32::MAX))
+                    .collect();
                 self.air_expr_id_maps
-                    .insert((ag_idx, air_id_counter), expr_id_map.clone());
+                    .insert((ag_idx, air_id_counter), flattened);
                 // Record the IM-label side table for this air so
                 // the IM SymbolEntry emission below sees the
                 // first-save (packed_idx -> label) pairs.
@@ -910,6 +972,7 @@ impl<'a> ProtoOutBuilder<'a> {
                     let expr_idx = expr_id_map
                         .get(store_idx)
                         .copied()
+                        .flatten()
                         .unwrap_or(entry.expr_id);
                     let debug_line = Some(entry.source_ref.clone());
                     let expression_idx =
@@ -2295,7 +2358,7 @@ impl<'a> ProtoOutBuilder<'a> {
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
-        expr_id_map: &[u32],
+        expr_id_map: &[Option<u32>],
         source_to_pos: &HashMap<u32, usize>,
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
@@ -2389,7 +2452,7 @@ impl<'a> ProtoOutBuilder<'a> {
             } else {
                 let unresolved = source_to_pos
                     .get(id)
-                    .and_then(|&pos| expr_id_map.get(pos).copied())
+                    .and_then(|&pos| expr_id_map.get(pos).copied().flatten())
                     .is_none();
                 if unresolved {
                     let key = origin_frame_id.map(|o| (o, *id));
@@ -2484,7 +2547,7 @@ impl<'a> ProtoOutBuilder<'a> {
             // resolution-map path below.
             if origin == current_origin && offset == 0 {
                 if let Some(&pos) = source_to_pos.get(id) {
-                    if let Some(&idx) = expr_id_map.get(pos) {
+                    if let Some(&Some(idx)) = expr_id_map.get(pos) {
                         prov_cache.insert(cache_key, idx);
                         return idx;
                     }
@@ -2693,7 +2756,7 @@ impl<'a> ProtoOutBuilder<'a> {
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
-        expr_id_map: &[u32],
+        expr_id_map: &[Option<u32>],
         source_to_pos: &HashMap<u32, usize>,
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
@@ -2735,7 +2798,7 @@ impl<'a> ProtoOutBuilder<'a> {
                 is_foreign
                     || source_to_pos
                         .get(id)
-                        .and_then(|&pos| expr_id_map.get(pos).copied())
+                        .and_then(|&pos| expr_id_map.get(pos).copied().flatten())
                         .is_none()
             } =>
             {
@@ -2850,7 +2913,7 @@ impl<'a> ProtoOutBuilder<'a> {
                 // `expr` and `expr'` produce distinct arena entries.
                 if origin == current_origin && offset == 0 {
                     if let Some(&pos) = source_to_pos.get(id) {
-                        if let Some(&idx) = expr_id_map.get(pos) {
+                        if let Some(&Some(idx)) = expr_id_map.get(pos) {
                             prov_cache.insert(cache_key, idx);
                             return Some(pilout_proto::Operand {
                                 operand: Some(pilout_proto::operand::Operand::Expression(
@@ -2922,7 +2985,7 @@ impl<'a> ProtoOutBuilder<'a> {
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
-        expr_id_map: &[u32],
+        expr_id_map: &[Option<u32>],
         source_to_pos: &HashMap<u32, usize>,
     ) -> Option<pilout_proto::Operand> {
         let operand = match expr {
@@ -3237,7 +3300,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         } else {
                             let proto_idx = source_to_pos
                                 .get(id)
-                                .and_then(|&pos| expr_id_map.get(pos).copied());
+                                .and_then(|&pos| expr_id_map.get(pos).copied().flatten());
                             match proto_idx {
                                 Some(idx) => pilout_proto::operand::Operand::Expression(
                                     pilout_proto::operand::Expression { idx },
