@@ -220,11 +220,22 @@ pub(super) fn exec_variable_declaration(&mut self, vd: &VariableDeclaration) -> 
                 // IM even though their labels are recorded at
                 // declaration time, matching JS
                 // saveAndPushExpressionReference semantics.
+                //
+                // Mark `const expr X = ...` slots with
+                // `is_const_expr: true` so the Phase 3 importer in
+                // `execute_air_template_call` can distinguish them
+                // from runtime `expr X = ...` slots. JS's
+                // `this.expressions.reserve` packs only the former
+                // unconditionally into the per-AIR arena;
+                // `self.exprs.ids.label_ranges` alone cannot
+                // distinguish the two classes.
+                let mut expr_id_data = id_data.clone();
+                expr_id_data.is_const_expr = vd.is_const;
                 let id = self.exprs.reserve(
                     size,
                     Some(name),
                     &array_dims,
-                    id_data.clone(),
+                    expr_id_data,
                 );
                 if let Some(val) = &init_value {
                     if !array_dims.is_empty() {

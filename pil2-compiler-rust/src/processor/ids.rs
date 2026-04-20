@@ -68,6 +68,16 @@ pub struct IdData {
     /// `container { ... }` body, consulted by
     /// `VariableStore::trim_values_after`.
     pub container_owned: bool,
+    /// Slot was reserved for a `const expr X = ...` declaration. JS's
+    /// `this.expressions.reserve` packs these unconditionally into the
+    /// per-AIR arena regardless of reachability from the current AIR's
+    /// constraint/hint roots. Set only by `exec_variable_declaration`
+    /// when `vd.is_const && vd.vtype == TypeKind::Expr`; every other
+    /// `IdAllocator::reserve` call leaves this at the `Default::default`
+    /// value `false`. Consumed by `execute_air_template_call`'s
+    /// reachability importer to seed the const-expr in-frame inclusion
+    /// set and by its trimmed-slot fallback to preserve the same set.
+    pub is_const_expr: bool,
     pub extra: HashMap<String, String>,
 }
 

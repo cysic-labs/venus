@@ -97,15 +97,19 @@ airtemplate LazyReifyAir(const int N = 2**4,
 }
 
 airgroup LazyReify {
-    // Both instances emit identical bodies (including the
-    // MARKER_UNUSED_OPID payload) so their per-AIR arenas are
-    // structurally identical under JS semantics. This keeps the
-    // cross-instance identity invariants checkable while still
-    // exercising cross-AIR Intermediate resolution via the
-    // second instance inheriting proof-scope state from the
-    // first.
+    // Asymmetric instantiation: the first instance emits the
+    // MARKER_UNUSED_OPID payload, the second instance inherits
+    // the proof-scope state but does NOT re-emit or consume it.
+    // Under JS lazy `Expressions.pack`, the marker payload is
+    // never reachable from either instance's constraint/hint
+    // roots (no direct_global_update_assumes at airgroup scope
+    // for MARKER_UNUSED_OPID), so the 987654321 coefficient
+    // never lands in either per-AIR arena. The second instance
+    // therefore has a strictly smaller reachable set than the
+    // first and tests the "inherited-but-dropped" semantic the
+    // Round 3 reachability importer enforces.
     LazyReifyAir(N: 2**4, enable_flag: ps_enable, emit_marker_unused: 1);
-    LazyReifyAir(N: 2**4, enable_flag: ps_enable, emit_marker_unused: 1);
+    LazyReifyAir(N: 2**4, enable_flag: ps_enable, emit_marker_unused: 0);
 
     // Balance USED_OPID but NOT MARKER_UNUSED_OPID (the proof
     // obligation is symmetric between the two LazyReifyAir

@@ -504,25 +504,44 @@ pub(super) fn execute_air_template_call(
         // not pack (JS differentiates `ExpressionReference`
         // const-declarations from runtime `expr` variables and
         // only reserves the former in `this.expressions`).
-        // Round 8 must either (a) add a dedicated flag at
-        // self.exprs.reserve-time to distinguish const-expr
-        // declarations from runtime expr vars, or (b) find a
-        // different JS-parity signal. For now keep the Round 4
-        // reachability filter.
-        let in_frame_labeled_ids: std::collections::BTreeSet<u32> =
-            std::collections::BTreeSet::new();
-        let reachable_current_ids_sorted: Vec<u32> = reachable_order
-            .iter()
-            .filter_map(|(origin, id)| {
-                if origin.is_none() || *origin == Some(current_origin) {
-                    Some(*id)
-                } else {
-                    None
-                }
+        //
+        // Round 8 adds the dedicated `IdData.is_const_expr` flag
+        // set at `exec_variable_declaration` reserve-time when
+        // `vd.is_const && vd.vtype == TypeKind::Expr`. This is
+        // the JS-parity signal for `this.expressions.reserve`:
+        // const-expr declarations always pack regardless of
+        // reachability, matching
+        // `saveAndPushExpressionReference`. The final import
+        // set is `const-current union reachable-anonymous-current
+        // union reachable-proof-scope`, emitted in numeric id
+        // order. Same set is used by the trimmed-slot fallback
+        // below for slot blanking by `trim_values_after`.
+        let in_frame_labeled_ids: std::collections::BTreeSet<u32> = (frame_start
+            ..self.exprs.len())
+            .filter(|&eid| {
+                self.exprs
+                    .ids
+                    .get_data(eid)
+                    .map(|d| d.is_const_expr)
+                    .unwrap_or(false)
             })
-            .collect::<std::collections::BTreeSet<u32>>()
-            .into_iter()
             .collect();
+        let mut reachable_current_ids_sorted_set: std::collections::BTreeSet<u32> =
+            reachable_order
+                .iter()
+                .filter_map(|(origin, id)| {
+                    if origin.is_none() || *origin == Some(current_origin) {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        for &eid in &in_frame_labeled_ids {
+            reachable_current_ids_sorted_set.insert(eid);
+        }
+        let reachable_current_ids_sorted: Vec<u32> =
+            reachable_current_ids_sorted_set.into_iter().collect();
         let mut imported_ids: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
         for eid in &reachable_current_ids_sorted {
@@ -534,7 +553,8 @@ pub(super) fn execute_air_template_call(
                 continue;
             };
             let force_include = eid >= frame_start
-                && self.intermediate_refs_emitted.contains(&eid);
+                && (self.intermediate_refs_emitted.contains(&eid)
+                    || in_frame_labeled_ids.contains(&eid));
             if !force_include && !is_symbolic(val) {
                 continue;
             }
