@@ -668,6 +668,18 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                         stored
                     }
                 }
+                // Round 5 of plan-rustify-pkgen-e2e-0420:
+                // `Value::ColRef` aliases such as
+                // `const expr shifted_cx = cx';` intentionally
+                // inline at read sites. JS
+                // `Context.references.getDefinitionByItem` for a
+                // `const expr X = <ColRef>` declaration returns
+                // the underlying column reference directly; no
+                // ExpressionReference is created, so both reads
+                // of `shifted_cx` carry raw
+                // `WitnessCol(cx, row_offset=+1)` operands. The
+                // Rust port mirrors this by falling through to
+                // the wildcard inline path below.
                 _ => stored,
             }
         }
@@ -731,6 +743,10 @@ pub(super) fn get_var_ref_value_by_type_and_id(
                         stored
                     }
                 }
+                // Round 5: `Value::ColRef` aliases inline at read
+                // sites to match JS `const expr X = <ColRef>`
+                // behavior. See the matching arm in
+                // `get_var_ref_value` for the full rationale.
                 _ => stored,
             }
         }

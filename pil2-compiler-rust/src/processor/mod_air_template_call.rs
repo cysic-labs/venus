@@ -420,7 +420,7 @@ pub(super) fn execute_air_template_call(
             // serializer handles it via the resolution map).
             let is_current_origin = origin_opt.is_none()
                 || origin_opt == Some(current_origin);
-            let tree_opt: Option<std::rc::Rc<super::expression::RuntimeExpr>> =
+            let mut tree_opt: Option<std::rc::Rc<super::expression::RuntimeExpr>> =
                 if is_current_origin {
                     self.exprs.get(id).and_then(|v| match v {
                         Value::RuntimeExpr(rt) => Some(rt.clone()),
@@ -430,24 +430,31 @@ pub(super) fn execute_air_template_call(
                     let key = (origin_opt.unwrap(), id);
                     self.global_intermediate_resolution.get(&key).cloned()
                 };
+            // Round 5 of plan-rustify-pkgen-e2e-0420: when the
+            // stored value is a non-RuntimeExpr `Value::ColRef`
+            // (proof-scope `const expr alias = <col>` pattern
+            // after the ColRef identity fix in mod_vardecl.rs),
+            // the walker must also consult the resolution maps
+            // so transitive refs through the ColRef alias are
+            // discovered. The resolution map was populated at
+            // ref-mint time with `Rc<RuntimeExpr::ColRef>` for
+            // exactly these cases.
+            if tree_opt.is_none() && is_current_origin {
+                let key = (current_origin, id);
+                tree_opt = self
+                    .intermediate_ref_resolution
+                    .get(&key)
+                    .cloned()
+                    .or_else(|| {
+                        self.global_intermediate_resolution.get(&key).cloned()
+                    });
+            }
             if let Some(tree) = tree_opt {
                 collect_refs_from_expr(
                     tree.as_ref(),
                     &mut reachable_order,
                     &mut reachable_seen,
                 );
-            }
-            // Also check intermediate_ref_resolution for
-            // trimmed-slot reachable ids.
-            if is_current_origin && self.exprs.get(id).is_none() {
-                let key = (current_origin, id);
-                if let Some(tree) = self.intermediate_ref_resolution.get(&key).cloned() {
-                    collect_refs_from_expr(
-                        tree.as_ref(),
-                        &mut reachable_order,
-                        &mut reachable_seen,
-                    );
-                }
             }
         }
         // Telemetry: count reachable current-origin ids that
