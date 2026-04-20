@@ -679,18 +679,63 @@ pub(super) fn get_var_ref_value(&mut self, reference: &Reference) -> Value {
                         stored
                     }
                 }
-                // Round 5 of plan-rustify-pkgen-e2e-0420:
-                // `Value::ColRef` aliases such as
-                // `const expr shifted_cx = cx';` intentionally
-                // inline at read sites. JS
-                // `Context.references.getDefinitionByItem` for a
-                // `const expr X = <ColRef>` declaration returns
-                // the underlying column reference directly; no
-                // ExpressionReference is created, so both reads
-                // of `shifted_cx` carry raw
-                // `WitnessCol(cx, row_offset=+1)` operands. The
-                // Rust port mirrors this by falling through to
-                // the wildcard inline path below.
+                // Round 9 per Codex Round 8 review: current-frame
+                // `const expr X = <ColRef>` aliases (e.g.
+                // `const expr shifted_cx = cx';`) must mint a
+                // packable Intermediate reference so the proto
+                // serializer emits `Operand::Expression { idx }`
+                // for every read of `shifted_cx` instead of
+                // inlining a raw `WitnessCol(cx, row_offset=+1)`
+                // leaf at each read site. Wrap the stored ColRef
+                // in `RuntimeExpr::ColRef` and register it in the
+                // resolution maps so the Phase 3 importer + proto
+                // serializer can walk to the underlying tree.
+                // Out-of-frame ColRef aliases stay inline because
+                // they belong to an enclosing scope's frame.
+                Value::ColRef {
+                    col_type,
+                    id: stored_id,
+                    row_offset: stored_offset,
+                    origin_frame_id: stored_origin,
+                } => {
+                    let in_air = !self.air_stack.is_empty();
+                    let frame_start = self.exprs.frame_start();
+                    let is_const_expr = self
+                        .exprs
+                        .ids
+                        .get_data(reference.id)
+                        .map(|d| d.is_const_expr)
+                        .unwrap_or(false);
+                    if in_air
+                        && reference.id >= frame_start
+                        && is_const_expr
+                    {
+                        let colref_rt = RuntimeExpr::ColRef {
+                            col_type: *col_type,
+                            id: *stored_id,
+                            row_offset: *stored_offset,
+                            origin_frame_id: *stored_origin,
+                        };
+                        let rt_rc = Rc::new(colref_rt);
+                        self.intermediate_refs_emitted.insert(reference.id);
+                        let origin = self.current_origin_frame_id;
+                        let key = (origin, reference.id);
+                        self.intermediate_ref_resolution
+                            .entry(key)
+                            .or_insert_with(|| rt_rc.clone());
+                        self.global_intermediate_resolution
+                            .entry(key)
+                            .or_insert_with(|| rt_rc.clone());
+                        Value::ColRef {
+                            col_type: ColRefKind::Intermediate,
+                            id: reference.id,
+                            row_offset: None,
+                            origin_frame_id: Some(origin),
+                        }
+                    } else {
+                        stored
+                    }
+                }
                 _ => stored,
             }
         }
@@ -754,10 +799,54 @@ pub(super) fn get_var_ref_value_by_type_and_id(
                         stored
                     }
                 }
-                // Round 5: `Value::ColRef` aliases inline at read
-                // sites to match JS `const expr X = <ColRef>`
-                // behavior. See the matching arm in
-                // `get_var_ref_value` for the full rationale.
+                // Round 9 per Codex Round 8 review: current-frame
+                // `const expr X = <ColRef>` aliases (including
+                // array-element form) mint a packable Intermediate
+                // reference so proto emits
+                // `Operand::Expression { idx }`. See the matching
+                // branch in `get_var_ref_value` for the full
+                // rationale.
+                Value::ColRef {
+                    col_type,
+                    id: stored_id,
+                    row_offset: stored_offset,
+                    origin_frame_id: stored_origin,
+                } => {
+                    let in_air = !self.air_stack.is_empty();
+                    let frame_start = self.exprs.frame_start();
+                    let is_const_expr = self
+                        .exprs
+                        .ids
+                        .get_data(id)
+                        .map(|d| d.is_const_expr)
+                        .unwrap_or(false);
+                    if in_air && id >= frame_start && is_const_expr {
+                        let colref_rt = RuntimeExpr::ColRef {
+                            col_type: *col_type,
+                            id: *stored_id,
+                            row_offset: *stored_offset,
+                            origin_frame_id: *stored_origin,
+                        };
+                        let rt_rc = Rc::new(colref_rt);
+                        self.intermediate_refs_emitted.insert(id);
+                        let origin = self.current_origin_frame_id;
+                        let key = (origin, id);
+                        self.intermediate_ref_resolution
+                            .entry(key)
+                            .or_insert_with(|| rt_rc.clone());
+                        self.global_intermediate_resolution
+                            .entry(key)
+                            .or_insert_with(|| rt_rc.clone());
+                        Value::ColRef {
+                            col_type: ColRefKind::Intermediate,
+                            id,
+                            row_offset: None,
+                            origin_frame_id: Some(origin),
+                        }
+                    } else {
+                        stored
+                    }
+                }
                 _ => stored,
             }
         }

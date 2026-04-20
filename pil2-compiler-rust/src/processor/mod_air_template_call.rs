@@ -507,16 +507,21 @@ pub(super) fn execute_air_template_call(
         //
         // Round 8 adds the dedicated `IdData.is_const_expr` flag
         // set at `exec_variable_declaration` reserve-time when
-        // `vd.is_const && vd.vtype == TypeKind::Expr`. This is
-        // the JS-parity signal for `this.expressions.reserve`:
-        // const-expr declarations always pack regardless of
-        // reachability, matching
-        // `saveAndPushExpressionReference`. The final import
-        // set is `const-current union reachable-anonymous-current
-        // union reachable-proof-scope`, emitted in numeric id
-        // order. Same set is used by the trimmed-slot fallback
-        // below for slot blanking by `trim_values_after`.
-        let in_frame_labeled_ids: std::collections::BTreeSet<u32> = (frame_start
+        // `vd.is_const && vd.vtype == TypeKind::Expr`. Round 9
+        // narrows the inclusion rule per Codex Round 8 review:
+        // JS `ExpressionPacker::referencePack` only calls
+        // `saveAndPushExpressionReference` when pack-walking
+        // reaches an `ExpressionReference` operand whose value
+        // `isExpression` during the current AIR's root walk.
+        // That is a reachability rule, not an unconditional
+        // include. So the in-frame const-expr set participates
+        // in force_include ONLY when the reachability walker
+        // visited it: `reachable_const_current_ids =
+        // reachable_current_ids INTERSECT
+        // in_frame_const_expr_ids`. The final import set is
+        // the same numeric sort of reachable current-origin
+        // ids (the intersection is automatically included).
+        let in_frame_const_expr_ids: std::collections::BTreeSet<u32> = (frame_start
             ..self.exprs.len())
             .filter(|&eid| {
                 self.exprs
@@ -526,22 +531,14 @@ pub(super) fn execute_air_template_call(
                     .unwrap_or(false)
             })
             .collect();
-        let mut reachable_current_ids_sorted_set: std::collections::BTreeSet<u32> =
-            reachable_order
+        let reachable_const_current_ids: std::collections::BTreeSet<u32> =
+            in_frame_const_expr_ids
                 .iter()
-                .filter_map(|(origin, id)| {
-                    if origin.is_none() || *origin == Some(current_origin) {
-                        Some(*id)
-                    } else {
-                        None
-                    }
-                })
+                .copied()
+                .filter(|eid| reachable_current_ids.contains(eid))
                 .collect();
-        for &eid in &in_frame_labeled_ids {
-            reachable_current_ids_sorted_set.insert(eid);
-        }
         let reachable_current_ids_sorted: Vec<u32> =
-            reachable_current_ids_sorted_set.into_iter().collect();
+            reachable_current_ids.iter().copied().collect();
         let mut imported_ids: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
         for eid in &reachable_current_ids_sorted {
@@ -554,7 +551,7 @@ pub(super) fn execute_air_template_call(
             };
             let force_include = eid >= frame_start
                 && (self.intermediate_refs_emitted.contains(&eid)
-                    || in_frame_labeled_ids.contains(&eid));
+                    || reachable_const_current_ids.contains(&eid));
             if !force_include && !is_symbolic(val) {
                 continue;
             }
@@ -624,11 +621,10 @@ pub(super) fn execute_air_template_call(
             // silently reintroducing non-reachable slots the
             // new importer intends to drop.
             //
-            // Round 7: labeled-in-frame ids must also be pulled
-            // from `intermediate_ref_resolution` when their
-            // `self.exprs` slot is blanked — labeled slots pack
-            // unconditionally per JS semantics, and a blanked
-            // labeled slot is still a valid arena entry.
+            // Round 9: trimmed-slot fallback uses the same
+            // `reachable_const_current_ids` set so const-expr
+            // slots recovered from `intermediate_ref_resolution`
+            // still respect the JS pack-walk reachability rule.
             let mut pending_set: std::collections::BTreeSet<u32> = reachable_current_ids
                 .iter()
                 .copied()
@@ -636,7 +632,7 @@ pub(super) fn execute_air_template_call(
                 .filter(|eid| self.exprs.get(*eid).is_none())
                 .filter(|eid| !imported_ids.contains(eid))
                 .collect();
-            for &eid in &in_frame_labeled_ids {
+            for &eid in &reachable_const_current_ids {
                 if self.exprs.get(eid).is_none() && !imported_ids.contains(&eid) {
                     pending_set.insert(eid);
                 }
@@ -1090,6 +1086,22 @@ pub(super) fn execute_air_template_call(
             let air_id = air_on_stack.id;
             if let Some(ag) = self.air_groups.get_mut(&ag_name) {
                 if let Some(stored_air) = ag.airs.iter_mut().find(|a| a.id == air_id && !a.is_virtual) {
+                    // Round 9: propagate the execution-frame
+                    // origin-frame-id set at AIR push time onto the
+                    // stored-air entry that proto_out.rs reads when
+                    // initializing `current_origin_frame_id`. Without
+                    // this, `flatten_air_expr`'s is_foreign check sees
+                    // every same-origin ColRef{Intermediate,..} as
+                    // foreign (current_origin defaults to 0 while
+                    // ColRef.origin_frame_id is the actual frame id)
+                    // and every Intermediate re-flattens inline via
+                    // the global resolution map instead of landing
+                    // as `Operand::Expression { idx }`. The bug
+                    // predates Round 9 but was latent because most
+                    // AIRs carried only forward references through
+                    // the unresolved path, which coincidentally
+                    // matched the same re-flatten behavior.
+                    stored_air.origin_frame_id = air_on_stack.origin_frame_id;
                     // Constraint entries/expressions were already taken
                     // above; constraint exprs are appended at the end of
                     // air_expr_store. Pass just the count to avoid
