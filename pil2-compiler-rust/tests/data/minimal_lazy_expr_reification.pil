@@ -1,0 +1,92 @@
+// minimal_lazy_expr_reification.pil
+//
+// Phase 1 fixture for plan-rustify-pkgen-e2e-0420:
+// isolate the JS-lazy vs Rust-eager expression reification mismatch.
+//
+// The fixture exercises all four cases the plan names. The companion
+// regression test asserts lazy-packing semantics on the compiled
+// pilout. On current HEAD the regression MUST FAIL because
+// `execute_air_template_call` bulk-lifts every symbolic self.exprs
+// slot into air_expression_store regardless of reference.
+//
+// Case 1 - Cross-AIR / proof-scope ref used multiple times
+//    LazyReifyProducer.lookup_proves and LazyReifyConsumer.lookup_assumes
+//    share bus LAZY_REIFY_OPID, so std_lookup's proof-scope deferred
+//    cluster reduction materializes a shared gsum Intermediate that
+//    both AIRs reference. The consumer references the same logical
+//    expression more than once through the cluster reduction.
+//
+// Case 2 - Unused proof-scope expr
+//    `marker_unused` is declared as a symbolic `const expr` with a
+//    DISTINCTIVE literal coefficient 987654321 that appears nowhere
+//    else in the fixture. It is NEVER read by any constraint, hint,
+//    or further expression. JS lazy packing drops it entirely;
+//    current Rust bulk-lift keeps it in `air.expressions`. The
+//    regression test searches the decoded pilout for the marker
+//    constant and asserts zero occurrences.
+//
+// Case 3 - AIR-local alias chain
+//    `local_alias_1 = cx + cy; local_alias_2 = local_alias_1;`
+//    Both are read. JS shares one packed idx across the alias;
+//    Rust today creates two arena entries for the same logical
+//    expression.
+//
+// Case 4 - Row-offset use
+//    `shifted_cx = cx';`  plus direct read of `cx'` at another
+//    use site. JS keys the packed-expression cache by
+//    (expr_id, row_offset) and shares a single idx for repeated
+//    (cx, row_offset=+1) refs.
+
+require "std_lookup.pil";
+
+const int LAZY_REIFY_OPID = 991234;
+
+airtemplate LazyReifyProducer(const int N = 2**4) {
+    col witness px;
+    col witness py;
+    // Producer side of the shared bus. Mints a gsum payload that
+    // LazyReifyConsumer pulls via lookup_assumes. std_lookup's
+    // proof-scope reification turns this into a cross-AIR
+    // Intermediate reference the consumer reads multiple times.
+    const expr produced = px * py;
+    lookup_proves(LAZY_REIFY_OPID, [produced]);
+}
+
+airtemplate LazyReifyConsumer(const int N = 2**4) {
+    col witness cx;
+    col witness cy;
+
+    // Case 3 - AIR-local alias chain, BOTH read.
+    // In JS the `=== 0` constraint consumes one alias, and the
+    // reuse on the next line goes through the packed-expression
+    // cache; both references share one packed idx.
+    const expr local_alias_1 = cx + cy;
+    const expr local_alias_2 = local_alias_1;
+    local_alias_1 === 0;
+    local_alias_2 === 0;
+
+    // Case 2 - Unused proof-scope expression with distinctive
+    // literal coefficient 987654321. No constraint / hint / expr
+    // reads it. JS never packs it; current Rust lifts it anyway.
+    const expr marker_unused = cx * 987654321;
+
+    // Case 4 - Row-offset use. Both direct read and named alias
+    // of cx' must collapse onto a single (cx, row_offset=+1) idx.
+    const expr shifted_cx = cx';
+    shifted_cx === 0;
+    cx' + cy === 0;
+
+    // Case 1 - Proof-scope ref through std_lookup cluster.
+    // LazyReifyProducer's gsum Intermediate flows through
+    // LazyReifyConsumer's folded-term accumulator. Multiple
+    // cluster-reduction use sites reference the foreign-origin
+    // Intermediate; the lazy-reify importer should share one
+    // idx.
+    const expr consumer_product = cx * cy;
+    lookup_assumes(LAZY_REIFY_OPID, [consumer_product]);
+}
+
+airgroup LazyReify {
+    LazyReifyProducer();
+    LazyReifyConsumer();
+}
