@@ -719,6 +719,34 @@ pub(super) fn eval_function_call_with_alias(
         return FlowSignal::None;
     }
 
+    // Tables.* built-in functions for fixed column manipulation.
+    // These are dispatched in `eval_function_call` for expression-form
+    // calls; statement-form calls (e.g.
+    // `Tables.fill(opid, OPID[i], row_offset, h);` in
+    // std_range_check.pil and std_virtual_table.pil) flow through
+    // `exec_expr_stmt` -> `eval_function_call_with_alias` and were
+    // silently dropped here without the dispatcher, leaving the
+    // trio's (SpecifiedRanges / VirtualTable0 / VirtualTable1) fixed
+    // columns entirely unpopulated. The basic prover then committed
+    // to all-zero fixed cols and the recursive1 verifier rejected
+    // the basic proof at VerifyEvaluations0. See
+    // BL-20260420-tables-statement-dispatch-missing.
+    match name.as_str() {
+        "Tables.num_rows" => {
+            self.tables_num_rows(&raw_args);
+            return FlowSignal::None;
+        }
+        "Tables.fill" => {
+            self.tables_fill(&raw_args);
+            return FlowSignal::None;
+        }
+        "Tables.copy" => {
+            self.tables_copy(&raw_args);
+            return FlowSignal::None;
+        }
+        _ => {}
+    }
+
     FlowSignal::None
 }
 

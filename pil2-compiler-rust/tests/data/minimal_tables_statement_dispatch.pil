@@ -1,0 +1,37 @@
+// minimal_tables_statement_dispatch.pil
+//
+// Pins the statement-level dispatch of Tables.fill / Tables.copy.
+// The expression-level path in eval_function_call dispatches
+// Tables.* correctly, but the statement-level path in
+// eval_function_call_with_alias (used by exec_expr_stmt) was
+// missing the dispatcher and silently dropped Tables.* calls
+// without invoking them.
+//
+// std_range_check.pil and std_virtual_table.pil call Tables.fill
+// and Tables.copy as STATEMENTS to populate `col fixed name[N]`
+// arrays:
+//   for (int i = 0; i < num_groups; i++) {
+//       Tables.fill(opid, OPID[i], row_offset, h);
+//       Tables.copy(tVALS[i], 0, VALS[i], row_offset, h);
+//   }
+// With the missing dispatcher, the trio AIRs (SpecifiedRanges /
+// VirtualTable0 / VirtualTable1) ended up with entirely
+// zero-filled .fixed files, the basic prover committed to
+// all-zero fixed cols, and the recursive1 verifier rejected the
+// basic proof at VerifyEvaluations0.
+//
+// This fixture exercises Tables.fill in statement form on a
+// `col fixed F` declaration. The post-fix pilout's fixed-file
+// must contain the literal `42` byte at offset 0 (instead of
+// all zeros).
+
+airtemplate TablesStatementDispatchAir(const int N = 2**4) {
+    col fixed F;
+    Tables.fill(42, F, 0, 4);
+    col witness W;
+    W === F[0];
+}
+
+airgroup TablesStatementDispatchGroup {
+    TablesStatementDispatchAir();
+}
