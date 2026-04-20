@@ -398,19 +398,20 @@ fn lazy_reify_air_alias_chain_shares_packed_idx() {
 ///   constraints[2]: `shifted_cx === 0`
 ///   constraints[3]: `shifted_cx + cy === 0`
 ///
-/// Under JS lazy `saveAndPushExpressionReference` packing:
-/// constraint[2]'s expression IS shifted_cx (the packer reuses
-/// the shifted_cx lift idx via `references[(shifted_cx_id, 0)]`),
-/// so `constraint[2].expression_idx` equals the shifted_cx lift
-/// arena idx directly. Constraint[3]'s expression `shifted_cx +
-/// cy` embeds an `Operand::Expression { idx: shifted_cx_lift }`
-/// on the Add's lhs. The invariant this test locks: both
-/// constraints reach the SAME shifted_cx arena idx — constraint[2]
-/// through its direct expression_idx, constraint[3] through its
-/// lhs `Operand::Expression`. If constraint[3]'s lhs is anything
-/// other than `Operand::Expression { idx: shifted_cx_lift }`, the
-/// producer inlined the `shifted_cx = cx'` alias instead of
-/// minting a packable Intermediate reference.
+/// Under Round 13's JS-mirrored producer (Codex Round 12 review
+/// directive): expression-site reads of a bare-reference const-
+/// expr alias emit a single `Add(leaf, 0)` wrapper arena entry
+/// keyed by the alias identity, while operand-site reads emit the
+/// underlying leaf (`Operand::WitnessCol { col_idx, row_offset }`
+/// / `Operand::FixedCol { .. }` / ...) directly with no arena
+/// allocation. Both reads of shifted_cx therefore share the SAME
+/// underlying witness identity (`cx, row_offset=+1, stage=1`) —
+/// constraint[2] through its wrapper entry, constraint[3] through
+/// the inlined operand. The invariant this assertion locks:
+/// constraint[2]'s wrapper-entry lhs and constraint[3]'s
+/// operand-site lhs both describe the SAME witness col tuple, so
+/// either presentation form is accepted but the leaf identity
+/// must match.
 #[test]
 fn lazy_reify_air_row_offset_shares_packed_idx() {
     let pilout = decode(&compile_fixture("row_offset"));
@@ -435,6 +436,14 @@ fn lazy_reify_air_row_offset_shares_packed_idx() {
                 .expect("constraints[3] must have an expression_idx");
             use pb::expression::Operation;
             use pb::operand::Operand as O;
+            let Some(first_expr) = air.expressions.get(shifted_1_idx as usize)
+            else {
+                panic!(
+                    "constraints[2] expression_idx {} is out of arena range ({} entries)",
+                    shifted_1_idx,
+                    air.expressions.len()
+                );
+            };
             let Some(second_expr) = air.expressions.get(shifted_2_idx as usize)
             else {
                 panic!(
@@ -443,40 +452,63 @@ fn lazy_reify_air_row_offset_shares_packed_idx() {
                     air.expressions.len()
                 );
             };
-            let second_read = match second_expr.operation.as_ref() {
-                Some(Operation::Add(a)) => a.lhs.as_ref(),
-                _ => None,
-            };
-            let second_ident_idx: Option<u32> = second_read
-                .and_then(|op| op.operand.as_ref())
-                .and_then(|inner| match inner {
-                    O::Expression(e) => Some(e.idx),
+            // Resolve each Add's lhs to the underlying
+            // `(col_idx, row_offset, stage)` witness identity.
+            // Under Round 13 constraint[2] wraps
+            // `Add(WitnessCol(cx, +1), Constant(0))` and
+            // constraint[3] wraps `Add(WitnessCol(cx, +1),
+            // WitnessCol(cy))`. Both left operands resolve to the
+            // same tuple `(cx, +1, 1)`.
+            let leaf_witness = |expr: &pb::Expression| -> Option<(u32, i32, u32)> {
+                let Some(Operation::Add(add)) = expr.operation.as_ref() else {
+                    return None;
+                };
+                let op = add.lhs.as_ref()?.operand.as_ref()?;
+                match op {
+                    O::WitnessCol(w) => {
+                        Some((w.col_idx, w.row_offset, w.stage))
+                    }
+                    O::Expression(e) => {
+                        let target = air.expressions.get(e.idx as usize)?;
+                        let Some(Operation::Add(inner)) =
+                            target.operation.as_ref()
+                        else {
+                            return None;
+                        };
+                        match inner.lhs.as_ref()?.operand.as_ref()? {
+                            O::WitnessCol(w) => {
+                                Some((w.col_idx, w.row_offset, w.stage))
+                            }
+                            _ => None,
+                        }
+                    }
                     _ => None,
-                });
+                }
+            };
+            let first_leaf = leaf_witness(first_expr);
+            let second_leaf = leaf_witness(second_expr);
             assert!(
-                second_ident_idx.is_some(),
-                "LazyReifyAir instance#{}: constraints[3] \
-                 (shifted_cx + cy === 0) must source-reference \
-                 `shifted_cx` via `Operand::Expression {{ idx }}` on \
-                 the Add's lhs. A raw `Operand::WitnessCol` there \
-                 means the producer inlined the `const expr \
-                 shifted_cx = cx';` alias instead of minting a \
-                 packable Intermediate reference. second_read={:?}",
-                inst_idx, second_read
+                first_leaf.is_some() && second_leaf.is_some(),
+                "LazyReifyAir instance#{}: both constraint trees \
+                 must resolve shifted_cx's lhs to a WitnessCol \
+                 leaf (directly or through a single \
+                 `Add(Expression(..), Constant(0))` wrap). first={:?} \
+                 second={:?}",
+                inst_idx, first_expr, second_expr
             );
-            let second_idx = second_ident_idx.unwrap();
             assert_eq!(
-                shifted_1_idx, second_idx,
+                first_leaf, second_leaf,
                 "LazyReifyAir instance#{}: constraints[2] \
-                 (shifted_cx === 0) packs to expression_idx={} but \
-                 constraints[3] (shifted_cx + cy === 0) embeds \
-                 `Operand::Expression {{ idx: {} }}` on its lhs. \
-                 Under JS lazy `saveAndPushExpressionReference`, \
-                 both reads of `shifted_cx` must share the same \
-                 arena idx — constraint[2] through its direct \
-                 expression_idx and constraint[3] through its \
-                 Operand::Expression operand.",
-                inst_idx, shifted_1_idx, second_idx
+                 (shifted_cx === 0) and constraints[3] \
+                 (shifted_cx + cy === 0) must both resolve their \
+                 shifted_cx lhs to the SAME witness identity \
+                 `(col_idx, row_offset=+1, stage)`. Under Round \
+                 13's JS-mirrored producer, constraint[2] reaches \
+                 it through a wrapper arena entry keyed by the \
+                 alias identity and constraint[3] reaches it \
+                 through an inline `Operand::WitnessCol` — both \
+                 paths MUST carry the same underlying leaf.",
+                inst_idx,
             );
         }
     }

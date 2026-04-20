@@ -93,6 +93,22 @@ fn packed_key_for(expr: &RuntimeExpr, source_expr_id: Option<u32>) -> Option<Pac
     None
 }
 
+/// Round 13 per Codex Round 12 review: detect a bare
+/// non-`Intermediate` `RuntimeExpr::ColRef` leaf — the resolved
+/// shape of a same-origin unresolved reference to a
+/// bare-reference const-expr alias. Used at the four same-origin
+/// unresolved-reference branches in `flatten_air_expr` /
+/// `flatten_air_operand` so operand sites emit
+/// `leaf_to_air_operand(...)` directly (no arena allocation) and
+/// expression sites share one alias-keyed wrapper entry.
+fn is_bare_leaf_colref(expr: &RuntimeExpr) -> bool {
+    matches!(
+        expr,
+        RuntimeExpr::ColRef { col_type, .. }
+            if !matches!(col_type, ColRefKind::Intermediate)
+    )
+}
+
 /// Tree-size threshold (in nodes) above which an expression is not
 /// inserted into or queried from the structural dedup cache. The
 /// derived `Hash`/`Eq` for `RuntimeExpr` walk every Rc-linked child,
@@ -2149,26 +2165,17 @@ impl<'a> ProtoOutBuilder<'a> {
                     if let Some(resolved) = key
                         .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
                     {
-                        // Round 12 per Codex Round 11 review: when
-                        // the resolved tree is a bare non-Intermediate
-                        // ColRef leaf (the Round 11 importer skip
-                        // path drops these alias slots from the
-                        // top-level lift but registers the stored
-                        // leaf in `global_intermediate_resolution`),
-                        // cache the Add(leaf, 0) arena wrapper by the
-                        // ALIAS identity `(id, row_offset)`, not the
-                        // leaf's own `ColRef(kind, col_id,
-                        // col_offset)` key. JS `packed_expressions
-                        // .js::saveAndPushExpressionReference` keys
-                        // `references[]` by the ExpressionReference
-                        // id + rowOffset pair, not the underlying
-                        // column. Matching that keying is the Codex
-                        // directive step for closing the remaining
-                        // trio `expressionsCode[0].expId` offset.
-                        if matches!(
-                            resolved.as_ref(),
-                            RuntimeExpr::ColRef { col_type, .. } if !matches!(col_type, ColRefKind::Intermediate)
-                        ) {
+                        // Round 13 per Codex Round 12 review: at
+                        // EXPRESSION sites with a bare-leaf
+                        // resolved tree, consult the alias-keyed
+                        // `PackedKey::Provenance(alias_id,
+                        // row_offset)` cache first. On miss, emit
+                        // exactly one `Add(leaf, 0)` wrapper entry
+                        // via the generic leaf path and cache the
+                        // resulting idx under the alias key.
+                        // Subsequent expression-site reads reuse
+                        // the single wrapper entry.
+                        if is_bare_leaf_colref(resolved.as_ref()) {
                             let alias_key = PackedKey::Provenance(*id, offset_i32);
                             stats.prov_cache_probes += 1;
                             if let Some(&cached_idx) = prov_cache.get(&alias_key) {
@@ -2265,6 +2272,41 @@ impl<'a> ProtoOutBuilder<'a> {
                 // and `expr'` serialize to distinct trees, matching
                 // JS `ExpressionPacker.rowOffset` accumulation.
                 let resolved = shift_row_offsets(&resolved_raw, offset);
+                // Round 13 per Codex Round 12 review: at expression
+                // sites with a bare-leaf ExprRef resolution, consult
+                // `PackedKey::Provenance(alias_id, offset)` (same
+                // `cache_key` already reserved by the ForeignIntermediate
+                // keying above — alias identity for the ExprRef's id
+                // and rowOffset matches JS
+                // `saveAndPushExpressionReference(id, rowOffset)`).
+                // Emit a single `Add(leaf, 0)` wrapper entry, cache
+                // the idx. See `is_bare_leaf_colref` helper.
+                if is_bare_leaf_colref(&resolved) {
+                    stats.prov_cache_probes += 1;
+                    if let Some(&cached_idx) = prov_cache.get(&cache_key) {
+                        stats.prov_cache_hits += 1;
+                        return cached_idx;
+                    }
+                    let idx = self.flatten_air_expr(
+                        &resolved,
+                        source_expr_id,
+                        source_label,
+                        fixed_map,
+                        fixed_col_start,
+                        witness_map,
+                        custom_map,
+                        expr_id_map,
+                        source_to_pos,
+                        out,
+                        rc_cache,
+                        struct_cache,
+                        prov_cache,
+                        im_labels,
+                        stats,
+                    );
+                    prov_cache.insert(cache_key, idx);
+                    return idx;
+                }
                 let idx = self.flatten_air_expr(
                     &resolved,
                     source_expr_id,
@@ -2495,58 +2537,31 @@ impl<'a> ProtoOutBuilder<'a> {
                 if let Some(resolved) = key
                     .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
                 {
-                    // Round 12 per Codex Round 11 review: same
-                    // alias-keyed prov_cache as the
-                    // `flatten_air_expr` path. When the resolved
-                    // tree is a bare non-Intermediate ColRef
-                    // leaf, cache the Add(leaf, 0) arena wrapper
-                    // by `Provenance(alias_id, row_offset)` so
-                    // operand-level reads of the same alias share
-                    // the arena idx (matching JS
-                    // `references[(id, rowOffset)]` keying). This
-                    // also keeps the `Phase 1 row-offset`
-                    // assertion's strict `Operand::Expression`
-                    // oracle green because operand sites still
-                    // emit `Operand::Expression(shared_idx)`.
-                    if !is_foreign
-                        && matches!(
+                    // Round 13 per Codex Round 12 review: at
+                    // OPERAND sites, when the resolved tree is a
+                    // bare non-Intermediate ColRef leaf, emit the
+                    // leaf operand directly via
+                    // `leaf_to_air_operand(resolved, ...)` with
+                    // NO arena allocation. JS
+                    // `expression_packer.js::referencePack`'s
+                    // `defvalue.isReference` branch calls
+                    // `pushExpressionReference(id, offset)` which
+                    // is a miss-no-op when no saved reference
+                    // exists; the arena never gets an extra
+                    // wrapper entry at operand sites. Round 13
+                    // replaces the Round 12 Expression(idx)
+                    // wrapping at this site with a direct
+                    // WitnessCol / FixedCol / ... leaf.
+                    if !is_foreign && is_bare_leaf_colref(resolved.as_ref()) {
+                        return self.leaf_to_air_operand(
                             resolved.as_ref(),
-                            RuntimeExpr::ColRef { col_type, .. } if !matches!(col_type, ColRefKind::Intermediate)
-                        )
-                    {
-                        let alias_key = PackedKey::Provenance(*id, offset_i32);
-                        stats.prov_cache_probes += 1;
-                        if let Some(&cached_idx) = prov_cache.get(&alias_key) {
-                            stats.prov_cache_hits += 1;
-                            return Some(pilout_proto::Operand {
-                                operand: Some(pilout_proto::operand::Operand::Expression(
-                                    pilout_proto::operand::Expression { idx: cached_idx },
-                                )),
-                            });
-                        }
-                        let idx = self.flatten_air_expr(
-                            &resolved,
-                            None,
-                            None,
                             fixed_map,
                             fixed_col_start,
                             witness_map,
                             custom_map,
                             expr_id_map,
                             source_to_pos,
-                            out,
-                            rc_cache,
-                            struct_cache,
-                            prov_cache,
-                            im_labels,
-                            stats,
                         );
-                        prov_cache.insert(alias_key, idx);
-                        return Some(pilout_proto::Operand {
-                            operand: Some(pilout_proto::operand::Operand::Expression(
-                                pilout_proto::operand::Expression { idx },
-                            )),
-                        });
                     }
                     let idx = self.flatten_air_expr(
                         &resolved,
@@ -2621,6 +2636,23 @@ impl<'a> ProtoOutBuilder<'a> {
                     .cloned()
                 {
                     let resolved = shift_row_offsets(&resolved_raw, offset);
+                    // Round 13 per Codex Round 12 review: at
+                    // OPERAND sites with bare-leaf ExprRef
+                    // resolution, emit the leaf operand directly
+                    // via `leaf_to_air_operand(resolved)`. No
+                    // arena allocation at operand sites. Mirrors
+                    // the Intermediate operand-site handling.
+                    if is_bare_leaf_colref(&resolved) {
+                        return self.leaf_to_air_operand(
+                            &resolved,
+                            fixed_map,
+                            fixed_col_start,
+                            witness_map,
+                            custom_map,
+                            expr_id_map,
+                            source_to_pos,
+                        );
+                    }
                     let idx = self.flatten_air_expr(
                         &resolved,
                         None,
