@@ -642,6 +642,16 @@ pub struct ProtoOutBuilder<'a> {
     /// `temp/plan-rustify-pkgen-e2e-0420-1.md` AC-S2 + AC-S4 and
     /// BL-20260420-hint-colref-arena-head-discovery.
     origin_registry: HashMap<u32, AirOriginCtx>,
+    /// Per-AIR hint entries serialized inline during
+    /// `build_air_groups`. Keyed by `(air_group_id, air_id)`. Each
+    /// AIR's hints are emitted against the same live packing caches
+    /// as its constraints (JS parity — the `addHints(packed)` call
+    /// in `temp/golden_references/pil2-compiler/src/processor.js`
+    /// feeds hints into the same `PackedExpressions` context before
+    /// `setExpressions(packed)`). Drained by `build_hints` after
+    /// all AIRs have finished packing. See
+    /// BL-20260420-live-pack-ctx-inline-hints.
+    pending_air_hints: HashMap<(u32, u32), Vec<pilout_proto::Hint>>,
 }
 
 /// Per-origin AIR translation context cloned into
@@ -671,6 +681,7 @@ impl<'a> ProtoOutBuilder<'a> {
             current_origin_frame_id: std::cell::RefCell::new(0),
             im_label_by_packed_idx: HashMap::new(),
             origin_registry: HashMap::new(),
+            pending_air_hints: HashMap::new(),
         }
     }
 
@@ -716,6 +727,29 @@ impl<'a> ProtoOutBuilder<'a> {
 
     /// Build the air groups section.
     fn build_air_groups(&mut self) -> Vec<pilout_proto::AirGroup> {
+        // Populate the origin-keyed registry up front so air-scope
+        // hint serialization (now inline below) can resolve
+        // foreign-origin `HintValue::ColRef` leaves against the
+        // minting AIR's maps without depending on `build_hints`
+        // running the population step. See
+        // BL-20260420-live-pack-ctx-inline-hints.
+        self.origin_registry.clear();
+        self.pending_air_hints.clear();
+        for ag in self.processor.air_groups.iter() {
+            for air in ag.airs.iter().filter(|a| !a.is_virtual) {
+                self.origin_registry.insert(
+                    air.origin_frame_id,
+                    AirOriginCtx {
+                        fixed_id_map: air.fixed_id_map.clone(),
+                        fixed_col_start: air.fixed_col_start,
+                        witness_id_map: air.witness_id_map.clone(),
+                        custom_id_map: air.custom_id_map.clone(),
+                        air_value_count: air.air_value_stages.len(),
+                    },
+                );
+            }
+        }
+
         let mut result = Vec::new();
         for ag in self.processor.air_groups.iter() {
             // Build air group values from stored metadata.
@@ -739,6 +773,8 @@ impl<'a> ProtoOutBuilder<'a> {
             let ag_idx = self.processor.air_groups.iter().position(|g| std::ptr::eq(g, ag)).unwrap_or(0) as u32;
             let mut air_id_counter = 0u32;
             for air in ag.airs.iter().filter(|a| !a.is_virtual) {
+                let air_id = air_id_counter;
+                air_id_counter += 1;
                 *self.current_air_name.borrow_mut() = air.name.clone();
                 *self.current_air_value_count.borrow_mut() = air.air_value_stages.len();
                 *self.current_origin_frame_id.borrow_mut() = air.origin_frame_id;
@@ -863,31 +899,15 @@ impl<'a> ProtoOutBuilder<'a> {
                     );
                     expr_id_map[pos] = Some(root_idx);
                 }
-                for (pos, (expr, source_expr_id, source_label, is_late)) in
-                    entries.iter().enumerate()
-                {
-                    if !*is_late {
-                        continue;
-                    }
-                    let root_idx = self.flatten_air_expr(
-                        expr.as_ref(),
-                        *source_expr_id,
-                        *source_label,
-                        &air.fixed_id_map,
-                        air.fixed_col_start,
-                        &air.witness_id_map,
-                        &air.custom_id_map,
-                        &expr_id_map,
-                        &source_to_pos,
-                        &mut proto_expressions,
-                        &mut rc_cache,
-                        &mut struct_cache,
-                        &mut prov_cache,
-                        &mut im_labels,
-                        &mut stats,
-                    );
-                    expr_id_map[pos] = Some(root_idx);
-                }
+                // Late-pack entries (`is_late_pack == true`, hint-
+                // scoped `Value::RuntimeExpr` trees) are NOT flattened
+                // up front. They pack on demand below when an
+                // air-scope hint's `HintValue::ExprId(raw_id)`
+                // references them. Unreferenced late entries are
+                // never packed, matching JS: `addHints(packed)` only
+                // appends packed entries for hint fields that are
+                // actually emitted, not for every stored runtime
+                // expression the processor happened to create.
                 if trace_enabled {
                     eprintln!(
                         "PIL2C_CHAIN_SHAPE air={}/{} airgroup_id={} air_id={} \
@@ -901,7 +921,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         ag.name,
                         air.name,
                         ag_idx,
-                        air_id_counter,
+                        air_id,
                         stats.entry_count,
                         stats.binop_total,
                         stats.unaryop_total,
@@ -930,31 +950,16 @@ impl<'a> ProtoOutBuilder<'a> {
                     );
                 }
 
-                // Stash the packed expression-id map so `build_hints`
-                // can look up packed indices for this air when
-                // serializing `HintValue::ExprId` hint leaves.
-                // Collapse Option slots: unfilled positions degrade to
-                // `u32::MAX` sentinel so the build_hints consumer can
-                // detect an unresolved ExprId without triggering a
-                // panic.
-                let flattened: Vec<u32> = expr_id_map
-                    .iter()
-                    .map(|slot| slot.unwrap_or(u32::MAX))
-                    .collect();
-                self.air_expr_id_maps
-                    .insert((ag_idx, air_id_counter), flattened);
-                // Record the IM-label side table for this air so
-                // the IM SymbolEntry emission below sees the
-                // first-save (packed_idx -> label) pairs.
-                self.im_label_by_packed_idx
-                    .insert((ag_idx, air_id_counter), im_labels);
-                air_id_counter += 1;
-
                 // Build per-AIR constraints, referencing the flattened
                 // expression indices. The constraint expr_id offsets into
                 // the stored_expressions; when using the full expression
                 // store, we need to offset by the number of intermediate
-                // expressions that were prepended.
+                // expressions that were prepended. Constraints are
+                // emitted BEFORE air-scope hint serialization so hints
+                // can reference constraint sub-expressions that have
+                // already been packed (JS parity: `addHints(packed)`
+                // runs AFTER constraints are packed into the same
+                // `PackedExpressions` context).
                 let constraint_expr_count = if air.stored_expressions_count > 0 {
                     air.stored_expressions_count
                 } else {
@@ -1018,6 +1023,64 @@ impl<'a> ProtoOutBuilder<'a> {
                         constraint: Some(constraint_kind),
                     });
                 }
+
+                // Inline air-scope hint emission against the same
+                // mutable pack context used above. Each
+                // `HintValue::ExprId(raw_id)` triggers on-demand
+                // flatten of `entries[raw_id]` via
+                // `flatten_late_on_demand` below — unreferenced
+                // late-pack entries never land in the arena. Mirrors
+                // JS `addHints(packed)` semantic: hint-field
+                // expressions are packed AFTER constraints into the
+                // same `PackedExpressions` context (see
+                // `temp/golden_references/pil2-compiler/src/
+                // processor.js` and
+                // `temp/golden_references/pil2-compiler/src/
+                // proto_out.js`). Non-runtime hint values
+                // (`HintValue::ColRef`, `Int`, `Str`, `Array`,
+                // `Object`) use existing direct paths.
+                let mut air_hints_out: Vec<pilout_proto::Hint> = Vec::new();
+                for hint in &air.hints {
+                    let hint_fields = self.hint_value_to_fields_live(
+                        &hint.data,
+                        &entries,
+                        &air.fixed_id_map,
+                        air.fixed_col_start,
+                        &air.witness_id_map,
+                        &air.custom_id_map,
+                        &source_to_pos,
+                        &mut expr_id_map,
+                        &mut proto_expressions,
+                        &mut rc_cache,
+                        &mut struct_cache,
+                        &mut prov_cache,
+                        &mut im_labels,
+                        &mut stats,
+                    );
+                    air_hints_out.push(pilout_proto::Hint {
+                        name: hint.name.clone(),
+                        hint_fields,
+                        air_group_id: Some(ag_idx),
+                        air_id: Some(air_id),
+                    });
+                }
+                self.pending_air_hints
+                    .insert((ag_idx, air_id), air_hints_out);
+
+                // Stash the packed expression-id map and IM-label
+                // side table AFTER hint emission so on-demand
+                // flattened late entries are visible to downstream
+                // consumers (`build_symbols` IM iteration; and, in
+                // the current layout, `build_hints` has nothing
+                // more to do for air-scope hints).
+                let flattened: Vec<u32> = expr_id_map
+                    .iter()
+                    .map(|slot| slot.unwrap_or(u32::MAX))
+                    .collect();
+                self.air_expr_id_maps
+                    .insert((ag_idx, air_id), flattened);
+                self.im_label_by_packed_idx
+                    .insert((ag_idx, air_id), im_labels);
 
                 // Build fixed column entries (empty values when using
                 // fixed-to-file mode; the data is in separate .fixed
@@ -1471,79 +1534,20 @@ impl<'a> ProtoOutBuilder<'a> {
     fn build_hints(&mut self) -> Vec<pilout_proto::Hint> {
         let mut result = Vec::new();
 
-        // Populate the origin-keyed AIR translation registry before
-        // any hint serialization so foreign-origin hint leaves can
-        // resolve their raw ids through the minting AIR's maps. Keyed
-        // by `Air::origin_frame_id`; entries cloned from stored AIR
-        // metadata so the registry survives scope transitions during
-        // serialization. Virtual airs are excluded (they never emit
-        // hints and carry no column allocations in the proto).
-        self.origin_registry.clear();
-        for ag in self.processor.air_groups.iter() {
-            for air in ag.airs.iter().filter(|a| !a.is_virtual) {
-                self.origin_registry.insert(
-                    air.origin_frame_id,
-                    AirOriginCtx {
-                        fixed_id_map: air.fixed_id_map.clone(),
-                        fixed_col_start: air.fixed_col_start,
-                        witness_id_map: air.witness_id_map.clone(),
-                        custom_id_map: air.custom_id_map.clone(),
-                        air_value_count: air.air_value_stages.len(),
-                    },
-                );
-            }
-        }
+        // Origin registry and air-scope hint bundles are populated
+        // inline by `build_air_groups`. `build_hints` now only
+        // drains the per-AIR bundles and appends proof-scope hints.
 
-        // Per-AIR hints: iterate airgroups -> airs, using stored hints.
-        for (ag_idx, ag) in self.processor.air_groups.iter().enumerate() {
-            let air_group_id = ag_idx as u32;
-            let mut non_virtual_pos = 0u32;
-            for air in &ag.airs {
-                if air.is_virtual {
-                    continue;
-                }
-                let air_id = non_virtual_pos;
-                non_virtual_pos += 1;
-
-                // Load the packed expression-id map built during
-                // build_air_groups so HintValue::ExprId can emit an
-                // Operand::Expression referencing the same index the
-                // per-AIR expressions[] array uses.
-                self.current_air_expr_id_map =
-                    self.air_expr_id_maps.get(&(air_group_id, air_id)).cloned();
-
-                // Refresh the per-AIR scratch state the HintValue::ColRef
-                // resolver consults. Without these assignments the
-                // resolver would read stale values left over from
-                // `build_air_groups`'s final iteration, causing stale
-                // is_foreign detection and (before the origin_registry
-                // landed) stale fallback maps.
-                *self.current_air_name.borrow_mut() = air.name.clone();
-                *self.current_air_value_count.borrow_mut() = air.air_value_stages.len();
-                *self.current_origin_frame_id.borrow_mut() = air.origin_frame_id;
-
-                let air_expr_refs: Vec<&RuntimeExpr> = air
-                    .air_expression_store
-                    .iter()
-                    .map(|e| &e.expr)
-                    .collect();
-                for hint in &air.hints {
-                    let hint_fields = self.hint_value_to_fields(
-                        &hint.data,
-                        &air.fixed_id_map,
-                        air.fixed_col_start,
-                        &air.witness_id_map,
-                        &air.custom_id_map,
-                        &air_expr_refs,
-                    );
-                    result.push(pilout_proto::Hint {
-                        name: hint.name.clone(),
-                        hint_fields,
-                        air_group_id: Some(air_group_id),
-                        air_id: Some(air_id),
-                    });
-                }
-                self.current_air_expr_id_map = None;
+        // Air-scope hints: drain `pending_air_hints` in stable
+        // (ag_idx, air_id) order. `build_air_groups` populated
+        // these inline against the live per-AIR pack context so
+        // hint-field expressions share the same arena positions as
+        // constraint sub-expressions they reference.
+        let mut keys: Vec<(u32, u32)> = self.pending_air_hints.keys().copied().collect();
+        keys.sort();
+        for key in keys {
+            if let Some(hints) = self.pending_air_hints.remove(&key) {
+                result.extend(hints);
             }
         }
 
@@ -1559,6 +1563,269 @@ impl<'a> ProtoOutBuilder<'a> {
         }
 
         result
+    }
+
+    /// Live-context variant of `hint_value_to_fields` used by
+    /// `build_air_groups` inline hint emission. Threads the mutable
+    /// pack context (expr_id_map, proto_expressions, caches,
+    /// im_labels, stats) so `HintValue::ExprId(raw_id)` can
+    /// on-demand flatten `entries[raw_id]` into the live arena.
+    /// Non-ExprId variants delegate back to the immutable helpers
+    /// that were stable across earlier rounds.
+    #[allow(clippy::too_many_arguments)]
+    fn hint_value_to_fields_live(
+        &self,
+        value: &HintValue,
+        entries: &[(Rc<RuntimeExpr>, Option<u32>, Option<&str>, bool)],
+        fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
+        witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        source_to_pos: &HashMap<u32, usize>,
+        expr_id_map: &mut Vec<Option<u32>>,
+        proto_expressions: &mut Vec<pilout_proto::Expression>,
+        rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
+        struct_cache: &mut HashMap<RuntimeExpr, u32>,
+        prov_cache: &mut HashMap<PackedKey, u32>,
+        im_labels: &mut std::collections::BTreeMap<u32, String>,
+        stats: &mut ChainShapeStats,
+    ) -> Vec<pilout_proto::HintField> {
+        match value {
+            HintValue::Object(pairs) => {
+                let fields: Vec<pilout_proto::HintField> = pairs
+                    .iter()
+                    .map(|(k, v)| {
+                        let mut field = self.hint_value_to_single_field_live(
+                            v,
+                            entries,
+                            fixed_map,
+                            fixed_col_start,
+                            witness_map,
+                            custom_map,
+                            source_to_pos,
+                            expr_id_map,
+                            proto_expressions,
+                            rc_cache,
+                            struct_cache,
+                            prov_cache,
+                            im_labels,
+                            stats,
+                        );
+                        field.name = Some(k.clone());
+                        field
+                    })
+                    .collect();
+                vec![pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::HintFieldArray(
+                        pilout_proto::HintFieldArray { hint_fields: fields },
+                    )),
+                }]
+            }
+            _ => vec![self.hint_value_to_single_field_live(
+                value,
+                entries,
+                fixed_map,
+                fixed_col_start,
+                witness_map,
+                custom_map,
+                source_to_pos,
+                expr_id_map,
+                proto_expressions,
+                rc_cache,
+                struct_cache,
+                prov_cache,
+                im_labels,
+                stats,
+            )],
+        }
+    }
+
+    /// Single-field live-context variant. Forwards Int / Str /
+    /// ColRef / Array / Object to the existing direct paths; for
+    /// `HintValue::ExprId(raw_id)` it packs `entries[raw_id]` on
+    /// demand into the live arena if the slot is still unfilled,
+    /// then emits `Operand::Expression(packed_idx)`.
+    #[allow(clippy::too_many_arguments)]
+    fn hint_value_to_single_field_live(
+        &self,
+        value: &HintValue,
+        entries: &[(Rc<RuntimeExpr>, Option<u32>, Option<&str>, bool)],
+        fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
+        witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        source_to_pos: &HashMap<u32, usize>,
+        expr_id_map: &mut Vec<Option<u32>>,
+        proto_expressions: &mut Vec<pilout_proto::Expression>,
+        rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
+        struct_cache: &mut HashMap<RuntimeExpr, u32>,
+        prov_cache: &mut HashMap<PackedKey, u32>,
+        im_labels: &mut std::collections::BTreeMap<u32, String>,
+        stats: &mut ChainShapeStats,
+    ) -> pilout_proto::HintField {
+        match value {
+            HintValue::ExprId(raw_id) => {
+                let packed_idx = self.resolve_or_pack_air_hint_expr(
+                    *raw_id,
+                    entries,
+                    fixed_map,
+                    fixed_col_start,
+                    witness_map,
+                    custom_map,
+                    source_to_pos,
+                    expr_id_map,
+                    proto_expressions,
+                    rc_cache,
+                    struct_cache,
+                    prov_cache,
+                    im_labels,
+                    stats,
+                );
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::Operand(
+                        pilout_proto::Operand {
+                            operand: Some(pilout_proto::operand::Operand::Expression(
+                                pilout_proto::operand::Expression { idx: packed_idx },
+                            )),
+                        },
+                    )),
+                }
+            }
+            HintValue::Array(items) => {
+                let fields: Vec<pilout_proto::HintField> = items
+                    .iter()
+                    .map(|v| {
+                        self.hint_value_to_single_field_live(
+                            v,
+                            entries,
+                            fixed_map,
+                            fixed_col_start,
+                            witness_map,
+                            custom_map,
+                            source_to_pos,
+                            expr_id_map,
+                            proto_expressions,
+                            rc_cache,
+                            struct_cache,
+                            prov_cache,
+                            im_labels,
+                            stats,
+                        )
+                    })
+                    .collect();
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::HintFieldArray(
+                        pilout_proto::HintFieldArray { hint_fields: fields },
+                    )),
+                }
+            }
+            HintValue::Object(pairs) => {
+                let fields: Vec<pilout_proto::HintField> = pairs
+                    .iter()
+                    .map(|(k, v)| {
+                        let mut field = self.hint_value_to_single_field_live(
+                            v,
+                            entries,
+                            fixed_map,
+                            fixed_col_start,
+                            witness_map,
+                            custom_map,
+                            source_to_pos,
+                            expr_id_map,
+                            proto_expressions,
+                            rc_cache,
+                            struct_cache,
+                            prov_cache,
+                            im_labels,
+                            stats,
+                        );
+                        field.name = Some(k.clone());
+                        field
+                    })
+                    .collect();
+                pilout_proto::HintField {
+                    name: None,
+                    value: Some(pilout_proto::hint_field::Value::HintFieldArray(
+                        pilout_proto::HintFieldArray { hint_fields: fields },
+                    )),
+                }
+            }
+            // Non-expression-backed variants never need on-demand
+            // flatten; forward to the immutable single-field helper
+            // using an empty expression-store slice (the helper
+            // ignores that parameter for non-ExprId leaves).
+            _ => self.hint_value_to_single_field(
+                value,
+                fixed_map,
+                fixed_col_start,
+                witness_map,
+                custom_map,
+                &[],
+            ),
+        }
+    }
+
+    /// On-demand flatten of `entries[raw_id]` into the live pack
+    /// context. If the slot is already filled (non-late entries
+    /// packed in pass 1, or previously-flattened late entries from
+    /// earlier hint references) returns the cached packed idx; else
+    /// flattens and fills the slot.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_or_pack_air_hint_expr(
+        &self,
+        raw_id: u32,
+        entries: &[(Rc<RuntimeExpr>, Option<u32>, Option<&str>, bool)],
+        fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
+        witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        source_to_pos: &HashMap<u32, usize>,
+        expr_id_map: &mut Vec<Option<u32>>,
+        proto_expressions: &mut Vec<pilout_proto::Expression>,
+        rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
+        struct_cache: &mut HashMap<RuntimeExpr, u32>,
+        prov_cache: &mut HashMap<PackedKey, u32>,
+        im_labels: &mut std::collections::BTreeMap<u32, String>,
+        stats: &mut ChainShapeStats,
+    ) -> u32 {
+        let pos = raw_id as usize;
+        if let Some(Some(idx)) = expr_id_map.get(pos).copied() {
+            return idx;
+        }
+        let Some((expr, source_expr_id, source_label, _is_late)) = entries.get(pos) else {
+            // Out of range: a stale raw_id in a hint. Return a
+            // sentinel so downstream consumers hit an obvious
+            // misalignment rather than a silent 0.
+            debug_assert!(
+                false,
+                "hint ExprId {} out of entries range (len={})",
+                raw_id,
+                entries.len()
+            );
+            return u32::MAX;
+        };
+        let root_idx = self.flatten_air_expr(
+            expr.as_ref(),
+            *source_expr_id,
+            *source_label,
+            fixed_map,
+            fixed_col_start,
+            witness_map,
+            custom_map,
+            expr_id_map,
+            source_to_pos,
+            proto_expressions,
+            rc_cache,
+            struct_cache,
+            prov_cache,
+            im_labels,
+            stats,
+        );
+        expr_id_map[pos] = Some(root_idx);
+        root_idx
     }
 
     /// Convert a HintValue to a list of HintField messages (per-AIR context).
@@ -3612,5 +3879,149 @@ mod tests {
         assert_eq!(main.fixed_cols.len(), 3, "Main fixedCols count");
 
         eprintln!("test_decoded_pilout_parity: all assertions passed");
+    }
+
+    // -----------------------------------------------------------------
+    // `hint_colref_to_operand` unit tests: prove the origin-aware
+    // resolver routes foreign-origin AIR-local leaves through the
+    // registered minting AIR and asserts in debug on a registry miss.
+    // -----------------------------------------------------------------
+
+    use crate::processor::context::CompilerConfig;
+    use crate::processor::expression::ColRefKind;
+    use crate::processor::Processor;
+
+    fn make_builder(processor: &Processor) -> ProtoOutBuilder<'_> {
+        let b = ProtoOutBuilder::new(processor);
+        // Simulate the per-AIR scratch state that `build_hints`
+        // refreshes inside its inner loop. `current_origin_frame_id`
+        // represents the AIR currently being serialized.
+        *b.current_origin_frame_id.borrow_mut() = 7;
+        *b.current_air_name.borrow_mut() = String::from("ConsumerAir");
+        *b.current_air_value_count.borrow_mut() = 0;
+        b
+    }
+
+    /// Foreign-origin witness hint leaf: `origin_frame_id` differs
+    /// from the consuming AIR's origin, and the registered minting
+    /// AIR's `witness_id_map` routes the raw id to a non-zero
+    /// (stage, col_idx). Proves AC-S2.
+    #[test]
+    fn hint_colref_foreign_origin_resolves_through_registry() {
+        let config = CompilerConfig::default();
+        let processor = Processor::new(config);
+        let mut b = make_builder(&processor);
+        // Mint AIR has origin_frame_id = 42, with a witness_id_map
+        // that translates local witness id 5 to (stage=2, col_idx=9).
+        b.origin_registry.insert(
+            42,
+            AirOriginCtx {
+                fixed_id_map: Vec::new(),
+                fixed_col_start: 0,
+                witness_id_map: vec![(0, 0); 5]
+                    .into_iter()
+                    .chain(std::iter::once((2u32, 9u32)))
+                    .collect(),
+                custom_id_map: Vec::new(),
+                air_value_count: 0,
+            },
+        );
+        let operand = b.hint_colref_to_operand(
+            ColRefKind::Witness,
+            5,
+            Some(1),
+            Some(42),
+            /* consuming AIR fixed_map */ &[],
+            /* fixed_col_start */ 0,
+            /* consuming AIR witness_map (empty on purpose) */ &[],
+            /* custom_map */ &[],
+        );
+        match operand {
+            pilout_proto::operand::Operand::WitnessCol(wc) => {
+                assert_eq!(wc.stage, 2, "stage must come from registry ctx");
+                assert_eq!(wc.col_idx, 9, "col_idx must come from registry ctx");
+                assert_eq!(wc.row_offset, 1, "row_offset must be preserved");
+            }
+            other => panic!(
+                "expected Operand::WitnessCol via registry; got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Same-origin path: `origin_frame_id == current`. The resolver
+    /// uses the consuming AIR's maps. Regression lock for AC-S1.
+    #[test]
+    fn hint_colref_same_origin_uses_current_maps() {
+        let config = CompilerConfig::default();
+        let processor = Processor::new(config);
+        let b = make_builder(&processor);
+        let consumer_witness_map: Vec<(u32, u32)> = vec![(1, 3)];
+        let operand = b.hint_colref_to_operand(
+            ColRefKind::Witness,
+            0,
+            None,
+            Some(7), // matches current_origin_frame_id
+            &[],
+            0,
+            &consumer_witness_map,
+            &[],
+        );
+        match operand {
+            pilout_proto::operand::Operand::WitnessCol(wc) => {
+                assert_eq!(wc.stage, 1);
+                assert_eq!(wc.col_idx, 3);
+            }
+            other => panic!(
+                "expected same-origin WitnessCol via current maps; got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Registry miss: `origin_frame_id` differs from current AIR and
+    /// is NOT in the registry. Debug builds must fire
+    /// `debug_assert!` in `hint_colref_to_operand`. Release builds
+    /// emit `Constant(0)` as a well-formed fallback (covered by the
+    /// release-only variant below).
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "hint leaf origin not in origin_registry")]
+    fn hint_colref_registry_miss_debug_asserts() {
+        let config = CompilerConfig::default();
+        let processor = Processor::new(config);
+        let b = make_builder(&processor);
+        // origin 99 is NOT in the registry; current AIR origin is 7.
+        let _ = b.hint_colref_to_operand(
+            ColRefKind::Witness,
+            0,
+            None,
+            Some(99),
+            &[],
+            0,
+            &[],
+            &[],
+        );
+    }
+
+    /// Release variant of the miss path: the resolver emits
+    /// `Constant(0)` well-formed fallback without panicking.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn hint_colref_registry_miss_release_fallback() {
+        let config = CompilerConfig::default();
+        let processor = Processor::new(config);
+        let b = make_builder(&processor);
+        let operand = b.hint_colref_to_operand(
+            ColRefKind::Witness,
+            0,
+            None,
+            Some(99),
+            &[],
+            0,
+            &[],
+            &[],
+        );
+        matches!(operand, pilout_proto::operand::Operand::Constant(_));
     }
 }

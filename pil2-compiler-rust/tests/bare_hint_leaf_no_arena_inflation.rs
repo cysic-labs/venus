@@ -1,6 +1,9 @@
 //! Regression for the producer invariant that air-scope bare hint
 //! column references do NOT push anonymous `Add(leaf, Constant(0))`
-//! wrappers into the per-AIR expressions arena (AC-P2).
+//! wrappers into the per-AIR expressions arena (AC-P2), plus the
+//! AC-P1 target that trio `first_constraint.expression_idx` match
+//! the golden JS build (`16 / 36 / 8` for `VirtualTable0` /
+//! `VirtualTable1` / `SpecifiedRanges`).
 //!
 //! Background: pil2-compiler-rust historically routed air-scope
 //! bare `Value::ColRef` hint arguments through a catch-all arm in
@@ -59,31 +62,75 @@ enum CompileOutcome {
     Pilout(Vec<u8>),
 }
 
-/// Load the workspace's `pil/zisk.pilout` produced by the real
-/// build chain (`make generate-key` or a direct `pil2c` run from
-/// the workspace root). Rebuilding the pilout inside the test
-/// from the `pil2-compiler-rust/` cwd triggers pre-existing
-/// runtime errors (`Tables.copy: src must be a fixed column`)
-/// that silently drop constraints on some AIRs, producing a
-/// differently-shaped artifact than production. Reading the
-/// checked-out pilout instead gives the test a stable,
-/// reproducible input that matches the actual build.
+/// Invoke the current Rust `pil2c` against `pil/zisk.pil` using
+/// the production include set, running from the workspace root so
+/// `Tables.copy` arguments (resolved through relative-path
+/// lookups in the Zisk build wiring) pick up the same column
+/// values they would under `make generate-key`.
+///
+/// AC-R5 requires this test to guard the live compiler output, so
+/// the subprocess cwd and includes mirror `Makefile::generate-key`
+/// exactly. If `pil/zisk.pil` is present but the compile fails
+/// (non-zero exit), the test HARD-FAILS with captured stderr
+/// rather than silently skipping: silent skipping masked the
+/// Round 0-Round 1 regression where stale artifacts could let the
+/// test pass against a pilout that no longer reflected source.
 fn compile_zisk() -> CompileOutcome {
-    let Some((workspace, _zisk_pil, _std_pil)) = locate_workspace() else {
+    let Some((workspace, zisk_pil, std_pil)) = locate_workspace() else {
         return CompileOutcome::ZiskMissing;
     };
-    let pilout_path = workspace.join("pil").join("zisk.pilout");
-    if !pilout_path.is_file() {
-        eprintln!(
-            "bare_hint_leaf_no_arena_inflation: `pil/zisk.pilout` \
-             not found at {}; skipping. Run `make generate-key` \
-             or invoke `pil2c` from the workspace root first.",
-            pilout_path.display()
+    let includes = format!(
+        "{},{},{},{}",
+        workspace.join("pil").display(),
+        std_pil.display(),
+        workspace.join("state-machines").display(),
+        workspace.join("precompiles").display(),
+    );
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_pil2c"));
+    let out = std::env::temp_dir().join("pil2c_bare_hint_leaf_no_arena_inflation.pilout");
+    let fixed_dir = std::env::temp_dir().join("pil2c_bare_hint_leaf_no_arena_inflation_fixed");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_dir_all(&fixed_dir);
+    std::fs::create_dir_all(&fixed_dir).expect("create fixed output dir");
+    let output = Command::new(&bin)
+        .current_dir(&workspace)
+        .arg(&zisk_pil)
+        .arg("-I")
+        .arg(&includes)
+        .arg("-o")
+        .arg(&out)
+        .arg("-u")
+        .arg(&fixed_dir)
+        .arg("-O")
+        .arg("fixed-to-file")
+        .output()
+        .expect("spawn pil2c");
+    if !output.status.success() {
+        panic!(
+            "pil2c exited non-zero compiling `pil/zisk.pil` from the \
+             workspace root (exit={:?}). AC-R5 requires this build to \
+             succeed when the Zisk workspace is present. The test \
+             cannot be trusted to guard the live compiler output with \
+             a failing subprocess. stdout tail:\n{}\nstderr tail:\n{}",
+            output.status.code(),
+            tail_lines(&output.stdout, 40),
+            tail_lines(&output.stderr, 40),
         );
-        return CompileOutcome::ZiskMissing;
     }
-    let bytes = std::fs::read(&pilout_path).expect("read zisk.pilout");
+    assert!(
+        out.is_file(),
+        "pil2c returned success but did not produce pilout at {}",
+        out.display()
+    );
+    let bytes = std::fs::read(&out).expect("read pilout output");
     CompileOutcome::Pilout(bytes)
+}
+
+fn tail_lines(raw: &[u8], n: usize) -> String {
+    let s = String::from_utf8_lossy(raw);
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
 }
 
 fn is_bare_col_wrapper(expr: &pb::Expression) -> bool {
