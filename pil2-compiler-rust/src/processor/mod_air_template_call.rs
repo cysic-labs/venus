@@ -549,6 +549,35 @@ pub(super) fn execute_air_template_call(
             let Some(val) = self.exprs.get(eid) else {
                 continue;
             };
+            // Round 11 per Codex Round 10 review: explicit skip for
+            // reachable current-frame const-expr slots whose stored
+            // value is a bare column reference (i.e.
+            // `Value::ColRef{col_type != Intermediate, ..}`). These
+            // are `const expr X = <bare col ref>` aliases that JS
+            // `expression_packer.js::referencePack`'s
+            // `defvalue.isReference` branch handles via bare
+            // `pushExpressionReference(id, offset)` — a miss-no-op
+            // when no saved reference exists, so no arena entry gets
+            // created on first reference. Rust's `is_symbolic`
+            // matches every `Value::ColRef` as symbolic and the
+            // importer would otherwise lift the alias slot into the
+            // per-AIR arena; skip it here so the serializer's
+            // unresolved-Intermediate path rehydrates the alias via
+            // `global_intermediate_resolution` at every read site.
+            let is_bare_ref_const_alias = eid >= frame_start
+                && self
+                    .exprs
+                    .ids
+                    .get_data(eid)
+                    .map(|d| d.is_const_expr)
+                    .unwrap_or(false)
+                && matches!(
+                    val,
+                    Value::ColRef { col_type, .. } if !matches!(col_type, super::expression::ColRefKind::Intermediate)
+                );
+            if is_bare_ref_const_alias {
+                continue;
+            }
             let force_include = eid >= frame_start
                 && (self.intermediate_refs_emitted.contains(&eid)
                     || reachable_const_current_ids.contains(&eid));
@@ -638,6 +667,35 @@ pub(super) fn execute_air_template_call(
                 }
             }
             for eid in pending_set {
+                // Round 11: also skip bare-ref const-expr aliases
+                // in the trimmed-slot fallback. Their registered
+                // `intermediate_ref_resolution` entry is a bare
+                // `RuntimeExpr::ColRef{Witness / Fixed / ..}` leaf
+                // that the serializer should rehydrate inline via
+                // the unresolved-Intermediate path, NOT as a
+                // top-level `air_expression_store` entry.
+                let is_bare_ref_const_alias = self
+                    .exprs
+                    .ids
+                    .get_data(eid)
+                    .map(|d| d.is_const_expr)
+                    .unwrap_or(false)
+                    && matches!(
+                        self
+                            .intermediate_ref_resolution
+                            .get(&(self.current_origin_frame_id, eid))
+                            .map(|rt| rt.as_ref()),
+                        Some(super::expression::RuntimeExpr::ColRef {
+                            col_type,
+                            ..
+                        }) if !matches!(
+                            col_type,
+                            super::expression::ColRefKind::Intermediate
+                        )
+                    );
+                if is_bare_ref_const_alias {
+                    continue;
+                }
                 let rt: Rc<super::expression::RuntimeExpr> =
                     match self
                         .intermediate_ref_resolution
