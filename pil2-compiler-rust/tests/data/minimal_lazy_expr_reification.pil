@@ -64,10 +64,13 @@ airtemplate LazyReifyAir(const int N = 2**4,
     local_alias_1 === 0;
     local_alias_2 === 0;
 
-    // Case 4 - AIR-local row-offset reuse.
+    // Case 4 - AIR-local row-offset reuse. Both constraints
+    // reference the `shifted_cx = cx'` alias so JS-lazy
+    // `(expr_id, row_offset)` reuse semantics collapse them to
+    // the same arena idx via the shared `shifted_cx` lift.
     const expr shifted_cx = cx';
     shifted_cx === 0;
-    cx' + cy === 0;
+    shifted_cx + cy === 0;
 
     // Case 1 - Used proof-scope payload. Populates the USED_OPID
     // bus; the airgroup's `direct_global_update_assumes(USED_OPID,

@@ -332,20 +332,42 @@ pub(super) fn execute_air_template_call(
     // the consumer.
     let air_expr_store: Vec<air::AirExpressionEntry> = {
         let mut store = std::mem::take(&mut self.air_expression_store);
-        // Iterate every self.exprs slot. Most proof-scope
-        // container-seeded slots (id < frame_start) carry
-        // legitimate pre-declared state that Main / other AIRs
-        // reference back through the per-AIR expressionsCode list
-        // (Round 14: dropping all of them removed 91 valid Main
-        // entries and regressed recursive1). The narrow case we
-        // need to drop is the cross-AIR Custom leak class: a
-        // proof-scope slot populated in a PRIOR AIR's frame that
-        // holds a `ColRefKind::Custom` id not declared in THIS
-        // AIR (e.g. Rom's compress_exprs Horner polynomial stored
-        // into `proof.std.gsum.direct_gsum_e[i]`). Those are the
-        // only slots that must not surface in the consuming AIR's
-        // per-AIR expression store.
+        // Round 4 of plan-rustify-pkgen-e2e-0420 Phase 3: replace
+        // the unconditional `for eid in 0..self.exprs.len()`
+        // sweep with a reachability-driven importer. JS
+        // `PackedExpressions` packs expression references
+        // lazily, only when
+        // `expression_packer.js::referencePack` encounters an
+        // `ExpressionReference` during tree walking. The Rust
+        // port's old sweep lifted every symbolic `self.exprs`
+        // slot regardless of reference, which inflated the
+        // per-AIR arena 1.4x-7.8x above JS golden and is the
+        // root cause the plan is trying to eliminate.
+        //
+        // New flow:
+        //   1. Seed a reachable-set with refs collected from
+        //      constraint expressions plus any hint-originated
+        //      `air_expression_store` entries accumulated during
+        //      AIR execution.
+        //   2. Walk the reachable ids to fixpoint: for each
+        //      reachable id, look up its stored tree in
+        //      `self.exprs` (current-origin) or
+        //      `global_intermediate_resolution` (foreign-origin)
+        //      and collect further refs.
+        //   3. Import only the reachable current-origin ids
+        //      (deduped by id, preserving first-seen walker
+        //      discovery order - the JS-equivalent arena
+        //      insertion order).
+        //   4. Retain the `proof_scope_slot_has_foreign_leaf`
+        //      filter for cross-AIR custom-col leak safety.
+        //   5. Keep the trimmed-slot fallback but gated on
+        //      reachability.
+        //
+        // The Phase 2 `RuntimeExpr::ExprRef` node carries the
+        // reference identity this importer walks. The importer
+        // is the Phase 3 payload.
         let frame_start = self.exprs.frame_start();
+        let current_origin = self.current_origin_frame_id;
         let trace_lift_breakdown = std::env::var("PIL2C_LIFT_BREAKDOWN")
             .map(|v| v == "1")
             .unwrap_or(false);
@@ -360,70 +382,174 @@ pub(super) fn execute_air_template_call(
         let mut leak_visited: std::collections::HashSet<
             *const super::expression::RuntimeExpr,
         > = std::collections::HashSet::new();
-        for eid in 0..self.exprs.len() {
-            if let Some(val) = self.exprs.get(eid) {
-                // Round 3 lift / read consistency: if the producer
-                // emitted an `Intermediate` ref pointing to this
-                // slot via `eval_reference`, the proto serializer
-                // will need an `air_expression_store` entry for
-                // it - even if the slot has since been overwritten
-                // with a non-symbolic value (Int, Array, etc.).
-                // Without the force-include, `pil2-stark-setup`
-                // panics at `helpers.rs:21:19` indexing past
-                // `expressions[]` for the unresolved ref.
-                let force_include = eid >= frame_start
-                    && self.intermediate_refs_emitted.contains(&eid);
-                if !force_include && !is_symbolic(val) {
+
+        // Build the reachable-id set via root-driven walk. The
+        // helper `collect_refs_from_expr` adds every `ExprRef`
+        // plus every `ColRef { col_type: Intermediate }` leaf
+        // to the `reachable_order` Vec preserving first-seen
+        // discovery order; `reachable_seen` dedups.
+        let mut reachable_order: Vec<(Option<u32>, u32)> = Vec::new();
+        let mut reachable_seen: std::collections::HashSet<(Option<u32>, u32)> =
+            std::collections::HashSet::new();
+        collect_refs_from_constraint_exprs(
+            &constraint_exprs,
+            &mut reachable_order,
+            &mut reachable_seen,
+        );
+        for entry in &store {
+            collect_refs_from_expr(
+                &entry.expr,
+                &mut reachable_order,
+                &mut reachable_seen,
+            );
+        }
+        // Fixpoint: expand reachable set through the stored
+        // tree at each reachable id.
+        let mut cursor = 0usize;
+        while cursor < reachable_order.len() {
+            let (origin_opt, id) = reachable_order[cursor];
+            cursor += 1;
+            // Same-origin id resolves through self.exprs; a
+            // None-origin proof-scope id also resolves through
+            // self.exprs (the slot persists across the air
+            // push). Foreign-origin ids resolve through
+            // `global_intermediate_resolution` so downstream
+            // serialization can inline the tree; for
+            // reachability purposes the foreign-origin branch
+            // does NOT import into this AIR's store (the
+            // serializer handles it via the resolution map).
+            let is_current_origin = origin_opt.is_none()
+                || origin_opt == Some(current_origin);
+            let tree_opt: Option<std::rc::Rc<super::expression::RuntimeExpr>> =
+                if is_current_origin {
+                    self.exprs.get(id).and_then(|v| match v {
+                        Value::RuntimeExpr(rt) => Some(rt.clone()),
+                        _ => None,
+                    })
+                } else {
+                    let key = (origin_opt.unwrap(), id);
+                    self.global_intermediate_resolution.get(&key).cloned()
+                };
+            if let Some(tree) = tree_opt {
+                collect_refs_from_expr(
+                    tree.as_ref(),
+                    &mut reachable_order,
+                    &mut reachable_seen,
+                );
+            }
+            // Also check intermediate_ref_resolution for
+            // trimmed-slot reachable ids.
+            if is_current_origin && self.exprs.get(id).is_none() {
+                let key = (current_origin, id);
+                if let Some(tree) = self.intermediate_ref_resolution.get(&key).cloned() {
+                    collect_refs_from_expr(
+                        tree.as_ref(),
+                        &mut reachable_order,
+                        &mut reachable_seen,
+                    );
+                }
+            }
+        }
+        // Telemetry: count reachable current-origin ids that
+        // would otherwise have been lifted (in-frame or
+        // proof-scope), plus the complement set of symbolic
+        // self.exprs slots that were NOT reached.
+        let reachable_current_ids: std::collections::BTreeSet<u32> = reachable_order
+            .iter()
+            .filter_map(|(origin, id)| {
+                if origin.is_none() || *origin == Some(current_origin) {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut lift_proof_scope_reachable = 0usize;
+        let mut lift_proof_scope_unused_dropped = 0usize;
+        if trace_lift_breakdown {
+            for eid in 0..self.exprs.len() {
+                if eid >= frame_start {
+                    break;
+                }
+                let Some(val) = self.exprs.get(eid) else {
+                    continue;
+                };
+                if !is_symbolic(val) {
                     continue;
                 }
-                if eid < frame_start {
-                    // Seeded proof-scope slot. Drop it if the
-                    // expression tree carries column leaves that do
-                    // NOT belong to this AIR's allocators. Round 8
-                    // extracts the filter logic into
-                    // `Processor::proof_scope_slot_has_foreign_leaf`
-                    // so unit tests can drive the predicate directly
-                    // (Codex Round 7 review requirement). See
-                    // BL-20260419-origin-authoritative-serializer.
-                    let rt_probe = value_to_runtime_expr(val);
-                    if self.proof_scope_slot_has_foreign_leaf(
-                        &rt_probe,
-                        &mut leak_visited,
-                    ) {
-                        lift_proof_scope_dropped_foreign += 1;
-                        continue;
-                    }
-                }
-                let rt = value_to_runtime_expr(val);
-                let source_label = self.exprs.ids.label_ranges
-                    .to_vec()
-                    .iter()
-                    .find_map(|lr| {
-                        if eid >= lr.from && eid < lr.from + lr.count {
-                            let size = lr.array_dims.iter().copied().product::<u32>().max(1);
-                            if size <= 1 {
-                                Some(lr.label.clone())
-                            } else {
-                                Some(format!("{}[{}]", lr.label, eid - lr.from))
-                            }
-                        } else {
-                            None
-                        }
-                    });
-                if eid < frame_start {
-                    lift_proof_scope += 1;
-                    if trace_lift_breakdown {
-                        proof_scope_unique_trees.insert(rt.clone());
-                    }
-                } else if force_include && !is_symbolic(val) {
-                    lift_in_frame_force_include += 1;
-                } else if source_label.is_some() {
-                    lift_in_frame_symbolic_labeled += 1;
+                if reachable_current_ids.contains(&eid) {
+                    lift_proof_scope_reachable += 1;
                 } else {
-                    lift_in_frame_symbolic_unlabeled += 1;
+                    lift_proof_scope_unused_dropped += 1;
                 }
-                store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
             }
+        }
+        // Import reachable ids preserving walker discovery
+        // order. Dedup by id so the same id appearing multiple
+        // times in reachable_order (different row offsets)
+        // lifts only once.
+        let mut imported_ids: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
+        for (origin_opt, eid) in &reachable_order {
+            let eid = *eid;
+            let is_current_origin = origin_opt.is_none()
+                || *origin_opt == Some(current_origin);
+            if !is_current_origin {
+                continue;
+            }
+            if !imported_ids.insert(eid) {
+                continue;
+            }
+            let Some(val) = self.exprs.get(eid) else {
+                continue;
+            };
+            let force_include = eid >= frame_start
+                && self.intermediate_refs_emitted.contains(&eid);
+            if !force_include && !is_symbolic(val) {
+                continue;
+            }
+            if eid < frame_start {
+                // Seeded proof-scope slot. Drop it if the
+                // expression tree carries column leaves from a
+                // different AIR's allocator.
+                let rt_probe = value_to_runtime_expr(val);
+                if self.proof_scope_slot_has_foreign_leaf(
+                    &rt_probe,
+                    &mut leak_visited,
+                ) {
+                    lift_proof_scope_dropped_foreign += 1;
+                    continue;
+                }
+            }
+            let rt = value_to_runtime_expr(val);
+            let source_label = self.exprs.ids.label_ranges
+                .to_vec()
+                .iter()
+                .find_map(|lr| {
+                    if eid >= lr.from && eid < lr.from + lr.count {
+                        let size = lr.array_dims.iter().copied().product::<u32>().max(1);
+                        if size <= 1 {
+                            Some(lr.label.clone())
+                        } else {
+                            Some(format!("{}[{}]", lr.label, eid - lr.from))
+                        }
+                    } else {
+                        None
+                    }
+                });
+            if eid < frame_start {
+                lift_proof_scope += 1;
+                if trace_lift_breakdown {
+                    proof_scope_unique_trees.insert(rt.clone());
+                }
+            } else if force_include && !is_symbolic(val) {
+                lift_in_frame_force_include += 1;
+            } else if source_label.is_some() {
+                lift_in_frame_symbolic_labeled += 1;
+            } else {
+                lift_in_frame_symbolic_unlabeled += 1;
+            }
+            store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
         }
         // Round 4 trimmed-slot fallback: any slot id the producer
         // minted an `Intermediate` ref for, but whose value has since
@@ -438,16 +564,24 @@ pub(super) fn execute_air_template_call(
         // BL-20260418-intermediate-ref-cross-air-leak.
         {
             use std::rc::Rc;
-            let mut pending: Vec<u32> =
-                self.intermediate_refs_emitted.iter().copied().collect();
+            // Round 4 Phase 3: trimmed-slot fallback is now
+            // gated on reachability. Only reachable ids whose
+            // self.exprs slot was blanked by
+            // `trim_values_after` get pulled from
+            // `intermediate_ref_resolution`. This keeps the
+            // old correctness backstop for trimmed-by-function-
+            // exit slots while preventing the fallback from
+            // silently reintroducing non-reachable slots the
+            // new importer intends to drop.
+            let mut pending: Vec<u32> = reachable_current_ids
+                .iter()
+                .copied()
+                .filter(|eid| *eid >= frame_start)
+                .filter(|eid| self.exprs.get(*eid).is_none())
+                .filter(|eid| !imported_ids.contains(eid))
+                .collect();
             pending.sort_unstable();
             for eid in pending {
-                if eid < frame_start {
-                    continue;
-                }
-                if self.exprs.get(eid).is_some() {
-                    continue;
-                }
                 let rt: Rc<super::expression::RuntimeExpr> =
                     match self
                         .intermediate_ref_resolution
@@ -471,6 +605,7 @@ pub(super) fn execute_air_template_call(
                             None
                         }
                     });
+                imported_ids.insert(eid);
                 store.push(air::AirExpressionEntry::with_source(
                     (*rt).clone(),
                     eid,
@@ -497,6 +632,7 @@ pub(super) fn execute_air_template_call(
                 "PIL2C_LIFT_BREAKDOWN air={}/{} frame_start={} total={} \
                  proof_scope={} proof_scope_unique_trees={} \
                  proof_scope_dropped_foreign={} \
+                 proof_scope_reachable={} proof_scope_unused_dropped={} \
                  in_frame_force_include={} \
                  in_frame_symbolic_labeled={} \
                  in_frame_symbolic_unlabeled={} \
@@ -509,6 +645,8 @@ pub(super) fn execute_air_template_call(
                 lift_proof_scope,
                 proof_scope_unique_trees.len(),
                 lift_proof_scope_dropped_foreign,
+                lift_proof_scope_reachable,
+                lift_proof_scope_unused_dropped,
                 lift_in_frame_force_include,
                 lift_in_frame_symbolic_labeled,
                 lift_in_frame_symbolic_unlabeled,
@@ -1043,4 +1181,67 @@ pub(super) fn execute_air_template_call(
 
     Value::Int(0)
 }
+}
+
+/// Walk a `RuntimeExpr` tree and record every by-id reference as
+/// `(origin_frame_id, id)` in `out`, preserving first-seen order.
+/// Used by the Phase 3 reachability importer in
+/// `execute_air_template_call` to seed its root set.
+///
+/// Both `RuntimeExpr::ColRef { col_type: Intermediate, .. }` and
+/// `RuntimeExpr::ExprRef { .. }` contribute. Other `ColRef` kinds
+/// (Witness / Fixed / AirValue / Custom / Public / Challenge /
+/// ProofValue / AirGroupValue) do not carry by-id expression
+/// references. `Value` and `ColRef { non-Intermediate }` leaves
+/// short-circuit.
+pub(super) fn collect_refs_from_expr(
+    expr: &super::expression::RuntimeExpr,
+    out: &mut Vec<(Option<u32>, u32)>,
+    seen: &mut std::collections::HashSet<(Option<u32>, u32)>,
+) {
+    use super::expression::{ColRefKind, RuntimeExpr};
+    match expr {
+        RuntimeExpr::ColRef {
+            col_type: ColRefKind::Intermediate,
+            id,
+            origin_frame_id,
+            ..
+        } => {
+            let key = (*origin_frame_id, *id);
+            if seen.insert(key) {
+                out.push(key);
+            }
+        }
+        RuntimeExpr::ExprRef { id, origin_frame_id, .. } => {
+            let key = (*origin_frame_id, *id);
+            if seen.insert(key) {
+                out.push(key);
+            }
+        }
+        RuntimeExpr::BinOp { left, right, .. } => {
+            collect_refs_from_expr(left.as_ref(), out, seen);
+            collect_refs_from_expr(right.as_ref(), out, seen);
+        }
+        RuntimeExpr::UnaryOp { operand, .. } => {
+            collect_refs_from_expr(operand.as_ref(), out, seen);
+        }
+        // ColRef (non-Intermediate) and bare Value leaves carry
+        // no by-id expression reference.
+        RuntimeExpr::ColRef { .. } | RuntimeExpr::Value(_) => {}
+    }
+}
+
+/// Walk a slice of top-level constraint expressions and seed the
+/// reachability set. Mirrors the JS `expressions.js::pack`
+/// entry where each AIR root expression is packed; `ExprRef`
+/// discovery happens lazily during the pack walk, not via a
+/// self.exprs sweep. Phase 3 of plan-rustify-pkgen-e2e-0420.
+pub(super) fn collect_refs_from_constraint_exprs(
+    constraint_exprs: &[super::expression::RuntimeExpr],
+    out: &mut Vec<(Option<u32>, u32)>,
+    seen: &mut std::collections::HashSet<(Option<u32>, u32)>,
+) {
+    for expr in constraint_exprs {
+        collect_refs_from_expr(expr, out, seen);
+    }
 }

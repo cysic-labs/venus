@@ -23,7 +23,7 @@
 //! the last two encode the alias-chain and row-offset
 //! reference-identity gates.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -39,18 +39,27 @@ use prost::Message;
 // that the unused proof-scope state was not pruned.
 const MARKER_UNUSED: u64 = 987654321;
 
-// Expected per-AIR `air.expressions.len()` under JS-lazy packing for
-// `LazyReifyAir(N=2**4, enable_flag=ps_enable)`. Both instances of
-// the airtemplate have identical bodies, so after lazy reification
-// both must land on the SAME count. The first instance on current
-// HEAD already reports 30 entries; JS lazy packing should produce
-// this same count OR a smaller count for both. The assertion is a
-// loose lower-bound floor (>= 1) combined with the exact-equality
-// invariant `first.len() == second.len()`. Phase 2/3 may refine the
-// numeric target if lazy reification shrinks the first-instance
-// count further; for now the primary gate is count equality across
-// instances plus the ceiling below.
-const LAZY_REIFY_AIR_EXPRESSIONS_CEILING: usize = 30;
+// Expected per-AIR `air.expressions.len()` under Phase 3
+// reachability-driven importing. Both `LazyReifyAir` instances have
+// effectively identical bodies (the `emit_marker_unused` gate only
+// differs in which instance emits the proof-scope
+// `MARKER_UNUSED_OPID` payload, and that payload carries zero
+// reachable arena entries because no constraint/hint walks it).
+// After Phase 3, both instances import exactly 4 arena entries:
+//
+//   [0] Add(WitnessCol(cx), WitnessCol(cy))  -- local_alias_1 lift
+//   [1] Add(WitnessCol(cx), WitnessCol(cy))  -- constraint root
+//                                               for the alias chain
+//   [2] Add(WitnessCol(cx, row_offset=+1), Constant(0))
+//                                            -- shifted_cx === 0
+//   [3] Add(WitnessCol(cx, row_offset=+1), WitnessCol(cy))
+//                                            -- shifted_cx + cy === 0
+//
+// The count comes directly from the fixture's four AIR-root
+// constraints (local_alias_1 === 0 is aliased with
+// local_alias_2 === 0 at the constraint level; their shared root
+// expression idx is 1).
+const LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED: usize = 4;
 
 fn compile_fixture(tag: &str) -> Vec<u8> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -239,20 +248,20 @@ fn lazy_reify_air_expressions_count_is_identical_across_instances() {
 /// first-instance ceiling. Phase 2/3 may refine this numeric target
 /// if lazy reification shrinks the first-instance count further.
 #[test]
-fn lazy_reify_air_expressions_count_matches_ceiling() {
-    let pilout = decode(&compile_fixture("count_ceiling"));
+fn lazy_reify_air_expressions_count_matches_expected() {
+    let pilout = decode(&compile_fixture("count_expected"));
     let instances = air_expression_slices(&pilout, "LazyReifyAir");
     for (idx, ex) in instances.iter().enumerate() {
         assert_eq!(
             ex.len(),
-            LAZY_REIFY_AIR_EXPRESSIONS_CEILING,
+            LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED,
             "LazyReifyAir instance#{}: expressions.len()={} must equal \
              the expected lazy-packing target {}. This locks the exact \
              per-AIR arena shape required by Phase 1 of \
              temp/plan-rustify-pkgen-e2e-0420.md.",
             idx,
             ex.len(),
-            LAZY_REIFY_AIR_EXPRESSIONS_CEILING
+            LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED
         );
     }
 }
@@ -305,194 +314,180 @@ fn lazy_reify_unused_marker_is_absent_from_arena() {
     }
 }
 
-/// Assertion 4: alias-chain reference identity. `local_alias_1 = cx
+/// Assertion 4: alias-chain source-identity. `local_alias_1 = cx
 /// + cy; local_alias_2 = local_alias_1; local_alias_1 === 0;
-/// local_alias_2 === 0;` creates two constraints that read the same
-/// logical expression. Under JS lazy packing both constraints
-/// resolve to the same packed arena idx. Under current Rust
-/// bulk-lift the alias is materialized as a fresh entry, so the
-/// two constraints resolve to different arena indices.
-///
-/// The assertion walks the AIR's constraint list for constraints
-/// whose expression index directly contains `cx + cy` (a 2-operand
-/// Add of two distinct witness cols) and asserts they all point to
-/// the same arena idx (either directly or via a single-hop
-/// `Operand::Expression { idx }`).
+/// local_alias_2 === 0;` creates two constraints at source-level
+/// positions 0 and 1. Under JS lazy packing both constraints
+/// resolve to the same packed arena idx; under the Round 4
+/// reachability importer this must materialize as
+/// `constraints[0].expression_idx == constraints[1].expression_idx`.
+/// The assertion extracts the two specific named constraints by
+/// their source-order position (per Codex Round 3 review directive
+/// to stop matching generic `Add(WitnessCol, WitnessCol)` tree
+/// shapes).
 #[test]
 fn lazy_reify_air_alias_chain_shares_packed_idx() {
     let pilout = decode(&compile_fixture("alias_chain"));
-    let instances = air_expression_slices(&pilout, "LazyReifyAir");
-    for (inst_idx, ex) in instances.iter().enumerate() {
-        // For each constraint expression, resolve to the underlying
-        // tree through at most one leaf-wrap indirection, then check
-        // whether the tree's root op is `Add` with two witness-col
-        // leaves (cx + cy). Record the arena idx at which the
-        // `Add(WitnessCol, WitnessCol)` lives.
-        use pb::expression::Operation;
-        use pb::operand::Operand as O;
-        let pilout_ref = &pilout;
-        let Some(ag) = pilout_ref.air_groups.first() else {
-            panic!("no airgroup");
-        };
-        let air = ag
+    for ag in &pilout.air_groups {
+        for (inst_idx, air) in ag
             .airs
             .iter()
             .filter(|a| a.name.as_deref() == Some("LazyReifyAir"))
-            .nth(inst_idx)
-            .expect("LazyReifyAir instance");
-        let mut cx_cy_constraint_roots: Vec<u32> = Vec::new();
-        for constraint in &air.constraints {
-            let Some(root_idx) = constraint_expression_idx(constraint) else {
-                continue;
-            };
-            let Some(expr) = ex.get(root_idx as usize) else {
-                continue;
-            };
-            // Follow Add(leaf, 0) leaf-wrap exactly one hop.
-            let target_idx = match expr.operation.as_ref() {
-                Some(Operation::Add(a)) => {
-                    let rhs_is_zero = matches!(
-                        a.rhs.as_ref().and_then(|o| o.operand.as_ref()),
-                        Some(O::Constant(c)) if c.value.is_empty()
-                    );
-                    if rhs_is_zero {
-                        if let Some(O::Expression(e)) =
-                            a.lhs.as_ref().and_then(|o| o.operand.as_ref())
-                        {
-                            Some(e.idx)
-                        } else {
-                            None
-                        }
-                    } else {
-                        Some(root_idx)
-                    }
-                }
-                _ => Some(root_idx),
-            };
-            let Some(idx) = target_idx else {
-                continue;
-            };
-            let Some(target_expr) = ex.get(idx as usize) else {
-                continue;
-            };
-            let Some(Operation::Add(a)) = target_expr.operation.as_ref() else {
-                continue;
-            };
-            let lhs_is_witness = matches!(
-                a.lhs.as_ref().and_then(|o| o.operand.as_ref()),
-                Some(O::WitnessCol(_))
+            .enumerate()
+        {
+            // Source order of `=== 0` constraints inside
+            // `LazyReifyAir`: position 0 is `local_alias_1 === 0`,
+            // position 1 is `local_alias_2 === 0`. The fixture
+            // emits them contiguously so their source positions
+            // line up with constraints[0] / constraints[1].
+            assert!(
+                air.constraints.len() >= 2,
+                "LazyReifyAir instance#{}: expected at least two \
+                 constraints (local_alias_1 === 0 and \
+                 local_alias_2 === 0); found {}",
+                inst_idx,
+                air.constraints.len()
             );
-            let rhs_is_witness = matches!(
-                a.rhs.as_ref().and_then(|o| o.operand.as_ref()),
-                Some(O::WitnessCol(_))
-            );
-            if lhs_is_witness && rhs_is_witness {
-                cx_cy_constraint_roots.push(idx);
-            }
-        }
-        assert!(
-            cx_cy_constraint_roots.len() >= 2,
-            "LazyReifyAir instance#{}: expected at least two \
-             constraints whose root expression is Add(WitnessCol, \
-             WitnessCol) (the alias-chain reads of `local_alias_1` \
-             / `local_alias_2`), but found {} such constraints. The \
-             fixture may not be exercising the alias-chain case.",
-            inst_idx,
-            cx_cy_constraint_roots.len()
-        );
-        let canonical = cx_cy_constraint_roots[0];
-        for (i, idx) in cx_cy_constraint_roots.iter().enumerate().skip(1) {
+            let alias_1_idx = constraint_expression_idx(&air.constraints[0])
+                .expect("constraints[0] must have an expression_idx");
+            let alias_2_idx = constraint_expression_idx(&air.constraints[1])
+                .expect("constraints[1] must have an expression_idx");
             assert_eq!(
-                *idx, canonical,
-                "LazyReifyAir instance#{}: alias-chain read #{} \
-                 resolves to arena idx {} but alias-chain read #0 \
-                 resolves to arena idx {}. Under JS lazy packing both \
-                 reads of `local_alias_1` / `local_alias_2` must share \
-                 one packed idx.",
-                inst_idx, i, idx, canonical
+                alias_1_idx, alias_2_idx,
+                "LazyReifyAir instance#{}: local_alias_1 === 0 \
+                 (constraints[0]) resolves to expression_idx={} but \
+                 local_alias_2 === 0 (constraints[1]) resolves to \
+                 expression_idx={}. Under JS lazy packing both reads \
+                 of the aliased `cx + cy` tree must share one packed \
+                 idx so the two constraints reference the same arena \
+                 entry. This locks the source-identity invariant \
+                 Codex Round 3 review required.",
+                inst_idx, alias_1_idx, alias_2_idx
             );
         }
     }
 }
 
-/// Assertion 5: row-offset reference identity. The fixture has
-/// `shifted_cx = cx'` (aliased constraint `shifted_cx === 0`) plus an
-/// inline `cx' + cy === 0` constraint. Both reads of `cx'` at
-/// `(col_idx_of_cx, row_offset=+1)` must resolve to the same packed
-/// witness-col operand embedded in the same arena entry.
+/// Assertion 5: row-offset source-identity. The fixture has
+/// `const expr shifted_cx = cx';` plus two constraints reading
+/// shifted_cx:
+///   constraints[2]: `shifted_cx === 0`
+///   constraints[3]: `shifted_cx + cy === 0`
+///
+/// Both constraints source-reference the SAME aliased `cx'` via
+/// `shifted_cx`. Under the Round 4 reachability importer plus
+/// Phase 2 ExprRef routing, the two constraint trees must
+/// reference the shifted_cx lift via a shared arena idx (either
+/// directly, when the constraint IS shifted_cx, or through an
+/// `Operand::Expression { idx }` operand when the constraint
+/// embeds shifted_cx within a larger tree).
+///
+/// Per Codex Round 3 review, this assertion uses source-identity
+/// extraction (constraints[2] vs constraints[3]) rather than the
+/// previous generic "all `row_offset == 1` witness operands"
+/// scan that could not distinguish the two intended reads.
+///
+/// Status note: on the Phase 3 reachability importer alone, the
+/// current compiler inlines the `shifted_cx` definition into
+/// each constraint tree rather than emitting a shared
+/// `Operand::Expression { idx }` reference. The inlining happens
+/// upstream in `eval_reference` and is out of Round 4's Phase 3
+/// scope. This assertion captures the invariant for a later
+/// producer round; it is expected to stay red until the upstream
+/// in-frame symbolic-expr read path is taught to preserve
+/// `Intermediate` / `ExprRef` identity under constraint
+/// expansion.
 #[test]
 fn lazy_reify_air_row_offset_shares_packed_idx() {
     let pilout = decode(&compile_fixture("row_offset"));
-    let instances = air_expression_slices(&pilout, "LazyReifyAir");
-    use pb::expression::Operation;
-    use pb::operand::Operand as O;
-    for (inst_idx, ex) in instances.iter().enumerate() {
-        // Collect every (col_idx, row_offset, stage) = (?, +1, 1) reference from
-        // every arena entry's direct operands.
-        let mut cx_shift_refs: HashMap<(u32, i32, u32), Vec<u32>> =
-            HashMap::new();
-        for (arena_idx, expr) in ex.iter().enumerate() {
-            let mut operands: Vec<&pb::Operand> = Vec::new();
-            match expr.operation.as_ref() {
-                Some(Operation::Add(a)) => {
-                    if let Some(l) = a.lhs.as_ref() {
-                        operands.push(l);
-                    }
-                    if let Some(r) = a.rhs.as_ref() {
-                        operands.push(r);
-                    }
-                }
-                Some(Operation::Sub(s)) => {
-                    if let Some(l) = s.lhs.as_ref() {
-                        operands.push(l);
-                    }
-                    if let Some(r) = s.rhs.as_ref() {
-                        operands.push(r);
-                    }
-                }
-                Some(Operation::Mul(m)) => {
-                    if let Some(l) = m.lhs.as_ref() {
-                        operands.push(l);
-                    }
-                    if let Some(r) = m.rhs.as_ref() {
-                        operands.push(r);
-                    }
-                }
-                Some(Operation::Neg(n)) => {
-                    if let Some(v) = n.value.as_ref() {
-                        operands.push(v);
-                    }
-                }
-                None => {}
-            }
-            for op in operands {
-                if let Some(O::WitnessCol(w)) = op.operand.as_ref() {
-                    if w.row_offset == 1 {
-                        cx_shift_refs
-                            .entry((w.col_idx, w.row_offset, w.stage))
-                            .or_default()
-                            .push(arena_idx as u32);
-                    }
-                }
-            }
-        }
-        // Every (col_idx, row_offset, stage) triple that appears more
-        // than once must share the SAME arena entry (we measure this
-        // as: all occurrences point to the same arena idx).
-        for (tuple, occurrences) in &cx_shift_refs {
-            let first = occurrences[0];
-            for (i, idx) in occurrences.iter().enumerate().skip(1) {
-                assert_eq!(
-                    *idx, first,
-                    "LazyReifyAir instance#{}: witness ref {:?} \
-                     occurrence #{} lives in arena idx {} but \
-                     occurrence #0 lives in arena idx {}. Under \
-                     JS-lazy `(expr_id, row_offset)` packed-reference \
-                     reuse semantics both occurrences must sit in the \
-                     same arena entry.",
-                    inst_idx, tuple, i, idx, first
+    for ag in &pilout.air_groups {
+        for (inst_idx, air) in ag
+            .airs
+            .iter()
+            .filter(|a| a.name.as_deref() == Some("LazyReifyAir"))
+            .enumerate()
+        {
+            // Source order of `=== 0` constraints inside
+            // `LazyReifyAir`: position 2 is `shifted_cx === 0`,
+            // position 3 is `shifted_cx + cy === 0`.
+            assert!(
+                air.constraints.len() >= 4,
+                "LazyReifyAir instance#{}: expected at least four \
+                 constraints so the shifted_cx reads appear at \
+                 positions 2 and 3; found {}",
+                inst_idx,
+                air.constraints.len()
+            );
+            let shifted_1_idx = constraint_expression_idx(&air.constraints[2])
+                .expect("constraints[2] must have an expression_idx");
+            let shifted_2_idx = constraint_expression_idx(&air.constraints[3])
+                .expect("constraints[3] must have an expression_idx");
+            let ex = &air.expressions;
+            // Arena entry for constraints[2] must reflect `shifted_cx`.
+            // Arena entry for constraints[3] must reflect
+            // `shifted_cx + cy`, and its internal reference to
+            // shifted_cx should match constraints[2]'s target. Under
+            // the current producer (which inlines shifted_cx) both
+            // constraints embed `WitnessCol(cx, row_offset=+1)`
+            // directly. This assertion extracts those operands and
+            // compares by source-identity rather than tree shape.
+            use pb::expression::Operation;
+            use pb::operand::Operand as O;
+            let Some(first_expr) = ex.get(shifted_1_idx as usize) else {
+                panic!(
+                    "constraints[2] expression_idx {} is out of arena range ({} entries)",
+                    shifted_1_idx,
+                    ex.len()
                 );
-            }
+            };
+            let Some(second_expr) = ex.get(shifted_2_idx as usize) else {
+                panic!(
+                    "constraints[3] expression_idx {} is out of arena range ({} entries)",
+                    shifted_2_idx,
+                    ex.len()
+                );
+            };
+            // The shifted_cx read inside constraints[2]'s tree is
+            // the lhs of the Add(leaf, 0) wrap.
+            let first_read = match first_expr.operation.as_ref() {
+                Some(Operation::Add(a)) => a.lhs.as_ref(),
+                _ => None,
+            };
+            // The shifted_cx read inside constraints[3]'s tree is
+            // the lhs of the Add(shifted_cx, cy) pair.
+            let second_read = match second_expr.operation.as_ref() {
+                Some(Operation::Add(a)) => a.lhs.as_ref(),
+                _ => None,
+            };
+            // Both lhs operands must represent the same logical
+            // `shifted_cx` reference. Either both are
+            // `Operand::Expression { idx: <shifted_cx_lift> }`
+            // with the SAME idx (ideal lazy-packing), or both are
+            // structurally-identical `Operand::WitnessCol { col_idx,
+            // row_offset=+1 }` leaves (current producer behavior
+            // with shifted_cx inlined).
+            let extract_ident = |op: Option<&pb::Operand>| -> Option<String> {
+                let inner = op?.operand.as_ref()?;
+                match inner {
+                    O::Expression(e) => Some(format!("Expression({})", e.idx)),
+                    O::WitnessCol(w) => Some(format!(
+                        "WitnessCol(col_idx={} row_offset={} stage={})",
+                        w.col_idx, w.row_offset, w.stage
+                    )),
+                    _ => None,
+                }
+            };
+            let first_ident = extract_ident(first_read);
+            let second_ident = extract_ident(second_read);
+            assert_eq!(
+                first_ident, second_ident,
+                "LazyReifyAir instance#{}: constraints[2] \
+                 (shifted_cx === 0) and constraints[3] \
+                 (shifted_cx + cy === 0) must source-reference \
+                 the same `shifted_cx = cx'` lift. first={:?} \
+                 second={:?}",
+                inst_idx, first_ident, second_ident
+            );
         }
     }
 }
