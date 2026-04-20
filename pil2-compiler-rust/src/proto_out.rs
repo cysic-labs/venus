@@ -39,10 +39,23 @@ const GOLDILOCKS_PRIME: u128 = 0xFFFFFFFF00000001;
 ///   from `self.exprs` whose `AirExpressionEntry::source_expr_id` is
 ///   `Some`. Two references to the same `const expr X = ...` at the
 ///   same row offset share a packed slot.
+/// - `ForeignIntermediate(origin_frame_id, local_id, row_offset)` covers
+///   `Intermediate` ColRef leaves whose `origin_frame_id` differs from
+///   the serializer's current AIR. These are resolved by inlining the
+///   tree stashed in `global_intermediate_resolution`; without
+///   origin-aware dedup every textual occurrence of the same foreign
+///   `(origin, id, row_offset)` would recurse and emit a fresh arena
+///   entry, inflating the per-AIR `expressions` array 4-8x above the
+///   JS golden reference. Mirrors JS
+///   `packed_expressions.js::pushExpressionReference(id, rowOffset)`
+///   first-seen cache, but keyed on the foreign origin so two AIRs'
+///   `id = 42` cannot collide inside the single cross-AIR resolution
+///   container the Rust serializer uses.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum PackedKey {
     ColRef(ColRefKind, u32, i32),
     Provenance(u32, i32),
+    ForeignIntermediate(u32, u32, i32),
 }
 
 /// Compute the provenance cache key for a per-AIR store entry at
@@ -121,6 +134,8 @@ struct ChainShapeStats {
     struct_cache_hits: usize,
     prov_cache_probes: usize,
     prov_cache_hits: usize,
+    foreign_intermediate_probes: usize,
+    foreign_intermediate_hits: usize,
     proto_emitted: usize,
 }
 
@@ -737,7 +752,8 @@ impl<'a> ProtoOutBuilder<'a> {
                          proto_emitted={} \
                          rc_cache_hits={}/{} ({:.3}) \
                          struct_cache_hits={}/{} ({:.3}) \
-                         prov_cache_hits={}/{} ({:.3})",
+                         prov_cache_hits={}/{} ({:.3}) \
+                         foreign_intermediate_hits={}/{} ({:.3})",
                         ag.name,
                         air.name,
                         ag_idx,
@@ -761,6 +777,12 @@ impl<'a> ProtoOutBuilder<'a> {
                         stats.prov_cache_hits,
                         stats.prov_cache_probes,
                         ChainShapeStats::ratio(stats.prov_cache_hits, stats.prov_cache_probes),
+                        stats.foreign_intermediate_hits,
+                        stats.foreign_intermediate_probes,
+                        ChainShapeStats::ratio(
+                            stats.foreign_intermediate_hits,
+                            stats.foreign_intermediate_probes,
+                        ),
                     );
                 }
 
@@ -2000,7 +2022,7 @@ impl<'a> ProtoOutBuilder<'a> {
         if let RuntimeExpr::ColRef {
             col_type: ColRefKind::Intermediate,
             id,
-            row_offset: _,
+            row_offset,
             origin_frame_id,
         } = expr
         {
@@ -2015,13 +2037,35 @@ impl<'a> ProtoOutBuilder<'a> {
             // forward-reference fallback path (source_to_pos miss
             // or its mapped pos not yet in `expr_id_map`).
             // See BL-20260419-origin-frame-id-resolution.
+            //
+            // Round 32 foreign-ref dedup: every textual occurrence
+            // of a foreign `(origin, id, row_offset)` previously
+            // recursed into the resolved tree and emitted a fresh
+            // arena entry, inflating the per-AIR `expressions`
+            // array 4-8x above golden. Cache the first-seen packed
+            // arena idx under `PackedKey::ForeignIntermediate(...)`
+            // and short-circuit subsequent references, mirroring JS
+            // `pushExpressionReference(id, rowOffset)` first-seen
+            // semantics (`packed_expressions.js`). The cache scope
+            // is the current AIR's `prov_cache` (created fresh per
+            // AIR serialization pass), matching JS per-packer scope.
             let current_origin = *self.current_origin_frame_id.borrow();
             let is_foreign = matches!(origin_frame_id, Some(o) if *o != current_origin);
+            let offset_i32 = row_offset.unwrap_or(0) as i32;
             if is_foreign {
+                let foreign_key = origin_frame_id
+                    .map(|o| PackedKey::ForeignIntermediate(o, *id, offset_i32));
+                if let Some(k) = &foreign_key {
+                    stats.foreign_intermediate_probes += 1;
+                    if let Some(&cached_idx) = prov_cache.get(k) {
+                        stats.foreign_intermediate_hits += 1;
+                        return cached_idx;
+                    }
+                }
                 if let Some(resolved) = origin_frame_id
                     .and_then(|o| self.processor.global_intermediate_resolution.get(&(o, *id)).cloned())
                 {
-                    return self.flatten_air_expr(
+                    let idx = self.flatten_air_expr(
                         &resolved,
                         source_expr_id,
                         source_label,
@@ -2038,6 +2082,10 @@ impl<'a> ProtoOutBuilder<'a> {
                         im_labels,
                         stats,
                     );
+                    if let Some(k) = foreign_key {
+                        prov_cache.insert(k, idx);
+                    }
+                    return idx;
                 }
                 // Foreign ref with no resolution: fall through to
                 // the leaf path which emits Constant(0) with a
@@ -2237,7 +2285,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::ColRef {
                 col_type: ColRefKind::Intermediate,
                 id,
-                row_offset: _,
+                row_offset,
                 origin_frame_id,
             } if {
                 let current_origin = *self.current_origin_frame_id.borrow();
@@ -2249,6 +2297,31 @@ impl<'a> ProtoOutBuilder<'a> {
                         .is_none()
             } =>
             {
+                // Round 32 foreign-ref dedup: mirror the
+                // `flatten_air_expr` cache so operand-level inlines
+                // of the same `(origin, id, row_offset)` reuse the
+                // first-seen arena idx instead of emitting a fresh
+                // tree every time.
+                let current_origin = *self.current_origin_frame_id.borrow();
+                let is_foreign = matches!(origin_frame_id, Some(o) if *o != current_origin);
+                let offset_i32 = row_offset.unwrap_or(0) as i32;
+                let foreign_key = if is_foreign {
+                    origin_frame_id
+                        .map(|o| PackedKey::ForeignIntermediate(o, *id, offset_i32))
+                } else {
+                    None
+                };
+                if let Some(k) = &foreign_key {
+                    stats.foreign_intermediate_probes += 1;
+                    if let Some(&cached_idx) = prov_cache.get(k) {
+                        stats.foreign_intermediate_hits += 1;
+                        return Some(pilout_proto::Operand {
+                            operand: Some(pilout_proto::operand::Operand::Expression(
+                                pilout_proto::operand::Expression { idx: cached_idx },
+                            )),
+                        });
+                    }
+                }
                 let key = origin_frame_id.map(|o| (o, *id));
                 if let Some(resolved) = key
                     .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
@@ -2270,6 +2343,9 @@ impl<'a> ProtoOutBuilder<'a> {
                         im_labels,
                         stats,
                     );
+                    if let Some(k) = foreign_key {
+                        prov_cache.insert(k, idx);
+                    }
                     return Some(pilout_proto::Operand {
                         operand: Some(pilout_proto::operand::Operand::Expression(
                             pilout_proto::operand::Expression { idx },
