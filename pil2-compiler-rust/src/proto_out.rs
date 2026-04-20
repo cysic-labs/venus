@@ -652,6 +652,11 @@ pub struct ProtoOutBuilder<'a> {
     /// all AIRs have finished packing. See
     /// BL-20260420-live-pack-ctx-inline-hints.
     pending_air_hints: HashMap<(u32, u32), Vec<pilout_proto::Hint>>,
+    /// Per-AIR "in progress" set of store positions currently
+    /// being materialized. Guard against A -> B -> A recursion
+    /// in `materialize_store_pos`. Cleared at the start of each
+    /// AIR in `build_air_groups`.
+    materialize_in_progress: std::cell::RefCell<std::collections::HashSet<usize>>,
 }
 
 /// Per-origin AIR translation context cloned into
@@ -682,6 +687,9 @@ impl<'a> ProtoOutBuilder<'a> {
             im_label_by_packed_idx: HashMap::new(),
             origin_registry: HashMap::new(),
             pending_air_hints: HashMap::new(),
+            materialize_in_progress: std::cell::RefCell::new(
+                std::collections::HashSet::new(),
+            ),
         }
     }
 
@@ -778,6 +786,10 @@ impl<'a> ProtoOutBuilder<'a> {
                 *self.current_air_name.borrow_mut() = air.name.clone();
                 *self.current_air_value_count.borrow_mut() = air.air_value_stages.len();
                 *self.current_origin_frame_id.borrow_mut() = air.origin_frame_id;
+                // Reset the cycle-guard set for this AIR. Positions
+                // are meaningful only within the current AIR's
+                // entries list.
+                self.materialize_in_progress.borrow_mut().clear();
                 // Flatten the FULL AIR expression store into the protobuf
                 // array. This includes ALL expressions created during AIR
                 // execution (intermediate column definitions, constraint
@@ -1792,6 +1804,24 @@ impl<'a> ProtoOutBuilder<'a> {
             );
             return u32::MAX;
         };
+        // Cycle guard: if `pos` is already being materialized, a
+        // recursive call has walked back to itself. The expected
+        // PIL structure does not produce such cycles, so trigger
+        // `debug_assert!` to catch the bug. Release builds
+        // short-circuit with u32::MAX sentinel to avoid infinite
+        // recursion / stack overflow.
+        let newly_inserted = self
+            .materialize_in_progress
+            .borrow_mut()
+            .insert(pos);
+        debug_assert!(
+            newly_inserted,
+            "materialize_store_pos({}): cycle detected — already in progress",
+            pos,
+        );
+        if !newly_inserted {
+            return u32::MAX;
+        }
         let expr = Rc::clone(expr);
         let source_expr_id = *source_expr_id;
         let source_label = *source_label;
@@ -1814,6 +1844,7 @@ impl<'a> ProtoOutBuilder<'a> {
             stats,
         );
         expr_id_map[pos] = Some(root_idx);
+        self.materialize_in_progress.borrow_mut().remove(&pos);
         root_idx
     }
 
@@ -3279,20 +3310,39 @@ impl<'a> ProtoOutBuilder<'a> {
                         )),
                     });
                 }
-                // Reuse an existing arena entry only when offset = 0.
-                // A non-zero offset requires a shifted-tree
-                // emission via the resolution-map path below so
-                // `expr` and `expr'` produce distinct arena entries.
+                // Same-origin, zero row offset: materialize the
+                // store position on demand via `materialize_store_pos`.
+                // Round 5 closes the Round 4 review gap that left
+                // this branch as "reuse-only" and otherwise fell
+                // through to `global_intermediate_resolution`.
+                // Matching the `flatten_air_expr` same-origin ExprRef
+                // path: the referenced `expr` slot becomes a distinct
+                // arena entry, cached under the existing
+                // `PackedKey::ForeignIntermediate` key for dedup.
                 if origin == current_origin && offset == 0 {
                     if let Some(&pos) = source_to_pos.get(id) {
-                        if let Some(&Some(idx)) = expr_id_map.get(pos) {
-                            prov_cache.insert(cache_key, idx);
-                            return Some(pilout_proto::Operand {
-                                operand: Some(pilout_proto::operand::Operand::Expression(
-                                    pilout_proto::operand::Expression { idx },
-                                )),
-                            });
-                        }
+                        let idx = self.materialize_store_pos(
+                            pos,
+                            entries,
+                            fixed_map,
+                            fixed_col_start,
+                            witness_map,
+                            custom_map,
+                            source_to_pos,
+                            expr_id_map,
+                            out,
+                            rc_cache,
+                            struct_cache,
+                            prov_cache,
+                            im_labels,
+                            stats,
+                        );
+                        prov_cache.insert(cache_key, idx);
+                        return Some(pilout_proto::Operand {
+                            operand: Some(pilout_proto::operand::Operand::Expression(
+                                pilout_proto::operand::Expression { idx },
+                            )),
+                        });
                     }
                 }
                 if let Some(resolved_raw) = self
