@@ -107,12 +107,14 @@ fn bare_ref_alias_emits_single_wrapper_per_instance() {
             // stage=1 }, Constant(0))` wrapper — the shape
             // produced by a shifted_cx alias wrapper.
             let mut count_shifted_cx_wrappers = 0;
-            for expr in &air.expressions {
+            let mut wrapper_positions: Vec<usize> = Vec::new();
+            for (idx, expr) in air.expressions.iter().enumerate() {
                 if let Some((col_idx, row_offset, stage)) =
                     wrapper_witness_tuple(expr)
                 {
                     if col_idx == 0 && row_offset == 1 && stage == 1 {
                         count_shifted_cx_wrappers += 1;
+                        wrapper_positions.push(idx);
                     }
                 }
             }
@@ -121,15 +123,56 @@ fn bare_ref_alias_emits_single_wrapper_per_instance() {
                 "LazyReifyAir instance#{}: expected at most ONE \
                  `Add(WitnessCol(cx, +1), Constant(0))` wrapper \
                  arena entry (from constraint[2]'s expression-site \
-                 shifted_cx read); found {} such wrappers. Round \
-                 13 routes operand-site bare-ref alias references \
-                 through `leaf_to_air_operand` directly so \
-                 constraint[3]'s lhs no longer consumes a \
-                 duplicate wrapper entry.",
-                inst_idx, count_shifted_cx_wrappers,
+                 shifted_cx read); found {} such wrappers at \
+                 positions {:?}. Round 13 routes operand-site \
+                 bare-ref alias references through \
+                 `leaf_to_air_operand` directly so constraint[3]'s \
+                 lhs no longer consumes a duplicate wrapper entry.",
+                inst_idx, count_shifted_cx_wrappers, wrapper_positions,
             );
+
+            // Round 14 per Codex Round 13 directive: the wrapper
+            // must not land BEFORE the first labeled constraint
+            // root in arena order. Under Round 14's on-demand
+            // root-driven materializer, references are materialized
+            // inline as their consuming constraint is processed,
+            // so the shifted_cx wrapper lands at (or after) the
+            // position where constraint[2] is processed — NOT in
+            // a sorted prefix before all constraints. A wrapper
+            // appearing at idx 0..first_constraint_expression_idx
+            // indicates the pre-Round-14 eager pre-import
+            // regression has been reintroduced.
+            let first_constraint_idx = constraint_expression_idx(
+                &air.constraints[0],
+            )
+            .expect("constraint[0] must have an expression_idx");
+            if let Some(wrapper_idx) = wrapper_positions.first() {
+                assert!(
+                    (*wrapper_idx as u32) >= first_constraint_idx,
+                    "LazyReifyAir instance#{}: shifted_cx wrapper \
+                     arena entry lands at idx {} BEFORE the first \
+                     labeled constraint root at idx {}. This \
+                     indicates the pre-Round-14 eager pre-import \
+                     layout has regressed: the importer should not \
+                     prefix sorted intermediates before the first \
+                     constraint root. Round 14's on-demand \
+                     root-driven materializer appends a \
+                     reference's arena entry only when a consuming \
+                     root walks into it.",
+                    inst_idx, wrapper_idx, first_constraint_idx
+                );
+            }
         }
     }
+}
+
+fn constraint_expression_idx(c: &pb::Constraint) -> Option<u32> {
+    c.constraint.as_ref().and_then(|cv| match cv {
+        pb::constraint::Constraint::FirstRow(r) => r.expression_idx.as_ref(),
+        pb::constraint::Constraint::LastRow(r) => r.expression_idx.as_ref(),
+        pb::constraint::Constraint::EveryRow(r) => r.expression_idx.as_ref(),
+        pb::constraint::Constraint::EveryFrame(r) => r.expression_idx.as_ref(),
+    }).map(|e| e.idx)
 }
 
 /// Assertion 2: constraint[3]'s top-level arena entry embeds the
