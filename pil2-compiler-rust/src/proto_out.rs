@@ -630,6 +630,30 @@ pub struct ProtoOutBuilder<'a> {
     /// `Symbol.id` is the packed index the builder assigned.
     /// `BTreeMap` for deterministic iteration order at emission time.
     im_label_by_packed_idx: HashMap<(u32, u32), std::collections::BTreeMap<u32, String>>,
+    /// Origin-keyed AIR translation registry. Maps `origin_frame_id`
+    /// to the minting AIR's translation context so the per-AIR hint
+    /// serializer can resolve foreign-origin AIR-local hint leaves
+    /// (`HintValue::ColRef` with `origin_frame_id != current_origin`)
+    /// without consulting the current AIR's maps. Populated at the
+    /// start of `build_hints` by walking all non-virtual AIRs. Raw
+    /// witness / fixed / airvalue / custom ids are not globally
+    /// unique, so this registry is the only safe cross-AIR resolver
+    /// for AIR-local hint leaves. See
+    /// `temp/plan-rustify-pkgen-e2e-0420-1.md` AC-S2 + AC-S4 and
+    /// BL-20260420-hint-colref-arena-head-discovery.
+    origin_registry: HashMap<u32, AirOriginCtx>,
+}
+
+/// Per-origin AIR translation context cloned into
+/// `origin_registry` so foreign-origin hint leaves resolve against
+/// the minting AIR's maps rather than the consuming AIR's.
+#[derive(Debug, Clone)]
+struct AirOriginCtx {
+    fixed_id_map: Vec<(char, u32)>,
+    fixed_col_start: u32,
+    witness_id_map: Vec<(u32, u32)>,
+    custom_id_map: Vec<(u32, u32, u32)>,
+    air_value_count: usize,
 }
 
 impl<'a> ProtoOutBuilder<'a> {
@@ -646,6 +670,7 @@ impl<'a> ProtoOutBuilder<'a> {
             current_air_value_count: std::cell::RefCell::new(0),
             current_origin_frame_id: std::cell::RefCell::new(0),
             im_label_by_packed_idx: HashMap::new(),
+            origin_registry: HashMap::new(),
         }
     }
 
@@ -1383,6 +1408,29 @@ impl<'a> ProtoOutBuilder<'a> {
     fn build_hints(&mut self) -> Vec<pilout_proto::Hint> {
         let mut result = Vec::new();
 
+        // Populate the origin-keyed AIR translation registry before
+        // any hint serialization so foreign-origin hint leaves can
+        // resolve their raw ids through the minting AIR's maps. Keyed
+        // by `Air::origin_frame_id`; entries cloned from stored AIR
+        // metadata so the registry survives scope transitions during
+        // serialization. Virtual airs are excluded (they never emit
+        // hints and carry no column allocations in the proto).
+        self.origin_registry.clear();
+        for ag in self.processor.air_groups.iter() {
+            for air in ag.airs.iter().filter(|a| !a.is_virtual) {
+                self.origin_registry.insert(
+                    air.origin_frame_id,
+                    AirOriginCtx {
+                        fixed_id_map: air.fixed_id_map.clone(),
+                        fixed_col_start: air.fixed_col_start,
+                        witness_id_map: air.witness_id_map.clone(),
+                        custom_id_map: air.custom_id_map.clone(),
+                        air_value_count: air.air_value_stages.len(),
+                    },
+                );
+            }
+        }
+
         // Per-AIR hints: iterate airgroups -> airs, using stored hints.
         for (ag_idx, ag) in self.processor.air_groups.iter().enumerate() {
             let air_group_id = ag_idx as u32;
@@ -1400,6 +1448,16 @@ impl<'a> ProtoOutBuilder<'a> {
                 // per-AIR expressions[] array uses.
                 self.current_air_expr_id_map =
                     self.air_expr_id_maps.get(&(air_group_id, air_id)).cloned();
+
+                // Refresh the per-AIR scratch state the HintValue::ColRef
+                // resolver consults. Without these assignments the
+                // resolver would read stale values left over from
+                // `build_air_groups`'s final iteration, causing stale
+                // is_foreign detection and (before the origin_registry
+                // landed) stale fallback maps.
+                *self.current_air_name.borrow_mut() = air.name.clone();
+                *self.current_air_value_count.borrow_mut() = air.air_value_stages.len();
+                *self.current_origin_frame_id.borrow_mut() = air.origin_frame_id;
 
                 let air_expr_refs: Vec<&RuntimeExpr> = air
                     .air_expression_store
@@ -1556,119 +1614,292 @@ impl<'a> ProtoOutBuilder<'a> {
                 }
             }
             // Direct column reference: emit the matching leaf Operand
-            // (WitnessCol / AirValue / ...) instead of wrapping in an
-            // Expression. This is what the C++ consumer expects for
-            // hint fields like `witness_calc.reference` that must
-            // resolve to cm / airvalue operand class.
+            // (WitnessCol / AirValue / FixedCol / CustomCol / ...)
+            // instead of wrapping in an Expression. Required by the
+            // C++ consumer for hint fields like `witness_calc.reference`
+            // that must resolve to `cm` / `airvalue` operand class, and
+            // by air-scope bare hint leaves that would otherwise inflate
+            // the per-AIR arena with `Add(leaf, 0)` wrappers.
+            //
+            // Origin-aware resolution: same-origin leaves (origin_frame_id
+            // is None OR matches `current_origin_frame_id`) resolve
+            // through the current AIR's maps, passed in as parameters.
+            // Foreign-origin leaves whose origin matches a minting AIR
+            // registered in `origin_registry` resolve through that
+            // minting AIR's maps. Foreign-origin leaves whose origin is
+            // not in the registry degrade to `Constant(0)` under the
+            // existing env gate; `debug_assertions` builds surface the
+            // miss with a hard assertion (AC-S4).
             HintValue::ColRef { col_type, id, row_offset, origin_frame_id } => {
-                use crate::processor::expression::ColRefKind;
-                let offset = row_offset.unwrap_or(0) as i32;
-                // Round 3 foreign-origin guard: if the leaf carries an
-                // origin that differs from the AIR currently being
-                // serialized, the bare id belongs to the minting AIR's
-                // column allocator and does not translate here. Emit
-                // `Constant(0)` instead of a stale Witness/AirValue.
-                // Round 6: also require the serializer to BE inside
-                // an AIR context (`current_origin > 0`); without
-                // this, early-in-the-AIR-loop hint serialization
-                // (before `current_origin_frame_id` is populated on
-                // `ProtoOutBuilder`) would false-positive on the
-                // check and zero out legitimate hint refs.
-                let current_origin = *self.current_origin_frame_id.borrow();
-                let is_foreign = current_origin != 0
-                    && matches!(origin_frame_id, Some(o) if *o != current_origin);
-                let operand = if is_foreign {
-                    if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
-                        let air_name = self.current_air_name.borrow();
-                        eprintln!(
-                            "[pil2c-warn] foreign-origin hint ColRef: air='{}' \
-                             col_type={:?} id={} origin_frame_id={:?} \
-                             current_origin={} emitting Operand::Constant(0)",
-                            *air_name,
-                            col_type,
-                            id,
-                            origin_frame_id,
-                            current_origin,
-                        );
-                    }
-                    pilout_proto::operand::Operand::Constant(
-                        pilout_proto::operand::Constant { value: Vec::new() },
-                    )
-                } else {
-                    match col_type {
-                        ColRefKind::Witness => {
-                            match witness_map.get(*id as usize).copied() {
-                                Some((stage, col_idx)) => pilout_proto::operand::Operand::WitnessCol(
-                                    pilout_proto::operand::WitnessCol {
-                                        stage,
-                                        col_idx,
-                                        row_offset: offset,
-                                    },
-                                ),
-                                None => {
-                                    if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
-                                        let air_name = self.current_air_name.borrow();
-                                        eprintln!(
-                                            "[pil2c-warn] hint Witness miss: \
-                                             air='{}' id={} witness_map.len={} \
-                                             origin_frame_id={:?} emitting Operand::Constant(0)",
-                                            *air_name, id, witness_map.len(), origin_frame_id,
-                                        );
-                                    }
-                                    pilout_proto::operand::Operand::Constant(
-                                        pilout_proto::operand::Constant { value: Vec::new() },
-                                    )
-                                }
-                            }
-                        }
-                        ColRefKind::AirValue => {
-                            let count = *self.current_air_value_count.borrow();
-                            if (*id as usize) < count {
-                                pilout_proto::operand::Operand::AirValue(
-                                    pilout_proto::operand::AirValue { idx: *id },
-                                )
-                            } else {
-                                if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
-                                    let air_name = self.current_air_name.borrow();
-                                    eprintln!(
-                                        "[pil2c-warn] hint AirValue OOB: \
-                                         air='{}' id={} air_value_stages.len={} \
-                                         origin_frame_id={:?} emitting Operand::Constant(0)",
-                                        *air_name, id, count, origin_frame_id,
-                                    );
-                                }
-                                pilout_proto::operand::Operand::Constant(
-                                    pilout_proto::operand::Constant { value: Vec::new() },
-                                )
-                            }
-                        }
-                        _ => {
-                            // Other ColRefKinds (Fixed, Public, Challenge,
-                            // ProofValue, AirGroupValue, Custom,
-                            // Intermediate) are not valid destinations for
-                            // the calculateExpr guard; they should never
-                            // land here. Falling back to a stable empty
-                            // Constant keeps the proto well-formed so
-                            // validation errors surface downstream with
-                            // clear context rather than as a type panic.
-                            let _ = fixed_map;
-                            let _ = fixed_col_start;
-                            let _ = custom_map;
-                            let _ = expr_store;
-                            pilout_proto::operand::Operand::Constant(
-                                pilout_proto::operand::Constant {
-                                    value: Vec::new(),
-                                },
-                            )
-                        }
-                    }
-                };
+                let operand = self.hint_colref_to_operand(
+                    *col_type,
+                    *id,
+                    *row_offset,
+                    *origin_frame_id,
+                    fixed_map,
+                    fixed_col_start,
+                    witness_map,
+                    custom_map,
+                );
+                let _ = expr_store;
                 pilout_proto::HintField {
                     name: None,
                     value: Some(pilout_proto::hint_field::Value::Operand(
                         pilout_proto::Operand { operand: Some(operand) },
                     )),
                 }
+            }
+        }
+    }
+
+    /// Resolve a per-AIR `HintValue::ColRef` to its proto `Operand`.
+    ///
+    /// - Proof-global kinds (`Public`, `Challenge`, `ProofValue`,
+    ///   `AirGroupValue`) emit their direct operand regardless of
+    ///   origin.
+    /// - AIR-local kinds (`Witness`, `Fixed`, `AirValue`, `Custom`)
+    ///   use the current AIR's maps when `origin_frame_id` is `None`
+    ///   or matches `current_origin_frame_id`; otherwise the
+    ///   `origin_registry` supplies the minting AIR's maps.
+    /// - `Intermediate` is not a valid bare hint-leaf shape (it goes
+    ///   through `HintValue::ExprId`); emits `Constant(0)` as a
+    ///   well-formed fallback.
+    ///
+    /// On a provable origin-registry miss, debug builds abort via
+    /// `debug_assert!`; release builds emit `Constant(0)` and log
+    /// under `PIL2C_WARN_FOREIGN_INTERMEDIATE=1`.
+    #[allow(clippy::too_many_arguments)]
+    fn hint_colref_to_operand(
+        &self,
+        col_type: ColRefKind,
+        id: u32,
+        row_offset: Option<i64>,
+        origin_frame_id: Option<u32>,
+        fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
+        witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+    ) -> pilout_proto::operand::Operand {
+        let offset = row_offset.unwrap_or(0) as i32;
+
+        // Proof-global kinds: origin-independent direct operand.
+        match col_type {
+            ColRefKind::Public => {
+                return pilout_proto::operand::Operand::PublicValue(
+                    pilout_proto::operand::PublicValue { idx: id },
+                );
+            }
+            ColRefKind::Challenge => {
+                let stage = self
+                    .processor
+                    .challenges
+                    .get_data(id)
+                    .and_then(|d| d.stage)
+                    .unwrap_or(1);
+                return pilout_proto::operand::Operand::Challenge(
+                    pilout_proto::operand::Challenge { stage, idx: id },
+                );
+            }
+            ColRefKind::ProofValue => {
+                let stage = self
+                    .processor
+                    .proof_values
+                    .get_data(id)
+                    .and_then(|d| d.stage)
+                    .unwrap_or(1);
+                return pilout_proto::operand::Operand::ProofValue(
+                    pilout_proto::operand::ProofValue { stage, idx: id },
+                );
+            }
+            ColRefKind::AirGroupValue => {
+                return pilout_proto::operand::Operand::AirGroupValue(
+                    pilout_proto::operand::AirGroupValue { idx: id },
+                );
+            }
+            _ => {}
+        }
+
+        // AIR-local kinds: pick current-AIR maps vs registry entry.
+        let current_origin = *self.current_origin_frame_id.borrow();
+        let is_foreign = matches!(origin_frame_id, Some(o) if o != current_origin);
+
+        enum CtxSel<'ctx> {
+            Current,
+            Registered(&'ctx AirOriginCtx),
+            Miss,
+        }
+        let ctx_sel = if !is_foreign {
+            CtxSel::Current
+        } else {
+            match origin_frame_id.and_then(|o| self.origin_registry.get(&o)) {
+                Some(ctx) => CtxSel::Registered(ctx),
+                None => CtxSel::Miss,
+            }
+        };
+
+        if matches!(ctx_sel, CtxSel::Miss) {
+            if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
+                let air_name = self.current_air_name.borrow();
+                eprintln!(
+                    "[pil2c-warn] hint ColRef origin miss: air='{}' col_type={:?} \
+                     id={} row_offset={} origin_frame_id={:?} \
+                     current_origin={} emitting Operand::Constant(0)",
+                    *air_name,
+                    col_type,
+                    id,
+                    offset,
+                    origin_frame_id,
+                    current_origin,
+                );
+            }
+            debug_assert!(
+                false,
+                "hint leaf origin not in origin_registry: col_type={:?} \
+                 id={} origin_frame_id={:?} current_origin={}",
+                col_type, id, origin_frame_id, current_origin,
+            );
+            return pilout_proto::operand::Operand::Constant(
+                pilout_proto::operand::Constant { value: Vec::new() },
+            );
+        }
+
+        let (fmap, fstart, wmap, cmap, av_count) = match &ctx_sel {
+            CtxSel::Registered(ctx) => (
+                ctx.fixed_id_map.as_slice(),
+                ctx.fixed_col_start,
+                ctx.witness_id_map.as_slice(),
+                ctx.custom_id_map.as_slice(),
+                ctx.air_value_count,
+            ),
+            CtxSel::Current | CtxSel::Miss => (
+                fixed_map,
+                fixed_col_start,
+                witness_map,
+                custom_map,
+                *self.current_air_value_count.borrow(),
+            ),
+        };
+
+        match col_type {
+            ColRefKind::Witness => match wmap.get(id as usize).copied() {
+                Some((stage, col_idx)) => pilout_proto::operand::Operand::WitnessCol(
+                    pilout_proto::operand::WitnessCol {
+                        stage,
+                        col_idx,
+                        row_offset: offset,
+                    },
+                ),
+                None => {
+                    if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
+                        let air_name = self.current_air_name.borrow();
+                        eprintln!(
+                            "[pil2c-warn] hint Witness miss: air='{}' id={} \
+                             witness_map.len={} origin_frame_id={:?} \
+                             current_origin={} emitting Operand::Constant(0)",
+                            *air_name, id, wmap.len(), origin_frame_id, current_origin,
+                        );
+                    }
+                    pilout_proto::operand::Operand::Constant(
+                        pilout_proto::operand::Constant { value: Vec::new() },
+                    )
+                }
+            },
+            ColRefKind::AirValue => {
+                if (id as usize) < av_count {
+                    pilout_proto::operand::Operand::AirValue(
+                        pilout_proto::operand::AirValue { idx: id },
+                    )
+                } else {
+                    if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
+                        let air_name = self.current_air_name.borrow();
+                        eprintln!(
+                            "[pil2c-warn] hint AirValue OOB: air='{}' id={} \
+                             air_value_count={} origin_frame_id={:?} \
+                             current_origin={} emitting Operand::Constant(0)",
+                            *air_name, id, av_count, origin_frame_id, current_origin,
+                        );
+                    }
+                    pilout_proto::operand::Operand::Constant(
+                        pilout_proto::operand::Constant { value: Vec::new() },
+                    )
+                }
+            }
+            ColRefKind::Fixed => {
+                let rel_idx = id.checked_sub(fstart).unwrap_or(id) as usize;
+                match fmap.get(rel_idx).copied() {
+                    Some((ctype, proto_idx)) if ctype == 'P' => {
+                        pilout_proto::operand::Operand::PeriodicCol(
+                            pilout_proto::operand::PeriodicCol {
+                                idx: proto_idx,
+                                row_offset: offset,
+                            },
+                        )
+                    }
+                    Some((_, proto_idx)) => pilout_proto::operand::Operand::FixedCol(
+                        pilout_proto::operand::FixedCol {
+                            idx: proto_idx,
+                            row_offset: offset,
+                        },
+                    ),
+                    None => {
+                        if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
+                            let air_name = self.current_air_name.borrow();
+                            eprintln!(
+                                "[pil2c-warn] hint Fixed miss: air='{}' id={} \
+                                 rel_idx={} fixed_col_start={} \
+                                 origin_frame_id={:?} current_origin={} \
+                                 emitting Operand::Constant(0)",
+                                *air_name, id, rel_idx, fstart, origin_frame_id, current_origin,
+                            );
+                        }
+                        pilout_proto::operand::Operand::Constant(
+                            pilout_proto::operand::Constant { value: Vec::new() },
+                        )
+                    }
+                }
+            }
+            ColRefKind::Custom => match cmap.get(id as usize).copied() {
+                Some((stage, col_idx, commit_id)) => pilout_proto::operand::Operand::CustomCol(
+                    pilout_proto::operand::CustomCol {
+                        commit_id,
+                        stage,
+                        col_idx,
+                        row_offset: offset,
+                    },
+                ),
+                None => {
+                    if std::env::var("PIL2C_WARN_FOREIGN_INTERMEDIATE").is_ok() {
+                        let air_name = self.current_air_name.borrow();
+                        eprintln!(
+                            "[pil2c-warn] hint Custom miss: air='{}' id={} \
+                             custom_map.len={} origin_frame_id={:?} \
+                             current_origin={} emitting Operand::Constant(0)",
+                            *air_name, id, cmap.len(), origin_frame_id, current_origin,
+                        );
+                    }
+                    pilout_proto::operand::Operand::Constant(
+                        pilout_proto::operand::Constant { value: Vec::new() },
+                    )
+                }
+            },
+            ColRefKind::Intermediate => {
+                // Bare Intermediate as a hint leaf is not a valid
+                // shape for the direct-operand path; intermediate
+                // refs should travel through `HintValue::ExprId`.
+                // Emit `Constant(0)` as a well-formed fallback so
+                // any producer regression surfaces downstream.
+                pilout_proto::operand::Operand::Constant(
+                    pilout_proto::operand::Constant { value: Vec::new() },
+                )
+            }
+            ColRefKind::Public
+            | ColRefKind::Challenge
+            | ColRefKind::ProofValue
+            | ColRefKind::AirGroupValue => {
+                // Unreachable: handled above.
+                pilout_proto::operand::Operand::Constant(
+                    pilout_proto::operand::Constant { value: Vec::new() },
+                )
             }
         }
     }

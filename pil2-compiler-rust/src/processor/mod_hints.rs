@@ -131,7 +131,32 @@ pub(super) fn value_to_hint_value(&mut self, val: &Value) -> air::HintValue {
             self.global_expression_store.push(rt);
             air::HintValue::ExprId(idx)
         }
-        Value::ColRef { .. } | Value::RuntimeExpr(_) => {
+        Value::ColRef { col_type, id, row_offset, origin_frame_id } => {
+            // Air-scope bare column reference: emit `HintValue::ColRef`
+            // directly. The per-AIR serializer in `proto_out.rs`
+            // (`hint_colref_to_operand`) resolves the leaf through
+            // the current AIR's maps when `origin_frame_id` is `None`
+            // or matches the current origin, and through the
+            // `origin_registry` for foreign-origin leaves. Routing
+            // bare leaves here avoids pushing an anonymous
+            // `Add(leaf, Constant(0))` wrapper into
+            // `air_expression_store`, which was the primary driver of
+            // the arena-head inflation (first 48+ positions of the
+            // trio's per-AIR `expressions` array). See
+            // `temp/plan-rustify-pkgen-e2e-0420-1.md` AC-P1/AC-P2 and
+            // BL-20260420-hint-colref-arena-head-discovery.
+            air::HintValue::ColRef {
+                col_type: *col_type,
+                id: *id,
+                row_offset: *row_offset,
+                origin_frame_id: *origin_frame_id,
+            }
+        }
+        Value::RuntimeExpr(_) => {
+            // Air-scope non-leaf symbolic expression: push into the
+            // air expression store and reference by index. Kept
+            // deliberately narrow: only bare `Value::ColRef` migrates
+            // to the direct `HintValue::ColRef` path in this change.
             let rt = value_to_runtime_expr(val);
             let idx = self.air_expression_store.len() as u32;
             self.air_expression_store.push(air::AirExpressionEntry::anonymous(rt));
