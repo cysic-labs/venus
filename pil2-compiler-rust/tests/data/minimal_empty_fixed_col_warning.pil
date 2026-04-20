@@ -1,0 +1,17 @@
+// minimal_empty_fixed_col_warning.pil
+//
+// Pins the write_fixed_cols_to_file empty-col-data diagnostic.
+// Declares a `col fixed F` and never populates it. The Round 26
+// diagnostic in proto_out.rs::write_fixed_cols_to_file must emit
+// a stderr warning listing F's col_id as having no row data
+// before the row loop silently zero-pads it.
+
+airtemplate EmptyFixedColAir(const int N = 2**4) {
+    col fixed F;
+    col witness W;
+    W === F[0];
+}
+
+airgroup EmptyFixedColGroup {
+    EmptyFixedColAir();
+}

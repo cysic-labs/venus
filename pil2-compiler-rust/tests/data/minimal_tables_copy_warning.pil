@@ -1,0 +1,21 @@
+// minimal_tables_copy_warning.pil
+//
+// Pins the Tables.copy missing-source-row warning surface.
+// Declares src as a `col fixed` populated by Tables.fill for
+// only 4 rows out of N=16, then calls Tables.copy(src, 0, dst,
+// 0, 10) — count=10 exceeds the 4 populated source rows. The
+// Round 26 zero-fill diagnostic must emit a stderr warning
+// summarising 6 missing source rows.
+
+airtemplate TablesCopyWarningAir(const int N = 2**4) {
+    col fixed src;
+    col fixed dst;
+    Tables.fill(7, src, 0, 4);
+    Tables.copy(src, 0, dst, 0, 10);
+    col witness W;
+    W === dst[0];
+}
+
+airgroup TablesCopyWarningGroup {
+    TablesCopyWarningAir();
+}

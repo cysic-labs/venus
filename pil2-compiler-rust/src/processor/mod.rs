@@ -2009,10 +2009,23 @@ impl Processor {
         let count = if args.len() > 4 {
             args[4].as_int().unwrap_or(0) as usize
         } else {
-            // Default: copy all remaining source rows
-            self.fixed_cols.get_row_data(src_id)
+            // Default: copy all remaining source rows. Warn if the
+            // source column has no row data at all — under the 4-arg
+            // form the count would short-circuit to 0 and the loop
+            // below would not execute, masking the upstream
+            // under-population bug.
+            let derived = self.fixed_cols.get_row_data(src_id)
                 .map(|d| d.len().saturating_sub(src_offset))
-                .unwrap_or(0)
+                .unwrap_or(0);
+            if derived == 0 {
+                eprintln!(
+                    "warning: Tables.copy: 4-arg form derived count=0 \
+                     because source col_id={} has no populated rows past \
+                     src_offset={}; nothing will be copied.",
+                    src_id, src_offset
+                );
+            }
+            derived
         };
 
         // Read source data first to avoid borrow issues.
