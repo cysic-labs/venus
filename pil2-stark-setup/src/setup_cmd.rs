@@ -3342,6 +3342,43 @@ mod tests_global_info {
                 ));
             }
 
+            // Round 30 semantic gate (per Codex Round 29 review):
+            // assert starkinfo.cExpId matches golden. cExpId is the
+            // index into the per-AIR `expressions` arena; if it
+            // differs, recursive1's id-wired evaluation chain
+            // expects different indices than what the basic prover
+            // produces at runtime, breaking the
+            // `enable * (tmp_N - qAcc[1][k]) === 0` checks in the
+            // generated VerifyEvaluations0 circuit. The Round 17
+            // assertions on starkinfo / verifierinfo SHAPES (lengths)
+            // pass while make prove fails — this stronger gate
+            // catches the surviving numbering drift.
+            let cur_c_exp_id = cur.get("cExpId").and_then(|v| v.as_u64()).unwrap_or(0);
+            let gold_c_exp_id = gold.get("cExpId").and_then(|v| v.as_u64()).unwrap_or(0);
+            if cur_c_exp_id != gold_c_exp_id {
+                failures.push(format!(
+                    "{}: starkinfo.cExpId drift cur={} gold={}. \
+                     The constraint poly's index in the per-AIR \
+                     expressions arena differs from golden, which \
+                     causes recursive1's expected evaluation chain \
+                     to mismatch the basic prover's runtime \
+                     computation. Make prove fails at \
+                     VerifyEvaluations0 because of this.",
+                    name, cur_c_exp_id, gold_c_exp_id
+                ));
+            }
+            let cur_fri_exp_id = cur.get("friExpId").and_then(|v| v.as_u64()).unwrap_or(0);
+            let gold_fri_exp_id = gold.get("friExpId").and_then(|v| v.as_u64()).unwrap_or(0);
+            if cur_fri_exp_id != gold_fri_exp_id {
+                failures.push(format!(
+                    "{}: starkinfo.friExpId drift cur={} gold={}. \
+                     The FRI poly's expressions-arena index differs \
+                     from golden; downstream FRI-quotient checks in \
+                     recursive1 may also drift.",
+                    name, cur_fri_exp_id, gold_fri_exp_id
+                ));
+            }
+
             let cur_n_constraints =
                 cur.get("nConstraints").and_then(|v| v.as_u64()).unwrap_or(0);
             let gold_n_constraints =
