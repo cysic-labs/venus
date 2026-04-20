@@ -354,6 +354,9 @@ pub(super) fn execute_air_template_call(
         let mut lift_in_frame_symbolic_labeled = 0usize;
         let mut lift_in_frame_symbolic_unlabeled = 0usize;
         let mut lift_in_frame_force_include = 0usize;
+        let mut proof_scope_unique_trees: std::collections::HashSet<
+            super::expression::RuntimeExpr,
+        > = std::collections::HashSet::new();
         let mut leak_visited: std::collections::HashSet<
             *const super::expression::RuntimeExpr,
         > = std::collections::HashSet::new();
@@ -409,6 +412,9 @@ pub(super) fn execute_air_template_call(
                     });
                 if eid < frame_start {
                     lift_proof_scope += 1;
+                    if trace_lift_breakdown {
+                        proof_scope_unique_trees.insert(rt.clone());
+                    }
                 } else if force_include && !is_symbolic(val) {
                     lift_in_frame_force_include += 1;
                 } else if source_label.is_some() {
@@ -489,7 +495,8 @@ pub(super) fn execute_air_template_call(
                 .unwrap_or_else(|| "?".to_string());
             eprintln!(
                 "PIL2C_LIFT_BREAKDOWN air={}/{} frame_start={} total={} \
-                 proof_scope={} proof_scope_dropped_foreign={} \
+                 proof_scope={} proof_scope_unique_trees={} \
+                 proof_scope_dropped_foreign={} \
                  in_frame_force_include={} \
                  in_frame_symbolic_labeled={} \
                  in_frame_symbolic_unlabeled={} \
@@ -500,6 +507,7 @@ pub(super) fn execute_air_template_call(
                 frame_start,
                 store.len(),
                 lift_proof_scope,
+                proof_scope_unique_trees.len(),
                 lift_proof_scope_dropped_foreign,
                 lift_in_frame_force_include,
                 lift_in_frame_symbolic_labeled,
