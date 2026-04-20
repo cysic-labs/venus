@@ -209,6 +209,55 @@ fn chain_shape_trace_enabled() -> bool {
 /// Identity check for the additive zero operand. Mirrors JS
 /// pil2-compiler's `Add(x, 0) -> x` simplification at expression
 /// build time.
+/// Shift every `ColRef.row_offset` and nested
+/// `ExprRef.row_offset` inside a `RuntimeExpr` tree by `delta`.
+/// Used by Round 3 of plan-rustify-pkgen-e2e-0420 to apply the
+/// `ExprRef.row_offset` to the resolved expression at serialization
+/// time. Mirrors JS `ExpressionPacker`'s rowOffset accumulation
+/// (`temp/golden_references/pil2-compiler/src/expression_packer.js::operandPack`
+/// recursively composes `this.rowOffset` onto operand row
+/// offsets). A zero delta short-circuits so the hot path stays
+/// free of clones.
+fn shift_row_offsets(expr: &Rc<RuntimeExpr>, delta: i64) -> Rc<RuntimeExpr> {
+    if delta == 0 {
+        return expr.clone();
+    }
+    match expr.as_ref() {
+        RuntimeExpr::ColRef {
+            col_type,
+            id,
+            row_offset,
+            origin_frame_id,
+        } => Rc::new(RuntimeExpr::ColRef {
+            col_type: *col_type,
+            id: *id,
+            row_offset: Some(row_offset.unwrap_or(0) + delta),
+            origin_frame_id: *origin_frame_id,
+        }),
+        RuntimeExpr::ExprRef {
+            id,
+            row_offset,
+            origin_frame_id,
+        } => Rc::new(RuntimeExpr::ExprRef {
+            id: *id,
+            row_offset: Some(row_offset.unwrap_or(0) + delta),
+            origin_frame_id: *origin_frame_id,
+        }),
+        RuntimeExpr::BinOp { op, left, right } => Rc::new(RuntimeExpr::BinOp {
+            op: *op,
+            left: shift_row_offsets(left, delta),
+            right: shift_row_offsets(right, delta),
+        }),
+        RuntimeExpr::UnaryOp { op, operand } => Rc::new(RuntimeExpr::UnaryOp {
+            op: *op,
+            operand: shift_row_offsets(operand, delta),
+        }),
+        // Bare `Value` leaves (constants, non-column values)
+        // carry no row offset semantics. Return as-is.
+        RuntimeExpr::Value(_) => expr.clone(),
+    }
+}
+
 fn is_runtime_zero(expr: &RuntimeExpr) -> bool {
     match expr {
         RuntimeExpr::Value(Value::Int(0)) | RuntimeExpr::Value(Value::Fe(0)) => true,
@@ -2135,16 +2184,21 @@ impl<'a> ProtoOutBuilder<'a> {
         if let RuntimeExpr::ExprRef { id, row_offset, origin_frame_id } = expr {
             let current_origin = *self.current_origin_frame_id.borrow();
             let origin = origin_frame_id.unwrap_or(current_origin);
-            let offset_i32 = row_offset.unwrap_or(0) as i32;
+            let offset = row_offset.unwrap_or(0);
+            let offset_i32 = offset as i32;
             let cache_key = PackedKey::ForeignIntermediate(origin, *id, offset_i32);
             stats.foreign_intermediate_probes += 1;
             if let Some(&cached_idx) = prov_cache.get(&cache_key) {
                 stats.foreign_intermediate_hits += 1;
                 return cached_idx;
             }
-            // Same-AIR in-frame slots that are already lifted
-            // resolve through `source_to_pos` -> `expr_id_map`.
-            if origin == current_origin {
+            // Same-AIR in-frame slots that are already lifted at
+            // row_offset=0 resolve through `source_to_pos` ->
+            // `expr_id_map`. Only reuse the existing arena slot
+            // when the requested row_offset is also 0; a non-zero
+            // offset needs a shifted-tree emission via the
+            // resolution-map path below.
+            if origin == current_origin && offset == 0 {
                 if let Some(&pos) = source_to_pos.get(id) {
                     if let Some(&idx) = expr_id_map.get(pos) {
                         prov_cache.insert(cache_key, idx);
@@ -2152,12 +2206,19 @@ impl<'a> ProtoOutBuilder<'a> {
                     }
                 }
             }
-            if let Some(resolved) = self
+            if let Some(resolved_raw) = self
                 .processor
                 .global_intermediate_resolution
                 .get(&(origin, *id))
                 .cloned()
             {
+                // Round 3 of plan-rustify-pkgen-e2e-0420: the
+                // resolved tree's own leaves carry the declaring
+                // site's row offsets. Composing `ExprRef.row_offset`
+                // onto them via `shift_row_offsets` ensures `expr`
+                // and `expr'` serialize to distinct trees, matching
+                // JS `ExpressionPacker.rowOffset` accumulation.
+                let resolved = shift_row_offsets(&resolved_raw, offset);
                 let idx = self.flatten_air_expr(
                     &resolved,
                     source_expr_id,
@@ -2426,7 +2487,8 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::ExprRef { id, row_offset, origin_frame_id } => {
                 let current_origin = *self.current_origin_frame_id.borrow();
                 let origin = origin_frame_id.unwrap_or(current_origin);
-                let offset_i32 = row_offset.unwrap_or(0) as i32;
+                let offset = row_offset.unwrap_or(0);
+                let offset_i32 = offset as i32;
                 let cache_key = PackedKey::ForeignIntermediate(origin, *id, offset_i32);
                 stats.foreign_intermediate_probes += 1;
                 if let Some(&cached_idx) = prov_cache.get(&cache_key) {
@@ -2437,7 +2499,11 @@ impl<'a> ProtoOutBuilder<'a> {
                         )),
                     });
                 }
-                if origin == current_origin {
+                // Reuse an existing arena entry only when offset = 0.
+                // A non-zero offset requires a shifted-tree
+                // emission via the resolution-map path below so
+                // `expr` and `expr'` produce distinct arena entries.
+                if origin == current_origin && offset == 0 {
                     if let Some(&pos) = source_to_pos.get(id) {
                         if let Some(&idx) = expr_id_map.get(pos) {
                             prov_cache.insert(cache_key, idx);
@@ -2449,12 +2515,13 @@ impl<'a> ProtoOutBuilder<'a> {
                         }
                     }
                 }
-                if let Some(resolved) = self
+                if let Some(resolved_raw) = self
                     .processor
                     .global_intermediate_resolution
                     .get(&(origin, *id))
                     .cloned()
                 {
+                    let resolved = shift_row_offsets(&resolved_raw, offset);
                     let idx = self.flatten_air_expr(
                         &resolved,
                         None,

@@ -1422,6 +1422,34 @@ impl Processor {
                         row_offset: Some(offset_val as i64),
                         origin_frame_id,
                     },
+                    // Round 3 of plan-rustify-pkgen-e2e-0420: the
+                    // Round 2 `RuntimeExpr::ExprRef` producer
+                    // surface must compose row offsets onto the
+                    // new node so `expr'` preserves reference
+                    // identity. Without this arm `Expr::RowOffset`
+                    // falls through to the wildcard and the offset
+                    // is lost, which means `expr'` serializes as
+                    // `expr`. Mirror JS
+                    // `pil2-compiler/src/expression_items/row_offset.js::getValue`
+                    // where the offset accumulates onto the
+                    // underlying reference's row_offset.
+                    Value::RuntimeExpr(rc) => match rc.as_ref() {
+                        RuntimeExpr::ExprRef {
+                            id,
+                            row_offset: existing,
+                            origin_frame_id,
+                        } => {
+                            let composed = existing.unwrap_or(0) + offset_val as i64;
+                            Value::RuntimeExpr(std::rc::Rc::new(
+                                RuntimeExpr::ExprRef {
+                                    id: *id,
+                                    row_offset: Some(composed),
+                                    origin_frame_id: *origin_frame_id,
+                                },
+                            ))
+                        }
+                        _ => Value::RuntimeExpr(rc),
+                    },
                     _ => base_val,
                 }
             }

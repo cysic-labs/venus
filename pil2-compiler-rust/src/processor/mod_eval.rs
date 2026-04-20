@@ -553,8 +553,15 @@ pub(super) fn try_resolve_indexed_reference(&mut self, expr: &Expr) -> Option<Va
 /// scalar element.  When partially indexed, returns an `ArrayRef`
 /// carrying the sub-array's base ID and remaining dimensions so that
 /// further ArrayIndex operations or parameter binding can continue.
+///
+/// Round 3 of plan-rustify-pkgen-e2e-0420: fully-indexed
+/// `RefType::Expr` reads route through the ref-preserving path
+/// `get_var_ref_value_by_type_and_id` so proof-scope symbolic
+/// `expr_arr[i]` reads produce `RuntimeExpr::ExprRef` instead of
+/// inlining the stored tree. Other ref kinds keep the existing
+/// `get_var_value_by_type_and_id` inlining behavior.
 pub(super) fn resolve_partial_array(
-    &self,
+    &mut self,
     ref_type: &RefType,
     base_id: u32,
     dims: &[u32],
@@ -563,7 +570,11 @@ pub(super) fn resolve_partial_array(
     let flat_idx = compute_flat_index_partial(indexes, dims);
     let id = base_id + flat_idx;
     if indexes.len() == dims.len() {
-        self.get_var_value_by_type_and_id(ref_type, id)
+        if matches!(ref_type, RefType::Expr) {
+            self.get_var_ref_value_by_type_and_id(ref_type, id)
+        } else {
+            self.get_var_value_by_type_and_id(ref_type, id)
+        }
     } else {
         let remaining_dims = dims[indexes.len()..].to_vec();
         Value::ArrayRef {

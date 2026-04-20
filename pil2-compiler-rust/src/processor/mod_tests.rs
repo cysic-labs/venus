@@ -478,6 +478,207 @@ fn test_proof_scope_slot_keeps_origin_less_leaves() {
     );
 }
 
+// ----------------------------------------------------------------
+// Round 3 of plan-rustify-pkgen-e2e-0420 compile-time
+// `RuntimeExpr::ExprRef` identity regressions. Codex Round 2
+// review required replacing the serializer-cache-probe-based
+// regression with one that inspects the Processor's runtime-
+// expression shape directly. These tests exercise
+// `mod_vardecl.rs::get_var_ref_value_by_type_and_id` under a
+// synthetic proof-scope setup (id < frame_start AND in_air) and
+// lock the invariants documented in
+// `temp/plan-rustify-pkgen-e2e-0420.md` Phase 2:
+//
+// 1. Symbolic proof-scope reads mint `Value::RuntimeExpr(Rc<RuntimeExpr::ExprRef>)`,
+//    NOT an inlined clone of the stored tree.
+// 2. Repeated reads of the same slot produce `ExprRef` nodes with
+//    equal `(id, row_offset, origin_frame_id)` tuples.
+// 3. `Expr::RowOffset` composes onto the `ExprRef.row_offset` so
+//    `expr'` and `expr` carry distinct row offsets while sharing
+//    the same id.
+// ----------------------------------------------------------------
+
+fn seed_proof_scope_expr_slot(p: &mut Processor) -> u32 {
+    use super::ids::IdData;
+    // Reserve one container-owned slot at id=0 in the current
+    // (proof-scope) frame, then push an air scope so frame_start
+    // advances past it. After push, id=0 is a proof-scope symbolic
+    // slot that the `get_var_ref_value*` ExprRef branch should
+    // match (`in_air && id < frame_start`).
+    let data = IdData { container_owned: true, ..Default::default() };
+    let id = p.exprs.reserve(1, Some("ps_expr"), &[], data);
+    // Populate with a symbolic RuntimeExpr (Add of two witness
+    // col refs) so the inline / ExprRef branch sees a symbolic
+    // value rather than a folded constant.
+    let tree = RuntimeExpr::BinOp {
+        op: RuntimeOp::Add,
+        left: std::rc::Rc::new(RuntimeExpr::ColRef {
+            col_type: ColRefKind::Witness,
+            id: 0,
+            row_offset: None,
+            origin_frame_id: Some(0),
+        }),
+        right: std::rc::Rc::new(RuntimeExpr::ColRef {
+            col_type: ColRefKind::Witness,
+            id: 1,
+            row_offset: None,
+            origin_frame_id: Some(0),
+        }),
+    };
+    p.exprs.set(id, Value::RuntimeExpr(std::rc::Rc::new(tree)));
+    // Push an air-scope so frame_start advances past id=0. The
+    // new frame inherits the seeded slot as container_owned.
+    p.exprs.push();
+    p.ints.push();
+    p.fes.push();
+    p.strings.push();
+    // Simulate being inside an air body by parking a fake Air on
+    // the stack. `get_var_ref_value*` only reads `!self.air_stack.is_empty()`.
+    p.air_stack.push(super::air::Air::new(0, 0, "template", "air", 16, false));
+    p.next_origin_frame_id = p.next_origin_frame_id.saturating_add(1);
+    p.current_origin_frame_id = p.next_origin_frame_id;
+    id
+}
+
+#[test]
+fn expr_ref_proof_scope_read_produces_exprref_variant() {
+    let mut p = make_processor();
+    let slot_id = seed_proof_scope_expr_slot(&mut p);
+    assert!(
+        slot_id < p.exprs.frame_start(),
+        "seeded slot must be below frame_start; got id={} frame_start={}",
+        slot_id,
+        p.exprs.frame_start()
+    );
+
+    let v = p.get_var_ref_value_by_type_and_id(
+        &super::references::RefType::Expr,
+        slot_id,
+    );
+    match v {
+        Value::RuntimeExpr(rc) => match rc.as_ref() {
+            RuntimeExpr::ExprRef { id, row_offset, origin_frame_id } => {
+                assert_eq!(*id, slot_id, "ExprRef.id must be the slot id");
+                assert_eq!(
+                    *row_offset, None,
+                    "scalar proof-scope read must have row_offset=None"
+                );
+                assert_eq!(
+                    *origin_frame_id,
+                    Some(p.current_origin_frame_id),
+                    "ExprRef.origin_frame_id must be the current frame"
+                );
+            }
+            other => panic!(
+                "proof-scope symbolic expr read must mint RuntimeExpr::ExprRef; \
+                 got {:?}",
+                other
+            ),
+        },
+        other => panic!(
+            "proof-scope symbolic expr read must return Value::RuntimeExpr; \
+             got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn expr_ref_proof_scope_repeated_reads_share_identity_tuple() {
+    let mut p = make_processor();
+    let slot_id = seed_proof_scope_expr_slot(&mut p);
+
+    let first = p.get_var_ref_value_by_type_and_id(
+        &super::references::RefType::Expr,
+        slot_id,
+    );
+    let second = p.get_var_ref_value_by_type_and_id(
+        &super::references::RefType::Expr,
+        slot_id,
+    );
+
+    let (first_id, first_offset, first_origin) = match &first {
+        Value::RuntimeExpr(rc) => match rc.as_ref() {
+            RuntimeExpr::ExprRef { id, row_offset, origin_frame_id } => {
+                (*id, *row_offset, *origin_frame_id)
+            }
+            other => panic!("first read must be ExprRef; got {:?}", other),
+        },
+        other => panic!("first read must be Value::RuntimeExpr; got {:?}", other),
+    };
+    let (second_id, second_offset, second_origin) = match &second {
+        Value::RuntimeExpr(rc) => match rc.as_ref() {
+            RuntimeExpr::ExprRef { id, row_offset, origin_frame_id } => {
+                (*id, *row_offset, *origin_frame_id)
+            }
+            other => panic!("second read must be ExprRef; got {:?}", other),
+        },
+        other => panic!("second read must be Value::RuntimeExpr; got {:?}", other),
+    };
+    assert_eq!(
+        (first_id, first_offset, first_origin),
+        (second_id, second_offset, second_origin),
+        "repeated proof-scope reads must share the same ExprRef tuple"
+    );
+}
+
+#[test]
+fn expr_ref_row_offset_composes_on_proof_scope_ref() {
+    let mut p = make_processor();
+    let slot_id = seed_proof_scope_expr_slot(&mut p);
+
+    // Build an `Expr::RowOffset { base: Reference, offset: 2,
+    // prior: false }`. We need a Reference for `ps_expr`. Since
+    // the slot was reserved with label `ps_expr`, we register a
+    // matching `Reference` so the evaluator can find it.
+    p.references.declare(
+        "ps_expr",
+        super::references::RefType::Expr,
+        slot_id,
+        &[],
+        true,
+        0,
+        "",
+    );
+
+    use crate::parser::ast::{Expr, NameId, NumericLiteral, NumericRadix};
+    let shifted = Expr::RowOffset {
+        base: Box::new(Expr::Reference(NameId {
+            path: "ps_expr".to_string(),
+            indexes: vec![],
+            row_offset: None,
+        })),
+        offset: Box::new(Expr::Number(NumericLiteral {
+            value: "2".to_string(),
+            radix: NumericRadix::Decimal,
+        })),
+        prior: false,
+    };
+    let v = p.eval_expr(&shifted);
+    match v {
+        Value::RuntimeExpr(rc) => match rc.as_ref() {
+            RuntimeExpr::ExprRef { id, row_offset, .. } => {
+                assert_eq!(*id, slot_id);
+                assert_eq!(
+                    *row_offset,
+                    Some(2),
+                    "Expr::RowOffset must compose onto ExprRef.row_offset"
+                );
+            }
+            other => panic!(
+                "expr' on proof-scope symbolic expr must preserve \
+                 ExprRef with composed row_offset; got {:?}",
+                other
+            ),
+        },
+        other => panic!(
+            "expr' on proof-scope symbolic expr must return \
+             Value::RuntimeExpr; got {:?}",
+            other
+        ),
+    }
+}
+
 #[test]
 fn test_expand_templates() {
     let mut p = make_processor();
