@@ -943,33 +943,22 @@ impl<'a> ProtoOutBuilder<'a> {
                     // `flatten_air_expr`), matching JS pack-walk
                     // ordering. Subsequent references reuse the
                     // idx via `prov_cache`.
-                    let expr_idx = if let Some(Some(idx)) =
-                        expr_id_map.get(store_idx).copied()
-                    {
-                        idx
-                    } else if let Some((expr, sid, label, _)) = entries.get(store_idx) {
-                        let idx = self.flatten_air_expr(
-                            expr.as_ref(),
-                            *sid,
-                            *label,
-                            &air.fixed_id_map,
-                            air.fixed_col_start,
-                            &air.witness_id_map,
-                            &air.custom_id_map,
-                            &expr_id_map,
-                            &source_to_pos,
-                            &mut proto_expressions,
-                            &mut rc_cache,
-                            &mut struct_cache,
-                            &mut prov_cache,
-                            &mut im_labels,
-                            &mut stats,
-                        );
-                        expr_id_map[store_idx] = Some(idx);
-                        idx
-                    } else {
-                        entry.expr_id
-                    };
+                    let expr_idx = self.materialize_store_pos(
+                        store_idx,
+                        &entries,
+                        &air.fixed_id_map,
+                        air.fixed_col_start,
+                        &air.witness_id_map,
+                        &air.custom_id_map,
+                        &source_to_pos,
+                        &mut expr_id_map,
+                        &mut proto_expressions,
+                        &mut rc_cache,
+                        &mut struct_cache,
+                        &mut prov_cache,
+                        &mut im_labels,
+                        &mut stats,
+                    );
                     let debug_line = Some(entry.source_ref.clone());
                     let expression_idx =
                         Some(pilout_proto::operand::Expression { idx: expr_idx });
@@ -1759,11 +1748,77 @@ impl<'a> ProtoOutBuilder<'a> {
         }
     }
 
-    /// On-demand flatten of `entries[raw_id]` into the live pack
-    /// context. If the slot is already filled (non-late entries
-    /// packed in pass 1, or previously-flattened late entries from
-    /// earlier hint references) returns the cached packed idx; else
-    /// flattens and fills the slot.
+    /// On-demand materialization of `entries[pos]` into the live
+    /// per-AIR pack context. If `expr_id_map[pos]` is already
+    /// `Some(idx)` (packed by a previous constraint root, hint
+    /// resolution, or same-origin recursive call) returns `idx`.
+    /// Otherwise flattens `entries[pos]` via `flatten_air_expr`,
+    /// stores the root idx in `expr_id_map[pos]`, and returns it.
+    /// `debug_assert!` fires on out-of-range `pos`.
+    ///
+    /// This is the ONE place where a store position becomes an
+    /// arena entry. Called by constraint emission, by
+    /// `flatten_air_expr` / `flatten_air_operand` at same-origin
+    /// `Intermediate` / `ExprRef` miss branches, and by the
+    /// `HintValue::ExprId` arm of `hint_value_to_single_field_live`.
+    /// See BL-20260420-materialize-store-pos-helper.
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_store_pos(
+        &self,
+        pos: usize,
+        entries: &[(Rc<RuntimeExpr>, Option<u32>, Option<&str>, bool)],
+        fixed_map: &[(char, u32)],
+        fixed_col_start: u32,
+        witness_map: &[(u32, u32)],
+        custom_map: &[(u32, u32, u32)],
+        source_to_pos: &HashMap<u32, usize>,
+        expr_id_map: &mut Vec<Option<u32>>,
+        proto_expressions: &mut Vec<pilout_proto::Expression>,
+        rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
+        struct_cache: &mut HashMap<RuntimeExpr, u32>,
+        prov_cache: &mut HashMap<PackedKey, u32>,
+        im_labels: &mut std::collections::BTreeMap<u32, String>,
+        stats: &mut ChainShapeStats,
+    ) -> u32 {
+        if let Some(Some(idx)) = expr_id_map.get(pos).copied() {
+            return idx;
+        }
+        let Some((expr, source_expr_id, source_label, _is_late)) = entries.get(pos) else {
+            debug_assert!(
+                false,
+                "materialize_store_pos({}): out of entries range (len={})",
+                pos,
+                entries.len()
+            );
+            return u32::MAX;
+        };
+        let expr = Rc::clone(expr);
+        let source_expr_id = *source_expr_id;
+        let source_label = *source_label;
+        let root_idx = self.flatten_air_expr(
+            expr.as_ref(),
+            source_expr_id,
+            source_label,
+            fixed_map,
+            fixed_col_start,
+            witness_map,
+            custom_map,
+            entries,
+            expr_id_map,
+            source_to_pos,
+            proto_expressions,
+            rc_cache,
+            struct_cache,
+            prov_cache,
+            im_labels,
+            stats,
+        );
+        expr_id_map[pos] = Some(root_idx);
+        root_idx
+    }
+
+    /// Backwards-compatible wrapper for the Round 2 inline hint
+    /// path. Delegates to `materialize_store_pos(raw_id as usize)`.
     #[allow(clippy::too_many_arguments)]
     fn resolve_or_pack_air_hint_expr(
         &self,
@@ -1782,41 +1837,22 @@ impl<'a> ProtoOutBuilder<'a> {
         im_labels: &mut std::collections::BTreeMap<u32, String>,
         stats: &mut ChainShapeStats,
     ) -> u32 {
-        let pos = raw_id as usize;
-        if let Some(Some(idx)) = expr_id_map.get(pos).copied() {
-            return idx;
-        }
-        let Some((expr, source_expr_id, source_label, _is_late)) = entries.get(pos) else {
-            // Out of range: a stale raw_id in a hint. Return a
-            // sentinel so downstream consumers hit an obvious
-            // misalignment rather than a silent 0.
-            debug_assert!(
-                false,
-                "hint ExprId {} out of entries range (len={})",
-                raw_id,
-                entries.len()
-            );
-            return u32::MAX;
-        };
-        let root_idx = self.flatten_air_expr(
-            expr.as_ref(),
-            *source_expr_id,
-            *source_label,
+        self.materialize_store_pos(
+            raw_id as usize,
+            entries,
             fixed_map,
             fixed_col_start,
             witness_map,
             custom_map,
-            expr_id_map,
             source_to_pos,
+            expr_id_map,
             proto_expressions,
             rc_cache,
             struct_cache,
             prov_cache,
             im_labels,
             stats,
-        );
-        expr_id_map[pos] = Some(root_idx);
-        root_idx
+        )
     }
 
     /// Convert a HintValue to a list of HintField messages (per-AIR context).
@@ -2616,7 +2652,8 @@ impl<'a> ProtoOutBuilder<'a> {
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
-        expr_id_map: &[Option<u32>],
+        entries: &[(Rc<RuntimeExpr>, Option<u32>, Option<&str>, bool)],
+        expr_id_map: &mut Vec<Option<u32>>,
         source_to_pos: &HashMap<u32, usize>,
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
@@ -2690,6 +2727,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         fixed_col_start,
                         witness_map,
                         custom_map,
+                        entries,
                         expr_id_map,
                         source_to_pos,
                         out,
@@ -2708,53 +2746,51 @@ impl<'a> ProtoOutBuilder<'a> {
                 // the leaf path which emits Constant(0) with a
                 // warning.
             } else {
-                let unresolved = source_to_pos
-                    .get(id)
-                    .and_then(|&pos| expr_id_map.get(pos).copied().flatten())
-                    .is_none();
-                if unresolved {
-                    let key = origin_frame_id.map(|o| (o, *id));
-                    if let Some(resolved) = key
-                        .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
-                    {
-                        // Round 13 per Codex Round 12 review: at
-                        // EXPRESSION sites with a bare-leaf
-                        // resolved tree, consult the alias-keyed
-                        // `PackedKey::Provenance(alias_id,
-                        // row_offset)` cache first. On miss, emit
-                        // exactly one `Add(leaf, 0)` wrapper entry
-                        // via the generic leaf path and cache the
-                        // resulting idx under the alias key.
-                        // Subsequent expression-site reads reuse
-                        // the single wrapper entry.
-                        if is_bare_leaf_colref(resolved.as_ref()) {
-                            let alias_key = PackedKey::Provenance(*id, offset_i32);
-                            stats.prov_cache_probes += 1;
-                            if let Some(&cached_idx) = prov_cache.get(&alias_key) {
-                                stats.prov_cache_hits += 1;
-                                return cached_idx;
-                            }
-                            let idx = self.flatten_air_expr(
-                                &resolved,
-                                source_expr_id,
-                                source_label,
-                                fixed_map,
-                                fixed_col_start,
-                                witness_map,
-                                custom_map,
-                                expr_id_map,
-                                source_to_pos,
-                                out,
-                                rc_cache,
-                                struct_cache,
-                                prov_cache,
-                                im_labels,
-                                stats,
-                            );
-                            prov_cache.insert(alias_key, idx);
-                            return idx;
+                // Same-origin Intermediate ref: materialize the
+                // referenced store entry on demand if we have a
+                // source_to_pos mapping for it. This lifts the
+                // referenced tree as a distinct arena entry keyed
+                // at its store position (JS parity: every
+                // intermediate that a constraint reaches becomes a
+                // packed expression the constraint references via
+                // `Operand::Expression(idx)`, rather than being
+                // inlined at every use).
+                if let Some(&pos) = source_to_pos.get(id) {
+                    let idx = self.materialize_store_pos(
+                        pos,
+                        entries,
+                        fixed_map,
+                        fixed_col_start,
+                        witness_map,
+                        custom_map,
+                        source_to_pos,
+                        expr_id_map,
+                        out,
+                        rc_cache,
+                        struct_cache,
+                        prov_cache,
+                        im_labels,
+                        stats,
+                    );
+                    return idx;
+                }
+                // source_to_pos miss: fall through to the legacy
+                // global_intermediate_resolution path for refs
+                // whose store position is not known (e.g.
+                // cross-AIR refs whose origin_frame_id resolves
+                // to a foreign AIR's entries).
+                let key = origin_frame_id.map(|o| (o, *id));
+                if let Some(resolved) = key
+                    .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
+                {
+                    if is_bare_leaf_colref(resolved.as_ref()) {
+                        let alias_key = PackedKey::Provenance(*id, offset_i32);
+                        stats.prov_cache_probes += 1;
+                        if let Some(&cached_idx) = prov_cache.get(&alias_key) {
+                            stats.prov_cache_hits += 1;
+                            return cached_idx;
                         }
-                        return self.flatten_air_expr(
+                        let idx = self.flatten_air_expr(
                             &resolved,
                             source_expr_id,
                             source_label,
@@ -2762,6 +2798,7 @@ impl<'a> ProtoOutBuilder<'a> {
                             fixed_col_start,
                             witness_map,
                             custom_map,
+                            entries,
                             expr_id_map,
                             source_to_pos,
                             out,
@@ -2771,7 +2808,27 @@ impl<'a> ProtoOutBuilder<'a> {
                             im_labels,
                             stats,
                         );
+                        prov_cache.insert(alias_key, idx);
+                        return idx;
                     }
+                    return self.flatten_air_expr(
+                        &resolved,
+                        source_expr_id,
+                        source_label,
+                        fixed_map,
+                        fixed_col_start,
+                        witness_map,
+                        custom_map,
+                        entries,
+                        expr_id_map,
+                        source_to_pos,
+                        out,
+                        rc_cache,
+                        struct_cache,
+                        prov_cache,
+                        im_labels,
+                        stats,
+                    );
                 }
             }
         }
@@ -2805,10 +2862,32 @@ impl<'a> ProtoOutBuilder<'a> {
             // resolution-map path below.
             if origin == current_origin && offset == 0 {
                 if let Some(&pos) = source_to_pos.get(id) {
-                    if let Some(&Some(idx)) = expr_id_map.get(pos) {
-                        prov_cache.insert(cache_key, idx);
-                        return idx;
-                    }
+                    // Materialize the store position on demand.
+                    // If already filled, returns the cached idx;
+                    // otherwise flattens entries[pos] inline into
+                    // the live context. JS parity: an ExprRef
+                    // reaches into the same `PackedExpressions`
+                    // context as constraint roots, so the
+                    // referenced `expr` slot becomes a distinct
+                    // arena entry.
+                    let idx = self.materialize_store_pos(
+                        pos,
+                        entries,
+                        fixed_map,
+                        fixed_col_start,
+                        witness_map,
+                        custom_map,
+                        source_to_pos,
+                        expr_id_map,
+                        out,
+                        rc_cache,
+                        struct_cache,
+                        prov_cache,
+                        im_labels,
+                        stats,
+                    );
+                    prov_cache.insert(cache_key, idx);
+                    return idx;
                 }
             }
             if let Some(resolved_raw) = self
@@ -2847,6 +2926,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         fixed_col_start,
                         witness_map,
                         custom_map,
+                        entries,
                         expr_id_map,
                         source_to_pos,
                         out,
@@ -2867,6 +2947,7 @@ impl<'a> ProtoOutBuilder<'a> {
                     fixed_col_start,
                     witness_map,
                     custom_map,
+                    entries,
                     expr_id_map,
                     source_to_pos,
                     out,
@@ -2938,8 +3019,8 @@ impl<'a> ProtoOutBuilder<'a> {
                 // Sub-operands do not carry the top-level store entry's
                 // provenance; they're reused by their own ColRef /
                 // provenance identity when recursed into.
-                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
-                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
+                let lhs = self.flatten_air_operand(left, fixed_map, fixed_col_start, witness_map, custom_map, entries, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
+                let rhs = self.flatten_air_operand(right, fixed_map, fixed_col_start, witness_map, custom_map, entries, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
                 match op {
                     RuntimeOp::Add => pilout_proto::expression::Operation::Add(
                         pilout_proto::expression::Add { lhs, rhs },
@@ -2955,7 +3036,7 @@ impl<'a> ProtoOutBuilder<'a> {
             RuntimeExpr::UnaryOp { op, operand } => match op {
                 RuntimeUnaryOp::Neg => {
                     let value =
-                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
+                        self.flatten_air_operand(operand, fixed_map, fixed_col_start, witness_map, custom_map, entries, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
                     pilout_proto::expression::Operation::Neg(
                         pilout_proto::expression::Neg { value },
                     )
@@ -2963,7 +3044,7 @@ impl<'a> ProtoOutBuilder<'a> {
             },
             // Leaf node: wrap in Add(x, 0).
             _ => {
-                let leaf = self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos);
+                let leaf = self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, entries, expr_id_map, source_to_pos);
                 let zero = Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Constant(
                         pilout_proto::operand::Constant { value: Vec::new() },
@@ -3014,7 +3095,8 @@ impl<'a> ProtoOutBuilder<'a> {
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
-        expr_id_map: &[Option<u32>],
+        entries: &[(Rc<RuntimeExpr>, Option<u32>, Option<&str>, bool)],
+        expr_id_map: &mut Vec<Option<u32>>,
         source_to_pos: &HashMap<u32, usize>,
         out: &mut Vec<pilout_proto::Expression>,
         rc_cache: &mut HashMap<*const RuntimeExpr, u32>,
@@ -3029,7 +3111,7 @@ impl<'a> ProtoOutBuilder<'a> {
                 // entry's source provenance (source_expr_id and
                 // source_label are only authoritative at the air
                 // expression store entry level).
-                let idx = self.flatten_air_expr(expr, None, None, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
+                let idx = self.flatten_air_expr(expr, None, None, fixed_map, fixed_col_start, witness_map, custom_map, entries, expr_id_map, source_to_pos, out, rc_cache, struct_cache, prov_cache, im_labels, stats);
                 Some(pilout_proto::Operand {
                     operand: Some(pilout_proto::operand::Operand::Expression(
                         pilout_proto::operand::Expression { idx },
@@ -3068,6 +3150,36 @@ impl<'a> ProtoOutBuilder<'a> {
                 let current_origin = *self.current_origin_frame_id.borrow();
                 let is_foreign = matches!(origin_frame_id, Some(o) if *o != current_origin);
                 let offset_i32 = row_offset.unwrap_or(0) as i32;
+                // Same-origin Intermediate with unfilled slot:
+                // materialize the store position on demand. JS
+                // parity: the referenced `expr` slot becomes a
+                // distinct arena entry, and this operand site
+                // resolves to `Operand::Expression(idx)`.
+                if !is_foreign && offset_i32 == 0 {
+                    if let Some(&pos) = source_to_pos.get(id) {
+                        let idx = self.materialize_store_pos(
+                            pos,
+                            entries,
+                            fixed_map,
+                            fixed_col_start,
+                            witness_map,
+                            custom_map,
+                            source_to_pos,
+                            expr_id_map,
+                            out,
+                            rc_cache,
+                            struct_cache,
+                            prov_cache,
+                            im_labels,
+                            stats,
+                        );
+                        return Some(pilout_proto::Operand {
+                            operand: Some(pilout_proto::operand::Operand::Expression(
+                                pilout_proto::operand::Expression { idx },
+                            )),
+                        });
+                    }
+                }
                 let foreign_key = if is_foreign {
                     origin_frame_id
                         .map(|o| PackedKey::ForeignIntermediate(o, *id, offset_i32))
@@ -3111,6 +3223,7 @@ impl<'a> ProtoOutBuilder<'a> {
                             fixed_col_start,
                             witness_map,
                             custom_map,
+                            entries,
                             expr_id_map,
                             source_to_pos,
                         );
@@ -3123,6 +3236,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         fixed_col_start,
                         witness_map,
                         custom_map,
+                        entries,
                         expr_id_map,
                         source_to_pos,
                         out,
@@ -3141,7 +3255,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         )),
                     });
                 }
-                self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos)
+                self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, entries, expr_id_map, source_to_pos)
             }
             // Round 2 of plan-rustify-pkgen-e2e-0420: operand-level
             // handling for `RuntimeExpr::ExprRef`. Mirrors the
@@ -3201,6 +3315,7 @@ impl<'a> ProtoOutBuilder<'a> {
                             fixed_col_start,
                             witness_map,
                             custom_map,
+                            entries,
                             expr_id_map,
                             source_to_pos,
                         );
@@ -3213,6 +3328,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         fixed_col_start,
                         witness_map,
                         custom_map,
+                        entries,
                         expr_id_map,
                         source_to_pos,
                         out,
@@ -3229,9 +3345,9 @@ impl<'a> ProtoOutBuilder<'a> {
                         )),
                     });
                 }
-                self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos)
+                self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, entries, expr_id_map, source_to_pos)
             }
-            _ => self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, expr_id_map, source_to_pos),
+            _ => self.leaf_to_air_operand(expr, fixed_map, fixed_col_start, witness_map, custom_map, entries, expr_id_map, source_to_pos),
         }
     }
 
@@ -3243,7 +3359,8 @@ impl<'a> ProtoOutBuilder<'a> {
         fixed_col_start: u32,
         witness_map: &[(u32, u32)],
         custom_map: &[(u32, u32, u32)],
-        expr_id_map: &[Option<u32>],
+        entries: &[(Rc<RuntimeExpr>, Option<u32>, Option<&str>, bool)],
+        expr_id_map: &mut Vec<Option<u32>>,
         source_to_pos: &HashMap<u32, usize>,
     ) -> Option<pilout_proto::Operand> {
         let operand = match expr {
