@@ -491,19 +491,35 @@ pub(super) fn execute_air_template_call(
                 }
             }
         }
-        // Import reachable ids preserving walker discovery
-        // order. Dedup by id so the same id appearing multiple
-        // times in reachable_order (different row offsets)
-        // lifts only once.
+        // Round 6 of plan-rustify-pkgen-e2e-0420: import
+        // reachable ids in SORTED NUMERIC id order so the per-AIR
+        // arena insertion order mirrors JS
+        // `Expressions.pack(container, ...)` iterating
+        // `this.expressions` sequentially
+        // (temp/golden_references/pil2-compiler/src/expressions.js::pack).
+        // The prior walker-DFS order produced a JS-equivalent
+        // reachable set but with the arena head in the wrong
+        // order, which surfaced as `expressionsCode[0].expId`
+        // drift much larger than the total-count drift on the
+        // trio (e.g. SpecifiedRanges cur 96 vs gold 8 while
+        // cExpId was only 28 off). Sorting reachable current-
+        // origin ids numerically matches JS's allocator order.
+        let reachable_current_ids_sorted: Vec<u32> = reachable_order
+            .iter()
+            .filter_map(|(origin, id)| {
+                if origin.is_none() || *origin == Some(current_origin) {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect::<std::collections::BTreeSet<u32>>()
+            .into_iter()
+            .collect();
         let mut imported_ids: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
-        for (origin_opt, eid) in &reachable_order {
+        for eid in &reachable_current_ids_sorted {
             let eid = *eid;
-            let is_current_origin = origin_opt.is_none()
-                || *origin_opt == Some(current_origin);
-            if !is_current_origin {
-                continue;
-            }
             if !imported_ids.insert(eid) {
                 continue;
             }
