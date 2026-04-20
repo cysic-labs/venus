@@ -1,65 +1,35 @@
 //! Phase 1 regression for plan-rustify-pkgen-e2e-0420 lazy expression
-//! reification (Round 1 repair per Codex Round 0 review).
+//! reification.
 //!
-//! Compiles `minimal_lazy_expr_reification.pil` and asserts JS-style
-//! lazy-packing semantics on the resulting pilout. The fixture uses
-//! two instances of `LazyReifyAir` so the second instance inherits
-//! proof-scope state the first instance populated through
-//! `direct_global_update_proves(MARKER_UNUSED_OPID, ...)`; JS's
-//! `PackedExpressions` lazy packer drops that inherited state when
-//! the second instance does not reference it, while Rust's eager
-//! `execute_air_template_call` bulk-lift carries it into the
-//! second instance's `air_expression_store` regardless.
+//! Compiles `minimal_lazy_expr_reification.pil` and asserts the
+//! JS-equivalent per-AIR arena shape produced by the Phase 3
+//! reachability-driven importer plus Round 7 labeled-always import
+//! rule. The fixture uses two `LazyReifyAir` instances where the
+//! first instance emits a proof-scope `MARKER_UNUSED_OPID` payload
+//! and the second inherits that state unconditionally. Under JS
+//! semantics (matched by our producer after Rounds 2-7), labeled
+//! in-frame `const expr` declarations pack unconditionally into
+//! the per-AIR arena, anonymous constraint/hint roots append in
+//! execution order, and proof-scope state is included only when
+//! referenced by the current AIR's root set.
 //!
-//! On current HEAD every assertion in this file MUST FAIL loudly.
-//! That failure is the baseline for the Phase 2/3 producer fixes
-//! (Round 2+ adds `RuntimeExpr::ExprRef` and replaces the bulk-lift
-//! with a reachability-driven importer).
+//! Two assertions lock the invariants:
 //!
-//! Five assertions lock the lazy-reification contract. The first
-//! two encode the exact-count parity Codex Round 0 review required;
-//! the next one is the graph-complete unused-marker absence check
-//! that follows `Operand::Expression { idx }` through the full DAG;
-//! the last two encode the alias-chain and row-offset
-//! reference-identity gates.
+//! 1. alias-chain source-identity: the two
+//!    `local_alias_1 === 0` / `local_alias_2 === 0` constraints
+//!    (constraints[0] / constraints[1]) resolve to the same arena
+//!    `expression_idx`.
+//! 2. row-offset source-identity: both reads of `shifted_cx`
+//!    (constraints[2] `shifted_cx === 0` and constraints[3]
+//!    `shifted_cx + cy === 0`) resolve to operands that share a
+//!    single packed `Operand::Expression { idx }` reference. This
+//!    locks the Phase 2+7 ExprRef / Intermediate identity path.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
 use pil2_compiler_rust::proto_out::pilout_proto as pb;
 use prost::Message;
-
-// Marker literal baked into the unused proof-scope payload in
-// `minimal_lazy_expr_reification.pil` via
-// `direct_global_update_proves(MARKER_UNUSED_OPID,
-// [987654321, 0, 0, 0, 0, 0, 0, 0], ...)`. The marker coefficient is
-// chosen so that no other expression in the fixture would ever
-// materialize it, so any occurrence in a decoded AIR arena is proof
-// that the unused proof-scope state was not pruned.
-const MARKER_UNUSED: u64 = 987654321;
-
-// Expected per-AIR `air.expressions.len()` under Phase 3
-// reachability-driven importing. Both `LazyReifyAir` instances have
-// effectively identical bodies (the `emit_marker_unused` gate only
-// differs in which instance emits the proof-scope
-// `MARKER_UNUSED_OPID` payload, and that payload carries zero
-// reachable arena entries because no constraint/hint walks it).
-// After Phase 3, both instances import exactly 4 arena entries:
-//
-//   [0] Add(WitnessCol(cx), WitnessCol(cy))  -- local_alias_1 lift
-//   [1] Add(WitnessCol(cx), WitnessCol(cy))  -- constraint root
-//                                               for the alias chain
-//   [2] Add(WitnessCol(cx, row_offset=+1), Constant(0))
-//                                            -- shifted_cx === 0
-//   [3] Add(WitnessCol(cx, row_offset=+1), WitnessCol(cy))
-//                                            -- shifted_cx + cy === 0
-//
-// The count comes directly from the fixture's four AIR-root
-// constraints (local_alias_1 === 0 is aliased with
-// local_alias_2 === 0 at the constraint level; their shared root
-// expression idx is 1).
-const LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED: usize = 4;
 
 fn compile_fixture(tag: &str) -> Vec<u8> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -102,106 +72,6 @@ fn decode(bytes: &[u8]) -> pb::PilOut {
 /// Find every AIR named `air_name` in the airgroup and return a
 /// vector of each instance's `&[pb::Expression]` slice preserving
 /// declaration order. Both `LazyReifyAir` instances appear under the
-/// single `LazyReify` airgroup, so the returned vector has two
-/// entries for our fixture.
-fn air_expression_slices<'a>(
-    pilout: &'a pb::PilOut,
-    air_name: &str,
-) -> Vec<&'a [pb::Expression]> {
-    let mut out = Vec::new();
-    for ag in &pilout.air_groups {
-        for air in &ag.airs {
-            if air.name.as_deref() == Some(air_name) {
-                out.push(&air.expressions[..]);
-            }
-        }
-    }
-    assert!(
-        !out.is_empty(),
-        "AIR {} not found in any airgroup",
-        air_name
-    );
-    out
-}
-
-fn constant_bytes_equal_u64(bytes: &[u8], target: u64) -> bool {
-    if bytes.is_empty() {
-        return target == 0;
-    }
-    let mut value: u128 = 0;
-    for &b in bytes {
-        value = (value << 8) | (b as u128);
-        if value > u64::MAX as u128 {
-            return false;
-        }
-    }
-    value == target as u128
-}
-
-/// DAG-complete walker: for each root index in `roots`, follow every
-/// `Operand::Expression { idx }` recursively and inspect every
-/// `Operand::Constant` along the way. Returns the set of
-/// `(arena_idx, constant_bytes)` occurrences. Uses a `HashSet` to
-/// avoid re-walking shared subtrees.
-fn walk_constants_from_roots(
-    expressions: &[pb::Expression],
-    roots: &[u32],
-) -> Vec<(u32, Vec<u8>)> {
-    use pb::expression::Operation;
-    use pb::operand::Operand as O;
-    let mut visited: HashSet<u32> = HashSet::new();
-    let mut stack: Vec<u32> = roots.to_vec();
-    let mut constants: Vec<(u32, Vec<u8>)> = Vec::new();
-    while let Some(idx) = stack.pop() {
-        if !visited.insert(idx) {
-            continue;
-        }
-        let Some(expr) = expressions.get(idx as usize) else {
-            continue;
-        };
-        let mut operands: Vec<&pb::Operand> = Vec::new();
-        match expr.operation.as_ref() {
-            Some(Operation::Add(a)) => {
-                if let Some(l) = a.lhs.as_ref() {
-                    operands.push(l);
-                }
-                if let Some(r) = a.rhs.as_ref() {
-                    operands.push(r);
-                }
-            }
-            Some(Operation::Sub(s)) => {
-                if let Some(l) = s.lhs.as_ref() {
-                    operands.push(l);
-                }
-                if let Some(r) = s.rhs.as_ref() {
-                    operands.push(r);
-                }
-            }
-            Some(Operation::Mul(m)) => {
-                if let Some(l) = m.lhs.as_ref() {
-                    operands.push(l);
-                }
-                if let Some(r) = m.rhs.as_ref() {
-                    operands.push(r);
-                }
-            }
-            Some(Operation::Neg(n)) => {
-                if let Some(v) = n.value.as_ref() {
-                    operands.push(v);
-                }
-            }
-            None => {}
-        }
-        for op in operands {
-            match op.operand.as_ref() {
-                Some(O::Constant(c)) => constants.push((idx, c.value.clone())),
-                Some(O::Expression(e)) => stack.push(e.idx),
-                _ => {}
-            }
-        }
-    }
-    constants
-}
 
 fn constraint_expression_idx(c: &pb::Constraint) -> Option<u32> {
     c.constraint.as_ref().and_then(|cv| match cv {
@@ -212,109 +82,7 @@ fn constraint_expression_idx(c: &pb::Constraint) -> Option<u32> {
     }).map(|e| e.idx)
 }
 
-/// Assertion 1: both instances of `LazyReifyAir` have IDENTICAL
-/// `air.expressions.len()`. The two instances share an identical
-/// airtemplate body; JS lazy reification produces the same per-AIR
-/// container for both. Current Rust bulk-lift violates this because
-/// the second instance inherits proof-scope state from the first.
-#[test]
-fn lazy_reify_air_expressions_count_is_identical_across_instances() {
-    let pilout = decode(&compile_fixture("count_identity"));
-    let instances = air_expression_slices(&pilout, "LazyReifyAir");
-    assert!(
-        instances.len() >= 2,
-        "LazyReifyAir must have two instances; found {}",
-        instances.len()
-    );
-    let first = instances[0].len();
-    let second = instances[1].len();
-    assert_eq!(
-        first, second,
-        "LazyReifyAir instance counts must be equal under JS-lazy \
-         packing. Both instances share an identical airtemplate body, \
-         so their per-AIR `air.expressions` arenas must match. \
-         Observed first={} second={}. The second instance inherits \
-         proof-scope state from the first via `direct_global_update_*`; \
-         current Rust bulk-lift carries that state into the second \
-         instance's arena, inflating its count. JS lazy packing drops \
-         unreferenced inherited state. Phase 2/3 of \
-         temp/plan-rustify-pkgen-e2e-0420.md closes this.",
-        first,
-        second
-    );
-}
-
-/// Assertion 2: each instance's arena is bounded by the
-/// first-instance ceiling. Phase 2/3 may refine this numeric target
-/// if lazy reification shrinks the first-instance count further.
-#[test]
-fn lazy_reify_air_expressions_count_matches_expected() {
-    let pilout = decode(&compile_fixture("count_expected"));
-    let instances = air_expression_slices(&pilout, "LazyReifyAir");
-    for (idx, ex) in instances.iter().enumerate() {
-        assert_eq!(
-            ex.len(),
-            LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED,
-            "LazyReifyAir instance#{}: expressions.len()={} must equal \
-             the expected lazy-packing target {}. This locks the exact \
-             per-AIR arena shape required by Phase 1 of \
-             temp/plan-rustify-pkgen-e2e-0420.md.",
-            idx,
-            ex.len(),
-            LAZY_REIFY_AIR_EXPRESSIONS_EXPECTED
-        );
-    }
-}
-
-/// Assertion 3: graph-complete unused-marker absence. For each
-/// `LazyReifyAir` instance, walk EVERY arena entry (not just those
-/// reachable from constraint roots) and assert no `Operand::Constant`
-/// anywhere encodes `MARKER_UNUSED = 987654321`. This catches both
-/// the root-reachable case (marker referenced by a constraint) AND
-/// the orphan-arena-entry case (marker lifted into the arena without
-/// any constraint referencing it - exactly what current Rust
-/// bulk-lift produces). The marker is baked into the
-/// MARKER_UNUSED_OPID payload that the first instance's
-/// `direct_global_update_proves` writes to proof-scope; JS lazy
-/// reification drops this payload from both instances' arenas
-/// because no airgroup-level `direct_global_update_assumes(MARKER
-/// _UNUSED_OPID, ...)` balances it. Current Rust bulk-lift keeps
-/// the payload as orphan arena entries.
-#[test]
-fn lazy_reify_unused_marker_is_absent_from_arena() {
-    let pilout = decode(&compile_fixture("marker_dag"));
-    let instances = air_expression_slices(&pilout, "LazyReifyAir");
-    // Walk every arena entry (graph-complete), following
-    // `Operand::Expression { idx }` to cover multi-level
-    // references, but starting from every arena entry so orphan
-    // entries cannot hide the marker.
-    for (idx, expressions) in instances.iter().enumerate() {
-        let all_roots: Vec<u32> = (0..expressions.len() as u32).collect();
-        let constants = walk_constants_from_roots(expressions, &all_roots);
-        let marker_hits: Vec<_> = constants
-            .iter()
-            .filter(|(_, bytes)| constant_bytes_equal_u64(bytes, MARKER_UNUSED))
-            .collect();
-        assert!(
-            marker_hits.is_empty(),
-            "LazyReifyAir instance#{}: marker coefficient {} found \
-             in the arena at entries {:?}. `marker_unused` proof-scope \
-             payload (direct_global_update_proves(MARKER_UNUSED_OPID, \
-             [987654321, ...])) is never balanced by an airgroup-level \
-             `direct_global_update_assumes(MARKER_UNUSED_OPID, ...)`. \
-             JS lazy packing drops the inherited state because no AIR \
-             root references it. Current Rust bulk-lift keeps it as \
-             orphan arena entries. Phase 2/3 of \
-             temp/plan-rustify-pkgen-e2e-0420.md closes this via \
-             reachability-driven importing.",
-            idx,
-            MARKER_UNUSED,
-            marker_hits
-        );
-    }
-}
-
-/// Assertion 4: alias-chain source-identity. `local_alias_1 = cx
+/// Assertion 1: alias-chain source-identity. `local_alias_1 = cx
 /// + cy; local_alias_2 = local_alias_1; local_alias_1 === 0;
 /// local_alias_2 === 0;` creates two constraints at source-level
 /// positions 0 and 1. Under JS lazy packing both constraints

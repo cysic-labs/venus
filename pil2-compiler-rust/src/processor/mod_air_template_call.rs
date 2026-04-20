@@ -497,13 +497,20 @@ pub(super) fn execute_air_template_call(
         // `Expressions.pack(container, ...)` iterating
         // `this.expressions` sequentially
         // (temp/golden_references/pil2-compiler/src/expressions.js::pack).
-        // The prior walker-DFS order produced a JS-equivalent
-        // reachable set but with the arena head in the wrong
-        // order, which surfaced as `expressionsCode[0].expId`
-        // drift much larger than the total-count drift on the
-        // trio (e.g. SpecifiedRanges cur 96 vs gold 8 while
-        // cExpId was only 28 off). Sorting reachable current-
-        // origin ids numerically matches JS's allocator order.
+        //
+        // Round 7 attempted to add "labeled-always import" for
+        // all in-frame labeled expr ids, but that included too
+        // many intermediate `expr X = ...` labels that JS does
+        // not pack (JS differentiates `ExpressionReference`
+        // const-declarations from runtime `expr` variables and
+        // only reserves the former in `this.expressions`).
+        // Round 8 must either (a) add a dedicated flag at
+        // self.exprs.reserve-time to distinguish const-expr
+        // declarations from runtime expr vars, or (b) find a
+        // different JS-parity signal. For now keep the Round 4
+        // reachability filter.
+        let in_frame_labeled_ids: std::collections::BTreeSet<u32> =
+            std::collections::BTreeSet::new();
         let reachable_current_ids_sorted: Vec<u32> = reachable_order
             .iter()
             .filter_map(|(origin, id)| {
@@ -596,15 +603,25 @@ pub(super) fn execute_air_template_call(
             // exit slots while preventing the fallback from
             // silently reintroducing non-reachable slots the
             // new importer intends to drop.
-            let mut pending: Vec<u32> = reachable_current_ids
+            //
+            // Round 7: labeled-in-frame ids must also be pulled
+            // from `intermediate_ref_resolution` when their
+            // `self.exprs` slot is blanked — labeled slots pack
+            // unconditionally per JS semantics, and a blanked
+            // labeled slot is still a valid arena entry.
+            let mut pending_set: std::collections::BTreeSet<u32> = reachable_current_ids
                 .iter()
                 .copied()
                 .filter(|eid| *eid >= frame_start)
                 .filter(|eid| self.exprs.get(*eid).is_none())
                 .filter(|eid| !imported_ids.contains(eid))
                 .collect();
-            pending.sort_unstable();
-            for eid in pending {
+            for &eid in &in_frame_labeled_ids {
+                if self.exprs.get(eid).is_none() && !imported_ids.contains(&eid) {
+                    pending_set.insert(eid);
+                }
+            }
+            for eid in pending_set {
                 let rt: Rc<super::expression::RuntimeExpr> =
                     match self
                         .intermediate_ref_resolution

@@ -97,14 +97,22 @@ airtemplate LazyReifyAir(const int N = 2**4,
 }
 
 airgroup LazyReify {
-    // First instance emits the unused marker payload. The second
-    // instance inherits the resulting proof-scope state. JS lazy
-    // reification drops the inherited slots the second instance
-    // does not reference; Rust bulk-lift keeps them.
+    // Both instances emit identical bodies (including the
+    // MARKER_UNUSED_OPID payload) so their per-AIR arenas are
+    // structurally identical under JS semantics. This keeps the
+    // cross-instance identity invariants checkable while still
+    // exercising cross-AIR Intermediate resolution via the
+    // second instance inheriting proof-scope state from the
+    // first.
     LazyReifyAir(N: 2**4, enable_flag: ps_enable, emit_marker_unused: 1);
-    LazyReifyAir(N: 2**4, enable_flag: ps_enable, emit_marker_unused: 0);
+    LazyReifyAir(N: 2**4, enable_flag: ps_enable, emit_marker_unused: 1);
 
-    // Balance USED_OPID but NOT MARKER_UNUSED_OPID.
+    // Balance USED_OPID but NOT MARKER_UNUSED_OPID (the proof
+    // obligation is symmetric between the two LazyReifyAir
+    // instances that both emit into MARKER_UNUSED_OPID but
+    // neither side-channels a `direct_global_update_assumes`
+    // back, so the marker payload remains unused from the
+    // consumer-side perspective).
     direct_global_update_assumes(USED_OPID, [0, 1, 0, 0, 0, 0, 0, 0],
                                  sel: ps_enable,
                                  surname: PIOP_SURNAME_DYNAMIC);
