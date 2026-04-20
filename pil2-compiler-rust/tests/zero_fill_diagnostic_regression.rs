@@ -77,6 +77,55 @@ fn tables_copy_warns_on_missing_source_rows() {
         "stderr should describe missing source rows; got stderr:\n{}",
         stderr
     );
+
+    // Per Codex Round 27 review: also assert the emitted .fixed
+    // file zero-fills the rows past the populated source. The
+    // fixture populates `src` rows 0..3 with the literal 7 (via
+    // `Tables.fill(7, src, 0, 4)`), then runs
+    // `Tables.copy(src, 0, dst, 0, 10)` — copy count 10 exceeds
+    // the 4 populated source rows by 6, so dst should hold
+    // [7, 7, 7, 7] in rows 0..3 and 0 in rows 4..9. The remainder
+    // of the fixed file (rows 10..N) is also zero (no writes
+    // beyond the copy range).
+    let outdir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let fixed_file = outdir
+        .join("minimal_tables_copy_warning_fixed")
+        .join("TablesCopyWarningAir.fixed");
+    let bytes = std::fs::read(&fixed_file).expect("fixed file read failed");
+    // Layout is row-major: for each row r, write 8 bytes per
+    // non-temporal-non-external fixed col in column order. The
+    // fixture has 2 non-temporal cols: src (col 0) and dst
+    // (col 1). Each row is 16 bytes total.
+    let row_stride: usize = 16;
+    assert!(
+        bytes.len() >= row_stride * 10,
+        "fixed file too small ({} bytes); expected at least {} for 10 rows",
+        bytes.len(),
+        row_stride * 10
+    );
+    for row in 0..4 {
+        let dst_offset = row * row_stride + 8;
+        let val = u64::from_le_bytes(bytes[dst_offset..dst_offset + 8].try_into().unwrap());
+        assert_eq!(
+            val, 7,
+            "row {} of dst col should be 7 (Tables.copy from src[0..3] which were \
+             populated to 7 by Tables.fill); got {}. The Tables.copy missing-source \
+             warning fired but the populated source rows must still be copied correctly.",
+            row, val
+        );
+    }
+    for row in 4..10 {
+        let dst_offset = row * row_stride + 8;
+        let val = u64::from_le_bytes(bytes[dst_offset..dst_offset + 8].try_into().unwrap());
+        assert_eq!(
+            val, 0,
+            "row {} of dst col should be 0 (Tables.copy zero-fills past the populated \
+             source rows; src had rows 0..3 only); got {}. A non-zero here means the \
+             missing source row was filled with something other than the literal 0 \
+             that Tables.copy substitutes via `unwrap_or(0)`.",
+            row, val
+        );
+    }
 }
 
 #[test]
