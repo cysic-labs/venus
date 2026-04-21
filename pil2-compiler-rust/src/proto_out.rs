@@ -850,6 +850,25 @@ impl<'a> ProtoOutBuilder<'a> {
                         source_to_pos.entry(*s).or_insert(pos);
                     }
                 }
+                // Round 7 per Codex Round 6 review: fan out
+                // `source_to_pos` so alias `source_expr_id`s
+                // registered on `AirExpressionEntry::aliases` also
+                // resolve to the canonical store position. The
+                // importer in `mod_air_template_call` collapses
+                // multiple `eid`s that share the same underlying
+                // `Value::RuntimeExpr(Rc)` into a single entry;
+                // this fan-out lets both the canonical `eid` and
+                // every alias `eid` read `Operand::Expression(
+                // same_idx)` via `source_to_pos`. Matches JS
+                // `pushExpressionReference(id, rowOffset)` first-
+                // seen reference-identity semantics.
+                if !air.air_expression_store.is_empty() {
+                    for (pos, entry) in air.air_expression_store.iter().enumerate() {
+                        for alias in &entry.aliases {
+                            source_to_pos.entry(*alias).or_insert(pos);
+                        }
+                    }
+                }
                 let trace_enabled = chain_shape_trace_enabled();
                 let mut stats = ChainShapeStats {
                     entry_count: entries.len(),

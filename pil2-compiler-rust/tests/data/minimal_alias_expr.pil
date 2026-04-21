@@ -1,0 +1,29 @@
+// minimal_alias_expr.pil
+//
+// Regression fixture for Round 7 per Codex Round 6 review:
+// multiple `const expr` slots aliasing the same underlying
+// RuntimeExpr tree must collapse to a single arena entry in
+// the per-AIR expressions proto output.
+//
+// `alias_e` is a direct `const expr` alias of `E`. Both `E`
+// and `alias_e` share the same `Value::RuntimeExpr(Rc<T>)`
+// by `Rc::clone`, so the importer's canonical-owner map
+// (keyed on `Rc::as_ptr`) must detect the alias and add the
+// alias `eid` to the canonical entry's aliases list rather
+// than emitting a second arena root.
+//
+// The constraint `E === alias_e` references both eids; the
+// serializer's `source_to_pos` fan-out must resolve both to
+// the same packed `Operand::Expression(idx)`.
+
+airtemplate AliasAir(const int N = 2**4) {
+    col witness x;
+    col witness y;
+    const expr e = x + y;
+    const expr alias_e = e;
+    e === alias_e;
+}
+
+airgroup MinimalAlias {
+    AliasAir(N: 2**4);
+}

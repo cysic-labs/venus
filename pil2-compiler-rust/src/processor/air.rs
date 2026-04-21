@@ -88,6 +88,17 @@ pub struct AirExpressionEntry {
     /// right before `setExpressions(packed)`). Non-hint entries
     /// keep `false` and are flattened first.
     pub is_late_pack: bool,
+    /// Extra `source_expr_id`s that resolve to this entry's packed
+    /// store position. Populated by
+    /// `execute_air_template_call`'s reachable-root importer when
+    /// multiple `eid`s alias the same `RuntimeExpr` tree (Rc
+    /// pointer identity). The proto serializer's `source_to_pos`
+    /// fan-out maps every alias `eid` to the canonical position,
+    /// so later `ColRef::Intermediate { id, .. }` resolves produce
+    /// `Operand::Expression(idx)` with a single shared `idx`
+    /// rather than emitting the resolved tree N times. See
+    /// BL-20260420-alias-owner-import.
+    pub aliases: Vec<u32>,
 }
 
 impl AirExpressionEntry {
@@ -97,6 +108,7 @@ impl AirExpressionEntry {
             source_expr_id: None,
             source_label: None,
             is_late_pack: false,
+            aliases: Vec::new(),
         }
     }
     pub fn anonymous_late_pack(expr: RuntimeExpr) -> Self {
@@ -105,6 +117,7 @@ impl AirExpressionEntry {
             source_expr_id: None,
             source_label: None,
             is_late_pack: true,
+            aliases: Vec::new(),
         }
     }
     pub fn with_source(expr: RuntimeExpr, source_expr_id: u32, source_label: Option<String>) -> Self {
@@ -113,6 +126,7 @@ impl AirExpressionEntry {
             source_expr_id: Some(source_expr_id),
             source_label,
             is_late_pack: false,
+            aliases: Vec::new(),
         }
     }
 }

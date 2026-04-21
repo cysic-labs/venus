@@ -541,6 +541,20 @@ pub(super) fn execute_air_template_call(
             reachable_current_ids.iter().copied().collect();
         let mut imported_ids: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
+        // Round 7 per Codex Round 6 review: canonical-owner map
+        // for alias-equivalent reachable roots. Multiple `eid`s
+        // whose `Value::RuntimeExpr(Rc)` shares the same Rc
+        // pointer (e.g. `const expr B = A;` clones A's Rc via
+        // `Rc::clone`) collapse into a single arena entry. The
+        // first `eid` is the canonical owner; later aliasing
+        // `eid`s join the canonical entry's `aliases` vec. The
+        // proto serializer's `source_to_pos` fan-out maps every
+        // alias `eid` to the canonical store position so all
+        // reads resolve via `Operand::Expression(shared_idx)`.
+        let mut canonical_by_rc_ptr: std::collections::HashMap<
+            *const super::expression::RuntimeExpr,
+            usize,
+        > = std::collections::HashMap::new();
         for eid in &reachable_current_ids_sorted {
             let eid = *eid;
             if !imported_ids.insert(eid) {
@@ -625,7 +639,28 @@ pub(super) fn execute_air_template_call(
             } else {
                 lift_in_frame_symbolic_unlabeled += 1;
             }
+            // Round 7: alias-owner dedup. If this eid's value is
+            // `Value::RuntimeExpr(rc)` and some earlier reachable
+            // eid imported the SAME Rc, collapse into the canonical
+            // owner's aliases list instead of pushing a second
+            // arena-root entry.
+            let rc_ptr: Option<*const super::expression::RuntimeExpr> = match val {
+                Value::RuntimeExpr(rc) => {
+                    Some(std::rc::Rc::as_ptr(rc) as *const _)
+                }
+                _ => None,
+            };
+            if let Some(ptr) = rc_ptr {
+                if let Some(&canonical_pos) = canonical_by_rc_ptr.get(&ptr) {
+                    store[canonical_pos].aliases.push(eid);
+                    continue;
+                }
+            }
+            let pushed_pos = store.len();
             store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
+            if let Some(ptr) = rc_ptr {
+                canonical_by_rc_ptr.insert(ptr, pushed_pos);
+            }
         }
         // Round 4 trimmed-slot fallback: any slot id the producer
         // minted an `Intermediate` ref for, but whose value has since
