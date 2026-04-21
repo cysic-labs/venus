@@ -376,6 +376,12 @@ pub(super) fn execute_air_template_call(
         let mut lift_in_frame_symbolic_labeled = 0usize;
         let mut lift_in_frame_symbolic_unlabeled = 0usize;
         let mut lift_in_frame_force_include = 0usize;
+        // Round 9 per Codex Round 8 review: explicit counter
+        // incremented inside the trimmed-slot fallback push
+        // branch. Replaces the previous
+        // `store.len() - sum_of_*` derivation, which underflowed
+        // when alias dedup skipped pushes.
+        let mut lift_trimmed_fallback_count = 0usize;
         let mut proof_scope_unique_trees: std::collections::HashSet<
             super::expression::RuntimeExpr,
         > = std::collections::HashSet::new();
@@ -635,31 +641,22 @@ pub(super) fn execute_air_template_call(
                         None
                     }
                 });
-            if eid < frame_start {
-                lift_proof_scope += 1;
-                if trace_lift_breakdown {
-                    proof_scope_unique_trees.insert(rt.clone());
-                }
-            } else if force_include && !is_symbolic(val) {
-                lift_in_frame_force_include += 1;
-            } else if source_label.is_some() {
-                lift_in_frame_symbolic_labeled += 1;
-            } else {
-                lift_in_frame_symbolic_unlabeled += 1;
-            }
-            // Round 8: resolve canonical position through two
-            // paths. (a) Rc pointer identity for
+            // Round 8 + Round 9: resolve canonical position through
+            // two paths. (a) Rc pointer identity for
             // `Value::RuntimeExpr(rc)` — two reachable eids whose
             // stored value is the SAME `Rc<RuntimeExpr>` (e.g.
             // created via `Rc::clone`). (b) Intermediate-alias
             // target eid resolution for
             // `Value::ColRef{Intermediate, id: target_eid, ...}`
-            // at same-origin zero row offset — this is the live
-            // alias form produced by `mod_vardecl::get_var_ref_value`
-            // when reading an in-frame symbolic `expr` slot. The
-            // target_eid is the slot that a previously-processed
-            // reachable eid already canonicalized; we inherit its
-            // position.
+            // at same-origin zero row offset — the live alias
+            // form produced by `mod_vardecl::get_var_ref_value`
+            // when reading an in-frame symbolic `expr` slot.
+            // Round 9: counters are incremented AFTER the dedup
+            // check so `store.len() - sum_of_counters` stays
+            // non-negative (the Round 8 arrangement underflowed
+            // on aliased fixtures, panicking pil2c). Aliases do
+            // not count toward any `lift_*` category since they
+            // do not allocate a new arena entry.
             let rc_ptr: Option<*const super::expression::RuntimeExpr> = match val {
                 Value::RuntimeExpr(rc) => {
                     Some(std::rc::Rc::as_ptr(rc) as *const _)
@@ -686,6 +683,19 @@ pub(super) fn execute_air_template_call(
                 store[pos].aliases.push(eid);
                 canonical_by_eid.insert(eid, pos);
                 continue;
+            }
+            let rt = value_to_runtime_expr(val);
+            if eid < frame_start {
+                lift_proof_scope += 1;
+                if trace_lift_breakdown {
+                    proof_scope_unique_trees.insert(rt.clone());
+                }
+            } else if force_include && !is_symbolic(val) {
+                lift_in_frame_force_include += 1;
+            } else if source_label.is_some() {
+                lift_in_frame_symbolic_labeled += 1;
+            } else {
+                lift_in_frame_symbolic_unlabeled += 1;
             }
             let pushed_pos = store.len();
             store.push(air::AirExpressionEntry::with_source(rt, eid, source_label));
@@ -771,6 +781,52 @@ pub(super) fn execute_air_template_call(
                         Some(rt) => rt.clone(),
                         None => continue,
                     };
+                // Round 9 per Codex Round 8 review: canonical-owner
+                // dedup on the trimmed-slot fallback path.
+                // (a) Rc pointer identity of the recovered
+                // `Rc<RuntimeExpr>` from `intermediate_ref_resolution`.
+                // (b) Same-origin Intermediate / ExprRef refs inside
+                // the recovered tree that target an already-imported
+                // eid via `canonical_by_eid`.
+                let rc_ptr: *const super::expression::RuntimeExpr =
+                    Rc::as_ptr(&rt);
+                let target_alias_eid: Option<u32> = match rt.as_ref() {
+                    super::expression::RuntimeExpr::ColRef {
+                        col_type: super::expression::ColRefKind::Intermediate,
+                        id: target_eid,
+                        row_offset,
+                        origin_frame_id: Some(origin),
+                    } if row_offset.unwrap_or(0) == 0
+                        && *origin == current_origin =>
+                    {
+                        Some(*target_eid)
+                    }
+                    super::expression::RuntimeExpr::ExprRef {
+                        id: target_eid,
+                        row_offset,
+                        origin_frame_id,
+                    } if row_offset.unwrap_or(0) == 0
+                        && origin_frame_id
+                            .map(|o| o == current_origin)
+                            .unwrap_or(true) =>
+                    {
+                        Some(*target_eid)
+                    }
+                    _ => None,
+                };
+                let canonical_pos: Option<usize> = canonical_by_rc_ptr
+                    .get(&rc_ptr)
+                    .copied()
+                    .or_else(|| {
+                        target_alias_eid
+                            .and_then(|t| canonical_by_eid.get(&t).copied())
+                    });
+                if let Some(pos) = canonical_pos {
+                    store[pos].aliases.push(eid);
+                    canonical_by_eid.insert(eid, pos);
+                    imported_ids.insert(eid);
+                    continue;
+                }
                 let source_label = self.exprs.ids.label_ranges
                     .to_vec()
                     .iter()
@@ -787,18 +843,17 @@ pub(super) fn execute_air_template_call(
                         }
                     });
                 imported_ids.insert(eid);
+                let pushed_pos = store.len();
                 store.push(air::AirExpressionEntry::with_source(
                     (*rt).clone(),
                     eid,
                     source_label,
                 ));
+                canonical_by_rc_ptr.insert(rc_ptr, pushed_pos);
+                canonical_by_eid.insert(eid, pushed_pos);
+                lift_trimmed_fallback_count += 1;
             }
         }
-        let lift_trimmed_fallback_count = store.len()
-            - lift_proof_scope
-            - lift_in_frame_force_include
-            - lift_in_frame_symbolic_labeled
-            - lift_in_frame_symbolic_unlabeled;
         let lift_constraint_count = constraint_exprs.len();
         for expr in constraint_exprs {
             store.push(air::AirExpressionEntry::anonymous(expr));
