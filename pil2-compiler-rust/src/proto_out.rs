@@ -2814,13 +2814,25 @@ impl<'a> ProtoOutBuilder<'a> {
                 if let Some(resolved) = key
                     .and_then(|k| self.processor.global_intermediate_resolution.get(&k).cloned())
                 {
+                    // Round 6 per Codex Round 5 review:
+                    // reference-identity cache (JS
+                    // `pushExpressionReference(id, rowOffset)`
+                    // parity) on ALL same-origin Intermediate
+                    // misses, not only bare-leaf resolutions. The
+                    // bare-leaf case kept its direct-leaf semantic;
+                    // the non-bare path now also probes/inserts
+                    // `alias_key = PackedKey::Provenance(*id,
+                    // offset_i32)` so two references to the same
+                    // `(id, row_offset)` pair resolve to a single
+                    // packed arena idx rather than emitting the
+                    // resolved tree twice.
+                    let alias_key = PackedKey::Provenance(*id, offset_i32);
+                    stats.prov_cache_probes += 1;
+                    if let Some(&cached_idx) = prov_cache.get(&alias_key) {
+                        stats.prov_cache_hits += 1;
+                        return cached_idx;
+                    }
                     if is_bare_leaf_colref(resolved.as_ref()) {
-                        let alias_key = PackedKey::Provenance(*id, offset_i32);
-                        stats.prov_cache_probes += 1;
-                        if let Some(&cached_idx) = prov_cache.get(&alias_key) {
-                            stats.prov_cache_hits += 1;
-                            return cached_idx;
-                        }
                         let idx = self.flatten_air_expr(
                             &resolved,
                             source_expr_id,
@@ -2842,7 +2854,7 @@ impl<'a> ProtoOutBuilder<'a> {
                         prov_cache.insert(alias_key, idx);
                         return idx;
                     }
-                    return self.flatten_air_expr(
+                    let idx = self.flatten_air_expr(
                         &resolved,
                         source_expr_id,
                         source_label,
@@ -2860,6 +2872,8 @@ impl<'a> ProtoOutBuilder<'a> {
                         im_labels,
                         stats,
                     );
+                    prov_cache.insert(alias_key, idx);
+                    return idx;
                 }
             }
         }
@@ -3259,6 +3273,33 @@ impl<'a> ProtoOutBuilder<'a> {
                             source_to_pos,
                         );
                     }
+                    // Round 6 per Codex Round 5 review: probe and
+                    // insert `alias_key = PackedKey::Provenance(*id,
+                    // offset_i32)` for SAME-ORIGIN non-bare resolved
+                    // trees (JS `pushExpressionReference(id,
+                    // rowOffset)` reference-identity parity). Without
+                    // this, two operand-site references to the same
+                    // same-origin `(id, row_offset)` pair each
+                    // re-flatten the resolved tree, emitting
+                    // duplicate arena entries. Bare-leaf resolutions
+                    // continue to take the direct-operand fast path
+                    // above with no arena allocation.
+                    let alias_key = if !is_foreign {
+                        Some(PackedKey::Provenance(*id, offset_i32))
+                    } else {
+                        None
+                    };
+                    if let Some(k) = &alias_key {
+                        stats.prov_cache_probes += 1;
+                        if let Some(&cached_idx) = prov_cache.get(k) {
+                            stats.prov_cache_hits += 1;
+                            return Some(pilout_proto::Operand {
+                                operand: Some(pilout_proto::operand::Operand::Expression(
+                                    pilout_proto::operand::Expression { idx: cached_idx },
+                                )),
+                            });
+                        }
+                    }
                     let idx = self.flatten_air_expr(
                         &resolved,
                         None,
@@ -3278,6 +3319,9 @@ impl<'a> ProtoOutBuilder<'a> {
                         stats,
                     );
                     if let Some(k) = foreign_key {
+                        prov_cache.insert(k, idx);
+                    }
+                    if let Some(k) = alias_key {
                         prov_cache.insert(k, idx);
                     }
                     return Some(pilout_proto::Operand {
