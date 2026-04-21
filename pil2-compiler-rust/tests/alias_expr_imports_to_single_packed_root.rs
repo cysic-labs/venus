@@ -1,21 +1,34 @@
-//! Round 7 per Codex Round 6 review: alias-owner dedup
+//! Round 7/8 per Codex Round 6/7 reviews: alias-owner dedup
 //! regression. The reachable-root importer in
-//! `mod_air_template_call::execute_air_template_call` collapses
-//! multiple `eid`s whose `Value::RuntimeExpr(Rc)` shares the
-//! same Rc pointer (e.g. `const expr B = A;`) into a single
-//! `AirExpressionEntry` with an `aliases: Vec<u32>` list of
-//! extra source-expr ids. The proto serializer's
-//! `source_to_pos` fan-out maps every alias `eid` back to the
-//! canonical store position so all reads resolve to the same
-//! packed `Operand::Expression(idx)`.
+//! `mod_air_template_call::execute_air_template_call`
+//! collapses multiple reachable eids that resolve to the same
+//! canonical identity into a single `AirExpressionEntry` with
+//! an `aliases: Vec<u32>` list of extra source-expr ids. The
+//! canonical identity covers BOTH:
+//!   (a) `Value::RuntimeExpr(rc)` matched by `Rc::as_ptr(rc)`.
+//!   (b) `Value::ColRef{Intermediate, id: target_eid, ...}`
+//!       at same-origin zero row offset, resolved via
+//!       canonical_by_eid[target_eid] — the live form of
+//!       `const expr alias_e = e;` as produced by
+//!       `mod_vardecl::get_var_ref_value`.
 //!
-//! The fixture `minimal_alias_expr.pil` declares `const expr e
-//! = x + y;` plus `const expr alias_e = e;` and constrains
-//! `e === alias_e`. Before Round 7 the importer pushed two
-//! distinct arena entries for `e` and `alias_e` even though
-//! they share the same `Rc<RuntimeExpr>`. Post-Round-7 there
-//! is ONE non-bare-ref intermediate arena entry that the
-//! constraint references on both sides.
+//! The proto serializer's `source_to_pos` fan-out maps every
+//! alias eid back to the canonical store position so all
+//! reads resolve to the same packed `Operand::Expression(idx)`.
+//!
+//! The Round 8 rewrite strengthens the regression to assert
+//! the ACTUAL IMPORTER BEHAVIOR, not just downstream reuse.
+//! The fixture declares
+//! ```
+//! const expr e = x + y;
+//! const expr alias_e = e;
+//! e === alias_e;
+//! ```
+//! Under the importer alias-owner path, only ONE arena entry
+//! should materialize for the `Add(x, y)` expression; both
+//! `e` and `alias_e` source-expr-ids resolve to that single
+//! packed position. Before Round 7/8, the importer pushed two
+//! distinct entries.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -57,11 +70,31 @@ fn compile_fixture() -> Vec<u8> {
     std::fs::read(&out).expect("read pilout")
 }
 
+/// Shape-match an arena entry against the
+/// `Add(WitnessCol { col_idx: a }, WitnessCol { col_idx: b })`
+/// pattern. Used to count how many times the fixture's
+/// `x + y` expression was materialized in the arena.
+fn is_add_witness_pair(expr: &pb::Expression) -> bool {
+    use pb::expression::Operation;
+    use pb::operand::Operand as O;
+    let Some(Operation::Add(add)) = expr.operation.as_ref() else {
+        return false;
+    };
+    let lhs_is_wc = matches!(
+        add.lhs.as_ref().and_then(|o| o.operand.as_ref()),
+        Some(O::WitnessCol(_))
+    );
+    let rhs_is_wc = matches!(
+        add.rhs.as_ref().and_then(|o| o.operand.as_ref()),
+        Some(O::WitnessCol(_))
+    );
+    lhs_is_wc && rhs_is_wc
+}
+
 #[test]
 fn alias_expr_imports_to_single_packed_root() {
     let bytes = compile_fixture();
     let pilout = pb::PilOut::decode(bytes.as_slice()).expect("decode pilout");
-    // Exactly one AIR group and one non-virtual AIR.
     assert_eq!(pilout.air_groups.len(), 1, "expected one air group");
     let ag = &pilout.air_groups[0];
     let airs: Vec<&pb::Air> = ag.airs.iter().collect();
@@ -72,10 +105,55 @@ fn alias_expr_imports_to_single_packed_root() {
         Some("AliasAir"),
         "expected AliasAir instance"
     );
-    // The constraint `e === alias_e` serializes as a
-    // subtraction of two operands. Both operands must resolve
-    // to the SAME `Operand::Expression(idx)` when alias dedup
-    // fires.
+
+    // Assertion #1 (new Round 8): the aliased `x + y`
+    // expression must appear EXACTLY ONCE in the arena. If
+    // the importer fails to dedup the alias_e eid against
+    // e's eid, two distinct `Add(WitnessCol, WitnessCol)`
+    // entries would land in the arena. This is the primary
+    // evidence that the importer alias-owner path fires,
+    // not just downstream source_to_pos caching.
+    let add_witness_count = air
+        .expressions
+        .iter()
+        .filter(|expr| is_add_witness_pair(expr))
+        .count();
+    assert_eq!(
+        add_witness_count,
+        1,
+        "importer alias-owner dedup failed: expected exactly \
+         ONE `Add(WitnessCol, WitnessCol)` arena entry (the \
+         shared `x + y` expression), found {}. This proves the \
+         importer pushed `alias_e` as a second distinct \
+         AirExpressionEntry instead of appending its eid to \
+         the canonical owner's aliases list.",
+        add_witness_count,
+    );
+
+    // Assertion #2 (new Round 8): the per-AIR arena contains
+    // the expected minimal count. The fixture produces
+    // exactly one non-bare intermediate (`x + y`) plus the
+    // constraint's subtraction wrapper.
+    assert_eq!(
+        air.expressions.len(),
+        2,
+        "expected arena.len() = 2 for the minimal alias \
+         fixture (one `Add(x, y)` intermediate plus the \
+         constraint's `Sub(E_alias_e, E_e)`); got {}. Arena \
+         contents: {:?}",
+        air.expressions.len(),
+        air.expressions
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect::<Vec<_>>()
+            .join("\n  "),
+    );
+
+    // Assertion #3 (carry-over): the constraint must wrap the
+    // Sub operation with both operands resolving to the SAME
+    // packed arena idx (further confirmation that the
+    // source_to_pos fan-out routes both eids to the canonical
+    // position).
     assert!(
         !air.constraints.is_empty(),
         "expected at least one constraint",
@@ -117,12 +195,10 @@ fn alias_expr_imports_to_single_packed_root() {
     };
     assert_eq!(
         l_idx, r_idx,
-        "alias dedup failed: `e` and `alias_e` resolved to \
-         different packed arena positions ({} vs {}). Round 7 \
-         importer must collapse aliased eids into a single \
-         canonical AirExpressionEntry with the alias list \
-         populated; proto serializer must fan out source_to_pos \
-         to all alias eids.",
+        "source_to_pos fan-out failed: `e` and `alias_e` \
+         resolved to different packed arena positions ({} vs \
+         {}). The Round 7 source_to_pos fan-out should map \
+         every alias eid back to the canonical store position.",
         l_idx, r_idx
     );
 }
