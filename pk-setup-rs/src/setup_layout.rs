@@ -7,6 +7,7 @@ use pilout_crate::pilout_proxy::PilOutProxy;
 use serde::Serialize;
 use tracing::info;
 
+use crate::pil_info::codegen::generate_pil_code;
 use crate::pil_info::stark::{build_air_stark_draft, AirInput};
 use crate::stark_struct::{generate_stark_struct, StarkSettingsMap, StarkStruct};
 
@@ -115,7 +116,7 @@ fn write_basic_air(
     )
     .with_context(|| format!("failed to write {}", manifest_path.display()))?;
 
-    let draft = build_air_stark_draft(AirInput {
+    let mut draft = build_air_stark_draft(AirInput {
         airgroup_id: airgroup_id as u32,
         air_id: air_id as u32,
         airgroup_values,
@@ -132,6 +133,29 @@ fn write_basic_air(
             .context("failed to serialize AIR STARK draft")?,
     )
     .with_context(|| format!("failed to write {}", draft_path.display()))?;
+
+    let (expressions_info, verifier_info) = generate_pil_code(
+        &draft.stark_info,
+        &draft.symbols,
+        &draft.constraints,
+        &mut draft.expressions,
+        &draft.hints,
+        false,
+    )?;
+    let expressions_path = files_dir.join(format!("{air_name}.expressionsinfo-rs-draft.json"));
+    fs::write(
+        &expressions_path,
+        serde_json::to_string_pretty(&expressions_info)
+            .context("failed to serialize AIR expressions info draft")?,
+    )
+    .with_context(|| format!("failed to write {}", expressions_path.display()))?;
+    let verifier_path = files_dir.join(format!("{air_name}.verifierinfo-rs-draft.json"));
+    fs::write(
+        &verifier_path,
+        serde_json::to_string_pretty(&verifier_info)
+            .context("failed to serialize AIR verifier info draft")?,
+    )
+    .with_context(|| format!("failed to write {}", verifier_path.display()))?;
     info!("prepared basic AIR layout for {airgroup_name}/{air_name}");
 
     Ok(())

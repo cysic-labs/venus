@@ -56,6 +56,8 @@ pub struct FormattedExpression {
 
     #[serde(skip)]
     pub degree_cache: Option<u64>,
+    #[serde(skip)]
+    pub no_commit: bool,
 }
 
 impl FormattedExpression {
@@ -83,6 +85,7 @@ impl FormattedExpression {
             boundary: None,
             opening: None,
             degree_cache: None,
+            no_commit: false,
         }
     }
 
@@ -141,6 +144,8 @@ pub struct FormattedConstraint {
     pub e: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<String>,
+    #[serde(skip)]
+    pub stage: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset_min: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -389,6 +394,7 @@ fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
             boundary: "firstRow".to_string(),
             e: required_expression_idx(first.expression_idx.as_ref(), "firstRow")? as u64,
             line: first.debug_line.clone(),
+            stage: None,
             offset_min: None,
             offset_max: None,
         }),
@@ -396,6 +402,7 @@ fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
             boundary: "lastRow".to_string(),
             e: required_expression_idx(last.expression_idx.as_ref(), "lastRow")? as u64,
             line: last.debug_line.clone(),
+            stage: None,
             offset_min: None,
             offset_max: None,
         }),
@@ -403,6 +410,7 @@ fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
             boundary: "everyRow".to_string(),
             e: required_expression_idx(every.expression_idx.as_ref(), "everyRow")? as u64,
             line: every.debug_line.clone(),
+            stage: None,
             offset_min: None,
             offset_max: None,
         }),
@@ -410,6 +418,7 @@ fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
             boundary: "everyFrame".to_string(),
             e: required_expression_idx(frame.expression_idx.as_ref(), "everyFrame")? as u64,
             line: frame.debug_line.clone(),
+            stage: None,
             offset_min: Some(frame.offset_min),
             offset_max: Some(frame.offset_max),
         }),

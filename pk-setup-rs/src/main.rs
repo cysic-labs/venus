@@ -50,6 +50,23 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    std::thread::Builder::new()
+        .name("pk-setup-rs".to_string())
+        .stack_size(128 * 1024 * 1024)
+        .spawn(run)?
+        .join()
+        .map_err(|panic| {
+            if let Some(message) = panic.downcast_ref::<&str>() {
+                anyhow::anyhow!("pk-setup-rs worker panicked: {message}")
+            } else if let Some(message) = panic.downcast_ref::<String>() {
+                anyhow::anyhow!("pk-setup-rs worker panicked: {message}")
+            } else {
+                anyhow::anyhow!("pk-setup-rs worker panicked")
+            }
+        })?
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
     init_tracing(args.verbose);
 

@@ -192,6 +192,7 @@ pub fn build_air_stark_draft(input: AirInput<'_>) -> Result<AirStarkDraft> {
     let hints = format_air_hints(&ctx, &expressions, &symbols)?;
 
     annotate_expressions(&mut expressions, &constraints)?;
+    set_constraint_stages(&expressions, &mut constraints)?;
     let mut boundaries =
         vec![BoundaryJson { name: "everyRow".to_string(), offset_min: None, offset_max: None }];
     let opening_points = collect_opening_points(&expressions, &constraints)?;
@@ -380,6 +381,19 @@ fn generate_constraint_polynomial(
     c_exp_id.context("AIR has no constraints")
 }
 
+fn set_constraint_stages(
+    expressions: &[FormattedExpression],
+    constraints: &mut [FormattedConstraint],
+) -> Result<()> {
+    for constraint in constraints {
+        let expression = expressions
+            .get(constraint.e as usize)
+            .with_context(|| format!("constraint expression {} not found", constraint.e))?;
+        constraint.stage = expression.stage;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn add_intermediate_polynomials(
     expressions: &mut Vec<FormattedExpression>,
@@ -455,7 +469,7 @@ fn add_intermediate_polynomials(
         let constraint_expr = FormattedExpression::binary(
             "sub",
             cm_ref(pol_id, im_stage, dim),
-            exp_ref(exp_id as u64, im_stage),
+            exp_ref_no_commit(exp_id as u64, im_stage),
         );
         expressions.push(constraint_expr);
         let constraint_id = expressions.len() - 1;
@@ -464,6 +478,7 @@ fn add_intermediate_polynomials(
             boundary: "everyRow".to_string(),
             e: constraint_id as u64,
             line: None,
+            stage: Some(im_stage),
             offset_min: None,
             offset_max: None,
         });
@@ -821,12 +836,12 @@ fn build_ev_map(
     let q_index = maps
         .cm_pols_map
         .iter()
-        .position(|pol| {
-            pol.stage == (maps.challenges_map.len().saturating_sub(2)) as u64
-                && pol.stage_id == Some(0)
-        })
+        .position(|pol| pol.name == "Q0" && pol.stage_id == Some(0))
         .or_else(|| {
-            maps.cm_pols_map.iter().position(|pol| pol.name == "Q0" && pol.stage_id == Some(0))
+            maps.cm_pols_map.iter().position(|pol| {
+                pol.stage == (maps.challenges_map.len().saturating_sub(1)) as u64
+                    && pol.stage_id == Some(0)
+            })
         })
         .context("quotient polynomial Q0 not found")? as u64;
     let opening_pos = opening_points.iter().position(|opening| *opening == 0).unwrap_or(0);
@@ -1276,7 +1291,9 @@ fn collect_opening_points(
             offsets.insert(0);
         }
     }
-    Ok(offsets.into_iter().collect())
+    let mut offsets = offsets.into_iter().collect::<Vec<_>>();
+    offsets.sort_by_key(|offset| offset.to_string());
+    Ok(offsets)
 }
 
 fn find_or_add_boundary(boundaries: &mut Vec<BoundaryJson>, boundary: BoundaryJson) -> u64 {
@@ -1297,6 +1314,12 @@ fn exp_ref(id: u64, stage: u64) -> FormattedExpression {
     expr.id = Some(id);
     expr.row_offset = Some(0);
     expr.stage = Some(stage);
+    expr
+}
+
+fn exp_ref_no_commit(id: u64, stage: u64) -> FormattedExpression {
+    let mut expr = exp_ref(id, stage);
+    expr.no_commit = true;
     expr
 }
 
