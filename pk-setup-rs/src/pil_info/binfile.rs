@@ -240,6 +240,7 @@ fn prepare_verifier_bin(
     )?;
     let mut q_code = parsed_q.exps_info;
     q_code.exp_id = stark_info.c_exp_id as u64;
+    q_code.stage = stark_info.n_stages as u64 + 1;
     update_maxima(&q_code, &mut max_tmp1, &mut max_tmp3, &mut max_args, &mut max_ops);
 
     let parsed_query = get_parser_args_verify(
@@ -251,6 +252,7 @@ fn prepare_verifier_bin(
     )?;
     let mut query_code = parsed_query.exps_info;
     query_code.exp_id = stark_info.fri_exp_id.unwrap_or_default() as u64;
+    query_code.stage = stark_info.n_stages as u64 + 2;
     update_maxima(&query_code, &mut max_tmp1, &mut max_tmp3, &mut max_args, &mut max_ops);
 
     Ok(PreparedVerifierBin {
@@ -342,14 +344,14 @@ fn get_parser_args_inner(
     operations: &[OperationShape],
     code_info: &CodeBlockJson,
     numbers: &mut Vec<String>,
-    verify: bool,
+    _verify: bool,
 ) -> Result<ParserArgs> {
     let mut ops = Vec::new();
     let mut args = Vec::new();
     let id_maps = get_id_maps(&code_info.code)?;
 
     for line in &code_info.code {
-        let operation = get_operation(line, verify)?;
+        let operation = get_operation(line, true)?;
         args.push(operation_type_id(&operation.op)?);
         push_args(stark_info, &mut args, &line.dest, &id_maps, numbers, true)?;
         for src in &operation.src {
@@ -402,7 +404,7 @@ struct OperationRef {
     src1_dim: u64,
 }
 
-fn get_operation(line: &CodeLineJson, _verify: bool) -> Result<OperationRef> {
+fn get_operation(line: &CodeLineJson, cxx_sub_swap: bool) -> Result<OperationRef> {
     let mut src = line.src.clone();
     let mut op = line.op.clone();
     src.sort_by(|lhs, rhs| {
@@ -425,7 +427,7 @@ fn get_operation(line: &CodeLineJson, _verify: bool) -> Result<OperationRef> {
         } else {
             (op_l as i64) - (op_r as i64)
         };
-        if swap < 0 {
+        if (cxx_sub_swap && swap > 0) || (!cxx_sub_swap && swap < 0) {
             op = "sub_swap".to_string();
         }
     }

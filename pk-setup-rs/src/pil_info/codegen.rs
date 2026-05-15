@@ -187,9 +187,8 @@ pub fn generate_pil_code(
         .cloned()
         .context("FRI expression code not generated")?;
     if let Some(last) = query_verifier.block.code.last_mut() {
-        last.dest.ref_type = "tmp".to_string();
-        last.dest.id = Some(query_verifier.block.tmp_used.saturating_sub(1));
-        last.dest.dim = FIELD_EXTENSION;
+        last.dest =
+            CodeRefJson::tmp(query_verifier.block.tmp_used.saturating_sub(1), FIELD_EXTENSION);
     }
 
     let constraints =
@@ -266,16 +265,14 @@ fn generate_expressions_code(
         let mut block = build_code(ctx)?;
         if exp_id == stark_info.c_exp_id {
             if let Some(last) = block.code.last_mut() {
-                last.dest.ref_type = "q".to_string();
+                last.dest = CodeRefJson::new("q", stark_info.q_dim);
                 last.dest.id = Some(0);
-                last.dest.dim = stark_info.q_dim;
             }
         }
         if exp_id == fri_exp_id {
             if let Some(last) = block.code.last_mut() {
-                last.dest.ref_type = "f".to_string();
+                last.dest = CodeRefJson::new("f", FIELD_EXTENSION);
                 last.dest.id = Some(0);
-                last.dest.dim = FIELD_EXTENSION;
             }
         }
 
@@ -439,7 +436,7 @@ fn eval_exp(
             Ok(result)
         }
         "neg" => {
-            let zero = CodeRefJson::number("0");
+            let minus_one = CodeRefJson::number("18446744069414584320");
             let value = eval_exp(
                 ctx,
                 symbols,
@@ -451,9 +448,9 @@ fn eval_exp(
             let result = CodeRefJson::tmp(ctx.tmp_used, dim);
             ctx.tmp_used += 1;
             ctx.code.push(CodeLineJson {
-                op: "sub".to_string(),
+                op: "mul".to_string(),
                 dest: result.clone(),
-                src: vec![zero, value],
+                src: vec![minus_one, value],
             });
             Ok(result)
         }
@@ -462,6 +459,9 @@ fn eval_exp(
             let id = exp.id.context("exp expression is missing id")? as usize;
             let inner =
                 expressions.get(id).with_context(|| format!("expression {id} not found"))?;
+            if exp.no_commit {
+                return eval_exp(ctx, symbols, expressions, inner, prime_for(exp, prime));
+            }
             if matches!(inner.op.as_str(), "cm" | "const" | "custom") {
                 direct_column_ref(ctx, inner, prime_for(exp, prime))
             } else {
@@ -469,9 +469,7 @@ fn eval_exp(
                 result.exp_id = Some(id as u64);
                 result.id = Some(id as u64);
                 result.prime = Some(prime_for(exp, prime));
-                if !exp.no_commit {
-                    fix_commit_pol(&mut result, ctx, symbols)?;
-                }
+                fix_commit_pol(&mut result, ctx, symbols)?;
                 Ok(result)
             }
         }
@@ -548,14 +546,13 @@ fn calculate_deps(
     match exp.op.as_str() {
         "exp" => {
             let id = exp.id.context("dependency expression is missing id")? as usize;
-            pil_code_gen_inner(
-                ctx,
-                symbols,
-                expressions,
-                id,
-                prime_for(exp, prime),
-                exp.no_commit,
-            )?;
+            if exp.no_commit {
+                let inner =
+                    expressions.get(id).with_context(|| format!("expression {id} not found"))?;
+                calculate_deps(ctx, symbols, expressions, inner, prime_for(exp, prime))?;
+            } else {
+                pil_code_gen_inner(ctx, symbols, expressions, id, prime_for(exp, prime), false)?;
+            }
         }
         "add" | "sub" | "mul" | "neg" => {
             for value in &exp.values {

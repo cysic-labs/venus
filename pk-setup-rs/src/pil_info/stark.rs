@@ -750,9 +750,11 @@ fn wrap_constraint_polynomial(
         .iter()
         .position(|boundary| boundary.name == "everyRow")
         .context("everyRow boundary not found")? as u64;
-    let stage = expressions.get(c_exp_id).and_then(|expr| expr.stage).unwrap_or(0);
-    let wrapped =
-        FormattedExpression::binary("mul", exp_ref(c_exp_id as u64, stage), zi(every_row));
+    let c_exp = expressions
+        .get(c_exp_id)
+        .with_context(|| format!("constraint expression {c_exp_id} not found"))?
+        .clone();
+    let wrapped = FormattedExpression::binary("mul", c_exp, zi(every_row));
     expressions.push(wrapped);
     Ok(expressions.len() - 1)
 }
@@ -946,7 +948,7 @@ fn generate_fri_polynomial(
 
     let vf1 = challenge("std_vf1", stage, 0, vf1_id);
     let vf2 = challenge("std_vf2", stage, 1, vf2_id);
-    let mut fri_by_opening = BTreeMap::<i64, usize>::new();
+    let mut fri_by_opening = BTreeMap::<i64, FormattedExpression>::new();
 
     for (idx, ev) in ev_map.iter().enumerate() {
         let symbol = find_eval_symbol(symbols, ev).with_context(|| {
@@ -988,55 +990,38 @@ fn generate_fri_polynomial(
         eval.id = Some(idx as u64);
         eval.dim = Some(FIELD_EXTENSION);
         let term = FormattedExpression::binary("sub", value, eval);
-        expressions.push(term);
-        let term_id = expressions.len() - 1;
-        if let Some(current_id) = fri_by_opening.get_mut(&ev.prime) {
-            let weighted =
-                FormattedExpression::binary("mul", exp_ref(*current_id as u64, stage), vf2.clone());
-            expressions.push(weighted);
-            let weighted_id = expressions.len() - 1;
-            let accumulated = FormattedExpression::binary(
+        if let Some(current) = fri_by_opening.get_mut(&ev.prime) {
+            *current = FormattedExpression::binary(
                 "add",
-                exp_ref(weighted_id as u64, stage),
-                exp_ref(term_id as u64, stage),
+                FormattedExpression::binary("mul", current.clone(), vf2.clone()),
+                term,
             );
-            expressions.push(accumulated);
-            *current_id = expressions.len() - 1;
         } else {
-            fri_by_opening.insert(ev.prime, term_id);
+            fri_by_opening.insert(ev.prime, term);
         }
     }
 
-    let mut fri_exp_id = None;
+    let mut fri_exp = None;
     for (opening_idx, opening) in opening_points.iter().enumerate() {
-        let expr_id = fri_by_opening
+        let opening_exp = fri_by_opening
             .remove(opening)
             .with_context(|| format!("FRI expression for opening point {opening} not found"))?;
-        let weighted = FormattedExpression::binary(
-            "mul",
-            exp_ref(expr_id as u64, stage),
-            x_div_x_sub_xi(*opening, opening_idx),
-        );
-        expressions.push(weighted);
-        let weighted_id = expressions.len() - 1;
-        fri_exp_id = Some(if let Some(previous_id) = fri_exp_id {
-            let previous =
-                FormattedExpression::binary("mul", vf1.clone(), exp_ref(previous_id as u64, stage));
-            expressions.push(previous);
-            let previous_weighted_id = expressions.len() - 1;
-            let accumulated = FormattedExpression::binary(
+        let weighted =
+            FormattedExpression::binary("mul", opening_exp, x_div_x_sub_xi(*opening, opening_idx));
+        fri_exp = Some(if let Some(previous) = fri_exp {
+            FormattedExpression::binary(
                 "add",
-                exp_ref(previous_weighted_id as u64, stage),
-                exp_ref(weighted_id as u64, stage),
-            );
-            expressions.push(accumulated);
-            expressions.len() - 1
+                FormattedExpression::binary("mul", vf1.clone(), previous),
+                weighted,
+            )
         } else {
-            weighted_id
+            weighted
         });
     }
 
-    let fri_exp_id = fri_exp_id.context("FRI polynomial has no expressions")?;
+    let fri_exp = fri_exp.context("FRI polynomial has no expressions")?;
+    let fri_exp_id = expressions.len();
+    expressions.push(fri_exp);
     expressions[fri_exp_id].stage = Some(stage - 1);
     Ok(fri_exp_id)
 }
