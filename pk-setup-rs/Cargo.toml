@@ -14,9 +14,13 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+constraint_generation = { path = "vendor/circom/constraint_generation" }
+constraint_writers = { path = "vendor/circom/constraint_writers" }
 fields = { workspace = true }
+parser = { path = "vendor/circom/parser" }
 pilout-crate = { package = "pilout", path = "../pil2-proofman/pilout" }
 prost = { workspace = true }
+program_structure = { path = "vendor/circom/program_structure" }
 proofman-starks-lib-c = { path = "../pil2-proofman/provers/starks-lib-c" }
 rayon = { workspace = true }
 serde = { workspace = true }
@@ -25,6 +29,7 @@ sm-arith = { workspace = true }
 sm-binary = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+type_analysis = { path = "vendor/circom/type_analysis" }
 
 [features]
 default = []

@@ -1,3 +1,4 @@
+mod circom_compile;
 mod pil_info;
 mod pilout_info;
 mod recursive_cache;
