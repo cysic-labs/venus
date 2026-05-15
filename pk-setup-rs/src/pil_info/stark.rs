@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use pilout_crate::pilout::{Air, AirGroupValue, CustomCommit, Hint, Symbol};
@@ -204,8 +204,20 @@ pub fn build_air_stark_draft(input: AirInput<'_>) -> Result<AirStarkDraft> {
 
     let c_info = annotate_expression_id(&mut expressions, c_exp_id)?;
     let max_degree = calculate_exp_deg(&expressions, &expressions[c_exp_id], &[])?;
-    let q_deg = max_degree.saturating_sub(1);
-    let q_dim = c_info.dim;
+    let max_q_degree = (1u64 << (input.stark_struct.n_bits_ext - input.stark_struct.n_bits)) + 1;
+    let (c_exp_id, q_deg, q_dim) = add_intermediate_polynomials(
+        &mut expressions,
+        &mut constraints,
+        &mut symbols,
+        c_exp_id,
+        max_degree,
+        max_q_degree,
+        c_info.dim,
+        input.num_challenges.len(),
+        input.airgroup_id,
+        input.air_id,
+        input.air.name.as_deref().unwrap_or("Air"),
+    )?;
     let c_exp_id = wrap_constraint_polynomial(&mut expressions, c_exp_id, &boundaries)?;
     annotate_expression_id(&mut expressions, c_exp_id)?;
 
@@ -366,6 +378,351 @@ fn generate_constraint_polynomial(
     }
 
     c_exp_id.context("AIR has no constraints")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_intermediate_polynomials(
+    expressions: &mut Vec<FormattedExpression>,
+    constraints: &mut Vec<FormattedConstraint>,
+    symbols: &mut Vec<FormattedSymbol>,
+    c_exp_id: usize,
+    max_degree: u64,
+    max_q_degree: u64,
+    q_dim: u64,
+    n_stages: usize,
+    airgroup_id: u32,
+    air_id: u32,
+    air_name: &str,
+) -> Result<(usize, u64, u64)> {
+    if max_degree < max_q_degree || (max_degree == max_q_degree && expressions.len() > 1_000) {
+        return Ok((c_exp_id, max_degree.saturating_sub(1), q_dim));
+    }
+
+    let (im_exps, q_deg) =
+        calculate_intermediate_polynomials(expressions, c_exp_id, max_q_degree, q_dim)?;
+    if im_exps.is_empty() {
+        return Ok((c_exp_id, q_deg.min(max_degree.saturating_sub(1)), q_dim));
+    }
+
+    let stage = n_stages as u64 + 1;
+    let im_stage = n_stages as u64;
+    let vc_id = symbols
+        .iter()
+        .filter(|symbol| symbol.symbol_type == "challenge" && symbol.stage.unwrap_or(0) < stage)
+        .count() as u64;
+    let vc = challenge("std_vc", stage, 0, vc_id);
+    let mut current_c_exp_id = c_exp_id;
+    let mut next_pol_id = symbols
+        .iter()
+        .filter(|symbol| symbol.symbol_type == "witness")
+        .filter_map(|symbol| symbol.pol_id)
+        .max()
+        .map_or(0, |id| id + 1);
+
+    for exp_id in im_exps {
+        let dim = expressions.get(exp_id).and_then(|expression| expression.dim).unwrap_or(1);
+        let stage_id = symbols
+            .iter()
+            .filter(|symbol| symbol.symbol_type == "witness" && symbol.stage == Some(im_stage))
+            .count() as u64;
+        let pol_id = next_pol_id;
+        next_pol_id += 1;
+
+        symbols.push(FormattedSymbol {
+            name: format!("{air_name}.ImPol"),
+            symbol_type: "witness".to_string(),
+            pol_id: Some(pol_id),
+            id: None,
+            stage: Some(im_stage),
+            stage_id: Some(stage_id),
+            dim,
+            airgroup_id: Some(airgroup_id as u64),
+            air_id: Some(air_id as u64),
+            commit_id: None,
+            lengths: Vec::new(),
+            stage_pos: None,
+            exp_id: Some(exp_id as u64),
+            im_pol: true,
+        });
+
+        let expression = expressions
+            .get_mut(exp_id)
+            .with_context(|| format!("intermediate expression {exp_id} not found"))?;
+        expression.im_pol = true;
+        expression.pol_id = Some(pol_id);
+        expression.stage = Some(im_stage);
+
+        let constraint_expr = FormattedExpression::binary(
+            "sub",
+            cm_ref(pol_id, im_stage, dim),
+            exp_ref(exp_id as u64, im_stage),
+        );
+        expressions.push(constraint_expr);
+        let constraint_id = expressions.len() - 1;
+        annotate_expression_id(expressions, constraint_id)?;
+        constraints.push(FormattedConstraint {
+            boundary: "everyRow".to_string(),
+            e: constraint_id as u64,
+            line: None,
+            offset_min: None,
+            offset_max: None,
+        });
+
+        let weighted =
+            FormattedExpression::binary("mul", vc.clone(), exp_ref(current_c_exp_id as u64, stage));
+        expressions.push(weighted);
+        let weighted_id = expressions.len() - 1;
+        annotate_expression_id(expressions, weighted_id)?;
+        let accumulated = FormattedExpression::binary(
+            "add",
+            exp_ref(weighted_id as u64, stage),
+            exp_ref(constraint_id as u64, stage),
+        );
+        expressions.push(accumulated);
+        current_c_exp_id = expressions.len() - 1;
+        annotate_expression_id(expressions, current_c_exp_id)?;
+    }
+
+    let info = annotate_expression_id(expressions, current_c_exp_id)?;
+    Ok((current_c_exp_id, q_deg, info.dim))
+}
+
+fn calculate_intermediate_polynomials(
+    expressions: &[FormattedExpression],
+    c_exp_id: usize,
+    max_q_degree: u64,
+    q_dim: u64,
+) -> Result<(Vec<usize>, u64)> {
+    let c_exp = expressions
+        .get(c_exp_id)
+        .with_context(|| format!("constraint expression {c_exp_id} not found"))?;
+    let mut candidate_degree = 2;
+    let (mut im_exps, mut q_deg) = calculate_im_pols(expressions, c_exp, candidate_degree)?;
+    let mut added_cols = calculate_added_cols(expressions, &im_exps, q_deg, q_dim);
+    candidate_degree += 1;
+
+    while !im_exps.is_empty() && candidate_degree <= max_q_degree {
+        let (candidate_im_exps, candidate_q_deg) =
+            calculate_im_pols(expressions, c_exp, candidate_degree)?;
+        let candidate_added_cols =
+            calculate_added_cols(expressions, &candidate_im_exps, candidate_q_deg, q_dim);
+        if candidate_added_cols < added_cols {
+            added_cols = candidate_added_cols;
+            im_exps = candidate_im_exps;
+            q_deg = candidate_q_deg;
+        }
+        if im_exps.is_empty() {
+            break;
+        }
+        candidate_degree += 1;
+    }
+
+    Ok((im_exps, q_deg))
+}
+
+fn calculate_added_cols(
+    expressions: &[FormattedExpression],
+    im_exps: &[usize],
+    q_deg: u64,
+    q_dim: u64,
+) -> u64 {
+    let q_cols = q_deg * q_dim;
+    let im_cols = im_exps
+        .iter()
+        .map(|exp_id| expressions.get(*exp_id).and_then(|expression| expression.dim).unwrap_or(1))
+        .sum::<u64>();
+    q_cols + im_cols
+}
+
+fn calculate_im_pols(
+    expressions: &[FormattedExpression],
+    expression: &FormattedExpression,
+    max_degree: u64,
+) -> Result<(Vec<usize>, u64)> {
+    let mut absolute_max_degree = 0;
+    let mut memo = ImPolMemo::default();
+    let result = calculate_im_pols_inner(
+        expressions,
+        expression,
+        Vec::new(),
+        max_degree,
+        max_degree,
+        &mut absolute_max_degree,
+        &mut memo,
+    )?
+    .context("failed to calculate intermediate polynomials")?;
+    Ok((result.0, result.1.max(absolute_max_degree).saturating_sub(1)))
+}
+
+type ImPolMemo = HashMap<(usize, u64, Vec<usize>), Option<(Vec<usize>, u64)>>;
+
+fn calculate_im_pols_inner(
+    expressions: &[FormattedExpression],
+    expression: &FormattedExpression,
+    im_pols: Vec<usize>,
+    max_degree: u64,
+    absolute_max_degree: u64,
+    observed_absolute_max: &mut u64,
+    memo: &mut ImPolMemo,
+) -> Result<Option<(Vec<usize>, u64)>> {
+    match expression.op.as_str() {
+        "add" | "sub" => {
+            let mut current = im_pols;
+            let mut max_child_degree = 0;
+            for value in &expression.values {
+                let Some((next, degree)) = calculate_im_pols_inner(
+                    expressions,
+                    value,
+                    current,
+                    max_degree,
+                    absolute_max_degree,
+                    observed_absolute_max,
+                    memo,
+                )?
+                else {
+                    return Ok(None);
+                };
+                current = next;
+                max_child_degree = max_child_degree.max(degree);
+            }
+            Ok(Some((current, max_child_degree)))
+        }
+        "mul" => {
+            let lhs = expression.values.first().context("mul expression is missing lhs")?;
+            let rhs = expression.values.get(1).context("mul expression is missing rhs")?;
+            if !is_compound_or_exp(lhs) && expression_degree(expressions, lhs)? == 0 {
+                return calculate_im_pols_inner(
+                    expressions,
+                    rhs,
+                    im_pols,
+                    max_degree,
+                    absolute_max_degree,
+                    observed_absolute_max,
+                    memo,
+                );
+            }
+            if !is_compound_or_exp(rhs) && expression_degree(expressions, rhs)? == 0 {
+                return calculate_im_pols_inner(
+                    expressions,
+                    lhs,
+                    im_pols,
+                    max_degree,
+                    absolute_max_degree,
+                    observed_absolute_max,
+                    memo,
+                );
+            }
+
+            let degree_here = expression_degree(expressions, expression)?;
+            if degree_here <= max_degree {
+                return Ok(Some((im_pols, degree_here)));
+            }
+
+            let mut best: Option<(Vec<usize>, u64)> = None;
+            for lhs_degree in 0..=max_degree {
+                let rhs_degree = max_degree - lhs_degree;
+                let Some((lhs_im_pols, lhs_result_degree)) = calculate_im_pols_inner(
+                    expressions,
+                    lhs,
+                    im_pols.clone(),
+                    lhs_degree,
+                    absolute_max_degree,
+                    observed_absolute_max,
+                    memo,
+                )?
+                else {
+                    continue;
+                };
+                let Some((rhs_im_pols, rhs_result_degree)) = calculate_im_pols_inner(
+                    expressions,
+                    rhs,
+                    lhs_im_pols,
+                    rhs_degree,
+                    absolute_max_degree,
+                    observed_absolute_max,
+                    memo,
+                )?
+                else {
+                    continue;
+                };
+                let result_degree = lhs_result_degree + rhs_result_degree;
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_im_pols, _)| rhs_im_pols.len() < best_im_pols.len())
+                {
+                    best = Some((rhs_im_pols, result_degree));
+                }
+                if best
+                    .as_ref()
+                    .is_some_and(|(best_im_pols, _)| best_im_pols.len() == im_pols.len())
+                {
+                    break;
+                }
+            }
+            Ok(best)
+        }
+        "exp" => {
+            if max_degree < 1 {
+                return Ok(None);
+            }
+            let id = expression.id.context("exp expression is missing id")? as usize;
+            if im_pols.contains(&id) {
+                return Ok(Some((im_pols, 1)));
+            }
+            let key = (id, absolute_max_degree, im_pols.clone());
+            let candidate = if let Some(cached) = memo.get(&key) {
+                cached.clone()
+            } else {
+                let calculated = calculate_im_pols_inner(
+                    expressions,
+                    expressions.get(id).with_context(|| format!("expression {id} not found"))?,
+                    im_pols,
+                    absolute_max_degree,
+                    absolute_max_degree,
+                    observed_absolute_max,
+                    memo,
+                )?;
+                memo.insert(key, calculated.clone());
+                calculated
+            };
+            let Some((mut candidate_im_pols, degree)) = candidate else {
+                return Ok(None);
+            };
+            if degree > max_degree {
+                *observed_absolute_max = (*observed_absolute_max).max(degree);
+                if !candidate_im_pols.contains(&id) {
+                    candidate_im_pols.push(id);
+                }
+                Ok(Some((candidate_im_pols, 1)))
+            } else {
+                Ok(Some((candidate_im_pols, degree)))
+            }
+        }
+        _ => {
+            let degree = expression_degree(expressions, expression)?;
+            if degree == 0 {
+                Ok(Some((im_pols, 0)))
+            } else if max_degree < 1 {
+                Ok(None)
+            } else {
+                Ok(Some((im_pols, 1)))
+            }
+        }
+    }
+}
+
+fn is_compound_or_exp(expression: &FormattedExpression) -> bool {
+    matches!(expression.op.as_str(), "add" | "sub" | "mul" | "exp")
+}
+
+fn expression_degree(
+    expressions: &[FormattedExpression],
+    expression: &FormattedExpression,
+) -> Result<u64> {
+    if let Some(exp_deg) = expression.exp_deg {
+        return Ok(exp_deg);
+    }
+    calculate_exp_deg(expressions, expression, &[])
 }
 
 fn wrap_constraint_polynomial(
@@ -940,6 +1297,15 @@ fn exp_ref(id: u64, stage: u64) -> FormattedExpression {
     expr.id = Some(id);
     expr.row_offset = Some(0);
     expr.stage = Some(stage);
+    expr
+}
+
+fn cm_ref(id: u64, stage: u64, dim: u64) -> FormattedExpression {
+    let mut expr = FormattedExpression::new("cm");
+    expr.id = Some(id);
+    expr.row_offset = Some(0);
+    expr.stage = Some(stage);
+    expr.dim = Some(dim);
     expr
 }
 
