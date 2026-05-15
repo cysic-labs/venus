@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fields::{Poseidon16, Poseidon2Constants};
 use pilout_crate::pilout::{
     constraint, expression, operand, Air, Constraint, Expression, FixedCol, Operand, Symbol,
     SymbolType,
@@ -72,6 +73,7 @@ fn build_non_poseidon_constraints(kind: PlonkLayoutKind) -> (Vec<Expression>, Ve
     builder.add_evpol4_constraints();
     builder.add_tree_selector4_constraints();
     builder.add_select_value1_constraints();
+    builder.add_poseidon_constraints();
     builder.finish()
 }
 
@@ -450,6 +452,252 @@ impl RecursiveExpressionBuilder {
         self.add_select_constraints(selector, 4);
     }
 
+    fn add_poseidon_constraints(&mut self) {
+        let first_col = match self.kind {
+            PlonkLayoutKind::Aggregation => 27,
+            PlonkLayoutKind::Compressor => 36,
+            PlonkLayoutKind::FinalVadcop => 33,
+        };
+        let input_order_out = self.array_a(first_col, 0, 16);
+        let input_order_in = self.array_a(0, 0, 16);
+        self.add_poseidon_input_order(
+            &input_order_in,
+            self.a(16),
+            self.a(17),
+            &input_order_out,
+            self.fixed_selector(self.fixed.poseidon_sponge),
+            self.fixed_selector(self.fixed.poseidon_compression),
+        );
+
+        match self.kind {
+            PlonkLayoutKind::Compressor => self.add_poseidon_compressor_rounds(first_col),
+            PlonkLayoutKind::Aggregation | PlonkLayoutKind::FinalVadcop => {
+                self.add_poseidon_aggregation_rounds(first_col)
+            }
+        }
+    }
+
+    fn add_poseidon_aggregation_rounds(&mut self, first_col: u32) {
+        let input_p = self.array_a(first_col, 0, 16);
+        let output_p = self.array_a(first_col, 1, 16);
+        let mut st0 = self.array_a(first_col + 16, 0, 16);
+        st0.extend(self.array_a(18, -2, 6));
+
+        let mut input_f = Vec::with_capacity(16);
+        let mut output_f = Vec::with_capacity(16);
+        let mut input_f2 = Vec::with_capacity(16);
+        let mut output_f2 = Vec::with_capacity(16);
+        let mut intermediate = Vec::with_capacity(22);
+        for idx in 0..16u32 {
+            let i = idx as usize;
+            let constants_f = self.poseidon_aggregation_constant(i, false);
+            let constants_f2 = self.poseidon_aggregation_constant(i, true);
+            let first_input = self.add(self.a(first_col + idx), constants_f);
+            let second_input = self.add(self.a(first_col + 16 + idx), constants_f2);
+            let first = self.pow7(first_input);
+            let second = self.pow7(second_input);
+            input_f.push(first.clone());
+            output_f.push(self.a(first_col + 16 + idx));
+            input_f2.push(second.clone());
+            let final_selector = self.fixed_selector(self.fixed.poseidon_final);
+            let final_out = self.mul(final_selector, self.a(idx));
+            let non_final_selector =
+                self.sub(self.one(), self.fixed_selector(self.fixed.poseidon_final));
+            let non_final = self.mul(non_final_selector, self.a_offset(first_col + idx, 1));
+            output_f2.push(self.add(final_out, non_final));
+            intermediate.push(second);
+        }
+        for idx in 0..6 {
+            let with_constant = self
+                .add(self.a_offset(18 + idx, -2), self.number(Poseidon16::RC[80 + idx as usize]));
+            intermediate.push(self.pow7(with_constant));
+        }
+
+        let selector = self.sum(vec![
+            self.fixed_selector(self.fixed.poseidon_sponge),
+            self.fixed_selector(self.fixed.poseidon_compression),
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
+            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
+            self.fixed_selector(self.fixed.poseidon_final),
+        ]);
+        self.add_poseidon_full_round(&input_f, &output_f, selector.clone());
+        self.add_poseidon_full_round(&input_f2, &output_f2, selector);
+        let partial_selector = self.fixed_selector(self.fixed.poseidon_partial_round);
+        self.add_poseidon_partial_round(&input_p, &output_p, &st0, &intermediate, partial_selector);
+    }
+
+    fn add_poseidon_compressor_rounds(&mut self, first_col: u32) {
+        let input_p = self.array_a(first_col, -1, 16);
+        let output_p = self.array_a(first_col, 1, 16);
+        let mut st0 = self.array_a(first_col, 0, 16);
+        st0.extend(self.array_a(18, -5, 6));
+
+        let mut input_f = Vec::with_capacity(16);
+        let mut output_f = Vec::with_capacity(16);
+        let mut intermediate = Vec::with_capacity(22);
+        for idx in 0..16u32 {
+            let constants = self.poseidon_compressor_constant(idx as usize);
+            let input_expr = self.add(self.a(first_col + idx), constants);
+            let input = self.pow7(input_expr);
+            input_f.push(input.clone());
+            let final_selector = self.fixed_selector(self.fixed.poseidon_final);
+            let final_out = self.mul(final_selector, self.a(idx));
+            let non_final_selector =
+                self.sub(self.one(), self.fixed_selector(self.fixed.poseidon_final));
+            let non_final = self.mul(non_final_selector, self.a_offset(first_col + idx, 1));
+            output_f.push(self.add(final_out, non_final));
+            intermediate.push(input);
+        }
+        for idx in 0..6 {
+            let with_constant = self
+                .add(self.a_offset(18 + idx, -5), self.number(Poseidon16::RC[80 + idx as usize]));
+            intermediate.push(self.pow7(with_constant));
+        }
+
+        let selector = self.sum(vec![
+            self.fixed_selector(self.fixed.poseidon_sponge),
+            self.fixed_selector(self.fixed.poseidon_compression),
+            self.fixed_selector_offset(self.fixed.poseidon_sponge, -1),
+            self.fixed_selector_offset(self.fixed.poseidon_compression, -1),
+            self.fixed_selector_offset(self.fixed.poseidon_sponge, -2),
+            self.fixed_selector_offset(self.fixed.poseidon_compression, -2),
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, -2),
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
+            self.fixed_selector_offset(self.fixed.poseidon_final, -2),
+            self.fixed_selector_offset(self.fixed.poseidon_final, -1),
+            self.fixed_selector(self.fixed.poseidon_final),
+        ]);
+        self.add_poseidon_full_round(&input_f, &output_f, selector);
+        let partial_selector = self.fixed_selector(self.fixed.poseidon_partial_round);
+        self.add_poseidon_partial_round(&input_p, &output_p, &st0, &intermediate, partial_selector);
+    }
+
+    fn add_poseidon_input_order(
+        &mut self,
+        input: &[Expr],
+        bit0: Expr,
+        bit1: Expr,
+        output: &[Expr],
+        sponge: Expr,
+        compression: Expr,
+    ) {
+        self.add_bool_constraint(compression.clone(), bit0.clone());
+        self.add_bool_constraint(compression.clone(), bit1.clone());
+
+        let not_b0 = self.sub(self.one(), bit0.clone());
+        let not_b1 = self.sub(self.one(), bit1.clone());
+        let mask00 = self.mul(not_b0.clone(), not_b1.clone());
+        let mask10 = self.mul(bit0.clone(), not_b1);
+        let mask01 = self.mul(not_b0, bit1.clone());
+        let mask11 = self.mul(bit0, bit1);
+
+        let mut ordered = Vec::with_capacity(16);
+        for idx in 0..16 {
+            let compressed = if idx < 4 {
+                let non_zero = self.sum(vec![mask10.clone(), mask01.clone(), mask11.clone()]);
+                let term0 = self.mul(mask00.clone(), input[idx].clone());
+                let term1 = self.mul(non_zero, input[idx + 4].clone());
+                self.sum(vec![term0, term1])
+            } else if idx < 8 {
+                let upper = self.sum(vec![mask01.clone(), mask11.clone()]);
+                let term0 = self.mul(mask00.clone(), input[idx].clone());
+                let term1 = self.mul(mask10.clone(), input[idx - 4].clone());
+                let term2 = self.mul(upper, input[idx + 4].clone());
+                self.sum(vec![term0, term1, term2])
+            } else if idx < 12 {
+                let same = self.sum(vec![mask00.clone(), mask10.clone()]);
+                let term0 = self.mul(same, input[idx].clone());
+                let term1 = self.mul(mask01.clone(), input[idx - 8].clone());
+                let term2 = self.mul(mask11.clone(), input[idx + 4].clone());
+                self.sum(vec![term0, term1, term2])
+            } else {
+                let same = self.sum(vec![mask00.clone(), mask10.clone(), mask01.clone()]);
+                let term0 = self.mul(same, input[idx].clone());
+                let term1 = self.mul(mask11.clone(), input[idx - 12].clone());
+                self.sum(vec![term0, term1])
+            };
+            let sponge_value = self.mul(sponge.clone(), input[idx].clone());
+            let compressed_value = self.mul(compression.clone(), compressed);
+            ordered.push(self.add(compressed_value, sponge_value));
+        }
+        let selector = self.add(sponge, compression);
+        self.add_poseidon_full_round(&ordered, output, selector);
+    }
+
+    fn add_poseidon_full_round(&mut self, input: &[Expr], output: &[Expr], selector: Expr) {
+        let mut mat = vec![self.zero(); 16];
+        for idx in 0..4 {
+            let base = idx * 4;
+            let t0 = self.add(input[base].clone(), input[base + 1].clone());
+            let t1 = self.add(input[base + 2].clone(), input[base + 3].clone());
+            let twice_1 = self.mul(self.number(2), input[base + 1].clone());
+            let twice_3 = self.mul(self.number(2), input[base + 3].clone());
+            let t2 = self.add(twice_1, t1.clone());
+            let t3 = self.add(twice_3, t0.clone());
+            let four_t1 = self.mul(self.number(4), t1.clone());
+            let four_t0 = self.mul(self.number(4), t0);
+            mat[base + 3] = self.add(four_t1, t3.clone());
+            mat[base + 1] = self.add(four_t0, t2.clone());
+            mat[base] = self.add(t3, mat[base + 1].clone());
+            mat[base + 2] = self.add(t2, mat[base + 3].clone());
+        }
+
+        let mut stored = Vec::with_capacity(4);
+        for idx in 0..4 {
+            stored.push(self.sum(vec![
+                mat[idx].clone(),
+                mat[idx + 4].clone(),
+                mat[idx + 8].clone(),
+                mat[idx + 12].clone(),
+            ]));
+        }
+
+        for idx in 0..16 {
+            let rhs = self.add(mat[idx].clone(), stored[idx % 4].clone());
+            let diff = self.sub(output[idx].clone(), rhs);
+            let constraint = self.mul(selector.clone(), diff);
+            self.assert_zero(constraint);
+        }
+    }
+
+    fn add_poseidon_partial_round(
+        &mut self,
+        input: &[Expr],
+        output: &[Expr],
+        st0: &[Expr],
+        intermediate: &[Expr],
+        selector: Expr,
+    ) {
+        let mut state = input.to_vec();
+        for round in 0..22 {
+            let diff = self.sub(st0[round].clone(), state[0].clone());
+            let constraint = self.mul(selector.clone(), diff);
+            self.assert_zero(constraint);
+
+            let mut sum_terms = Vec::with_capacity(16);
+            sum_terms.push(intermediate[round].clone());
+            sum_terms.extend(state.iter().skip(1).cloned());
+            let partial_sum = self.sum(sum_terms);
+
+            let mut next = Vec::with_capacity(16);
+            let first_scaled =
+                self.mul(intermediate[round].clone(), self.number(Poseidon16::DIAG[0]));
+            let first = self.add(first_scaled, partial_sum.clone());
+            next.push(first);
+            for idx in 1..16 {
+                let scaled = self.mul(state[idx].clone(), self.number(Poseidon16::DIAG[idx]));
+                next.push(self.add(scaled, partial_sum.clone()));
+            }
+            state = next;
+        }
+
+        for idx in 0..16 {
+            let diff = self.sub(output[idx].clone(), state[idx].clone());
+            let constraint = self.mul(selector.clone(), diff);
+            self.assert_zero(constraint);
+        }
+    }
+
     fn add_select_constraints(&mut self, selector: Expr, value_width: u32) {
         let key0 = self.a(4 * value_width);
         let key1 = self.a(4 * value_width + 1);
@@ -506,6 +754,82 @@ impl RecursiveExpressionBuilder {
             self.mul(not_key0, key1.clone()),
             self.mul(key0, key1),
         ]
+    }
+
+    fn poseidon_aggregation_constant(&mut self, idx: usize, second_half: bool) -> Expr {
+        let mut terms = Vec::new();
+        let base = if second_half { 16 } else { 0 };
+        let sponge_or_compression = self.add(
+            self.fixed_selector(self.fixed.poseidon_sponge),
+            self.fixed_selector(self.fixed.poseidon_compression),
+        );
+        terms.push(self.mul(sponge_or_compression, self.number(Poseidon16::RC[idx + base])));
+        terms.push(self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
+            self.number(Poseidon16::RC[idx + if second_half { 48 } else { 32 }]),
+        ));
+        terms.push(self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
+            self.number(Poseidon16::RC[idx + if second_half { 102 } else { 86 }]),
+        ));
+        terms.push(self.mul(
+            self.fixed_selector(self.fixed.poseidon_final),
+            self.number(Poseidon16::RC[idx + if second_half { 134 } else { 118 }]),
+        ));
+        if second_half {
+            terms.push(self.mul(
+                self.fixed_selector(self.fixed.poseidon_partial_round),
+                self.number(Poseidon16::RC[idx + 64]),
+            ));
+        }
+        self.sum(terms)
+    }
+
+    fn poseidon_compressor_constant(&mut self, idx: usize) -> Expr {
+        let mut terms = Vec::with_capacity(9);
+        let r0 = self.add(
+            self.fixed_selector(self.fixed.poseidon_sponge),
+            self.fixed_selector(self.fixed.poseidon_compression),
+        );
+        terms.push(self.mul(r0, self.number(Poseidon16::RC[idx])));
+
+        let r1 = self.add(
+            self.fixed_selector_offset(self.fixed.poseidon_sponge, -1),
+            self.fixed_selector_offset(self.fixed.poseidon_compression, -1),
+        );
+        terms.push(self.mul(r1, self.number(Poseidon16::RC[idx + 16])));
+
+        let r2 = self.add(
+            self.fixed_selector_offset(self.fixed.poseidon_sponge, -2),
+            self.fixed_selector_offset(self.fixed.poseidon_compression, -2),
+        );
+        terms.push(self.mul(r2, self.number(Poseidon16::RC[idx + 32])));
+
+        terms.push(self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, -2),
+            self.number(Poseidon16::RC[idx + 48]),
+        ));
+        terms.push(self.mul(
+            self.fixed_selector(self.fixed.poseidon_partial_round),
+            self.number(Poseidon16::RC[idx + 64]),
+        ));
+        terms.push(self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
+            self.number(Poseidon16::RC[idx + 86]),
+        ));
+        terms.push(self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_final, -2),
+            self.number(Poseidon16::RC[idx + 102]),
+        ));
+        terms.push(self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_final, -1),
+            self.number(Poseidon16::RC[idx + 118]),
+        ));
+        terms.push(self.mul(
+            self.fixed_selector(self.fixed.poseidon_final),
+            self.number(Poseidon16::RC[idx + 134]),
+        ));
+        self.sum(terms)
     }
 
     fn plonk_slots(&self) -> Vec<PlonkSlot> {
@@ -699,15 +1023,30 @@ impl RecursiveExpressionBuilder {
     }
 
     fn a(&self, idx: u32) -> Expr {
+        self.a_offset(idx, 0)
+    }
+
+    fn a_offset(&self, idx: u32, offset: i32) -> Expr {
         Expr {
             operand: Operand {
                 operand: Some(operand::Operand::WitnessCol(operand::WitnessCol {
                     stage: 1,
                     col_idx: idx,
-                    row_offset: 0,
+                    row_offset: offset,
                 })),
             },
         }
+    }
+
+    fn array_a(&self, start: u32, offset: i32, len: u32) -> Vec<Expr> {
+        (0..len).map(|idx| self.a_offset(start + idx, offset)).collect()
+    }
+
+    fn pow7(&mut self, input: Expr) -> Expr {
+        let input2 = self.mul(input.clone(), input.clone());
+        let input4 = self.mul(input2.clone(), input2.clone());
+        let input6 = self.mul(input4, input2);
+        self.mul(input6, input)
     }
 
     fn number(&self, value: u64) -> Expr {
@@ -868,9 +1207,9 @@ mod tests {
         let (_, compressor) = build_non_poseidon_constraints(PlonkLayoutKind::Compressor);
         let (_, final_vadcop) = build_non_poseidon_constraints(PlonkLayoutKind::FinalVadcop);
 
-        assert_eq!(aggregation.len(), 65);
-        assert_eq!(compressor.len(), 71);
-        assert_eq!(final_vadcop.len(), 67);
+        assert_eq!(aggregation.len(), 153);
+        assert_eq!(compressor.len(), 143);
+        assert_eq!(final_vadcop.len(), 155);
     }
 
     fn one_constraint_r1cs() -> R1cs {

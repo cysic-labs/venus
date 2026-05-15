@@ -2907,6 +2907,7 @@ version = "0.16.1"
 dependencies = [
  "anyhow",
  "clap",
+ "fields",
  "pilout",
  "proofman-starks-lib-c",
  "prost 0.13.5",

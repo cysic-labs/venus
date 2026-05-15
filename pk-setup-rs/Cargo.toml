@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+fields = { workspace = true }
 pilout-crate = { package = "pilout", path = "../pil2-proofman/pilout" }
 prost = { workspace = true }
 proofman-starks-lib-c = { path = "../pil2-proofman/provers/starks-lib-c" }
