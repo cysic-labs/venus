@@ -1,4 +1,5 @@
 mod circom_compile;
+mod circom_assets;
 mod pil_info;
 mod pilout_info;
 mod recursive_cache;
