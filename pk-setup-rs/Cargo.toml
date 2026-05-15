@@ -1,0 +1,29 @@
+[package]
+name = "pk-setup-rs"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+repository = { workspace = true }
+categories = { workspace = true }
+
+[[bin]]
+name = "generate-key-rs"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+pilout-crate = { package = "pilout", path = "../pil2-proofman/pilout" }
+prost = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sm-arith = { workspace = true }
+sm-binary = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+default = []
+gpu = ["sm-arith/gpu", "sm-binary/gpu"]

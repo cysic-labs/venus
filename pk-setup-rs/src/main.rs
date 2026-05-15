@@ -1,0 +1,156 @@
+mod pilout_info;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use pilout_crate::pilout_proxy::PilOutProxy;
+use sm_arith::ArithFrops;
+use sm_binary::{BinaryBasicFrops, BinaryExtensionFrops};
+use tracing::info;
+
+#[derive(Debug, Parser)]
+#[command(version, about = "Native Rust proving-key setup generator")]
+struct Args {
+    /// Repository root.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+
+    /// Build directory where provingKey is generated.
+    #[arg(short = 'b', long, default_value = "build")]
+    build_dir: PathBuf,
+
+    /// Existing PILOUT file. Native PIL compilation will be added in this crate; for now this must exist.
+    #[arg(short = 'a', long, default_value = "pil/zisk.pilout")]
+    airout: PathBuf,
+
+    /// Fixed columns directory used by the legacy setup.
+    #[arg(short = 'u', long, default_value = "tmp/fixed")]
+    fixed_dir: PathBuf,
+
+    /// Proof scratch directory created by the legacy target.
+    #[arg(long, default_value = "tmp")]
+    proof_dir: PathBuf,
+
+    /// Generate aggregation setup artifacts.
+    #[arg(short = 'r', long, default_value_t = true)]
+    recursive: bool,
+
+    /// Verbosity (-v, -vv).
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    init_tracing(args.verbose);
+
+    let root = fs::canonicalize(&args.root).context("failed to canonicalize repository root")?;
+    let build_dir = resolve_path(&root, &args.build_dir);
+    let fixed_dir = resolve_path(&root, &args.fixed_dir);
+    let proof_dir = resolve_path(&root, &args.proof_dir);
+    let pilout_path = resolve_path(&root, &args.airout);
+    let proving_key_dir = build_dir.join("provingKey");
+
+    prepare_directories(&build_dir, &fixed_dir, &proof_dir, &proving_key_dir)?;
+    generate_frequent_op_fixed_tables(&root)?;
+
+    if !pilout_path.exists() {
+        anyhow::bail!(
+            "native PIL compilation is not implemented yet and PILOUT was not found at {}",
+            pilout_path.display()
+        );
+    }
+
+    let pilout = PilOutProxy::new(&pilout_path.display().to_string())
+        .map_err(|err| anyhow::anyhow!("failed to load PILOUT {}: {err}", pilout_path.display()))?;
+
+    let global = pilout_info::build_global_artifacts(&pilout)?;
+    pilout_info::write_global_artifacts(&proving_key_dir, &global)?;
+
+    if args.recursive {
+        info!("recursive aggregation setup is not implemented yet in pk-setup-rs");
+    }
+
+    anyhow::bail!(
+        "pk-setup-rs generated the native fixed tables and global metadata, but the STARK setup and recursive artifacts are still incomplete"
+    );
+}
+
+fn init_tracing(verbose: u8) {
+    let level = match verbose {
+        0 => tracing::Level::INFO,
+        1 => tracing::Level::DEBUG,
+        _ => tracing::Level::TRACE,
+    };
+    let _ = tracing_subscriber::fmt().with_max_level(level).with_target(false).try_init();
+}
+
+fn resolve_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn prepare_directories(
+    build_dir: &Path,
+    fixed_dir: &Path,
+    proof_dir: &Path,
+    proving_key_dir: &Path,
+) -> Result<()> {
+    fs::create_dir_all(build_dir)
+        .with_context(|| format!("failed to create {}", build_dir.display()))?;
+    fs::create_dir_all(fixed_dir)
+        .with_context(|| format!("failed to create {}", fixed_dir.display()))?;
+    fs::create_dir_all(proof_dir)
+        .with_context(|| format!("failed to create {}", proof_dir.display()))?;
+    if proving_key_dir.exists() {
+        fs::remove_dir_all(proving_key_dir)
+            .with_context(|| format!("failed to remove {}", proving_key_dir.display()))?;
+    }
+    fs::create_dir_all(proving_key_dir)
+        .with_context(|| format!("failed to create {}", proving_key_dir.display()))?;
+    Ok(())
+}
+
+fn generate_frequent_op_fixed_tables(root: &Path) -> Result<()> {
+    let current_dir = std::env::current_dir().context("failed to get current directory")?;
+    std::env::set_current_dir(root)
+        .with_context(|| format!("failed to enter {}", root.display()))?;
+
+    let result = (|| -> Result<()> {
+        info!("generating arithmetic frequent-op fixed table");
+        ArithFrops::new()
+            .generate_cmd("arith_frops_fixed_gen", "state-machines/arith/src/arith_frops_fixed.bin")
+            .map_err(|err| anyhow::anyhow!("failed to generate arith_frops_fixed.bin: {err}"))?;
+
+        info!("generating binary basic frequent-op fixed table");
+        BinaryBasicFrops::new()
+            .generate_cmd(
+                "binary_basic_frops_fixed_gen",
+                "state-machines/binary/src/binary_basic_frops_fixed.bin",
+            )
+            .map_err(|err| {
+                anyhow::anyhow!("failed to generate binary_basic_frops_fixed.bin: {err}")
+            })?;
+
+        info!("generating binary extension frequent-op fixed table");
+        BinaryExtensionFrops::new()
+            .generate_cmd(
+                "binary_extension_frops_fixed_gen",
+                "state-machines/binary/src/binary_extension_frops_fixed.bin",
+            )
+            .map_err(|err| {
+                anyhow::anyhow!("failed to generate binary_extension_frops_fixed.bin: {err}")
+            })?;
+        Ok(())
+    })();
+
+    std::env::set_current_dir(&current_dir)
+        .with_context(|| format!("failed to restore {}", current_dir.display()))?;
+
+    result
+}

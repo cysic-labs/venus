@@ -32,7 +32,7 @@ PROVE_ARGS := -i $(INPUT)
 PROVE_PREPARE :=
 endif
 
-.PHONY: all setup build install-toolchain check-key generate-key build-guest build-guest-native \
+.PHONY: all setup build install-toolchain check-key generate-key generate-key-rs build-guest build-guest-native \
         generate-hints rom-setup compile-key prove verify clean purge help
 
 all: setup prove verify
@@ -70,6 +70,12 @@ generate-key:
 		-a "$(ROOT)/pil/zisk.pilout" -b "$(BUILD_DIR)" \
 		-t "$(ROOT)/pil2-proofman/pil2-components/lib/std/pil" \
 		-u "$(FIXED_DIR)" -r -s "$(ROOT)/state-machines/starkstructs.json"
+
+generate-key-rs:
+	cargo run --release -p pk-setup-rs --bin generate-key-rs -- \
+		--root "$(ROOT)" --build-dir "$(BUILD_DIR)" \
+		--fixed-dir "$(FIXED_DIR)" --proof-dir "$(PROOF_DIR)" \
+		--airout "$(ROOT)/pil/zisk.pilout" -r
 
 build-guest: install-toolchain
 	cd "$(GUEST_DIR)" && "$(CARGO_ZISK_BIN)" build --release
@@ -116,6 +122,7 @@ help:
 	@echo "Targets:"
 	@echo "  make setup"
 	@echo "  make generate-key"
+	@echo "  make generate-key-rs"
 	@echo "  make prove"
 	@echo "  make verify"
 	@echo ""
