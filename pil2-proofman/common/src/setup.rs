@@ -9,7 +9,7 @@ use libloading::{Library, Symbol};
 use std::ffi::CString;
 use bytemuck::cast_slice;
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::RowInfo;
+use crate::{NativeRecursiveRuntime, RowInfo};
 
 use proofman_starks_lib_c::set_memory_expressions_c;
 use proofman_starks_lib_c::{
@@ -79,6 +79,7 @@ pub struct Setup<F: PrimeField64> {
     pub size_witness: RwLock<Option<u64>>,
     pub circom_library: RwLock<Option<Library>>,
     pub circom_circuit: RwLock<Option<*mut c_void>>,
+    pub native_runtime: RwLock<Option<NativeRecursiveRuntime>>,
     pub air_name: String,
     pub verkey: Vec<F>,
     pub verkey_file: String,
@@ -316,6 +317,7 @@ impl<F: PrimeField64> Setup<F> {
             size_witness: RwLock::new(None),
             circom_circuit: RwLock::new(None),
             circom_library: RwLock::new(None),
+            native_runtime: RwLock::new(None),
             exec_data: RwLock::new(None),
             setup_path: setup_path.to_path_buf().clone(),
             setup_type: setup_type.clone(),
@@ -392,6 +394,14 @@ impl<F: PrimeField64> Setup<F> {
         let dat_filename_ptr = dat_filename_str.as_ptr() as *mut std::os::raw::c_char;
 
         if !rust_lib_path.exists() {
+            let dat_path = Path::new(dat_filename.as_str());
+            if dat_path.exists() {
+                let runtime = NativeRecursiveRuntime::from_dat_file(dat_path)?;
+                *self.size_witness.write().unwrap() = Some(runtime.size_witness_words);
+                *self.native_runtime.write().unwrap() = Some(runtime);
+                return Ok(());
+            }
+
             return Err(ProofmanError::InvalidSetup(format!(
                 "Rust lib dynamic library not found at path: {rust_lib_path:?}"
             )));

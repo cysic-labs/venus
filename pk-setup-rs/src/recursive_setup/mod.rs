@@ -2,6 +2,8 @@
 pub mod plonk;
 #[allow(dead_code)]
 pub mod r1cs;
+#[allow(dead_code)]
+pub mod runtime;
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +15,7 @@ pub use plonk::PlonkLayoutKind;
 pub struct RecursiveLayoutArtifacts {
     pub const_path: PathBuf,
     pub exec_path: PathBuf,
+    pub dat_path: PathBuf,
     pub n_bits: u32,
     pub n_rows: usize,
     pub n_constants: usize,
@@ -41,12 +44,16 @@ pub fn write_layout(
     let layout = plonk::build_layout_from_program(r1cs, &program, kind, namespace)?;
     let const_path = setup_path.with_extension("const");
     let exec_path = setup_path.with_extension("exec");
+    let dat_path = setup_path.with_extension("dat");
     plonk::write_const_file(&const_path, &layout.fixed_columns)?;
     plonk::write_exec_file(&exec_path, &program.additions, &layout.signal_map)?;
+    runtime::write_runtime_dat_file(&dat_path, r1cs)?;
+    runtime::write_exec_sidecars(setup_path, r1cs, &program.additions, &layout.signal_map)?;
 
     Ok(RecursiveLayoutArtifacts {
         const_path,
         exec_path,
+        dat_path,
         n_bits: layout.shape.n_bits,
         n_rows: layout.shape.n_rows,
         n_constants: layout.fixed_columns.len(),
@@ -92,8 +99,10 @@ mod tests {
         assert_eq!(artifacts.n_committed_pols, 59);
         assert!(artifacts.const_path.exists());
         assert!(artifacts.exec_path.exists());
+        assert!(artifacts.dat_path.exists());
         assert_eq!(std::fs::metadata(&artifacts.const_path)?.len(), (49 * 8) as u64);
         assert_eq!(std::fs::metadata(&artifacts.exec_path)?.len(), (2 + 59) * 8);
+        assert_eq!(&std::fs::read(&artifacts.dat_path)?[..8], b"PIL2RSPD");
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())

@@ -849,6 +849,10 @@ fn generate_witness<F: PrimeField64>(
     let mut witness_size = setup.size_witness.read().unwrap().unwrap();
     witness_size += *setup.exec_data.read().unwrap().as_ref().unwrap().first().unwrap();
 
+    if let Some(runtime) = setup.native_runtime.read().unwrap().as_ref() {
+        return runtime.generate_witness::<F>(zkin, witness_size);
+    }
+
     let witness: Vec<F> = vec![F::ZERO; witness_size as usize];
 
     let circom_circuit_guard = setup.circom_circuit.read().unwrap();
