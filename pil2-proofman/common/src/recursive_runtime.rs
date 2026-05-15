@@ -67,6 +67,7 @@ pub struct NativeRuntimeCustomGate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeRuntimeCustomGateKind {
     CMul,
+    EvPol4,
 }
 
 impl NativeRecursiveRuntime {
@@ -311,7 +312,7 @@ impl NativeRecursiveRuntime {
     }
 
     fn solve_constraints<F: PrimeField64>(&self, witness: &mut [F], known: &mut [bool]) -> ProofmanResult<()> {
-        if self.constraints.is_empty() {
+        if self.constraints.is_empty() && self.custom_gates.is_empty() {
             return Ok(());
         }
 
@@ -388,6 +389,7 @@ impl NativeRecursiveRuntime {
     ) -> ProofmanResult<bool> {
         match gate.kind {
             NativeRuntimeCustomGateKind::CMul => solve_cmul_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::EvPol4 => solve_evpol4_gate(gate, witness, known),
         }
     }
 
@@ -399,6 +401,7 @@ impl NativeRecursiveRuntime {
     ) -> ProofmanResult<()> {
         match gate.kind {
             NativeRuntimeCustomGateKind::CMul => verify_cmul_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::EvPol4 => verify_evpol4_gate(gate, witness, known),
         }
     }
 }
@@ -526,6 +529,68 @@ fn verify_cmul_gate<F: PrimeField64>(
     Ok(())
 }
 
+fn solve_evpol4_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &mut [F],
+    known: &mut [bool],
+) -> ProofmanResult<bool> {
+    if gate.signals.len() != 21 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "EvPol4 native runtime gate must have 21 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals[..18].iter().any(|&signal| !known[signal]) {
+        return Ok(false);
+    }
+
+    let result = evpol4(&signals, witness);
+    let mut changed = false;
+    for idx in 0..3 {
+        let signal = signals[18 + idx];
+        if known[signal] {
+            if witness[signal] != result[idx] {
+                return Err(ProofmanError::InvalidProof(format!(
+                    "native recursive EvPol4 gate output mismatch at signal {signal}"
+                )));
+            }
+        } else {
+            witness[signal] = result[idx];
+            known[signal] = true;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn verify_evpol4_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &[F],
+    known: &[bool],
+) -> ProofmanResult<()> {
+    if gate.signals.len() != 21 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "EvPol4 native runtime gate must have 21 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals.iter().any(|&signal| !known[signal]) {
+        return Ok(());
+    }
+    let result = evpol4(&signals, witness);
+    for idx in 0..3 {
+        let signal = signals[18 + idx];
+        if witness[signal] != result[idx] {
+            return Err(ProofmanError::InvalidProof(format!(
+                "native recursive EvPol4 gate output mismatch at signal {signal}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
     let mut out = Vec::with_capacity(signals.len());
     for &signal in signals {
@@ -548,6 +613,26 @@ fn cmul<F: PrimeField64>(a: [F; 3], b: [F; 3]) -> [F; 3] {
         a[0] * b[1] + a[1] * b[0] + a[1] * b[2] + a[2] * b[1] + a[2] * b[2],
         a[0] * b[2] + a[2] * b[2] + a[2] * b[0] + a[1] * b[1],
     ]
+}
+
+fn cmul_add<F: PrimeField64>(a: [F; 3], b: [F; 3], c: [F; 3]) -> [F; 3] {
+    let product = cmul(a, b);
+    [product[0] + c[0], product[1] + c[1], product[2] + c[2]]
+}
+
+fn evpol4<F: PrimeField64>(signals: &[usize], witness: &[F]) -> [F; 3] {
+    let coefs = [
+        [witness[signals[0]], witness[signals[1]], witness[signals[2]]],
+        [witness[signals[3]], witness[signals[4]], witness[signals[5]]],
+        [witness[signals[6]], witness[signals[7]], witness[signals[8]]],
+        [witness[signals[9]], witness[signals[10]], witness[signals[11]]],
+        [witness[signals[12]], witness[signals[13]], witness[signals[14]]],
+    ];
+    let x = [witness[signals[15]], witness[signals[16]], witness[signals[17]]];
+    let acc = cmul_add(coefs[4], x, coefs[3]);
+    let acc = cmul_add(acc, x, coefs[2]);
+    let acc = cmul_add(acc, x, coefs[1]);
+    cmul_add(acc, x, coefs[0])
 }
 
 fn checked_table_end(path: &Path, start: usize, count: usize, row_len: usize, label: &str) -> ProofmanResult<usize> {
@@ -611,6 +696,7 @@ fn parse_custom_gates(
         let kind_id = read_u64(bytes, offset)?;
         let kind = match kind_id {
             1 => NativeRuntimeCustomGateKind::CMul,
+            2 => NativeRuntimeCustomGateKind::EvPol4,
             other => {
                 return Err(ProofmanError::InvalidSetup(format!(
                     "{} references unsupported native runtime custom gate kind {other}",
@@ -723,6 +809,38 @@ mod tests {
         assert_eq!(witness[11].as_canonical_u64(), 5100);
 
         std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn solves_evpol4_custom_gate() -> ProofmanResult<()> {
+        let runtime = NativeRecursiveRuntime {
+            template_id: 0,
+            size_witness_words: 22,
+            n_publics: 0,
+            public_input_offset_words: 1,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 18,
+            source_sections: Vec::new(),
+            section_copy_ops: Vec::new(),
+            constraints: Vec::new(),
+            custom_gates: vec![NativeRuntimeCustomGate {
+                kind: NativeRuntimeCustomGateKind::EvPol4,
+                signals: (1..=21).collect(),
+            }],
+        };
+        let mut source = vec![0u64; 18];
+        source[0] = 1;
+        source[15] = 7;
+        source[16] = 11;
+        source[17] = 13;
+
+        let witness = runtime.generate_witness::<Goldilocks>(&source, 22)?;
+        assert_eq!(witness[19].as_canonical_u64(), 1);
+        assert_eq!(witness[20].as_canonical_u64(), 0);
+        assert_eq!(witness[21].as_canonical_u64(), 0);
         Ok(())
     }
 }
