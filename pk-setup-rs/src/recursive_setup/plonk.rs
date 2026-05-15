@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::Path;
 
 use anyhow::{bail, Result};
 
@@ -318,6 +320,38 @@ pub fn write_exec_buffer(additions: &[PlonkAddition], signal_map: &[Vec<u32>]) -
     }
 
     Ok(out)
+}
+
+pub fn write_exec_file(
+    path: &Path,
+    additions: &[PlonkAddition],
+    signal_map: &[Vec<u32>],
+) -> Result<()> {
+    fs::write(path, write_exec_buffer(additions, signal_map)?)
+        .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))
+}
+
+pub fn write_const_buffer(fixed_columns: &[FixedColumn]) -> Result<Vec<u8>> {
+    if fixed_columns.is_empty() {
+        bail!("cannot write const file with no fixed columns");
+    }
+    let n_rows = fixed_columns[0].values.len();
+    if fixed_columns.iter().any(|column| column.values.len() != n_rows) {
+        bail!("all fixed columns must have the same row count");
+    }
+
+    let mut out = Vec::with_capacity(n_rows * fixed_columns.len() * 8);
+    for row in 0..n_rows {
+        for column in fixed_columns {
+            push_u64(&mut out, column.values[row]);
+        }
+    }
+    Ok(out)
+}
+
+pub fn write_const_file(path: &Path, fixed_columns: &[FixedColumn]) -> Result<()> {
+    fs::write(path, write_const_buffer(fixed_columns)?)
+        .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))
 }
 
 struct Converter {
@@ -1491,6 +1525,22 @@ mod tests {
         assert_eq!(layout.signal_map[27][0], 17);
         assert_eq!(layout.signal_map[43][0], 33);
         assert_eq!(layout.signal_map[0][4], 209);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_const_buffer_in_row_major_fixed_column_order() -> Result<()> {
+        let columns = vec![
+            FixedColumn { name: "A".to_string(), lengths: Vec::new(), values: vec![1, 2] },
+            FixedColumn { name: "B".to_string(), lengths: Vec::new(), values: vec![3, 4] },
+            FixedColumn { name: "C".to_string(), lengths: Vec::new(), values: vec![5, 6] },
+        ];
+        let bytes = write_const_buffer(&columns)?;
+        let words = bytes
+            .chunks_exact(8)
+            .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(words, vec![1, 3, 5, 2, 4, 6]);
         Ok(())
     }
 
