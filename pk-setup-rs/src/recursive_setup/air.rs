@@ -1,16 +1,20 @@
 use anyhow::{Context, Result};
 use fields::{Poseidon16, Poseidon2Constants};
 use pilout_crate::pilout::{
-    constraint, expression, operand, Air, Constraint, Expression, FixedCol, Operand, Symbol,
-    SymbolType,
+    constraint, expression, hint_field, operand, Air, Constraint, Expression, FixedCol, Hint,
+    HintField, HintFieldArray, Operand, Symbol, SymbolType,
 };
 
 use crate::recursive_setup::plonk::{FixedColumn, PlonkLayout, PlonkLayoutKind};
+
+const GOLDILOCKS_MODULUS: u128 = 18_446_744_069_414_584_321;
+const GOLDILOCKS_K: u64 = 12_275_445_934_081_160_404;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecursiveAirLayout {
     pub air: Air,
     pub symbols: Vec<Symbol>,
+    pub hints: Vec<Hint>,
 }
 
 pub fn build_air_layout(
@@ -27,6 +31,13 @@ pub fn build_air_layout(
     })?;
     let connection_width = connection_intermediate_width(layout.shape.kind);
 
+    let (expressions, constraints, hints) = build_recursive_constraints(
+        layout.shape.kind,
+        airgroup_id,
+        air_id,
+        fixed_namespace(&layout.fixed_columns).as_deref(),
+    );
+
     let fixed_cols = layout.fixed_columns.iter().map(to_proto_fixed_col).collect();
     let air = Air {
         name: Some(air_name.to_string()),
@@ -34,8 +45,8 @@ pub fn build_air_layout(
         periodic_cols: Vec::new(),
         fixed_cols,
         stage_widths: vec![witness_width, connection_width],
-        expressions: Vec::new(),
-        constraints: Vec::new(),
+        expressions,
+        constraints,
         air_values: Vec::new(),
         aggregable: false,
         custom_commits: Vec::new(),
@@ -50,7 +61,7 @@ pub fn build_air_layout(
         n_publics,
     )?;
 
-    Ok(RecursiveAirLayout { air, symbols })
+    Ok(RecursiveAirLayout { air, symbols, hints })
 }
 
 pub fn connection_intermediate_width(kind: PlonkLayoutKind) -> u32 {
@@ -65,7 +76,26 @@ pub fn connection_im_low_width(kind: PlonkLayoutKind) -> u32 {
     }
 }
 
-fn build_non_poseidon_constraints(kind: PlonkLayoutKind) -> (Vec<Expression>, Vec<Constraint>) {
+fn build_recursive_constraints(
+    kind: PlonkLayoutKind,
+    airgroup_id: u32,
+    air_id: u32,
+    namespace: Option<&str>,
+) -> (Vec<Expression>, Vec<Constraint>, Vec<Hint>) {
+    let mut builder = RecursiveExpressionBuilder::new(kind);
+    builder.add_plonk_constraints();
+    builder.add_cmul_constraints();
+    builder.add_fft4_constraints();
+    builder.add_evpol4_constraints();
+    builder.add_tree_selector4_constraints();
+    builder.add_select_value1_constraints();
+    builder.add_poseidon_constraints();
+    let hints = builder.add_connection_constraints(airgroup_id, air_id, namespace);
+    let (expressions, constraints) = builder.finish();
+    (expressions, constraints, hints)
+}
+
+fn build_non_connection_constraints(kind: PlonkLayoutKind) -> (Vec<Expression>, Vec<Constraint>) {
     let mut builder = RecursiveExpressionBuilder::new(kind);
     builder.add_plonk_constraints();
     builder.add_cmul_constraints();
@@ -79,6 +109,11 @@ fn build_non_poseidon_constraints(kind: PlonkLayoutKind) -> (Vec<Expression>, Ve
 
 fn to_proto_fixed_col(column: &FixedColumn) -> FixedCol {
     FixedCol { values: column.values.iter().map(|value| value.to_le_bytes().to_vec()).collect() }
+}
+
+fn fixed_namespace(fixed_columns: &[FixedColumn]) -> Option<String> {
+    let first = fixed_columns.first()?;
+    first.name.rsplit_once('.').map(|(namespace, _)| namespace.to_string())
 }
 
 fn build_symbols(
@@ -269,6 +304,7 @@ fn challenge_symbol(name: &str, stage: u32, id: u32) -> Symbol {
 
 #[derive(Debug, Clone, Copy)]
 struct FixedIds {
+    connection_cols: u32,
     c_start: u32,
     poseidon_sponge: u32,
     poseidon_compression: u32,
@@ -280,18 +316,17 @@ struct FixedIds {
     tree_selector4: u32,
     select_value1: u32,
     plonk: u32,
+    id: u32,
+    l1: u32,
 }
 
 impl FixedIds {
     fn for_kind(kind: PlonkLayoutKind) -> Self {
-        let connection_cols = match kind {
-            PlonkLayoutKind::Aggregation => 27,
-            PlonkLayoutKind::Compressor => 36,
-            PlonkLayoutKind::FinalVadcop => 33,
-        };
+        let connection_cols = connection_columns(kind);
         let c_start = connection_cols;
         let flags_start = c_start + 10;
         Self {
+            connection_cols,
             c_start,
             poseidon_sponge: flags_start,
             poseidon_compression: flags_start + 1,
@@ -303,7 +338,24 @@ impl FixedIds {
             tree_selector4: flags_start + 7,
             select_value1: flags_start + 8,
             plonk: flags_start + 9,
+            id: flags_start + 10,
+            l1: flags_start + 11,
         }
+    }
+}
+
+fn connection_columns(kind: PlonkLayoutKind) -> u32 {
+    match kind {
+        PlonkLayoutKind::Aggregation => 27,
+        PlonkLayoutKind::Compressor => 36,
+        PlonkLayoutKind::FinalVadcop => 33,
+    }
+}
+
+fn connection_constraint_degree(kind: PlonkLayoutKind) -> usize {
+    match kind {
+        PlonkLayoutKind::Aggregation | PlonkLayoutKind::FinalVadcop => 8,
+        PlonkLayoutKind::Compressor => 5,
     }
 }
 
@@ -475,6 +527,163 @@ impl RecursiveExpressionBuilder {
                 self.add_poseidon_aggregation_rounds(first_col)
             }
         }
+    }
+
+    fn add_connection_constraints(
+        &mut self,
+        airgroup_id: u32,
+        air_id: u32,
+        namespace: Option<&str>,
+    ) -> Vec<Hint> {
+        let terms = self.connection_terms();
+        let groups = connection_groups(terms.len(), connection_constraint_degree(self.kind));
+
+        let mut hints = Vec::new();
+        self.add_connection_debug_hints(&mut hints, airgroup_id, air_id, namespace, &terms);
+
+        let mut offset_num = 0usize;
+        let mut offset_den = 0usize;
+        let mut previous_im = None::<Expr>;
+        let max_degree = connection_constraint_degree(self.kind);
+
+        for (im_idx, _) in groups.iter().enumerate() {
+            let mut rhs_terms = Vec::new();
+            let mut rhs_degree = 0usize;
+            if let Some(previous) = previous_im.clone() {
+                rhs_terms.push(previous);
+                rhs_degree = 1;
+            }
+            while offset_num < terms.len() {
+                let next_degree = usize::from(offset_num + 1 < terms.len());
+                if rhs_degree + next_degree > max_degree {
+                    break;
+                }
+                rhs_terms.push(terms[offset_num].proves.clone());
+                rhs_degree += 1;
+                offset_num += 1;
+            }
+            let rhs = self.product(rhs_terms);
+
+            let mut lhs_terms = Vec::new();
+            let mut lhs_degree = 0usize;
+            while offset_den < terms.len() {
+                let next_degree = usize::from(offset_den + 1 < terms.len());
+                if lhs_degree + next_degree >= max_degree {
+                    break;
+                }
+                lhs_terms.push(terms[offset_den].assumes.clone());
+                lhs_degree += 1;
+                offset_den += 1;
+            }
+            let lhs = self.product(lhs_terms);
+
+            let im = self.im_low(im_idx as u32);
+            let im_times_lhs = self.mul(im.clone(), lhs.clone());
+            let constraint = self.sub(im_times_lhs, rhs.clone());
+            self.assert_zero(constraint);
+            hints.push(im_col_hint(airgroup_id, air_id, im.clone(), rhs, lhs));
+            previous_im = Some(im);
+        }
+
+        let mut numerator_terms = Vec::new();
+        if let Some(previous) = previous_im {
+            numerator_terms.push(previous);
+        }
+        numerator_terms.extend(terms[offset_num..].iter().map(|term| term.proves.clone()));
+        let numerator = self.product(numerator_terms);
+        let denominator =
+            self.product(terms[offset_den..].iter().map(|term| term.assumes.clone()).collect());
+
+        let lhs = self.mul(self.gprod(), denominator.clone());
+        let one_minus_l1 = self.sub(self.one(), self.l1());
+        let previous_gprod = self.mul(self.gprod_offset(-1), one_minus_l1);
+        let previous_or_one = self.add(previous_gprod, self.l1());
+        let rhs = self.mul(previous_or_one, numerator.clone());
+        let recurrence = self.sub(lhs, rhs);
+        self.assert_zero(recurrence);
+
+        let boundary_body = self.sub(self.one(), self.gprod());
+        let boundary = self.mul(self.l1_offset(1), boundary_body);
+        self.assert_zero(boundary);
+
+        hints.push(gprod_col_hint(
+            airgroup_id,
+            air_id,
+            self.gprod(),
+            numerator,
+            denominator,
+            self.one(),
+            self.one(),
+            self.one(),
+        ));
+
+        hints
+    }
+
+    fn add_connection_debug_hints(
+        &self,
+        hints: &mut Vec<Hint>,
+        airgroup_id: u32,
+        air_id: u32,
+        namespace: Option<&str>,
+        terms: &[ConnectionTerm],
+    ) {
+        let namespace = namespace.unwrap_or("Recursive");
+        for (idx, term) in terms.iter().enumerate() {
+            let witness_name = format!("a[{idx}]");
+            let assumes_name = if idx == 0 {
+                format!("{namespace}.ID")
+            } else {
+                format!("{} * {namespace}.ID", connection_k(idx as u32))
+            };
+            hints.push(gprod_debug_hint(
+                airgroup_id,
+                air_id,
+                0,
+                &[witness_name.clone(), assumes_name],
+                &[term.value.clone(), term.assume_target.clone()],
+            ));
+
+            let proves_name = format!("{namespace}.S[{idx}]");
+            hints.push(gprod_debug_hint(
+                airgroup_id,
+                air_id,
+                1,
+                &[witness_name, proves_name],
+                &[term.value.clone(), term.prove_target.clone()],
+            ));
+        }
+    }
+
+    fn connection_terms(&mut self) -> Vec<ConnectionTerm> {
+        let mut terms = Vec::with_capacity(self.fixed.connection_cols as usize);
+        for idx in 0..self.fixed.connection_cols {
+            let value = self.a(idx);
+            let assume_target = self.connection_assume_target(idx);
+            let prove_target = self.fixed_selector(idx);
+            let assumes = self.connection_product_term(value.clone(), assume_target.clone());
+            let proves = self.connection_product_term(value.clone(), prove_target.clone());
+            terms.push(ConnectionTerm { value, assume_target, prove_target, assumes, proves });
+        }
+        terms
+    }
+
+    fn connection_assume_target(&mut self, idx: u32) -> Expr {
+        let id = self.fixed_selector(self.fixed.id);
+        if idx == 0 {
+            id
+        } else {
+            self.mul(self.number(connection_k(idx)), id)
+        }
+    }
+
+    fn connection_product_term(&mut self, value: Expr, target: Expr) -> Expr {
+        let alpha = self.challenge(2, 0);
+        let target_alpha = self.mul(target, alpha.clone());
+        let compressed = self.add(target_alpha, value);
+        let compressed = self.mul(compressed, alpha);
+        let compressed = self.add(compressed, self.one());
+        self.add(compressed, self.challenge(2, 1))
     }
 
     fn add_poseidon_aggregation_rounds(&mut self, first_col: u32) {
@@ -1018,6 +1227,14 @@ impl RecursiveExpressionBuilder {
         }
     }
 
+    fn l1(&self) -> Expr {
+        self.l1_offset(0)
+    }
+
+    fn l1_offset(&self, offset: i32) -> Expr {
+        self.fixed_selector_offset(self.fixed.l1, offset)
+    }
+
     fn c(&self, offset: u32) -> Expr {
         self.fixed_selector(self.fixed.c_start + offset)
     }
@@ -1038,8 +1255,44 @@ impl RecursiveExpressionBuilder {
         }
     }
 
+    fn gprod(&self) -> Expr {
+        self.gprod_offset(0)
+    }
+
+    fn gprod_offset(&self, offset: i32) -> Expr {
+        Expr {
+            operand: Operand {
+                operand: Some(operand::Operand::WitnessCol(operand::WitnessCol {
+                    stage: 2,
+                    col_idx: 0,
+                    row_offset: offset,
+                })),
+            },
+        }
+    }
+
+    fn im_low(&self, idx: u32) -> Expr {
+        Expr {
+            operand: Operand {
+                operand: Some(operand::Operand::WitnessCol(operand::WitnessCol {
+                    stage: 2,
+                    col_idx: 1 + idx,
+                    row_offset: 0,
+                })),
+            },
+        }
+    }
+
     fn array_a(&self, start: u32, offset: i32, len: u32) -> Vec<Expr> {
         (0..len).map(|idx| self.a_offset(start + idx, offset)).collect()
+    }
+
+    fn challenge(&self, stage: u32, idx: u32) -> Expr {
+        Expr {
+            operand: Operand {
+                operand: Some(operand::Operand::Challenge(operand::Challenge { stage, idx })),
+            },
+        }
     }
 
     fn pow7(&mut self, input: Expr) -> Expr {
@@ -1103,6 +1356,17 @@ impl RecursiveExpressionBuilder {
         acc
     }
 
+    fn product(&mut self, mut terms: Vec<Expr>) -> Expr {
+        if terms.is_empty() {
+            return self.one();
+        }
+        let mut acc = terms.remove(0);
+        for term in terms {
+            acc = self.mul(acc, term);
+        }
+        acc
+    }
+
     fn push(&mut self, operation: expression::Operation) -> Expr {
         let idx = self.expressions.len() as u32;
         self.expressions.push(Expression { operation: Some(operation) });
@@ -1134,6 +1398,220 @@ impl RecursiveExpressionBuilder {
 }
 
 #[derive(Debug, Clone)]
+struct ConnectionTerm {
+    value: Expr,
+    assume_target: Expr,
+    prove_target: Expr,
+    assumes: Expr,
+    proves: Expr,
+}
+
+fn connection_groups(term_count: usize, max_degree: usize) -> Vec<usize> {
+    let mut groups = Vec::new();
+    let mut offset_num = 0usize;
+    let mut offset_den = 0usize;
+    let mut acc_num = 0usize;
+    let mut acc_den = 0usize;
+
+    while offset_num < term_count || offset_den < term_count {
+        while offset_num < term_count {
+            acc_num += 1;
+            offset_num += 1;
+            let next_degree = usize::from(offset_num < term_count);
+            if acc_num + next_degree > max_degree {
+                break;
+            }
+        }
+        while offset_den < term_count {
+            acc_den += 1;
+            offset_den += 1;
+            let next_degree = usize::from(offset_den < term_count);
+            if acc_den + next_degree > max_degree {
+                break;
+            }
+        }
+
+        if !groups.is_empty()
+            && offset_num == term_count
+            && offset_den == term_count
+            && acc_num < max_degree
+            && acc_den < max_degree
+        {
+            break;
+        }
+
+        if acc_num == max_degree && acc_den == max_degree {
+            offset_den -= 1;
+            groups.push(0);
+            acc_num = 1;
+            acc_den = 0;
+        } else if acc_num == max_degree {
+            groups.push(0);
+            acc_num = 1;
+            acc_den = 0;
+        } else if acc_den == max_degree {
+            groups.push(1);
+            acc_num = 0;
+            acc_den = 1;
+        } else {
+            groups.push(0);
+            acc_num = 1;
+            acc_den = 0;
+        }
+    }
+
+    groups
+}
+
+fn connection_k(idx: u32) -> u64 {
+    let mut value = 1u64;
+    for _ in 0..idx {
+        value = goldilocks_mul(value, GOLDILOCKS_K);
+    }
+    value
+}
+
+fn goldilocks_mul(lhs: u64, rhs: u64) -> u64 {
+    ((lhs as u128 * rhs as u128) % GOLDILOCKS_MODULUS) as u64
+}
+
+fn im_col_hint(
+    airgroup_id: u32,
+    air_id: u32,
+    reference: Expr,
+    numerator: Expr,
+    denominator: Expr,
+) -> Hint {
+    hint(
+        "im_col",
+        airgroup_id,
+        air_id,
+        vec![
+            operand_field("reference", reference),
+            operand_field("numerator", numerator),
+            operand_field("denominator", denominator),
+        ],
+    )
+}
+
+fn gprod_col_hint(
+    airgroup_id: u32,
+    air_id: u32,
+    reference: Expr,
+    numerator_air: Expr,
+    denominator_air: Expr,
+    numerator_direct: Expr,
+    denominator_direct: Expr,
+    result: Expr,
+) -> Hint {
+    hint(
+        "gprod_col",
+        airgroup_id,
+        air_id,
+        vec![
+            operand_field("reference", reference),
+            operand_field("numerator_air", numerator_air),
+            operand_field("denominator_air", denominator_air),
+            operand_field("numerator_direct", numerator_direct),
+            operand_field("denominator_direct", denominator_direct),
+            operand_field("result", result),
+        ],
+    )
+}
+
+fn gprod_debug_hint(
+    airgroup_id: u32,
+    air_id: u32,
+    type_piop: u64,
+    name_exprs: &[String],
+    expressions: &[Expr],
+) -> Hint {
+    hint(
+        "gprod_debug_data",
+        airgroup_id,
+        air_id,
+        vec![
+            string_field("name_piop", "Connection"),
+            number_field("type_piop", type_piop),
+            array_field("opids", vec![unnamed_number_field(1)]),
+            number_field("busid", 1),
+            number_field("num_reps", 1),
+            array_field(
+                "name_exprs",
+                name_exprs.iter().map(|name| unnamed_string_field(name)).collect(),
+            ),
+            array_field(
+                "expressions",
+                expressions.iter().cloned().map(unnamed_operand_field).collect(),
+            ),
+            number_field("len_expressions", expressions.len() as u64),
+            number_field("deg_expr", 1),
+            number_field("deg_sel", 0),
+        ],
+    )
+}
+
+fn hint(name: &str, airgroup_id: u32, air_id: u32, fields: Vec<HintField>) -> Hint {
+    Hint {
+        name: name.to_string(),
+        hint_fields: vec![HintField {
+            name: None,
+            value: Some(hint_field::Value::HintFieldArray(HintFieldArray { hint_fields: fields })),
+        }],
+        air_group_id: Some(airgroup_id),
+        air_id: Some(air_id),
+    }
+}
+
+fn string_field(name: &str, value: &str) -> HintField {
+    HintField {
+        name: Some(name.to_string()),
+        value: Some(hint_field::Value::StringValue(value.to_string())),
+    }
+}
+
+fn unnamed_string_field(value: &str) -> HintField {
+    HintField { name: None, value: Some(hint_field::Value::StringValue(value.to_string())) }
+}
+
+fn number_field(name: &str, value: u64) -> HintField {
+    HintField {
+        name: Some(name.to_string()),
+        value: Some(hint_field::Value::Operand(number_operand(value))),
+    }
+}
+
+fn unnamed_number_field(value: u64) -> HintField {
+    HintField { name: None, value: Some(hint_field::Value::Operand(number_operand(value))) }
+}
+
+fn operand_field(name: &str, value: Expr) -> HintField {
+    HintField {
+        name: Some(name.to_string()),
+        value: Some(hint_field::Value::Operand(value.operand)),
+    }
+}
+
+fn unnamed_operand_field(value: Expr) -> HintField {
+    HintField { name: None, value: Some(hint_field::Value::Operand(value.operand)) }
+}
+
+fn array_field(name: &str, values: Vec<HintField>) -> HintField {
+    HintField {
+        name: Some(name.to_string()),
+        value: Some(hint_field::Value::HintFieldArray(HintFieldArray { hint_fields: values })),
+    }
+}
+
+fn number_operand(value: u64) -> Operand {
+    Operand {
+        operand: Some(operand::Operand::Constant(operand::Constant {
+            value: value.to_le_bytes().to_vec(),
+        })),
+    }
+}
+
+#[derive(Debug, Clone)]
 struct PlonkSlot {
     start: u32,
     c_offset: u32,
@@ -1151,8 +1629,10 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
+    use crate::pil_info::stark::{build_air_stark_draft, AirInput};
     use crate::recursive_setup::plonk::{build_layout, PlonkLayoutKind};
     use crate::recursive_setup::r1cs::{R1cs, R1csConstraint, GOLDILOCKS_P};
+    use crate::stark_struct::{generate_stark_struct, StarkSettings};
 
     #[test]
     fn builds_aggregation_air_column_schema() -> Result<()> {
@@ -1163,6 +1643,10 @@ mod tests {
         assert_eq!(air.air.name.as_deref(), Some("recursive2"));
         assert_eq!(air.air.fixed_cols.len(), 49);
         assert_eq!(air.air.stage_widths, vec![59, 4]);
+        assert_eq!(air.air.constraints.len(), 158);
+        assert_eq!(air.hints.iter().filter(|hint| hint.name == "im_col").count(), 3);
+        assert_eq!(air.hints.iter().filter(|hint| hint.name == "gprod_col").count(), 1);
+        assert_eq!(air.hints.iter().filter(|hint| hint.name == "gprod_debug_data").count(), 54);
         assert!(air.symbols.iter().any(|symbol| {
             symbol.name == "Recursive2.S"
                 && symbol.r#type == SymbolType::FixedCol as i32
@@ -1202,14 +1686,46 @@ mod tests {
     }
 
     #[test]
-    fn builds_non_poseidon_constraint_groups() {
-        let (_, aggregation) = build_non_poseidon_constraints(PlonkLayoutKind::Aggregation);
-        let (_, compressor) = build_non_poseidon_constraints(PlonkLayoutKind::Compressor);
-        let (_, final_vadcop) = build_non_poseidon_constraints(PlonkLayoutKind::FinalVadcop);
+    fn builds_non_connection_constraint_groups() {
+        let (_, aggregation) = build_non_connection_constraints(PlonkLayoutKind::Aggregation);
+        let (_, compressor) = build_non_connection_constraints(PlonkLayoutKind::Compressor);
+        let (_, final_vadcop) = build_non_connection_constraints(PlonkLayoutKind::FinalVadcop);
 
         assert_eq!(aggregation.len(), 153);
         assert_eq!(compressor.len(), 143);
         assert_eq!(final_vadcop.len(), 155);
+    }
+
+    #[test]
+    fn records_connection_grouping_like_legacy_std_prod() {
+        assert_eq!(connection_groups(27, 8).len(), 3);
+        assert_eq!(connection_groups(33, 8).len(), 4);
+        assert_eq!(connection_groups(36, 5).len(), 8);
+    }
+
+    #[test]
+    fn formats_connection_hints_for_stark_codegen() -> Result<()> {
+        let layout =
+            build_layout(&one_constraint_r1cs(), PlonkLayoutKind::Aggregation, "Recursive2")?;
+        let recursive = build_air_layout(&layout, 0, 0, "recursive2", 473)?;
+        let settings = StarkSettings { blowup_factor: Some(3), ..Default::default() };
+        let stark_struct = generate_stark_struct(&settings, layout.shape.n_bits as u64)?;
+        let draft = build_air_stark_draft(AirInput {
+            airgroup_id: 0,
+            air_id: 0,
+            airgroup_values: &[],
+            all_symbols: &recursive.symbols,
+            all_hints: &recursive.hints,
+            num_challenges: &[0, 2],
+            air: &recursive.air,
+            stark_struct,
+        })?;
+
+        assert_eq!(draft.hints.iter().filter(|hint| hint.name == "im_col").count(), 3);
+        assert_eq!(draft.hints.iter().filter(|hint| hint.name == "gprod_col").count(), 1);
+        assert!(draft.stark_info.opening_points.contains(&-1));
+        assert!(draft.stark_info.opening_points.contains(&1));
+        Ok(())
     }
 
     fn one_constraint_r1cs() -> R1cs {
