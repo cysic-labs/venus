@@ -51,6 +51,35 @@ pub struct CustomGatesInfo {
     pub n_plonk_rows: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlonkLayoutKind {
+    Aggregation,
+    Compressor,
+    FinalVadcop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlonkLayoutShape {
+    pub kind: PlonkLayoutKind,
+    pub committed_pols: usize,
+    pub n_bits: u32,
+    pub n_rows: usize,
+    pub n_used_rows: usize,
+    pub n_publics: u32,
+    pub n_plonk_constraints: usize,
+    pub n_plonk_rows: usize,
+    pub n_plonk_constraints_in_rows: usize,
+    pub n_plonk_constraints_in_custom_rows: usize,
+    pub n_additions: usize,
+    pub n_cmul_rows: usize,
+    pub n_poseidon12_rows: usize,
+    pub n_cust_poseidon12_rows: usize,
+    pub n_fft4_rows: usize,
+    pub n_ev_pol4_rows: usize,
+    pub n_tree_selector4_rows: usize,
+    pub n_select_val1_rows: usize,
+}
+
 pub fn r1cs_to_plonk(r1cs: &R1cs) -> Result<PlonkProgram> {
     let mut converter =
         Converter { constraints: Vec::new(), additions: Vec::new(), next_var: r1cs.n_vars };
@@ -64,6 +93,63 @@ pub fn r1cs_to_plonk(r1cs: &R1cs) -> Result<PlonkProgram> {
         additions: converter.additions,
         n_vars: converter.next_var,
         custom_gates_info: get_custom_gates_info(r1cs)?,
+    })
+}
+
+pub fn calculate_layout_shape(r1cs: &R1cs, kind: PlonkLayoutKind) -> Result<PlonkLayoutShape> {
+    let program = r1cs_to_plonk(r1cs)?;
+    calculate_layout_shape_from_program(r1cs, &program, kind)
+}
+
+pub fn calculate_layout_shape_from_program(
+    r1cs: &R1cs,
+    program: &PlonkProgram,
+    kind: PlonkLayoutKind,
+) -> Result<PlonkLayoutShape> {
+    let policy = LayoutPolicy::for_kind(kind);
+    let counts = &program.custom_gates_info;
+    let n_cmul_rows = ceil_div(counts.n_cmul, policy.cmul_per_row);
+    let n_poseidon12_rows = counts.n_poseidon12 * policy.poseidon_rows_per_gate;
+    let n_cust_poseidon12_rows = counts.n_cust_poseidon12 * policy.poseidon_rows_per_gate;
+    let n_fft4_rows = counts.n_fft4;
+    let n_ev_pol4_rows = counts.n_ev_pol4;
+    let n_tree_selector4_rows = counts.n_tree_selector4;
+    let n_select_val1_rows = counts.n_select_val1;
+
+    let plonk_row_info =
+        calculate_plonk_constraint_rows(&program.constraints, policy, &program.custom_gates_info);
+    let n_used_rows = plonk_row_info.n_rows
+        + n_cmul_rows
+        + n_poseidon12_rows
+        + n_cust_poseidon12_rows
+        + n_fft4_rows
+        + n_ev_pol4_rows
+        + n_tree_selector4_rows
+        + n_select_val1_rows;
+    let n_bits = checked_domain_bits(n_used_rows)?;
+    let n_rows = 1usize
+        .checked_shl(n_bits)
+        .ok_or_else(|| anyhow::anyhow!("recursive PLONK domain is too large"))?;
+
+    Ok(PlonkLayoutShape {
+        kind,
+        committed_pols: policy.committed_pols,
+        n_bits,
+        n_rows,
+        n_used_rows,
+        n_publics: r1cs.n_outputs + r1cs.n_pub_inputs,
+        n_plonk_constraints: program.constraints.len(),
+        n_plonk_rows: plonk_row_info.n_rows,
+        n_plonk_constraints_in_rows: plonk_row_info.constraints_in_rows,
+        n_plonk_constraints_in_custom_rows: plonk_row_info.constraints_in_custom_rows,
+        n_additions: program.additions.len(),
+        n_cmul_rows,
+        n_poseidon12_rows,
+        n_cust_poseidon12_rows,
+        n_fft4_rows,
+        n_ev_pol4_rows,
+        n_tree_selector4_rows,
+        n_select_val1_rows,
     })
 }
 
@@ -101,6 +187,202 @@ struct Converter {
     constraints: Vec<PlonkConstraint>,
     additions: Vec<PlonkAddition>,
     next_var: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LayoutPolicy {
+    committed_pols: usize,
+    cmul_per_row: usize,
+    poseidon_rows_per_gate: usize,
+    normal_first_row_max: usize,
+    normal_remainder_start: usize,
+    custom_rules: [ExtraRule; 4],
+}
+
+impl LayoutPolicy {
+    fn for_kind(kind: PlonkLayoutKind) -> Self {
+        match kind {
+            PlonkLayoutKind::Aggregation => Self {
+                committed_pols: 59,
+                cmul_per_row: 3,
+                poseidon_rows_per_gate: 5,
+                normal_first_row_max: 2,
+                normal_remainder_start: 2,
+                custom_rules: [
+                    ExtraRule::Split { initial_max: 2, remainder_start: 2, remainder_max: 9 },
+                    ExtraRule::Partial { used_after_current: 7, max_used: 9 },
+                    ExtraRule::Partial { used_after_current: 8, max_used: 9 },
+                    ExtraRule::Single,
+                ],
+            },
+            PlonkLayoutKind::Compressor => Self {
+                committed_pols: 52,
+                cmul_per_row: 4,
+                poseidon_rows_per_gate: 10,
+                normal_first_row_max: 6,
+                normal_remainder_start: 6,
+                custom_rules: [
+                    ExtraRule::Split { initial_max: 6, remainder_start: 6, remainder_max: 12 },
+                    ExtraRule::Partial { used_after_current: 7, max_used: 12 },
+                    ExtraRule::Partial { used_after_current: 8, max_used: 12 },
+                    ExtraRule::Partial { used_after_current: 9, max_used: 12 },
+                ],
+            },
+            PlonkLayoutKind::FinalVadcop => Self {
+                committed_pols: 65,
+                cmul_per_row: 3,
+                poseidon_rows_per_gate: 5,
+                normal_first_row_max: 2,
+                normal_remainder_start: 2,
+                custom_rules: [
+                    ExtraRule::Split { initial_max: 2, remainder_start: 2, remainder_max: 11 },
+                    ExtraRule::Partial { used_after_current: 7, max_used: 11 },
+                    ExtraRule::Partial { used_after_current: 8, max_used: 11 },
+                    ExtraRule::Partial { used_after_current: 9, max_used: 11 },
+                ],
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExtraRule {
+    Split { initial_max: usize, remainder_start: usize, remainder_max: usize },
+    Partial { used_after_current: usize, max_used: usize },
+    Single,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PartialRow {
+    n_used: usize,
+    custom: bool,
+    max_used: usize,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PlonkRowInfo {
+    n_rows: usize,
+    constraints_in_rows: usize,
+    constraints_in_custom_rows: usize,
+}
+
+fn calculate_plonk_constraint_rows(
+    constraints: &[PlonkConstraint],
+    policy: LayoutPolicy,
+    custom_gates_info: &CustomGatesInfo,
+) -> PlonkRowInfo {
+    let n_poseidon = custom_gates_info.n_poseidon12 + custom_gates_info.n_cust_poseidon12;
+    let mut extra_counts = match policy.committed_pols {
+        59 => [
+            n_poseidon * 3,
+            n_poseidon + custom_gates_info.n_tree_selector4,
+            custom_gates_info.n_ev_pol4,
+            n_poseidon + custom_gates_info.n_select_val1,
+        ],
+        52 => [
+            n_poseidon * 8,
+            n_poseidon + custom_gates_info.n_tree_selector4,
+            custom_gates_info.n_ev_pol4,
+            n_poseidon + custom_gates_info.n_select_val1,
+        ],
+        65 => [
+            n_poseidon * 3,
+            n_poseidon + custom_gates_info.n_tree_selector4,
+            custom_gates_info.n_ev_pol4,
+            n_poseidon + custom_gates_info.n_select_val1,
+        ],
+        _ => unreachable!("unknown recursive PLONK layout"),
+    };
+
+    let mut partial_rows: HashMap<[u64; 5], PartialRow> = HashMap::new();
+    let mut remainder_rows: Vec<PartialRow> = Vec::new();
+    let mut info = PlonkRowInfo::default();
+
+    for constraint in constraints {
+        let key = [constraint.qm, constraint.ql, constraint.qr, constraint.qo, constraint.qc];
+        if let Some(row) = partial_rows.get_mut(&key) {
+            count_constraint(&mut info, row.custom);
+            row.n_used += 1;
+            if row.n_used == row.max_used {
+                partial_rows.remove(&key);
+            }
+        } else if !remainder_rows.is_empty() {
+            let mut row = remainder_rows.remove(0);
+            row.n_used += 1;
+            count_constraint(&mut info, row.custom);
+            partial_rows.insert(key, row);
+        } else if let Some((idx, _)) =
+            extra_counts.iter().enumerate().find(|(_, count)| **count > 0)
+        {
+            extra_counts[idx] -= 1;
+            count_constraint(&mut info, true);
+            match policy.custom_rules[idx] {
+                ExtraRule::Split { initial_max, remainder_start, remainder_max } => {
+                    partial_rows
+                        .insert(key, PartialRow { n_used: 1, custom: true, max_used: initial_max });
+                    remainder_rows.push(PartialRow {
+                        n_used: remainder_start,
+                        custom: true,
+                        max_used: remainder_max,
+                    });
+                }
+                ExtraRule::Partial { used_after_current, max_used } => {
+                    partial_rows.insert(
+                        key,
+                        PartialRow { n_used: used_after_current, custom: true, max_used },
+                    );
+                }
+                ExtraRule::Single => {}
+            }
+        } else {
+            count_constraint(&mut info, false);
+            info.n_rows += 1;
+            partial_rows.insert(
+                key,
+                PartialRow { n_used: 1, custom: false, max_used: policy.normal_first_row_max },
+            );
+            remainder_rows.push(PartialRow {
+                n_used: policy.normal_remainder_start,
+                custom: false,
+                max_used: policy.custom_rules[0].max_remainder(),
+            });
+        }
+    }
+
+    info
+}
+
+impl ExtraRule {
+    fn max_remainder(self) -> usize {
+        match self {
+            ExtraRule::Split { remainder_max, .. } => remainder_max,
+            ExtraRule::Partial { max_used, .. } => max_used,
+            ExtraRule::Single => 1,
+        }
+    }
+}
+
+fn count_constraint(info: &mut PlonkRowInfo, custom: bool) {
+    if custom {
+        info.constraints_in_custom_rows += 1;
+    } else {
+        info.constraints_in_rows += 1;
+    }
+}
+
+fn checked_domain_bits(n_used_rows: usize) -> Result<u32> {
+    if n_used_rows == 0 {
+        bail!("recursive PLONK layout has no rows");
+    }
+    Ok(usize::BITS - (n_used_rows - 1).leading_zeros())
+}
+
+fn ceil_div(value: usize, divisor: usize) -> usize {
+    if value == 0 {
+        0
+    } else {
+        1 + (value - 1) / divisor
+    }
 }
 
 impl Converter {
@@ -431,6 +713,78 @@ mod tests {
             .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(words, vec![1, 2, 1, 2, 3, 4, 10, 20, 30, 11, 21, 31]);
+        Ok(())
+    }
+
+    #[test]
+    fn packs_plain_constraints_into_rows_like_js_layouts() {
+        let constraint = PlonkConstraint { sl: 1, sr: 2, so: 3, qm: 4, ql: 5, qr: 6, qo: 7, qc: 8 };
+        let custom_gates_info = CustomGatesInfo::default();
+
+        let aggregation_rows = calculate_plonk_constraint_rows(
+            &vec![constraint.clone(); 10],
+            LayoutPolicy::for_kind(PlonkLayoutKind::Aggregation),
+            &custom_gates_info,
+        );
+        assert_eq!(aggregation_rows.n_rows, 2);
+        assert_eq!(aggregation_rows.constraints_in_rows, 10);
+        assert_eq!(aggregation_rows.constraints_in_custom_rows, 0);
+
+        let compressor_rows = calculate_plonk_constraint_rows(
+            &vec![constraint.clone(); 13],
+            LayoutPolicy::for_kind(PlonkLayoutKind::Compressor),
+            &custom_gates_info,
+        );
+        assert_eq!(compressor_rows.n_rows, 2);
+        assert_eq!(compressor_rows.constraints_in_rows, 13);
+
+        let final_rows = calculate_plonk_constraint_rows(
+            &vec![constraint; 12],
+            LayoutPolicy::for_kind(PlonkLayoutKind::FinalVadcop),
+            &custom_gates_info,
+        );
+        assert_eq!(final_rows.n_rows, 2);
+        assert_eq!(final_rows.constraints_in_rows, 12);
+    }
+
+    #[test]
+    fn reports_layout_shape_for_custom_gate_rows() -> Result<()> {
+        let r1cs = R1cs {
+            n8: 8,
+            prime: GOLDILOCKS_P,
+            n_vars: 1,
+            n_outputs: 2,
+            n_pub_inputs: 3,
+            n_prv_inputs: 0,
+            n_labels: 0,
+            n_constraints: 0,
+            constraints: Vec::new(),
+            wire_map: Vec::new(),
+            custom_gates: Vec::new(),
+            custom_gate_uses: Vec::new(),
+        };
+        let program = PlonkProgram {
+            constraints: Vec::new(),
+            additions: Vec::new(),
+            n_vars: 1,
+            custom_gates_info: CustomGatesInfo {
+                n_cmul: 4,
+                n_poseidon12: 1,
+                n_ev_pol4: 1,
+                ..Default::default()
+            },
+        };
+
+        let shape =
+            calculate_layout_shape_from_program(&r1cs, &program, PlonkLayoutKind::Aggregation)?;
+        assert_eq!(shape.committed_pols, 59);
+        assert_eq!(shape.n_publics, 5);
+        assert_eq!(shape.n_cmul_rows, 2);
+        assert_eq!(shape.n_poseidon12_rows, 5);
+        assert_eq!(shape.n_ev_pol4_rows, 1);
+        assert_eq!(shape.n_used_rows, 8);
+        assert_eq!(shape.n_bits, 3);
+        assert_eq!(shape.n_rows, 8);
         Ok(())
     }
 
