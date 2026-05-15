@@ -19,6 +19,7 @@ pub struct NativeRecursiveRuntime {
     pub source_public_prefix_words: u64,
     pub source_sections: Vec<NativeRuntimeSection>,
     pub section_copy_ops: Vec<NativeRuntimeSectionCopyOp>,
+    pub constraints: Vec<NativeRuntimeConstraint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,19 @@ pub struct NativeRuntimeSectionCopyOp {
     pub section_offset_words: u64,
     pub word_len: u64,
     pub witness_offset_words: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRuntimeConstraint {
+    pub a: Vec<NativeRuntimeLcTerm>,
+    pub b: Vec<NativeRuntimeLcTerm>,
+    pub c: Vec<NativeRuntimeLcTerm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRuntimeLcTerm {
+    pub signal: u64,
+    pub coeff: u64,
 }
 
 impl NativeRecursiveRuntime {
@@ -125,7 +139,7 @@ impl NativeRecursiveRuntime {
         };
 
         let copy_ops_count_offset = sections_end;
-        let section_copy_ops = if bytes.len() >= copy_ops_count_offset + 8 {
+        let (section_copy_ops, copy_ops_end) = if bytes.len() >= copy_ops_count_offset + 8 {
             let copy_ops_count = read_u64(&bytes, copy_ops_count_offset)? as usize;
             let copy_ops_start = copy_ops_count_offset + 8;
             let copy_ops_end = checked_table_end(path, copy_ops_start, copy_ops_count, 32, "section copy op")?;
@@ -145,10 +159,12 @@ impl NativeRecursiveRuntime {
                     witness_offset_words: read_u64(&bytes, offset + 24)?,
                 });
             }
-            copy_ops
+            (copy_ops, copy_ops_end)
         } else {
-            Vec::new()
+            (Vec::new(), copy_ops_count_offset)
         };
+        let constraints =
+            if bytes.len() >= copy_ops_end + 8 { parse_constraints(path, &bytes, copy_ops_end)? } else { Vec::new() };
 
         Ok(Self {
             template_id,
@@ -161,6 +177,7 @@ impl NativeRecursiveRuntime {
             source_public_prefix_words,
             source_sections,
             section_copy_ops,
+            constraints,
         })
     }
 
@@ -177,8 +194,10 @@ impl NativeRecursiveRuntime {
         }
 
         let mut witness = vec![F::ZERO; total_witness_words as usize];
+        let mut known = vec![false; total_witness_words as usize];
         if !witness.is_empty() {
             witness[0] = F::ONE;
+            known[0] = true;
         }
 
         for assertion in &self.source_assertions {
@@ -202,6 +221,7 @@ impl NativeRecursiveRuntime {
             .min(source_words.len() as u64);
         for offset in 0..prefix_words {
             witness[(1 + offset) as usize] = F::from_u64(source_words[offset as usize]);
+            known[(1 + offset) as usize] = true;
         }
 
         if self.copy_indices.is_empty() {
@@ -212,6 +232,7 @@ impl NativeRecursiveRuntime {
             for offset in 0..copy_words {
                 let dst = self.public_input_offset_words + offset;
                 witness[dst as usize] = F::from_u64(source_words[offset as usize]);
+                known[dst as usize] = true;
             }
         } else {
             for (offset, source_index) in self.copy_indices.iter().enumerate() {
@@ -224,6 +245,7 @@ impl NativeRecursiveRuntime {
                 }
                 if let Some(value) = source_words.get(*source_index as usize) {
                     witness[dst as usize] = F::from_u64(*value);
+                    known[dst as usize] = true;
                 }
             }
         }
@@ -258,10 +280,131 @@ impl NativeRecursiveRuntime {
             for offset in 0..copy_op.word_len {
                 witness[(copy_op.witness_offset_words + offset) as usize] =
                     F::from_u64(source_words[(source_start + offset) as usize]);
+                known[(copy_op.witness_offset_words + offset) as usize] = true;
             }
         }
 
+        self.solve_constraints(&mut witness, &mut known)?;
+
         Ok(witness)
+    }
+
+    fn solve_constraints<F: PrimeField64>(&self, witness: &mut [F], known: &mut [bool]) -> ProofmanResult<()> {
+        if self.constraints.is_empty() {
+            return Ok(());
+        }
+
+        let mut solved_any = true;
+        while solved_any {
+            solved_any = false;
+            for constraint in &self.constraints {
+                if self.try_solve_constraint(constraint, witness, known)? {
+                    solved_any = true;
+                }
+            }
+        }
+
+        for constraint in &self.constraints {
+            let a = eval_lc(&constraint.a, witness, known)?;
+            let b = eval_lc(&constraint.b, witness, known)?;
+            let c = eval_lc(&constraint.c, witness, known)?;
+            if a.unknown.is_empty() && b.unknown.is_empty() && c.unknown.is_empty() && a.value * b.value != c.value {
+                return Err(ProofmanError::InvalidProof(
+                    "native recursive R1CS witness does not satisfy all constraints".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn try_solve_constraint<F: PrimeField64>(
+        &self,
+        constraint: &NativeRuntimeConstraint,
+        witness: &mut [F],
+        known: &mut [bool],
+    ) -> ProofmanResult<bool> {
+        let a = eval_lc(&constraint.a, witness, known)?;
+        let b = eval_lc(&constraint.b, witness, known)?;
+        let c = eval_lc(&constraint.c, witness, known)?;
+
+        if a.unknown.len() == 1 && b.unknown.is_empty() && c.unknown.is_empty() && !b.value.is_zero() {
+            let desired = c.value / b.value;
+            return solve_single_unknown(&a, desired, witness, known);
+        }
+        if b.unknown.len() == 1 && a.unknown.is_empty() && c.unknown.is_empty() && !a.value.is_zero() {
+            let desired = c.value / a.value;
+            return solve_single_unknown(&b, desired, witness, known);
+        }
+        if c.unknown.len() == 1 && a.unknown.is_empty() && b.unknown.is_empty() {
+            let desired = a.value * b.value;
+            return solve_single_unknown(&c, desired, witness, known);
+        }
+
+        if a.unknown.is_empty() && b.unknown.is_empty() && c.unknown.is_empty() && a.value * b.value != c.value {
+            return Err(ProofmanError::InvalidProof(
+                "native recursive R1CS constraint failed during witness solving".to_string(),
+            ));
+        }
+
+        Ok(false)
+    }
+}
+
+#[derive(Debug)]
+struct LcEval<F: PrimeField64> {
+    value: F,
+    unknown: Vec<(usize, F)>,
+}
+
+fn eval_lc<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known: &[bool]) -> ProofmanResult<LcEval<F>> {
+    let mut value = F::ZERO;
+    let mut unknown = Vec::new();
+    for term in terms {
+        let signal = usize::try_from(term.signal).map_err(|_| {
+            ProofmanError::InvalidSetup(format!("native recursive R1CS signal {} is too large", term.signal))
+        })?;
+        if signal >= witness.len() {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive R1CS signal {signal} is outside witness size {}",
+                witness.len()
+            )));
+        }
+        let coeff = F::from_u64(term.coeff);
+        if known[signal] {
+            value += witness[signal] * coeff;
+        } else {
+            unknown.push((signal, coeff));
+        }
+    }
+    Ok(LcEval { value, unknown })
+}
+
+fn solve_single_unknown<F: PrimeField64>(
+    lc: &LcEval<F>,
+    desired: F,
+    witness: &mut [F],
+    known: &mut [bool],
+) -> ProofmanResult<bool> {
+    if lc.unknown.len() != 1 {
+        return Ok(false);
+    }
+    let (signal, coeff) = lc.unknown[0];
+    if coeff.is_zero() {
+        return Ok(false);
+    }
+    let value = (desired - lc.value) / coeff;
+    if known[signal] {
+        if witness[signal] != value {
+            return Err(ProofmanError::InvalidProof(format!(
+                "native recursive R1CS solved conflicting value for signal {signal}"
+            )));
+        }
+        Ok(false)
+    } else {
+        witness[signal] = value;
+        known[signal] = true;
+        Ok(true)
     }
 }
 
@@ -275,6 +418,43 @@ fn checked_table_end(path: &Path, start: usize, count: usize, row_len: usize, la
         .ok_or_else(|| {
             ProofmanError::InvalidSetup(format!("{} has an overflowing native runtime {label} table", path.display()))
         })
+}
+
+fn parse_constraints(
+    path: &Path,
+    bytes: &[u8],
+    constraints_offset: usize,
+) -> ProofmanResult<Vec<NativeRuntimeConstraint>> {
+    let count = read_u64(bytes, constraints_offset)? as usize;
+    let mut offset = constraints_offset + 8;
+    let mut constraints = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (a, next) = parse_lc(path, bytes, offset)?;
+        let (b, next) = parse_lc(path, bytes, next)?;
+        let (c, next) = parse_lc(path, bytes, next)?;
+        offset = next;
+        constraints.push(NativeRuntimeConstraint { a, b, c });
+    }
+    Ok(constraints)
+}
+
+fn parse_lc(path: &Path, bytes: &[u8], offset: usize) -> ProofmanResult<(Vec<NativeRuntimeLcTerm>, usize)> {
+    let count = read_u64(bytes, offset)? as usize;
+    let terms_start = offset + 8;
+    let terms_end = checked_table_end(path, terms_start, count, 16, "R1CS linear-combination")?;
+    if terms_end > bytes.len() {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "{} has a truncated native runtime R1CS linear-combination table",
+            path.display()
+        )));
+    }
+
+    let mut terms = Vec::with_capacity(count);
+    for index in 0..count {
+        let offset = terms_start + index * 16;
+        terms.push(NativeRuntimeLcTerm { signal: read_u64(bytes, offset)?, coeff: read_u64(bytes, offset + 8)? });
+    }
+    Ok((terms, terms_end))
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> ProofmanResult<u64> {
@@ -322,6 +502,16 @@ mod tests {
         bytes.extend_from_slice(&1u64.to_le_bytes());
         bytes.extend_from_slice(&2u64.to_le_bytes());
         bytes.extend_from_slice(&6u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&6u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&8u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
         std::fs::write(&path, bytes)?;
 
         let runtime = NativeRecursiveRuntime::from_dat_file(&path)?;
@@ -331,6 +521,7 @@ mod tests {
         assert_eq!(runtime.source_public_prefix_words, 6);
         assert_eq!(runtime.source_sections.len(), 1);
         assert_eq!(runtime.section_copy_ops.len(), 1);
+        assert_eq!(runtime.constraints.len(), 1);
 
         let witness = runtime.generate_witness::<Goldilocks>(&[10, 20, 30, 40, 50], 10)?;
         assert_eq!(witness[0].as_canonical_u64(), 1);
@@ -339,6 +530,7 @@ mod tests {
         assert_eq!(witness[3].as_canonical_u64(), 30);
         assert_eq!(witness[6].as_canonical_u64(), 30);
         assert_eq!(witness[7].as_canonical_u64(), 40);
+        assert_eq!(witness[8].as_canonical_u64(), 1200);
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())

@@ -65,8 +65,14 @@ impl RuntimeDescriptor {
 }
 
 pub fn write_runtime_dat_file(path: &Path, r1cs: &R1cs) -> Result<()> {
-    fs::write(path, runtime_dat_buffer(&RuntimeDescriptor::for_r1cs(r1cs))?)
+    fs::write(path, runtime_dat_buffer_for_r1cs(r1cs)?)
         .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))
+}
+
+pub fn runtime_dat_buffer_for_r1cs(r1cs: &R1cs) -> Result<Vec<u8>> {
+    let mut out = runtime_dat_buffer(&RuntimeDescriptor::for_r1cs(r1cs))?;
+    append_constraints(&mut out, r1cs);
+    Ok(out)
 }
 
 pub fn runtime_dat_buffer(descriptor: &RuntimeDescriptor) -> Result<Vec<u8>> {
@@ -104,6 +110,26 @@ pub fn runtime_dat_buffer(descriptor: &RuntimeDescriptor) -> Result<Vec<u8>> {
         push_u64(&mut out, copy_op.witness_offset_words);
     }
     Ok(out)
+}
+
+fn append_constraints(out: &mut Vec<u8>, r1cs: &R1cs) {
+    push_u64(out, r1cs.constraints.len() as u64);
+    for constraint in &r1cs.constraints {
+        append_linear_combination(out, &constraint.a);
+        append_linear_combination(out, &constraint.b);
+        append_linear_combination(out, &constraint.c);
+    }
+}
+
+fn append_linear_combination(
+    out: &mut Vec<u8>,
+    lc: &crate::recursive_setup::r1cs::LinearCombination,
+) {
+    push_u64(out, lc.len() as u64);
+    for (&signal, &coeff) in lc {
+        push_u64(out, signal as u64);
+        push_u64(out, coeff);
+    }
 }
 
 pub fn write_exec_sidecars(
@@ -202,12 +228,13 @@ mod tests {
 
     #[test]
     fn writes_native_runtime_descriptor_header() -> Result<()> {
-        let buffer = runtime_dat_buffer(&RuntimeDescriptor::for_r1cs(&synthetic_r1cs()))?;
+        let buffer = runtime_dat_buffer_for_r1cs(&synthetic_r1cs())?;
         assert_eq!(&buffer[..8], MAGIC);
         assert_eq!(u64::from_le_bytes(buffer[8..16].try_into()?), VERSION);
         assert_eq!(u64::from_le_bytes(buffer[24..32].try_into()?), 4);
         assert_eq!(u64::from_le_bytes(buffer[32..40].try_into()?), 3);
         assert_eq!(u64::from_le_bytes(buffer[56..64].try_into()?), 3);
+        assert_eq!(u64::from_le_bytes(buffer[120..128].try_into()?), 0);
         Ok(())
     }
 
