@@ -142,6 +142,8 @@ fn append_custom_gates(out: &mut Vec<u8>, r1cs: &R1cs) {
             let kind = match gate.template_name.as_str() {
                 "CMul" => Some(1u64),
                 "EvPol4" => Some(2u64),
+                "TreeSelector4" => Some(3u64),
+                "SelectValue1" => Some(4u64),
                 _ => None,
             }?;
             Some((kind, gate_use))

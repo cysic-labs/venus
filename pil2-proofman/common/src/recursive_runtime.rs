@@ -68,6 +68,8 @@ pub struct NativeRuntimeCustomGate {
 pub enum NativeRuntimeCustomGateKind {
     CMul,
     EvPol4,
+    TreeSelector4,
+    SelectValue1,
 }
 
 impl NativeRecursiveRuntime {
@@ -390,6 +392,8 @@ impl NativeRecursiveRuntime {
         match gate.kind {
             NativeRuntimeCustomGateKind::CMul => solve_cmul_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::EvPol4 => solve_evpol4_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::TreeSelector4 => solve_tree_selector4_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::SelectValue1 => solve_select_value1_gate(gate, witness, known),
         }
     }
 
@@ -402,6 +406,8 @@ impl NativeRecursiveRuntime {
         match gate.kind {
             NativeRuntimeCustomGateKind::CMul => verify_cmul_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::EvPol4 => verify_evpol4_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::TreeSelector4 => verify_tree_selector4_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::SelectValue1 => verify_select_value1_gate(gate, witness, known),
         }
     }
 }
@@ -591,6 +597,120 @@ fn verify_evpol4_gate<F: PrimeField64>(
     Ok(())
 }
 
+fn solve_tree_selector4_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &mut [F],
+    known: &mut [bool],
+) -> ProofmanResult<bool> {
+    if gate.signals.len() != 17 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "TreeSelector4 native runtime gate must have 17 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals[..14].iter().any(|&signal| !known[signal]) {
+        return Ok(false);
+    }
+
+    let index = selector_index(witness[signals[12]], witness[signals[13]], "TreeSelector4")?;
+    let value_start = index * 3;
+    assign_gate_outputs(
+        "TreeSelector4",
+        &signals[14..17],
+        [witness[signals[value_start]], witness[signals[value_start + 1]], witness[signals[value_start + 2]]],
+        witness,
+        known,
+    )
+}
+
+fn verify_tree_selector4_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &[F],
+    known: &[bool],
+) -> ProofmanResult<()> {
+    if gate.signals.len() != 17 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "TreeSelector4 native runtime gate must have 17 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals.iter().any(|&signal| !known[signal]) {
+        return Ok(());
+    }
+    let index = selector_index(witness[signals[12]], witness[signals[13]], "TreeSelector4")?;
+    let value_start = index * 3;
+    verify_gate_outputs(
+        "TreeSelector4",
+        &signals[14..17],
+        [witness[signals[value_start]], witness[signals[value_start + 1]], witness[signals[value_start + 2]]],
+        witness,
+    )
+}
+
+fn solve_select_value1_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &mut [F],
+    known: &mut [bool],
+) -> ProofmanResult<bool> {
+    if gate.signals.len() != 22 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "SelectValue1 native runtime gate must have 22 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals[..18].iter().any(|&signal| !known[signal]) {
+        return Ok(false);
+    }
+
+    let index = selector_index(witness[signals[16]], witness[signals[17]], "SelectValue1")?;
+    let value_start = index * 4;
+    assign_gate_outputs(
+        "SelectValue1",
+        &signals[18..22],
+        [
+            witness[signals[value_start]],
+            witness[signals[value_start + 1]],
+            witness[signals[value_start + 2]],
+            witness[signals[value_start + 3]],
+        ],
+        witness,
+        known,
+    )
+}
+
+fn verify_select_value1_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &[F],
+    known: &[bool],
+) -> ProofmanResult<()> {
+    if gate.signals.len() != 22 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "SelectValue1 native runtime gate must have 22 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals.iter().any(|&signal| !known[signal]) {
+        return Ok(());
+    }
+    let index = selector_index(witness[signals[16]], witness[signals[17]], "SelectValue1")?;
+    let value_start = index * 4;
+    verify_gate_outputs(
+        "SelectValue1",
+        &signals[18..22],
+        [
+            witness[signals[value_start]],
+            witness[signals[value_start + 1]],
+            witness[signals[value_start + 2]],
+            witness[signals[value_start + 3]],
+        ],
+        witness,
+    )
+}
+
 fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
     let mut out = Vec::with_capacity(signals.len());
     for &signal in signals {
@@ -605,6 +725,62 @@ fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize
         out.push(signal);
     }
     Ok(out)
+}
+
+fn selector_index<F: PrimeField64>(key0: F, key1: F, gate: &str) -> ProofmanResult<usize> {
+    let bit0 = selector_bit(key0, gate)?;
+    let bit1 = selector_bit(key1, gate)?;
+    Ok(bit0 + bit1 * 2)
+}
+
+fn selector_bit<F: PrimeField64>(value: F, gate: &str) -> ProofmanResult<usize> {
+    if value == F::ZERO {
+        Ok(0)
+    } else if value == F::ONE {
+        Ok(1)
+    } else {
+        Err(ProofmanError::InvalidProof(format!("native recursive {gate} gate key must be boolean")))
+    }
+}
+
+fn assign_gate_outputs<F: PrimeField64, const N: usize>(
+    gate: &str,
+    output_signals: &[usize],
+    expected: [F; N],
+    witness: &mut [F],
+    known: &mut [bool],
+) -> ProofmanResult<bool> {
+    let mut changed = false;
+    for (idx, &signal) in output_signals.iter().enumerate() {
+        if known[signal] {
+            if witness[signal] != expected[idx] {
+                return Err(ProofmanError::InvalidProof(format!(
+                    "native recursive {gate} gate output mismatch at signal {signal}"
+                )));
+            }
+        } else {
+            witness[signal] = expected[idx];
+            known[signal] = true;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn verify_gate_outputs<F: PrimeField64, const N: usize>(
+    gate: &str,
+    output_signals: &[usize],
+    expected: [F; N],
+    witness: &[F],
+) -> ProofmanResult<()> {
+    for (idx, &signal) in output_signals.iter().enumerate() {
+        if witness[signal] != expected[idx] {
+            return Err(ProofmanError::InvalidProof(format!(
+                "native recursive {gate} gate output mismatch at signal {signal}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn cmul<F: PrimeField64>(a: [F; 3], b: [F; 3]) -> [F; 3] {
@@ -697,6 +873,8 @@ fn parse_custom_gates(
         let kind = match kind_id {
             1 => NativeRuntimeCustomGateKind::CMul,
             2 => NativeRuntimeCustomGateKind::EvPol4,
+            3 => NativeRuntimeCustomGateKind::TreeSelector4,
+            4 => NativeRuntimeCustomGateKind::SelectValue1,
             other => {
                 return Err(ProofmanError::InvalidSetup(format!(
                     "{} references unsupported native runtime custom gate kind {other}",
@@ -841,6 +1019,63 @@ mod tests {
         assert_eq!(witness[19].as_canonical_u64(), 1);
         assert_eq!(witness[20].as_canonical_u64(), 0);
         assert_eq!(witness[21].as_canonical_u64(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn solves_tree_selector4_custom_gate() -> ProofmanResult<()> {
+        let runtime = NativeRecursiveRuntime {
+            template_id: 0,
+            size_witness_words: 18,
+            n_publics: 0,
+            public_input_offset_words: 1,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 14,
+            source_sections: Vec::new(),
+            section_copy_ops: Vec::new(),
+            constraints: Vec::new(),
+            custom_gates: vec![NativeRuntimeCustomGate {
+                kind: NativeRuntimeCustomGateKind::TreeSelector4,
+                signals: (1..=17).collect(),
+            }],
+        };
+        let source = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 1];
+
+        let witness = runtime.generate_witness::<Goldilocks>(&source, 18)?;
+        assert_eq!(witness[15].as_canonical_u64(), 7);
+        assert_eq!(witness[16].as_canonical_u64(), 8);
+        assert_eq!(witness[17].as_canonical_u64(), 9);
+        Ok(())
+    }
+
+    #[test]
+    fn solves_select_value1_custom_gate() -> ProofmanResult<()> {
+        let runtime = NativeRecursiveRuntime {
+            template_id: 0,
+            size_witness_words: 23,
+            n_publics: 0,
+            public_input_offset_words: 1,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 18,
+            source_sections: Vec::new(),
+            section_copy_ops: Vec::new(),
+            constraints: Vec::new(),
+            custom_gates: vec![NativeRuntimeCustomGate {
+                kind: NativeRuntimeCustomGateKind::SelectValue1,
+                signals: (1..=22).collect(),
+            }],
+        };
+        let source = vec![1, 2, 3, 4, 11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34, 1, 1];
+
+        let witness = runtime.generate_witness::<Goldilocks>(&source, 23)?;
+        assert_eq!(witness[19].as_canonical_u64(), 31);
+        assert_eq!(witness[20].as_canonical_u64(), 32);
+        assert_eq!(witness[21].as_canonical_u64(), 33);
+        assert_eq!(witness[22].as_canonical_u64(), 34);
         Ok(())
     }
 }
