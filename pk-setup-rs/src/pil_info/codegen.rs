@@ -425,14 +425,20 @@ fn eval_exp(
 ) -> Result<CodeRefJson> {
     match exp.op.as_str() {
         "add" | "sub" | "mul" => {
+            let normalized_mul = normalized_zero_add_sub(exp);
+            let op = normalized_mul.unwrap_or(exp.op.as_str());
             let mut values = Vec::with_capacity(exp.values.len());
             for value in &exp.values {
-                values.push(eval_exp(ctx, symbols, expressions, value, prime)?);
+                if normalized_mul.is_some() && is_zero_number(value) {
+                    values.push(CodeRefJson::number("1"));
+                } else {
+                    values.push(eval_exp(ctx, symbols, expressions, value, prime)?);
+                }
             }
             let dim = values.iter().map(|value| value.dim).max().unwrap_or(1);
             let result = CodeRefJson::tmp(ctx.tmp_used, dim);
             ctx.tmp_used += 1;
-            ctx.code.push(CodeLineJson { op: exp.op.clone(), dest: result.clone(), src: values });
+            ctx.code.push(CodeLineJson { op: op.to_string(), dest: result.clone(), src: values });
             Ok(result)
         }
         "neg" => {
@@ -1054,6 +1060,27 @@ impl CodeRefJson {
         result.value = Some(value.to_string());
         result
     }
+}
+
+fn normalized_zero_add_sub(expression: &FormattedExpression) -> Option<&'static str> {
+    if expression.values.len() != 2 {
+        return None;
+    }
+    let lhs_zero = is_zero_number(&expression.values[0]);
+    let rhs_zero = is_zero_number(&expression.values[1]);
+    match expression.op.as_str() {
+        "add" if lhs_zero || rhs_zero => Some("mul"),
+        "sub" if rhs_zero => Some("mul"),
+        _ => None,
+    }
+}
+
+fn is_zero_number(expression: &FormattedExpression) -> bool {
+    expression.op == "number"
+        && expression
+            .value
+            .as_deref()
+            .is_some_and(|value| value.parse::<i128>().is_ok_and(|parsed| parsed == 0))
 }
 
 fn prime_for(expression: &FormattedExpression, prime: i64) -> i64 {
