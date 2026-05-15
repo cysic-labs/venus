@@ -31,6 +31,15 @@ pub struct VerifierInfoJson {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalConstraintCodeJson {
+    #[serde(flatten)]
+    pub block: CodeBlockJson,
+    pub boundary: String,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct HintInfoJson {
     pub name: String,
     pub fields: Vec<HintFieldInfoJson>,
@@ -112,6 +121,8 @@ pub struct CodeRefJson {
     pub opening: Option<i64>,
     #[serde(rename = "commitId", skip_serializing_if = "Option::is_none")]
     pub commit_id: Option<u64>,
+    #[serde(rename = "airgroupId", skip_serializing_if = "Option::is_none")]
+    pub airgroup_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,6 +152,7 @@ struct CodegenContext {
     opening_points: Vec<i64>,
     verifier_evaluations: bool,
     ev_map: Vec<EvMapJson>,
+    global: bool,
 }
 
 type CalculatedMap = HashMap<usize, HashMap<i64, Calculated>>;
@@ -180,10 +192,29 @@ pub fn generate_pil_code(
         last.dest.dim = FIELD_EXTENSION;
     }
 
-    let constraints = generate_constraints_debug_code(stark_info, symbols, constraints, expressions)?;
+    let constraints =
+        generate_constraints_debug_code(stark_info, symbols, constraints, expressions)?;
     let expressions_info = ExpressionsInfoJson { hints_info, expressions_code, constraints };
     let verifier_info = VerifierInfoJson { q_verifier, query_verifier };
     Ok((expressions_info, verifier_info))
+}
+
+pub fn generate_global_constraints_code(
+    constraints: &[FormattedConstraint],
+    expressions: &[FormattedExpression],
+) -> Result<Vec<GlobalConstraintCodeJson>> {
+    let mut out = Vec::with_capacity(constraints.len());
+    for constraint in constraints {
+        let mut ctx = CodegenContext::new_global();
+        pil_code_gen(&mut ctx, &[], expressions, constraint.e as usize, 0)?;
+        let block = build_code(ctx)?;
+        out.push(GlobalConstraintCodeJson {
+            block,
+            boundary: constraint.boundary.clone(),
+            line: constraint.line.clone().unwrap_or_default(),
+        });
+    }
+    Ok(out)
 }
 
 fn generate_expressions_code(
@@ -199,8 +230,11 @@ fn generate_expressions_code(
             continue;
         }
 
-        let dom =
-            if exp_id == stark_info.c_exp_id || exp_id == fri_exp_id { Domain::Ext } else { Domain::N };
+        let dom = if exp_id == stark_info.c_exp_id || exp_id == fri_exp_id {
+            Domain::Ext
+        } else {
+            Domain::N
+        };
         let mut ctx = CodegenContext::new(stark_info, exp.stage.unwrap_or(0), dom, false);
         if exp_id == fri_exp_id {
             ctx.opening_points = stark_info.opening_points.clone();
@@ -212,8 +246,12 @@ fn generate_expressions_code(
         let dest = if exp.im_pol {
             let symbol = symbols
                 .iter()
-                .find(|symbol| symbol.symbol_type == "witness" && symbol.exp_id == Some(exp_id as u64))
-                .with_context(|| format!("intermediate symbol for expression {exp_id} not found"))?;
+                .find(|symbol| {
+                    symbol.symbol_type == "witness" && symbol.exp_id == Some(exp_id as u64)
+                })
+                .with_context(|| {
+                    format!("intermediate symbol for expression {exp_id} not found")
+                })?;
             Some(ExpressionDestJson {
                 op: "cm".to_string(),
                 stage: symbol.stage.unwrap_or(0),
@@ -269,17 +307,40 @@ fn generate_constraints_debug_code(
             Some(stage) => stage,
             None => 0,
         };
+        let generated_line;
+        let line = if constraint.im_pol && constraint.line.is_none() {
+            generated_line =
+                print_expression(stark_info, expressions, constraint.e as usize, true)?;
+            Some(generated_line.as_str())
+        } else {
+            constraint.line.as_deref()
+        };
         out.push(ConstraintCodeJson {
             block,
             boundary: constraint.boundary.clone(),
-            line: constraint.line.clone().unwrap_or_default(),
-            im_pol: 0,
+            line: constraint_line_with_zero(line),
+            im_pol: u64::from(constraint.im_pol),
             stage,
-            offset_min: (constraint.boundary == "everyFrame").then_some(constraint.offset_min).flatten(),
-            offset_max: (constraint.boundary == "everyFrame").then_some(constraint.offset_max).flatten(),
+            offset_min: (constraint.boundary == "everyFrame")
+                .then_some(constraint.offset_min)
+                .flatten(),
+            offset_max: (constraint.boundary == "everyFrame")
+                .then_some(constraint.offset_max)
+                .flatten(),
         });
     }
     Ok(out)
+}
+
+fn constraint_line_with_zero(line: Option<&str>) -> String {
+    let Some(line) = line else {
+        return String::new();
+    };
+    if line.is_empty() || line.trim_end().ends_with("== 0") {
+        line.to_string()
+    } else {
+        format!("{line} == 0")
+    }
 }
 
 fn generate_constraint_polynomial_verifier_code(
@@ -287,12 +348,7 @@ fn generate_constraint_polynomial_verifier_code(
     symbols: &[FormattedSymbol],
     expressions: &[FormattedExpression],
 ) -> Result<CodeBlockJson> {
-    let mut ctx = CodegenContext::new(
-        stark_info,
-        stark_info.n_stages as u64 + 1,
-        Domain::N,
-        true,
-    );
+    let mut ctx = CodegenContext::new(stark_info, stark_info.n_stages as u64 + 1, Domain::N, true);
     ctx.ev_map = stark_info.ev_map.clone();
     seed_intermediate_calculations(&mut ctx, symbols, stark_info);
     pil_code_gen(&mut ctx, symbols, expressions, stark_info.c_exp_id, 0)?;
@@ -320,19 +376,12 @@ fn pil_code_gen_inner(
     force: bool,
 ) -> Result<()> {
     if !force
-        && ctx
-        .calculated
-        .borrow()
-        .get(&exp_id)
-        .and_then(|by_prime| by_prime.get(&prime))
-        .is_some()
+        && ctx.calculated.borrow().get(&exp_id).and_then(|by_prime| by_prime.get(&prime)).is_some()
     {
         return Ok(());
     }
 
-    let exp = expressions
-        .get(exp_id)
-        .with_context(|| format!("expression {exp_id} not found"))?;
+    let exp = expressions.get(exp_id).with_context(|| format!("expression {exp_id} not found"))?;
     calculate_deps(ctx, symbols, expressions, exp, prime)?;
 
     let mut code_ctx = ctx.fork_for_expression();
@@ -363,11 +412,7 @@ fn pil_code_gen_inner(
     }
 
     ctx.code.extend(code_ctx.code);
-    ctx.calculated
-        .borrow_mut()
-        .entry(exp_id)
-        .or_default()
-        .insert(prime, Calculated { cm: false });
+    ctx.calculated.borrow_mut().entry(exp_id).or_default().insert(prime, Calculated { cm: false });
     if code_ctx.tmp_used > ctx.tmp_used {
         ctx.tmp_used = code_ctx.tmp_used;
     }
@@ -390,16 +435,18 @@ fn eval_exp(
             let dim = values.iter().map(|value| value.dim).max().unwrap_or(1);
             let result = CodeRefJson::tmp(ctx.tmp_used, dim);
             ctx.tmp_used += 1;
-            ctx.code.push(CodeLineJson {
-                op: exp.op.clone(),
-                dest: result.clone(),
-                src: values,
-            });
+            ctx.code.push(CodeLineJson { op: exp.op.clone(), dest: result.clone(), src: values });
             Ok(result)
         }
         "neg" => {
             let zero = CodeRefJson::number("0");
-            let value = eval_exp(ctx, symbols, expressions, exp.values.first().context("neg missing value")?, prime)?;
+            let value = eval_exp(
+                ctx,
+                symbols,
+                expressions,
+                exp.values.first().context("neg missing value")?,
+                prime,
+            )?;
             let dim = value.dim;
             let result = CodeRefJson::tmp(ctx.tmp_used, dim);
             ctx.tmp_used += 1;
@@ -413,7 +460,8 @@ fn eval_exp(
         "cm" | "const" | "custom" => direct_column_ref(ctx, exp, prime),
         "exp" => {
             let id = exp.id.context("exp expression is missing id")? as usize;
-            let inner = expressions.get(id).with_context(|| format!("expression {id} not found"))?;
+            let inner =
+                expressions.get(id).with_context(|| format!("expression {id} not found"))?;
             if matches!(inner.op.as_str(), "cm" | "const" | "custom") {
                 direct_column_ref(ctx, inner, prime_for(exp, prime))
             } else {
@@ -455,6 +503,9 @@ fn eval_exp(
             let mut result = CodeRefJson::new(&exp.op, exp.dim.unwrap_or(1));
             result.id = exp.id;
             result.stage = exp.stage;
+            if ctx.global && exp.op == "airgroupvalue" {
+                result.airgroup_id = exp.airgroup_id;
+            }
             Ok(result)
         }
         "xDivXSubXi" => {
@@ -569,7 +620,9 @@ fn fix_eval(reference: &mut CodeRefJson, ctx: &CodegenContext) -> Result<()> {
     let eval_index = ctx
         .ev_map
         .iter()
-        .position(|ev| ev.ev_type == reference.ref_type && ev.id == id && ev.opening_pos == opening_pos)
+        .position(|ev| {
+            ev.ev_type == reference.ref_type && ev.id == id && ev.opening_pos == opening_pos
+        })
         .with_context(|| {
             format!(
                 "evaluation map entry not found for {} id={} opening={opening_pos}",
@@ -729,7 +782,8 @@ fn process_hint_object(
     let mut processed = object.clone();
     match op {
         "exp" => {
-            let id = object.get("id").and_then(Value::as_u64).context("hint exp missing id")? as usize;
+            let id =
+                object.get("id").and_then(Value::as_u64).context("hint exp missing id")? as usize;
             let line = print_expression(stark_info, expressions, id, false)?;
             let dim = expressions.get(id).and_then(|expression| expression.dim).unwrap_or(1);
             if let Some(expression) = expressions.get_mut(id) {
@@ -775,10 +829,9 @@ fn mark_hint_value_keeps(expressions: &mut [FormattedExpression], values: &[Valu
             Value::Array(values) => mark_hint_value_keeps(expressions, values)?,
             Value::Object(object) => {
                 if object.get("op").and_then(Value::as_str) == Some("exp") {
-                    let id = object
-                        .get("id")
-                        .and_then(Value::as_u64)
-                        .context("hint exp missing id")? as usize;
+                    let id =
+                        object.get("id").and_then(Value::as_u64).context("hint exp missing id")?
+                            as usize;
                     if let Some(expression) = expressions.get_mut(id) {
                         expression.keep = true;
                     }
@@ -842,10 +895,14 @@ fn print_expression_value(
             is_constraint,
         ),
         "number" => Ok(expression.value.clone().unwrap_or_else(|| "0".to_string())),
-        "const" | "cm" | "custom" => print_column(stark_info, expressions, expression, is_constraint),
+        "const" | "cm" | "custom" => {
+            print_column(stark_info, expressions, expression, is_constraint)
+        }
         "public" => map_name(&stark_info.publics_map, expression.id, "public"),
         "airvalue" => map_name(&stark_info.air_values_map, expression.id, "airvalue"),
-        "airgroupvalue" => map_name(&stark_info.airgroup_values_map, expression.id, "airgroupvalue"),
+        "airgroupvalue" => {
+            map_name(&stark_info.airgroup_values_map, expression.id, "airgroupvalue")
+        }
         "challenge" => stark_info
             .challenges_map
             .get(expression.id.unwrap_or(0) as usize)
@@ -886,12 +943,7 @@ fn print_column(
         name.push_str(&format!("[{index}]"));
     }
     if pol.im_pol {
-        let im_index = stark_info
-            .cm_pols_map
-            .iter()
-            .take(id)
-            .filter(|pol| pol.im_pol)
-            .count();
+        let im_index = stark_info.cm_pols_map.iter().take(id).filter(|pol| pol.im_pol).count();
         name.push_str(&im_index.to_string());
     }
     if let Some(row_offset) = expression.row_offset.filter(|offset| *offset != 0) {
@@ -939,6 +991,23 @@ impl CodegenContext {
             opening_points: stark_info.opening_points.clone(),
             verifier_evaluations,
             ev_map: stark_info.ev_map.clone(),
+            global: false,
+        }
+    }
+
+    fn new_global() -> Self {
+        Self {
+            stage: 0,
+            calculated: Rc::new(RefCell::new(HashMap::new())),
+            tmp_used: 0,
+            code: Vec::new(),
+            dom: Domain::N,
+            air_id: 0,
+            airgroup_id: 0,
+            opening_points: Vec::new(),
+            verifier_evaluations: false,
+            ev_map: Vec::new(),
+            global: true,
         }
     }
 
@@ -954,6 +1023,7 @@ impl CodegenContext {
             opening_points: self.opening_points.clone(),
             verifier_evaluations: self.verifier_evaluations,
             ev_map: self.ev_map.clone(),
+            global: self.global,
         }
     }
 }
@@ -972,6 +1042,7 @@ impl CodeRefJson {
             boundary_id: None,
             opening: None,
             commit_id: None,
+            airgroup_id: None,
         }
     }
 

@@ -16,6 +16,7 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 pilout-crate = { package = "pilout", path = "../pil2-proofman/pilout" }
 prost = { workspace = true }
+proofman-starks-lib-c = { path = "../pil2-proofman/provers/starks-lib-c" }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

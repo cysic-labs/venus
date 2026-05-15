@@ -7,14 +7,19 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::pil_info::codegen::{
-    CodeBlockJson, CodeLineJson, CodeRefJson, ExpressionsInfoJson, HintInfoJson, VerifierInfoJson,
+    CodeBlockJson, CodeLineJson, CodeRefJson, ExpressionsInfoJson, GlobalConstraintCodeJson,
+    HintInfoJson, VerifierInfoJson,
 };
 use crate::pil_info::format::FIELD_EXTENSION;
+use crate::pil_info::global::GlobalConstraintsJson;
 use crate::pil_info::stark::StarkInfoJson;
+use crate::pilout_info::GlobalInfoJson;
 
 const CHELPERS_EXPRESSIONS_SECTION: u32 = 1;
 const CHELPERS_CONSTRAINTS_DEBUG_SECTION: u32 = 2;
 const CHELPERS_HINTS_SECTION: u32 = 3;
+const GLOBAL_CONSTRAINTS_SECTION: u32 = 1;
+const GLOBAL_HINTS_SECTION: u32 = 2;
 
 #[derive(Debug, Clone)]
 struct ExpInfoBin {
@@ -114,6 +119,33 @@ pub fn write_verifier_expressions_bin_file(
     writer.close()
 }
 
+pub fn write_global_constraints_bin_file(
+    path: &Path,
+    global_info: &GlobalInfoJson,
+    global_constraints: &GlobalConstraintsJson,
+) -> Result<()> {
+    let operations = default_operations();
+    let mut constraints_info = Vec::with_capacity(global_constraints.constraints.len());
+    let mut numbers = Vec::new();
+
+    for constraint in &global_constraints.constraints {
+        let parsed = get_parser_args_global(global_info, &operations, constraint, &mut numbers)?;
+        let mut info = parsed.exps_info;
+        info.line = constraint.line.clone();
+        constraints_info.push(info);
+    }
+
+    let mut writer = BinWriter::create(path, "chps", 1, 2)?;
+    write_global_constraints_section(
+        &mut writer,
+        GLOBAL_CONSTRAINTS_SECTION,
+        &constraints_info,
+        &numbers,
+    )?;
+    write_global_hints_section(&mut writer, GLOBAL_HINTS_SECTION, &global_constraints.hints)?;
+    writer.close()
+}
+
 fn prepare_expressions_bin(
     stark_info: &StarkInfoJson,
     expressions_info: &ExpressionsInfoJson,
@@ -140,7 +172,8 @@ fn prepare_expressions_bin(
             ),
             boundary => anyhow::bail!("invalid boundary: {boundary}"),
         };
-        let parsed = get_parser_args(stark_info, &operations, &constraint.block, &mut numbers_constraints)?;
+        let parsed =
+            get_parser_args(stark_info, &operations, &constraint.block, &mut numbers_constraints)?;
         let mut info = parsed.exps_info;
         info.stage = constraint.stage;
         info.first_row = first_row;
@@ -155,10 +188,7 @@ fn prepare_expressions_bin(
         let mut expression = expression.clone();
         if expression.exp_id == stark_info.c_exp_id
             || Some(expression.exp_id) == stark_info.fri_exp_id
-            || stark_info
-                .cm_pols_map
-                .iter()
-                .any(|pol| pol.exp_id == Some(expression.exp_id as u64))
+            || stark_info.cm_pols_map.iter().any(|pol| pol.exp_id == Some(expression.exp_id as u64))
         {
             let tmp_id = expression.block.tmp_used;
             if let Some(last) = expression.block.code.last_mut() {
@@ -167,7 +197,8 @@ fn prepare_expressions_bin(
             }
             expression.block.tmp_used += 1;
         }
-        let parsed = get_parser_args(stark_info, &operations, &expression.block, &mut numbers_exps)?;
+        let parsed =
+            get_parser_args(stark_info, &operations, &expression.block, &mut numbers_exps)?;
         let mut info = parsed.exps_info;
         info.exp_id = expression.exp_id as u64;
         info.stage = expression.stage;
@@ -251,6 +282,61 @@ fn get_parser_args_verify(
     get_parser_args_inner(stark_info, operations, code_info, numbers, verify)
 }
 
+fn get_parser_args_global(
+    global_info: &GlobalInfoJson,
+    operations: &[OperationShape],
+    constraint: &GlobalConstraintCodeJson,
+    numbers: &mut Vec<String>,
+) -> Result<ParserArgs> {
+    let mut ops = Vec::new();
+    let mut args = Vec::new();
+    let id_maps = get_id_maps(&constraint.block.code)?;
+
+    for line in &constraint.block.code {
+        let operation = get_operation(line, false)?;
+        args.push(operation_type_id(&operation.op)?);
+        push_args_global(&mut args, &line.dest, &id_maps, numbers, global_info, true)?;
+        for src in &operation.src {
+            push_args_global(&mut args, src, &id_maps, numbers, global_info, false)?;
+        }
+        let ops_index = operations
+            .iter()
+            .position(|shape| {
+                shape.dest_dim == operation.dest_dim
+                    && shape.src0_dim == operation.src0_dim
+                    && shape.src1_dim == operation.src1_dim
+            })
+            .with_context(|| format!("global operation not considered: {:?}", operation))?;
+        ops.push(ops_index as u8);
+    }
+
+    let dest = constraint.block.code.last().context("empty global constraint code")?.dest.clone();
+    let (dest_dim, dest_id) = if dest.dim == 1 {
+        (1, id_maps.id1d.get(&dest.id.unwrap_or(0)).copied().unwrap_or(0))
+    } else if dest.dim == FIELD_EXTENSION {
+        (FIELD_EXTENSION, id_maps.id3d.get(&dest.id.unwrap_or(0)).copied().unwrap_or(0))
+    } else {
+        anyhow::bail!("unknown global destination dimension {}", dest.dim);
+    };
+
+    Ok(ParserArgs {
+        exps_info: ExpInfoBin {
+            exp_id: 0,
+            dest_dim,
+            dest_id,
+            stage: 0,
+            n_temp1: id_maps.count1d,
+            n_temp3: id_maps.count3d,
+            ops,
+            args,
+            line: String::new(),
+            first_row: 0,
+            last_row: 0,
+            im_pol: 0,
+        },
+    })
+}
+
 fn get_parser_args_inner(
     stark_info: &StarkInfoJson,
     operations: &[OperationShape],
@@ -284,10 +370,7 @@ fn get_parser_args_inner(
     let (dest_dim, dest_id) = if dest.dim == 1 {
         (1, id_maps.id1d.get(&dest.id.unwrap_or(0)).copied().unwrap_or(0))
     } else if dest.dim == FIELD_EXTENSION {
-        (
-            FIELD_EXTENSION,
-            id_maps.id3d.get(&dest.id.unwrap_or(0)).copied().unwrap_or(0),
-        )
+        (FIELD_EXTENSION, id_maps.id3d.get(&dest.id.unwrap_or(0)).copied().unwrap_or(0))
     } else {
         anyhow::bail!("unknown destination dimension {}", dest.dim);
     };
@@ -348,13 +431,7 @@ fn get_operation(line: &CodeLineJson, _verify: bool) -> Result<OperationRef> {
     }
     let src0 = src.first().context("operation missing src0")?;
     let src1 = src.get(1).context("operation missing src1")?;
-    Ok(OperationRef {
-        op,
-        dest_dim: line.dest.dim,
-        src0_dim: src0.dim,
-        src1_dim: src1.dim,
-        src,
-    })
+    Ok(OperationRef { op, dest_dim: line.dest.dim, src0_dim: src0.dim, src1_dim: src1.dim, src })
 }
 
 fn push_args(
@@ -438,7 +515,10 @@ fn push_args(
         }
         "proofvalue" => {
             push_u16(args, buffer_size + 5)?;
-            push_u16(args, value_position(reference.id.unwrap_or(0), &stark_info.proof_values_map))?;
+            push_u16(
+                args,
+                value_position(reference.id.unwrap_or(0), &stark_info.proof_values_map),
+            )?;
             args.push(0);
         }
         "challenge" => {
@@ -448,7 +528,10 @@ fn push_args(
         }
         "airgroupvalue" => {
             push_u16(args, buffer_size + 6)?;
-            push_u16(args, value_position(reference.id.unwrap_or(0), &stark_info.airgroup_values_map))?;
+            push_u16(
+                args,
+                value_position(reference.id.unwrap_or(0), &stark_info.airgroup_values_map),
+            )?;
             args.push(0);
         }
         "xDivXSubXi" => {
@@ -466,10 +549,85 @@ fn push_args(
     Ok(())
 }
 
-fn value_position(
-    id: u64,
-    values: &[crate::pil_info::stark::NamedMapJson],
-) -> u64 {
+fn push_args_global(
+    args: &mut Vec<u16>,
+    reference: &CodeRefJson,
+    id_maps: &IdMaps,
+    numbers: &mut Vec<String>,
+    global_info: &GlobalInfoJson,
+    dest: bool,
+) -> Result<()> {
+    if dest && reference.ref_type != "tmp" {
+        anyhow::bail!("invalid global destination reference type {}", reference.ref_type);
+    }
+    match reference.ref_type.as_str() {
+        "tmp" => {
+            if reference.dim == 1 {
+                if !dest {
+                    args.push(0);
+                }
+                push_u16(args, id_maps.id1d.get(&reference.id.unwrap_or(0)).copied().unwrap_or(0))?;
+            } else if reference.dim == FIELD_EXTENSION {
+                if !dest {
+                    args.push(4);
+                }
+                push_u16(
+                    args,
+                    FIELD_EXTENSION
+                        * id_maps.id3d.get(&reference.id.unwrap_or(0)).copied().unwrap_or(0),
+                )?;
+            } else {
+                anyhow::bail!("invalid global tmp dimension {}", reference.dim);
+            }
+        }
+        "number" => {
+            let value = normalize_number(reference.value.as_deref().unwrap_or("0"))?;
+            if !numbers.contains(&value) {
+                numbers.push(value.clone());
+            }
+            args.push(2);
+            push_u16(args, numbers.iter().position(|item| item == &value).unwrap() as u64)?;
+        }
+        "public" => {
+            args.push(1);
+            push_u16(args, reference.id.unwrap_or(0))?;
+        }
+        "proofvalue" => {
+            args.push(3);
+            push_u16(args, global_proof_value_position(reference.id.unwrap_or(0), global_info))?;
+        }
+        "airgroupvalue" => {
+            args.push(5);
+            let airgroup_id = reference
+                .airgroup_id
+                .context("global airgroupvalue reference missing airgroupId")?;
+            let offset = global_info
+                .agg_types
+                .iter()
+                .take(airgroup_id as usize)
+                .map(|values| FIELD_EXTENSION * values.len() as u64)
+                .sum::<u64>();
+            push_u16(args, offset + FIELD_EXTENSION * reference.id.unwrap_or(0))?;
+        }
+        "challenge" => {
+            args.push(6);
+            push_u16(args, FIELD_EXTENSION * reference.id.unwrap_or(0))?;
+        }
+        other => anyhow::bail!("unknown global parser argument type {other}"),
+    }
+    Ok(())
+}
+
+fn global_proof_value_position(id: u64, global_info: &GlobalInfoJson) -> u64 {
+    global_info
+        .proof_values_map
+        .iter()
+        .take(id as usize)
+        .map(|value| if value.stage == 1 { 1 } else { FIELD_EXTENSION })
+        .sum()
+}
+
+fn value_position(id: u64, values: &[crate::pil_info::stark::NamedMapJson]) -> u64 {
     values
         .iter()
         .take(id as usize)
@@ -600,13 +758,15 @@ fn visit_tmp(
 
 fn collect_segments(ini: &HashMap<u64, usize>, end: &HashMap<u64, usize>) -> Vec<Segment> {
     ini.iter()
-        .filter_map(|(id, start)| end.get(id).map(|end| Segment { start: *start, end: *end, id: *id }))
+        .filter_map(|(id, start)| {
+            end.get(id).map(|end| Segment { start: *start, end: *end, id: *id })
+        })
         .collect()
 }
 
 fn assign_segments(segments: &[Segment], ids: &mut HashMap<u64, u64>, count: &mut u64) {
     let mut segments = segments.to_vec();
-    segments.sort_by_key(|segment| segment.end);
+    segments.sort_by_key(|segment| (segment.end, segment.id));
     let mut subsets: Vec<Vec<Segment>> = Vec::new();
     for segment in segments {
         let mut closest = None;
@@ -772,6 +932,54 @@ fn write_constraints_section(
     writer.end_section()
 }
 
+fn write_global_constraints_section(
+    writer: &mut BinWriter,
+    section: u32,
+    constraints_info: &[ExpInfoBin],
+    numbers_constraints: &[String],
+) -> Result<()> {
+    writer.start_section(section)?;
+    let mut ops_debug = Vec::new();
+    let mut args_debug = Vec::new();
+    let mut ops_offsets = Vec::new();
+    let mut args_offsets = Vec::new();
+
+    for info in constraints_info {
+        ops_offsets.push(ops_debug.len() as u64);
+        args_offsets.push(args_debug.len() as u64);
+        ops_debug.extend(info.ops.iter().copied());
+        args_debug.extend(info.args.iter().copied());
+    }
+
+    writer.write_u32(ops_debug.len() as u64)?;
+    writer.write_u32(args_debug.len() as u64)?;
+    writer.write_u32(numbers_constraints.len() as u64)?;
+    writer.write_u32(constraints_info.len() as u64)?;
+
+    for (idx, info) in constraints_info.iter().enumerate() {
+        writer.write_u32(info.dest_dim)?;
+        writer.write_u32(info.dest_id)?;
+        writer.write_u32(info.n_temp1)?;
+        writer.write_u32(info.n_temp3)?;
+        writer.write_u32(info.ops.len() as u64)?;
+        writer.write_u32(ops_offsets[idx])?;
+        writer.write_u32(info.args.len() as u64)?;
+        writer.write_u32(args_offsets[idx])?;
+        writer.write_string(&info.line)?;
+    }
+
+    for op in ops_debug {
+        writer.write_u8(op)?;
+    }
+    for arg in args_debug {
+        writer.write_u16(arg)?;
+    }
+    for number in numbers_constraints {
+        writer.write_u64(number.parse::<u64>()?)?;
+    }
+    writer.end_section()
+}
+
 fn write_hints_section(
     writer: &mut BinWriter,
     section: u32,
@@ -799,10 +1007,8 @@ fn write_hint_value(writer: &mut BinWriter, value: &Value) -> Result<()> {
     writer.write_string(op)?;
     match op {
         "number" => {
-            let number = object
-                .get("value")
-                .and_then(Value::as_str)
-                .context("number hint missing value")?;
+            let number =
+                object.get("value").and_then(Value::as_str).context("number hint missing value")?;
             writer.write_u64(normalize_number(number)?.parse::<u64>()?)?;
         }
         "string" => {
@@ -819,6 +1025,60 @@ fn write_hint_value(writer: &mut BinWriter, value: &Value) -> Result<()> {
     }
     if op == "custom" {
         writer.write_u32(object.get("commitId").and_then(Value::as_u64).unwrap_or(0))?;
+    }
+    let pos = object.get("pos").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+    writer.write_u32(pos.len() as u64)?;
+    for value in pos {
+        writer.write_u32(value.as_u64().unwrap_or(0))?;
+    }
+    Ok(())
+}
+
+fn write_global_hints_section(
+    writer: &mut BinWriter,
+    section: u32,
+    hints_info: &[HintInfoJson],
+) -> Result<()> {
+    writer.start_section(section)?;
+    writer.write_u32(hints_info.len() as u64)?;
+    for hint in hints_info {
+        writer.write_string(&hint.name)?;
+        writer.write_u32(hint.fields.len() as u64)?;
+        for field in &hint.fields {
+            writer.write_string(&field.name)?;
+            writer.write_u32(field.values.len() as u64)?;
+            for value in &field.values {
+                write_global_hint_value(writer, value)?;
+            }
+        }
+    }
+    writer.end_section()
+}
+
+fn write_global_hint_value(writer: &mut BinWriter, value: &Value) -> Result<()> {
+    let object = value.as_object().context("global hint value must be object")?;
+    let op = object.get("op").and_then(Value::as_str).context("global hint value missing op")?;
+    writer.write_string(op)?;
+    match op {
+        "number" => {
+            let number = object
+                .get("value")
+                .and_then(Value::as_str)
+                .context("number global hint missing value")?;
+            writer.write_u64(normalize_number(number)?.parse::<u64>()?)?;
+        }
+        "string" => {
+            let string = object.get("string").and_then(Value::as_str).unwrap_or_default();
+            writer.write_string(string)?;
+        }
+        "airgroupvalue" => {
+            writer.write_u32(object.get("airgroupId").and_then(Value::as_u64).unwrap_or(0))?;
+            writer.write_u32(object.get("id").and_then(Value::as_u64).unwrap_or(0))?;
+        }
+        "tmp" | "public" | "proofvalue" => {
+            writer.write_u32(object.get("id").and_then(Value::as_u64).unwrap_or(0))?;
+        }
+        other => anyhow::bail!("unknown global hint operand {other}"),
     }
     let pos = object.get("pos").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
     writer.write_u32(pos.len() as u64)?;

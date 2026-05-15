@@ -91,9 +91,9 @@ fn run() -> Result<()> {
     let pilout = PilOutProxy::new(&pilout_path.display().to_string())
         .map_err(|err| anyhow::anyhow!("failed to load PILOUT {}: {err}", pilout_path.display()))?;
 
-    let global = pilout_info::build_global_artifacts(&pilout)?;
-    pilout_info::write_global_artifacts(&proving_key_dir, &global)?;
     let settings = stark_struct::StarkSettingsMap::from_file(&starkstructs_path)?;
+    let global = pilout_info::build_global_artifacts(&pilout, &settings)?;
+    pilout_info::write_global_artifacts(&proving_key_dir, &global)?;
     setup_layout::write_basic_air_layout(&proving_key_dir, &fixed_dir, &pilout, &settings)?;
 
     if args.recursive {

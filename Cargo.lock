@@ -2908,6 +2908,7 @@ dependencies = [
  "anyhow",
  "clap",
  "pilout",
+ "proofman-starks-lib-c",
  "prost 0.13.5",
  "rayon",
  "serde",

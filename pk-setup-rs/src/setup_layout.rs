@@ -1,9 +1,14 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use pilout_crate::pilout::Air;
 use pilout_crate::pilout_proxy::PilOutProxy;
+use proofman_starks_lib_c::{
+    calculate_const_tree_c, get_const_size_c, get_const_tree_size_c, load_const_pols_c,
+    stark_info_free_c, stark_info_new_c,
+};
 use serde::Serialize;
 use tracing::info;
 
@@ -127,7 +132,7 @@ fn write_basic_air(
         air,
         stark_struct: manifest.stark_struct.clone(),
     })?;
-    let draft_path = files_dir.join(format!("{air_name}.starkinfo-rs-draft.json"));
+    let draft_path = files_dir.join(format!("{air_name}.starkinfo.json"));
     fs::write(
         &draft_path,
         serde_json::to_string_pretty(&draft.stark_info)
@@ -143,29 +148,80 @@ fn write_basic_air(
         &draft.hints,
         false,
     )?;
-    let expressions_path = files_dir.join(format!("{air_name}.expressionsinfo-rs-draft.json"));
+    let expressions_path = files_dir.join(format!("{air_name}.expressionsinfo.json"));
     fs::write(
         &expressions_path,
         serde_json::to_string_pretty(&expressions_info)
             .context("failed to serialize AIR expressions info draft")?,
     )
     .with_context(|| format!("failed to write {}", expressions_path.display()))?;
-    let verifier_path = files_dir.join(format!("{air_name}.verifierinfo-rs-draft.json"));
+    let verifier_path = files_dir.join(format!("{air_name}.verifierinfo.json"));
     fs::write(
         &verifier_path,
         serde_json::to_string_pretty(&verifier_info)
             .context("failed to serialize AIR verifier info draft")?,
     )
     .with_context(|| format!("failed to write {}", verifier_path.display()))?;
-    let expressions_bin_path = files_dir.join(format!("{air_name}.bin-rs-draft"));
+    let expressions_bin_path = files_dir.join(format!("{air_name}.bin"));
     write_expressions_bin_file(&expressions_bin_path, &draft.stark_info, &expressions_info)
         .with_context(|| format!("failed to write {}", expressions_bin_path.display()))?;
-    let verifier_bin_path = files_dir.join(format!("{air_name}.verifier.bin-rs-draft"));
+    let verifier_bin_path = files_dir.join(format!("{air_name}.verifier.bin"));
     write_verifier_expressions_bin_file(&verifier_bin_path, &draft.stark_info, &verifier_info)
         .with_context(|| format!("failed to write {}", verifier_bin_path.display()))?;
+    write_const_root_files(&files_dir.join(air_name))?;
     info!("prepared basic AIR layout for {airgroup_name}/{air_name}");
 
     Ok(())
+}
+
+fn write_const_root_files(setup_path: &Path) -> Result<()> {
+    let stark_info_path = format!("{}.starkinfo.json", setup_path.display());
+    let const_path = format!("{}.const", setup_path.display());
+    let verkey_json_path = format!("{}.verkey.json", setup_path.display());
+    let verkey_bin_path = format!("{}.verkey.bin", setup_path.display());
+
+    let p_stark_info = stark_info_new_c(&stark_info_path, false, false, false, false, false, false);
+    if p_stark_info.is_null() {
+        anyhow::bail!("failed to load STARK info {}", stark_info_path);
+    }
+
+    let result = (|| -> Result<()> {
+        let const_size = get_const_size_c(p_stark_info) as usize;
+        let const_tree_size = get_const_tree_size_c(p_stark_info) as usize;
+        if const_tree_size < 4 {
+            anyhow::bail!("const tree for {} is too small", setup_path.display());
+        }
+
+        let mut const_pols = vec![0u64; const_size];
+        load_const_pols_c(
+            const_pols.as_mut_ptr() as *mut u8,
+            &const_path,
+            (const_size * std::mem::size_of::<u64>()) as u64,
+        );
+
+        let mut const_tree = vec![0u64; const_tree_size];
+        calculate_const_tree_c(
+            p_stark_info,
+            const_pols.as_mut_ptr() as *mut u8,
+            const_tree.as_mut_ptr() as *mut u8,
+            std::ptr::null_mut(),
+        );
+
+        let root = &const_tree[const_tree_size - 4..const_tree_size];
+        fs::write(&verkey_json_path, serde_json::to_string_pretty(root)?)
+            .with_context(|| format!("failed to write {verkey_json_path}"))?;
+
+        let mut file = fs::File::create(&verkey_bin_path)
+            .with_context(|| format!("failed to create {verkey_bin_path}"))?;
+        for value in root {
+            file.write_all(&value.to_le_bytes())
+                .with_context(|| format!("failed to write {verkey_bin_path}"))?;
+        }
+        Ok(())
+    })();
+
+    stark_info_free_c(p_stark_info);
+    result
 }
 
 fn checked_log2(value: u32) -> Option<u64> {

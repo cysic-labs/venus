@@ -144,6 +144,8 @@ pub struct FormattedConstraint {
     pub e: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<String>,
+    #[serde(rename = "imPol", skip_serializing_if = "is_false")]
+    pub im_pol: bool,
     #[serde(skip)]
     pub stage: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -374,6 +376,11 @@ fn format_operand(
             Ok(expr)
         }
         operand::Operand::Expression(expression) => {
+            if let Some(simplified) =
+                simplify_expression_operand(expression.idx, ctx, stage_widths)?
+            {
+                return Ok(simplified);
+            }
             let mut expr = FormattedExpression::new("exp");
             expr.id = Some(expression.idx as u64);
             Ok(expr)
@@ -387,6 +394,48 @@ fn format_operand(
     }
 }
 
+fn simplify_expression_operand(
+    idx: u32,
+    ctx: &AirFormatContext<'_>,
+    stage_widths: &StageWidths,
+) -> Result<Option<FormattedExpression>> {
+    let Some(expression) = ctx.air.expressions.get(idx as usize) else {
+        return Ok(None);
+    };
+    let Some(operation) = expression.operation.as_ref() else {
+        return Ok(None);
+    };
+
+    let (lhs, rhs) = match operation {
+        expression::Operation::Add(add) => (
+            required_operand(add.lhs.as_ref(), "add.lhs")?,
+            required_operand(add.rhs.as_ref(), "add.rhs")?,
+        ),
+        expression::Operation::Sub(sub) => (
+            required_operand(sub.lhs.as_ref(), "sub.lhs")?,
+            required_operand(sub.rhs.as_ref(), "sub.rhs")?,
+        ),
+        expression::Operation::Mul(_) | expression::Operation::Neg(_) => return Ok(None),
+    };
+
+    if !is_expression_operand(lhs) && constant_operand_is_zero(rhs)? {
+        return format_operand(lhs, ctx, stage_widths).map(Some);
+    }
+
+    Ok(None)
+}
+
+fn is_expression_operand(operand: &Operand) -> bool {
+    matches!(operand.operand, Some(operand::Operand::Expression(_)))
+}
+
+fn constant_operand_is_zero(operand: &Operand) -> Result<bool> {
+    let Some(operand::Operand::Constant(constant)) = operand.operand.as_ref() else {
+        return Ok(false);
+    };
+    Ok(le_bytes_to_u64(&constant.value)? == 0)
+}
+
 fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
     let constraint = constraint.constraint.as_ref().context("constraint is missing value")?;
     match constraint {
@@ -394,6 +443,7 @@ fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
             boundary: "firstRow".to_string(),
             e: required_expression_idx(first.expression_idx.as_ref(), "firstRow")? as u64,
             line: first.debug_line.clone(),
+            im_pol: false,
             stage: None,
             offset_min: None,
             offset_max: None,
@@ -402,6 +452,7 @@ fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
             boundary: "lastRow".to_string(),
             e: required_expression_idx(last.expression_idx.as_ref(), "lastRow")? as u64,
             line: last.debug_line.clone(),
+            im_pol: false,
             stage: None,
             offset_min: None,
             offset_max: None,
@@ -410,6 +461,7 @@ fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
             boundary: "everyRow".to_string(),
             e: required_expression_idx(every.expression_idx.as_ref(), "everyRow")? as u64,
             line: every.debug_line.clone(),
+            im_pol: false,
             stage: None,
             offset_min: None,
             offset_max: None,
@@ -418,6 +470,7 @@ fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
             boundary: "everyFrame".to_string(),
             e: required_expression_idx(frame.expression_idx.as_ref(), "everyFrame")? as u64,
             line: frame.debug_line.clone(),
+            im_pol: false,
             stage: None,
             offset_min: Some(frame.offset_min),
             offset_max: Some(frame.offset_max),
@@ -734,8 +787,8 @@ fn le_bytes_to_u64(bytes: &[u8]) -> Result<u64> {
         anyhow::bail!("field element is wider than u64: {} bytes", bytes.len());
     }
     let mut buf = [0u8; 8];
-    buf[..bytes.len()].copy_from_slice(bytes);
-    Ok(u64::from_le_bytes(buf))
+    buf[8 - bytes.len()..].copy_from_slice(bytes);
+    Ok(u64::from_be_bytes(buf))
 }
 
 fn linear_offset(lengths: &[u32], indexes: &[u32]) -> u32 {

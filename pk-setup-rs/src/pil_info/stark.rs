@@ -478,6 +478,7 @@ fn add_intermediate_polynomials(
             boundary: "everyRow".to_string(),
             e: constraint_id as u64,
             line: None,
+            im_pol: true,
             stage: Some(im_stage),
             offset_min: None,
             offset_max: None,

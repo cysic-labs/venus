@@ -6,6 +6,10 @@ use pilout_crate::pilout::{self, SymbolType};
 use pilout_crate::pilout_proxy::PilOutProxy;
 use serde::Serialize;
 
+use crate::pil_info::binfile::write_global_constraints_bin_file;
+use crate::pil_info::global::{build_global_constraints, GlobalConstraintsJson};
+use crate::stark_struct::StarkSettingsMap;
+
 const MERKLE_TREE_ARITY: usize = 4;
 const LATTICE_SIZE: usize = 368;
 
@@ -41,6 +45,8 @@ pub struct GlobalInfoJson {
 pub struct GlobalAirJson {
     pub name: String,
     pub num_rows: u32,
+    #[serde(rename = "hasCompressor", skip_serializing_if = "Option::is_none")]
+    pub has_compressor: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,13 +70,10 @@ pub struct PublicMapJson {
     pub lengths: Vec<u32>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct GlobalConstraintsJson {
-    pub constraints: Vec<serde_json::Value>,
-    pub hints: Vec<serde_json::Value>,
-}
-
-pub fn build_global_artifacts(pilout: &PilOutProxy) -> Result<GlobalArtifacts> {
+pub fn build_global_artifacts(
+    pilout: &PilOutProxy,
+    settings: &StarkSettingsMap,
+) -> Result<GlobalArtifacts> {
     let root = &pilout.pilout;
 
     let mut airs = Vec::with_capacity(root.air_groups.len());
@@ -84,9 +87,12 @@ pub fn build_global_artifacts(pilout: &PilOutProxy) -> Result<GlobalArtifacts> {
                 .airs
                 .iter()
                 .map(|air| {
+                    let name = required_string(air.name.as_ref(), "air name")?;
+                    let has_compressor = settings.for_air(&name).has_compressor;
                     Ok(GlobalAirJson {
-                        name: required_string(air.name.as_ref(), "air name")?,
+                        name,
                         num_rows: air.num_rows.unwrap_or_default(),
+                        has_compressor,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,
@@ -137,10 +143,7 @@ pub fn build_global_artifacts(pilout: &PilOutProxy) -> Result<GlobalArtifacts> {
         publics_map: sparse_public_map(publics_map),
     };
 
-    Ok(GlobalArtifacts {
-        info,
-        constraints: GlobalConstraintsJson { constraints: Vec::new(), hints: Vec::new() },
-    })
+    Ok(GlobalArtifacts { info, constraints: build_global_constraints(root)? })
 }
 
 pub fn write_global_artifacts(proving_key_dir: &Path, global: &GlobalArtifacts) -> Result<()> {
@@ -149,6 +152,7 @@ pub fn write_global_artifacts(proving_key_dir: &Path, global: &GlobalArtifacts) 
 
     let global_info_path = proving_key_dir.join("pilout.globalInfo.json");
     let global_constraints_path = proving_key_dir.join("pilout.globalConstraints.json");
+    let global_constraints_bin_path = proving_key_dir.join("pilout.globalConstraints.bin");
 
     fs::write(
         &global_info_path,
@@ -162,6 +166,13 @@ pub fn write_global_artifacts(proving_key_dir: &Path, global: &GlobalArtifacts) 
             .context("failed to serialize globalConstraints")?,
     )
     .with_context(|| format!("failed to write {}", global_constraints_path.display()))?;
+
+    write_global_constraints_bin_file(
+        &global_constraints_bin_path,
+        &global.info,
+        &global.constraints,
+    )
+    .with_context(|| format!("failed to write {}", global_constraints_bin_path.display()))?;
 
     Ok(())
 }
