@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+pub mod air;
+#[allow(dead_code)]
 pub mod circuit;
 #[allow(dead_code)]
 pub mod gadgets;
