@@ -1,4 +1,7 @@
+mod pil_info;
 mod pilout_info;
+mod setup_layout;
+mod stark_struct;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +27,10 @@ struct Args {
     /// Existing PILOUT file. Native PIL compilation will be added in this crate; for now this must exist.
     #[arg(short = 'a', long, default_value = "pil/zisk.pilout")]
     airout: PathBuf,
+
+    /// Stark settings JSON, compatible with the legacy state-machines/starkstructs.json.
+    #[arg(short = 's', long, default_value = "state-machines/starkstructs.json")]
+    starkstructs: PathBuf,
 
     /// Fixed columns directory used by the legacy setup.
     #[arg(short = 'u', long, default_value = "tmp/fixed")]
@@ -51,6 +58,7 @@ fn main() -> Result<()> {
     let fixed_dir = resolve_path(&root, &args.fixed_dir);
     let proof_dir = resolve_path(&root, &args.proof_dir);
     let pilout_path = resolve_path(&root, &args.airout);
+    let starkstructs_path = resolve_path(&root, &args.starkstructs);
     let proving_key_dir = build_dir.join("provingKey");
 
     prepare_directories(&build_dir, &fixed_dir, &proof_dir, &proving_key_dir)?;
@@ -68,6 +76,8 @@ fn main() -> Result<()> {
 
     let global = pilout_info::build_global_artifacts(&pilout)?;
     pilout_info::write_global_artifacts(&proving_key_dir, &global)?;
+    let settings = stark_struct::StarkSettingsMap::from_file(&starkstructs_path)?;
+    setup_layout::write_basic_air_layout(&proving_key_dir, &fixed_dir, &pilout, &settings)?;
 
     if args.recursive {
         info!("recursive aggregation setup is not implemented yet in pk-setup-rs");

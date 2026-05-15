@@ -75,7 +75,8 @@ generate-key-rs:
 	cargo run --release -p pk-setup-rs --bin generate-key-rs -- \
 		--root "$(ROOT)" --build-dir "$(BUILD_DIR)" \
 		--fixed-dir "$(FIXED_DIR)" --proof-dir "$(PROOF_DIR)" \
-		--airout "$(ROOT)/pil/zisk.pilout" -r
+		--airout "$(ROOT)/pil/zisk.pilout" \
+		--starkstructs "$(ROOT)/state-machines/starkstructs.json" -r
 
 build-guest: install-toolchain
 	cd "$(GUEST_DIR)" && "$(CARGO_ZISK_BIN)" build --release

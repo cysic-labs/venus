@@ -1,0 +1,118 @@
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use pilout_crate::pilout::Air;
+use pilout_crate::pilout_proxy::PilOutProxy;
+use serde::Serialize;
+use tracing::info;
+
+use crate::stark_struct::{generate_stark_struct, StarkSettingsMap, StarkStruct};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AirSetupManifest {
+    airgroup_id: usize,
+    air_id: usize,
+    airgroup_name: String,
+    air_name: String,
+    num_rows: u32,
+    n_bits: u64,
+    stark_struct: StarkStruct,
+    has_compressor: bool,
+}
+
+pub fn write_basic_air_layout(
+    proving_key_dir: &Path,
+    fixed_dir: &Path,
+    pilout: &PilOutProxy,
+    settings: &StarkSettingsMap,
+) -> Result<()> {
+    let root = &pilout.pilout;
+    let name = root.name.as_ref().context("PILOUT is missing a name")?.to_string();
+
+    for (airgroup_id, air_group) in root.air_groups.iter().enumerate() {
+        let airgroup_name = air_group
+            .name
+            .as_ref()
+            .with_context(|| format!("airgroup {airgroup_id} is missing a name"))?;
+        for (air_id, air) in air_group.airs.iter().enumerate() {
+            write_basic_air(
+                proving_key_dir,
+                fixed_dir,
+                &name,
+                airgroup_id,
+                airgroup_name,
+                air_id,
+                air,
+                settings,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_basic_air(
+    proving_key_dir: &Path,
+    fixed_dir: &Path,
+    pilout_name: &str,
+    airgroup_id: usize,
+    airgroup_name: &str,
+    air_id: usize,
+    air: &Air,
+    settings: &StarkSettingsMap,
+) -> Result<()> {
+    let air_name = air
+        .name
+        .as_ref()
+        .with_context(|| format!("air {airgroup_id}:{air_id} is missing a name"))?;
+    let files_dir = proving_key_dir
+        .join(pilout_name)
+        .join(airgroup_name)
+        .join("airs")
+        .join(air_name)
+        .join("air");
+    fs::create_dir_all(&files_dir)
+        .with_context(|| format!("failed to create {}", files_dir.display()))?;
+
+    let fixed_src = fixed_dir.join(format!("{air_name}.fixed"));
+    let const_dst = files_dir.join(format!("{air_name}.const"));
+    fs::copy(&fixed_src, &const_dst).with_context(|| {
+        format!("failed to copy {} to {}", fixed_src.display(), const_dst.display())
+    })?;
+
+    let num_rows = air.num_rows.with_context(|| format!("air {air_name} is missing numRows"))?;
+    let n_bits = checked_log2(num_rows)
+        .with_context(|| format!("air {air_name} numRows={num_rows} is not a power of two"))?;
+    let air_settings = settings.for_air(air_name);
+    let stark_struct = generate_stark_struct(&air_settings, n_bits)?;
+
+    let manifest = AirSetupManifest {
+        airgroup_id,
+        air_id,
+        airgroup_name: airgroup_name.to_string(),
+        air_name: air_name.to_string(),
+        num_rows,
+        n_bits,
+        stark_struct,
+        has_compressor: air_settings.has_compressor.unwrap_or(false),
+    };
+    let manifest_path = files_dir.join(format!("{air_name}.setup-rs.json"));
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest)
+            .context("failed to serialize AIR setup manifest")?,
+    )
+    .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+    info!("prepared basic AIR layout for {airgroup_name}/{air_name}");
+
+    Ok(())
+}
+
+fn checked_log2(value: u32) -> Option<u64> {
+    if value == 0 || !value.is_power_of_two() {
+        return None;
+    }
+    Some(u64::from(value.trailing_zeros()))
+}
