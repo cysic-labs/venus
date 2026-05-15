@@ -394,12 +394,14 @@ impl<F: PrimeField64> Setup<F> {
         let dat_filename_ptr = dat_filename_str.as_ptr() as *mut std::os::raw::c_char;
 
         if !rust_lib_path.exists() {
-            let dat_path = Path::new(dat_filename.as_str());
-            if dat_path.exists() {
-                let runtime = NativeRecursiveRuntime::from_dat_file(dat_path)?;
-                *self.size_witness.write().unwrap() = Some(runtime.size_witness_words);
-                *self.native_runtime.write().unwrap() = Some(runtime);
-                return Ok(());
+            let runtime_dat_filename = self.setup_path.display().to_string() + ".runtime.dat";
+            for dat_path in [Path::new(dat_filename.as_str()), Path::new(runtime_dat_filename.as_str())] {
+                if dat_path.exists() {
+                    let runtime = NativeRecursiveRuntime::from_dat_file(dat_path)?;
+                    *self.size_witness.write().unwrap() = Some(runtime.size_witness_words);
+                    *self.native_runtime.write().unwrap() = Some(runtime);
+                    return Ok(());
+                }
             }
 
             return Err(ProofmanError::InvalidSetup(format!(
