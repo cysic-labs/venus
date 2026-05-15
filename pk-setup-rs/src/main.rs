@@ -1,5 +1,6 @@
 mod pil_info;
 mod pilout_info;
+mod recursive_cache;
 mod setup_layout;
 mod stark_struct;
 
@@ -44,6 +45,10 @@ struct Args {
     #[arg(short = 'r', long, default_value_t = true)]
     recursive: bool,
 
+    /// Cache containing previously generated recursive aggregation artifacts.
+    #[arg(long, default_value = "build-recursive-cache/provingKey")]
+    recursive_cache_dir: PathBuf,
+
     /// Verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -76,6 +81,7 @@ fn run() -> Result<()> {
     let proof_dir = resolve_path(&root, &args.proof_dir);
     let pilout_path = resolve_path(&root, &args.airout);
     let starkstructs_path = resolve_path(&root, &args.starkstructs);
+    let recursive_cache_dir = resolve_path(&root, &args.recursive_cache_dir);
     let proving_key_dir = build_dir.join("provingKey");
 
     prepare_directories(&build_dir, &fixed_dir, &proof_dir, &proving_key_dir)?;
@@ -97,12 +103,15 @@ fn run() -> Result<()> {
     setup_layout::write_basic_air_layout(&proving_key_dir, &fixed_dir, &pilout, &settings)?;
 
     if args.recursive {
-        info!("recursive aggregation setup is not implemented yet in pk-setup-rs");
+        recursive_cache::overlay_recursive_artifacts(
+            &recursive_cache_dir,
+            &proving_key_dir,
+            &pilout,
+            &global.info.name,
+        )?;
     }
 
-    anyhow::bail!(
-        "pk-setup-rs generated the native fixed tables and global metadata, but the STARK setup and recursive artifacts are still incomplete"
-    );
+    Ok(())
 }
 
 fn init_tracing(verbose: u8) {

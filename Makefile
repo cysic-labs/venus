@@ -32,7 +32,7 @@ PROVE_ARGS := -i $(INPUT)
 PROVE_PREPARE :=
 endif
 
-.PHONY: all setup build install-toolchain check-key generate-key generate-key-rs build-guest build-guest-native \
+.PHONY: all setup build install-toolchain check-key generate-key generate-key-rs generate-key-js build-guest build-guest-native \
         generate-hints rom-setup compile-key prove verify clean purge help
 
 all: setup prove verify
@@ -52,10 +52,13 @@ install-toolchain: build
 check-key:
 	@if [ ! -d "$(PROVING_KEY)" ]; then \
 		echo "proving key not found at $(PROVING_KEY), generating..."; \
-		$(MAKE) generate-key; \
+		$(MAKE) generate-key-rs; \
 	fi
 
 generate-key:
+	$(MAKE) generate-key-rs
+
+generate-key-js:
 	mkdir -p "$(BUILD_DIR)" "$(FIXED_DIR)" "$(PROOF_DIR)"
 	rm -rf "$(PROVING_KEY)"
 	npm install --prefix "$(ROOT)/pil2-compiler"
@@ -124,6 +127,7 @@ help:
 	@echo "  make setup"
 	@echo "  make generate-key"
 	@echo "  make generate-key-rs"
+	@echo "  make generate-key-js"
 	@echo "  make prove"
 	@echo "  make verify"
 	@echo ""
