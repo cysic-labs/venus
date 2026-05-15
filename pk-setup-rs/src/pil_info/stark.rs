@@ -10,7 +10,7 @@ use crate::pil_info::format::{
     AirFormatContext, FormattedConstraint, FormattedExpression, FormattedHint, FormattedSymbol,
     FIELD_EXTENSION,
 };
-use crate::stark_struct::StarkStruct;
+use crate::stark_struct::{apply_security_estimate, SecurityEstimate, StarkStruct};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,11 +62,12 @@ pub struct StarkInfoJson {
     #[serde(rename = "nConstraints")]
     pub n_constraints: usize,
     #[serde(rename = "evMap")]
-    pub ev_map: Vec<serde_json::Value>,
+    pub ev_map: Vec<EvMapJson>,
     #[serde(rename = "airGroupValues")]
     pub air_group_values: Vec<AirGroupValueJson>,
     #[serde(rename = "nCommitmentsStage1")]
     pub n_commitments_stage1: usize,
+    pub security: SecurityInfoJson,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -134,6 +135,26 @@ pub struct AirGroupValueJson {
     pub stage: u32,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct EvMapJson {
+    #[serde(rename = "type")]
+    pub ev_type: String,
+    pub id: u64,
+    pub prime: i64,
+    #[serde(rename = "openingPos")]
+    pub opening_pos: usize,
+    #[serde(rename = "commitId", skip_serializing_if = "Option::is_none")]
+    pub commit_id: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityInfoJson {
+    pub proximity_parameter: f64,
+    pub proximity_gap: f64,
+    pub regime: &'static str,
+}
+
 pub struct AirStarkDraft {
     pub stark_info: StarkInfoJson,
     pub expressions: Vec<FormattedExpression>,
@@ -185,6 +206,8 @@ pub fn build_air_stark_draft(input: AirInput<'_>) -> Result<AirStarkDraft> {
     let max_degree = calculate_exp_deg(&expressions, &expressions[c_exp_id], &[])?;
     let q_deg = max_degree.saturating_sub(1);
     let q_dim = c_info.dim;
+    let c_exp_id = wrap_constraint_polynomial(&mut expressions, c_exp_id, &boundaries)?;
+    annotate_expression_id(&mut expressions, c_exp_id)?;
 
     add_quotient_polynomials(
         &mut symbols,
@@ -194,18 +217,43 @@ pub fn build_air_stark_draft(input: AirInput<'_>) -> Result<AirStarkDraft> {
         q_deg,
         q_dim,
     );
-    let maps = map_symbols(
+    add_xi_challenge(&mut symbols, input.num_challenges.len() + 2);
+    let mut maps = map_symbols(
         &mut symbols,
         input.air.custom_commits.as_slice(),
         input.num_challenges.len() + 1,
     );
+    let ev_map = build_ev_map(&expressions, &maps, c_exp_id, q_deg, &opening_points)?;
+    let fri_exp_id = generate_fri_polynomial(
+        &mut expressions,
+        &mut symbols,
+        &mut maps.challenges_map,
+        &ev_map,
+        &opening_points,
+        input.num_challenges.len() + 3,
+    )?;
+    annotate_expression_id(&mut expressions, fri_exp_id)?;
+    maps = map_symbols(
+        &mut symbols,
+        input.air.custom_commits.as_slice(),
+        input.num_challenges.len() + 1,
+    );
+
+    let mut stark_struct = input.stark_struct;
+    let security = format_security_estimate(apply_security_estimate(
+        &mut stark_struct,
+        opening_points.len(),
+        constraints.len(),
+        ev_map.len(),
+        q_deg + 1,
+    ));
 
     let air_name = input.air.name.clone().context("air is missing name")?;
     let stark_info = StarkInfoJson {
         name: air_name,
         airgroup_id: input.airgroup_id,
         air_id: input.air_id,
-        stark_struct: input.stark_struct,
+        stark_struct,
         n_publics: maps.publics_map.len(),
         n_constants: maps.const_pols_map.len(),
         n_stages: input.num_challenges.len(),
@@ -223,10 +271,10 @@ pub fn build_air_stark_draft(input: AirInput<'_>) -> Result<AirStarkDraft> {
         q_deg,
         q_dim,
         c_exp_id,
-        fri_exp_id: None,
+        fri_exp_id: Some(fri_exp_id),
         map_sections_n: maps.map_sections_n,
         n_constraints: constraints.len(),
-        ev_map: Vec::new(),
+        ev_map,
         air_group_values: input.airgroup_values.iter().map(format_airgroup_value).collect(),
         n_commitments_stage1: symbols
             .iter()
@@ -234,6 +282,7 @@ pub fn build_air_stark_draft(input: AirInput<'_>) -> Result<AirStarkDraft> {
                 symbol.symbol_type == "witness" && symbol.stage == Some(1) && !symbol.im_pol
             })
             .count(),
+        security,
     };
 
     Ok(AirStarkDraft { stark_info, expressions, constraints, symbols, hints })
@@ -319,6 +368,322 @@ fn generate_constraint_polynomial(
     c_exp_id.context("AIR has no constraints")
 }
 
+fn wrap_constraint_polynomial(
+    expressions: &mut Vec<FormattedExpression>,
+    c_exp_id: usize,
+    boundaries: &[BoundaryJson],
+) -> Result<usize> {
+    let every_row = boundaries
+        .iter()
+        .position(|boundary| boundary.name == "everyRow")
+        .context("everyRow boundary not found")? as u64;
+    let stage = expressions.get(c_exp_id).and_then(|expr| expr.stage).unwrap_or(0);
+    let wrapped =
+        FormattedExpression::binary("mul", exp_ref(c_exp_id as u64, stage), zi(every_row));
+    expressions.push(wrapped);
+    Ok(expressions.len() - 1)
+}
+
+fn add_xi_challenge(symbols: &mut Vec<FormattedSymbol>, stage: usize) {
+    let stage = stage as u64;
+    let xi_id = symbols
+        .iter()
+        .filter(|symbol| symbol.symbol_type == "challenge" && symbol.stage.unwrap_or(0) < stage)
+        .count() as u64;
+    symbols.push(FormattedSymbol {
+        name: "std_xi".to_string(),
+        symbol_type: "challenge".to_string(),
+        pol_id: None,
+        id: Some(xi_id),
+        stage: Some(stage),
+        stage_id: Some(0),
+        dim: FIELD_EXTENSION,
+        airgroup_id: None,
+        air_id: None,
+        commit_id: None,
+        lengths: Vec::new(),
+        stage_pos: None,
+        exp_id: None,
+        im_pol: false,
+    });
+}
+
+fn build_ev_map(
+    expressions: &[FormattedExpression],
+    maps: &SymbolMaps,
+    c_exp_id: usize,
+    q_deg: u64,
+    opening_points: &[i64],
+) -> Result<Vec<EvMapJson>> {
+    let mut ev_map = Vec::new();
+    let mut visited_expressions = BTreeSet::new();
+    let mut stack = vec![expressions
+        .get(c_exp_id)
+        .with_context(|| format!("constraint expression {c_exp_id} not found"))?];
+
+    while let Some(expression) = stack.pop() {
+        match expression.op.as_str() {
+            "exp" => {
+                let id = expression.id.context("exp expression is missing id")? as usize;
+                if visited_expressions.insert(id) {
+                    stack.push(
+                        expressions
+                            .get(id)
+                            .with_context(|| format!("expression {id} not found"))?,
+                    );
+                }
+            }
+            "cm" | "const" | "custom" => {
+                let prime = expression.row_offset.unwrap_or(0);
+                let opening_pos = opening_points
+                    .iter()
+                    .position(|opening| *opening == prime)
+                    .with_context(|| format!("opening point {prime} not found"))?;
+                let item = EvMapJson {
+                    ev_type: if expression.op == "const" {
+                        "const".to_string()
+                    } else if expression.op == "custom" {
+                        "custom".to_string()
+                    } else {
+                        "cm".to_string()
+                    },
+                    id: expression.id.context("evaluation expression is missing id")?,
+                    prime,
+                    opening_pos,
+                    commit_id: expression.commit_id,
+                };
+                if !ev_map.contains(&item) {
+                    ev_map.push(item);
+                }
+            }
+            "add" | "sub" | "mul" | "neg" => stack.extend(expression.values.iter()),
+            _ => {}
+        }
+    }
+
+    let q_index = maps
+        .cm_pols_map
+        .iter()
+        .position(|pol| {
+            pol.stage == (maps.challenges_map.len().saturating_sub(2)) as u64
+                && pol.stage_id == Some(0)
+        })
+        .or_else(|| {
+            maps.cm_pols_map.iter().position(|pol| pol.name == "Q0" && pol.stage_id == Some(0))
+        })
+        .context("quotient polynomial Q0 not found")? as u64;
+    let opening_pos = opening_points.iter().position(|opening| *opening == 0).unwrap_or(0);
+    for idx in 0..q_deg {
+        ev_map.push(EvMapJson {
+            ev_type: "cm".to_string(),
+            id: q_index + idx,
+            prime: 0,
+            opening_pos,
+            commit_id: None,
+        });
+    }
+
+    ev_map.sort_by(|lhs, rhs| {
+        lhs.opening_pos
+            .cmp(&rhs.opening_pos)
+            .then_with(|| type_order(rhs).cmp(&type_order(lhs)))
+            .then_with(|| lhs.id.cmp(&rhs.id))
+            .then_with(|| lhs.prime.cmp(&rhs.prime))
+    });
+    Ok(ev_map)
+}
+
+fn type_order(ev: &EvMapJson) -> u64 {
+    match ev.ev_type.as_str() {
+        "cm" => 0,
+        "const" => 1,
+        "custom" => ev.commit_id.unwrap_or(0) + 2,
+        _ => 0,
+    }
+}
+
+fn generate_fri_polynomial(
+    expressions: &mut Vec<FormattedExpression>,
+    symbols: &mut Vec<FormattedSymbol>,
+    challenges_map: &mut Vec<ChallengeMapJson>,
+    ev_map: &[EvMapJson],
+    opening_points: &[i64],
+    stage: usize,
+) -> Result<usize> {
+    let stage = stage as u64;
+    let vf1_id = symbols
+        .iter()
+        .filter(|symbol| symbol.symbol_type == "challenge" && symbol.stage.unwrap_or(0) < stage)
+        .count() as u64;
+    let vf2_id = vf1_id + 1;
+    let vf1_symbol = FormattedSymbol {
+        name: "std_vf1".to_string(),
+        symbol_type: "challenge".to_string(),
+        pol_id: None,
+        id: Some(vf1_id),
+        stage: Some(stage),
+        stage_id: Some(0),
+        dim: FIELD_EXTENSION,
+        airgroup_id: None,
+        air_id: None,
+        commit_id: None,
+        lengths: Vec::new(),
+        stage_pos: None,
+        exp_id: None,
+        im_pol: false,
+    };
+    let vf2_symbol = FormattedSymbol {
+        name: "std_vf2".to_string(),
+        symbol_type: "challenge".to_string(),
+        pol_id: None,
+        id: Some(vf2_id),
+        stage: Some(stage),
+        stage_id: Some(1),
+        dim: FIELD_EXTENSION,
+        airgroup_id: None,
+        air_id: None,
+        commit_id: None,
+        lengths: Vec::new(),
+        stage_pos: None,
+        exp_id: None,
+        im_pol: false,
+    };
+    set_sparse(
+        challenges_map,
+        vf1_id as usize,
+        ChallengeMapJson {
+            name: vf1_symbol.name.clone(),
+            stage,
+            dim: FIELD_EXTENSION,
+            stage_id: 0,
+        },
+    );
+    set_sparse(
+        challenges_map,
+        vf2_id as usize,
+        ChallengeMapJson {
+            name: vf2_symbol.name.clone(),
+            stage,
+            dim: FIELD_EXTENSION,
+            stage_id: 1,
+        },
+    );
+    symbols.push(vf1_symbol);
+    symbols.push(vf2_symbol);
+
+    let vf1 = challenge("std_vf1", stage, 0, vf1_id);
+    let vf2 = challenge("std_vf2", stage, 1, vf2_id);
+    let mut fri_by_opening = BTreeMap::<i64, usize>::new();
+
+    for (idx, ev) in ev_map.iter().enumerate() {
+        let symbol = find_eval_symbol(symbols, ev).with_context(|| {
+            format!("symbol for evMap entry {}:{} not found", ev.ev_type, ev.id)
+        })?;
+        let value = match ev.ev_type.as_str() {
+            "const" => {
+                let mut expr = FormattedExpression::new("const");
+                expr.id = Some(ev.id);
+                expr.row_offset = Some(0);
+                expr.stage = Some(0);
+                expr.dim = Some(symbol.dim);
+                expr
+            }
+            "cm" => {
+                let mut expr = FormattedExpression::new("cm");
+                expr.id = Some(ev.id);
+                expr.row_offset = Some(0);
+                expr.stage = symbol.stage;
+                expr.dim = Some(symbol.dim);
+                expr.airgroup_id = symbol.airgroup_id;
+                expr.air_id = symbol.air_id;
+                expr
+            }
+            "custom" => {
+                let mut expr = FormattedExpression::new("custom");
+                expr.id = Some(ev.id);
+                expr.row_offset = Some(0);
+                expr.stage = symbol.stage;
+                expr.dim = Some(symbol.dim);
+                expr.airgroup_id = symbol.airgroup_id;
+                expr.air_id = symbol.air_id;
+                expr.commit_id = ev.commit_id;
+                expr
+            }
+            _ => anyhow::bail!("unsupported evMap type {}", ev.ev_type),
+        };
+        let mut eval = FormattedExpression::new("eval");
+        eval.id = Some(idx as u64);
+        eval.dim = Some(FIELD_EXTENSION);
+        let term = FormattedExpression::binary("sub", value, eval);
+        expressions.push(term);
+        let term_id = expressions.len() - 1;
+        if let Some(current_id) = fri_by_opening.get_mut(&ev.prime) {
+            let weighted =
+                FormattedExpression::binary("mul", exp_ref(*current_id as u64, stage), vf2.clone());
+            expressions.push(weighted);
+            let weighted_id = expressions.len() - 1;
+            let accumulated = FormattedExpression::binary(
+                "add",
+                exp_ref(weighted_id as u64, stage),
+                exp_ref(term_id as u64, stage),
+            );
+            expressions.push(accumulated);
+            *current_id = expressions.len() - 1;
+        } else {
+            fri_by_opening.insert(ev.prime, term_id);
+        }
+    }
+
+    let mut fri_exp_id = None;
+    for (opening_idx, opening) in opening_points.iter().enumerate() {
+        let expr_id = fri_by_opening
+            .remove(opening)
+            .with_context(|| format!("FRI expression for opening point {opening} not found"))?;
+        let weighted = FormattedExpression::binary(
+            "mul",
+            exp_ref(expr_id as u64, stage),
+            x_div_x_sub_xi(*opening, opening_idx),
+        );
+        expressions.push(weighted);
+        let weighted_id = expressions.len() - 1;
+        fri_exp_id = Some(if let Some(previous_id) = fri_exp_id {
+            let previous =
+                FormattedExpression::binary("mul", vf1.clone(), exp_ref(previous_id as u64, stage));
+            expressions.push(previous);
+            let previous_weighted_id = expressions.len() - 1;
+            let accumulated = FormattedExpression::binary(
+                "add",
+                exp_ref(previous_weighted_id as u64, stage),
+                exp_ref(weighted_id as u64, stage),
+            );
+            expressions.push(accumulated);
+            expressions.len() - 1
+        } else {
+            weighted_id
+        });
+    }
+
+    let fri_exp_id = fri_exp_id.context("FRI polynomial has no expressions")?;
+    expressions[fri_exp_id].stage = Some(stage - 1);
+    Ok(fri_exp_id)
+}
+
+fn find_eval_symbol<'a>(
+    symbols: &'a [FormattedSymbol],
+    ev: &EvMapJson,
+) -> Option<&'a FormattedSymbol> {
+    symbols.iter().find(|symbol| match ev.ev_type.as_str() {
+        "const" => symbol.symbol_type == "fixed" && symbol.pol_id == Some(ev.id),
+        "cm" => symbol.symbol_type == "witness" && symbol.pol_id == Some(ev.id),
+        "custom" => {
+            symbol.symbol_type == "custom"
+                && symbol.pol_id == Some(ev.id)
+                && symbol.commit_id == ev.commit_id
+        }
+        _ => false,
+    })
+}
+
 fn add_quotient_polynomials(
     symbols: &mut Vec<FormattedSymbol>,
     airgroup_id: u32,
@@ -365,6 +730,7 @@ struct SymbolMaps {
     air_values_map: Vec<NamedMapJson>,
     challenges_map: Vec<ChallengeMapJson>,
     custom_commits_map: Vec<Vec<PolMapJson>>,
+    custom_section_names: Vec<Vec<Option<String>>>,
     map_sections_n: BTreeMap<String, u64>,
 }
 
@@ -379,11 +745,14 @@ fn map_symbols(
         maps.map_sections_n.insert(format!("cm{stage}"), 0);
     }
     maps.custom_commits_map = vec![Vec::new(); custom_commits.len()];
-    for commit in custom_commits {
+    maps.custom_section_names = vec![Vec::new(); custom_commits.len()];
+    for (commit_id, commit) in custom_commits.iter().enumerate() {
+        maps.custom_section_names[commit_id] = vec![None; commit.stage_widths.len()];
         for (stage, width) in commit.stage_widths.iter().enumerate() {
             if *width > 0 {
-                maps.map_sections_n
-                    .insert(format!("{}{}", commit.name.as_deref().unwrap_or("custom"), stage), 0);
+                let section = format!("{}{}", commit.name.as_deref().unwrap_or("custom"), stage);
+                maps.custom_section_names[commit_id][stage] = Some(section.clone());
+                maps.map_sections_n.insert(section, 0);
             }
         }
     }
@@ -479,8 +848,13 @@ fn add_pol(maps: &mut SymbolMaps, symbol: &FormattedSymbol) {
                 maps.custom_commits_map.resize_with(commit_id + 1, Vec::new);
             }
             set_sparse(&mut maps.custom_commits_map[commit_id], pol_id as usize, pol);
-            *maps.map_sections_n.entry(format!("custom{commit_id}{stage}")).or_default() +=
-                symbol.dim;
+            let section = maps
+                .custom_section_names
+                .get(commit_id)
+                .and_then(|stages| stages.get(stage as usize))
+                .and_then(|section| section.clone())
+                .unwrap_or_else(|| format!("custom{commit_id}{stage}"));
+            *maps.map_sections_n.entry(section).or_default() += symbol.dim;
         }
         _ => {}
     }
@@ -585,6 +959,14 @@ fn zi(boundary_id: u64) -> FormattedExpression {
     expr
 }
 
+fn x_div_x_sub_xi(opening: i64, id: usize) -> FormattedExpression {
+    let mut expr = FormattedExpression::new("xDivXSubXi");
+    expr.id = Some(id as u64);
+    expr.opening = Some(opening);
+    expr.dim = Some(FIELD_EXTENSION);
+    expr
+}
+
 fn format_custom_commit(commit: &CustomCommit) -> CustomCommitJson {
     CustomCommitJson {
         name: commit.name.clone().unwrap_or_default(),
@@ -599,6 +981,14 @@ fn format_custom_commit(commit: &CustomCommit) -> CustomCommitJson {
 
 fn format_airgroup_value(value: &AirGroupValue) -> AirGroupValueJson {
     AirGroupValueJson { agg_type: value.agg_type, stage: value.stage }
+}
+
+fn format_security_estimate(estimate: SecurityEstimate) -> SecurityInfoJson {
+    SecurityInfoJson {
+        proximity_parameter: estimate.proximity_parameter,
+        proximity_gap: estimate.proximity_gap,
+        regime: "JBR",
+    }
 }
 
 fn is_false(value: &bool) -> bool {
