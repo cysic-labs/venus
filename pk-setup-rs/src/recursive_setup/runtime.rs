@@ -145,6 +145,8 @@ fn append_custom_gates(out: &mut Vec<u8>, r1cs: &R1cs) {
                 "TreeSelector4" => Some(3u64),
                 "SelectValue1" => Some(4u64),
                 "FFT4" => Some(5u64),
+                "Poseidon16" => Some(6u64),
+                "CustPoseidon16" => Some(7u64),
                 _ => None,
             }?;
             Some((kind, &gate.parameters, gate_use))

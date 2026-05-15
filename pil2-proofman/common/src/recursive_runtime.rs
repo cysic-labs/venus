@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use fields::PrimeField64;
+use fields::{add, matmul_external, pow7, pow7add, prodadd, Poseidon16, Poseidon2Constants, PrimeField64};
 
 use crate::{ProofmanError, ProofmanResult};
 
@@ -72,6 +72,8 @@ pub enum NativeRuntimeCustomGateKind {
     TreeSelector4,
     SelectValue1,
     FFT4,
+    Poseidon16,
+    CustPoseidon16,
 }
 
 impl NativeRecursiveRuntime {
@@ -405,6 +407,8 @@ impl NativeRecursiveRuntime {
             NativeRuntimeCustomGateKind::TreeSelector4 => solve_tree_selector4_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::SelectValue1 => solve_select_value1_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::FFT4 => solve_fft4_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::Poseidon16 => solve_poseidon16_gate(gate, witness, known, false),
+            NativeRuntimeCustomGateKind::CustPoseidon16 => solve_poseidon16_gate(gate, witness, known, true),
         }
     }
 
@@ -420,6 +424,8 @@ impl NativeRecursiveRuntime {
             NativeRuntimeCustomGateKind::TreeSelector4 => verify_tree_selector4_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::SelectValue1 => verify_select_value1_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::FFT4 => verify_fft4_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::Poseidon16 => verify_poseidon16_gate(gate, witness, known, false),
+            NativeRuntimeCustomGateKind::CustPoseidon16 => verify_poseidon16_gate(gate, witness, known, true),
         }
     }
 }
@@ -762,6 +768,63 @@ fn verify_fft4_gate<F: PrimeField64>(
     verify_gate_outputs("FFT4", &signals[12..24], result, witness)
 }
 
+fn solve_poseidon16_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &mut [F],
+    known: &mut [bool],
+    custom: bool,
+) -> ProofmanResult<bool> {
+    let gate_name = if custom { "CustPoseidon16" } else { "Poseidon16" };
+    let expected_len = if custom { 226 } else { 224 };
+    if gate.signals.len() != expected_len {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "{gate_name} native runtime gate must have {expected_len} signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    if !gate.parameters.is_empty() {
+        return Err(ProofmanError::InvalidSetup(format!("{gate_name} native runtime gate must not have parameters")));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    let input_len = if custom { 18 } else { 16 };
+    if signals[..input_len].iter().any(|&signal| !known[signal]) {
+        return Ok(false);
+    }
+
+    let input = poseidon16_input(gate_name, custom, &signals, witness)?;
+    let result = poseidon16_trace(input);
+    let output_start = if custom { 18 } else { 16 };
+    assign_gate_outputs(gate_name, &signals[output_start..], result, witness, known)
+}
+
+fn verify_poseidon16_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &[F],
+    known: &[bool],
+    custom: bool,
+) -> ProofmanResult<()> {
+    let gate_name = if custom { "CustPoseidon16" } else { "Poseidon16" };
+    let expected_len = if custom { 226 } else { 224 };
+    if gate.signals.len() != expected_len {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "{gate_name} native runtime gate must have {expected_len} signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    if !gate.parameters.is_empty() {
+        return Err(ProofmanError::InvalidSetup(format!("{gate_name} native runtime gate must not have parameters")));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals.iter().any(|&signal| !known[signal]) {
+        return Ok(());
+    }
+
+    let input = poseidon16_input(gate_name, custom, &signals, witness)?;
+    let result = poseidon16_trace(input);
+    let output_start = if custom { 18 } else { 16 };
+    verify_gate_outputs(gate_name, &signals[output_start..], result, witness)
+}
+
 fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
     let mut out = Vec::with_capacity(signals.len());
     for &signal in signals {
@@ -904,6 +967,98 @@ fn fft4<F: PrimeField64>(parameters: &[u64], signals: &[usize], witness: &[F]) -
     Ok(out)
 }
 
+fn poseidon16_input<F: PrimeField64>(
+    gate: &str,
+    custom: bool,
+    signals: &[usize],
+    witness: &[F],
+) -> ProofmanResult<[F; 16]> {
+    let mut input = [F::ZERO; 16];
+    for idx in 0..16 {
+        input[idx] = witness[signals[idx]];
+    }
+    if !custom {
+        return Ok(input);
+    }
+
+    let index = selector_index(witness[signals[16]], witness[signals[17]], gate)?;
+    let order = match index {
+        0 => [0usize, 1, 2, 3],
+        1 => [1, 0, 2, 3],
+        2 => [1, 2, 0, 3],
+        3 => [1, 2, 3, 0],
+        _ => unreachable!(),
+    };
+    let mut ordered = [F::ZERO; 16];
+    for (dst_group, src_group) in order.into_iter().enumerate() {
+        for idx in 0..4 {
+            ordered[dst_group * 4 + idx] = input[src_group * 4 + idx];
+        }
+    }
+    Ok(ordered)
+}
+
+fn poseidon16_trace<F: PrimeField64>(input: [F; 16]) -> [F; 208] {
+    let mut state = input;
+    let mut trace = [F::ZERO; 208];
+    let mut row = 0usize;
+
+    matmul_external::<F, 16>(&mut state);
+    copy_poseidon_row(&mut trace, row, &state);
+    row += 1;
+
+    for r in 0..Poseidon16::HALF_ROUNDS {
+        let constants = poseidon_constants::<F>(r * 16);
+        pow7add::<F, 16>(&mut state, &constants);
+        matmul_external::<F, 16>(&mut state);
+        copy_poseidon_row(&mut trace, row, &state);
+        row += 1;
+    }
+
+    let mut index = 0usize;
+    for r in 0..Poseidon16::N_PARTIAL_ROUNDS {
+        trace[row * 16 + index] = state[0];
+        state[0] += F::from_u64(Poseidon16::RC[Poseidon16::HALF_ROUNDS * 16 + r]);
+        state[0] = pow7(state[0]);
+        let sum = add::<F, 16>(&state);
+        prodadd::<F, 16>(&mut state, Poseidon16::DIAG, sum);
+        index += 1;
+        if r == Poseidon16::N_PARTIAL_ROUNDS / 2 - 1 || r == Poseidon16::N_PARTIAL_ROUNDS - 1 {
+            trace[row * 16 + index] = F::ZERO;
+            index = 0;
+            row += 1;
+            copy_poseidon_row(&mut trace, row, &state);
+            row += 1;
+        }
+    }
+
+    for r in 0..Poseidon16::HALF_ROUNDS {
+        let constants = poseidon_constants::<F>(Poseidon16::HALF_ROUNDS * 16 + Poseidon16::N_PARTIAL_ROUNDS + r * 16);
+        pow7add::<F, 16>(&mut state, &constants);
+        matmul_external::<F, 16>(&mut state);
+        if r + 1 == Poseidon16::HALF_ROUNDS {
+            trace[192..208].copy_from_slice(&state);
+        } else {
+            copy_poseidon_row(&mut trace, row, &state);
+            row += 1;
+        }
+    }
+
+    trace
+}
+
+fn poseidon_constants<F: PrimeField64>(start: usize) -> [F; 16] {
+    let mut out = [F::ZERO; 16];
+    for idx in 0..16 {
+        out[idx] = F::from_u64(Poseidon16::RC[start + idx]);
+    }
+    out
+}
+
+fn copy_poseidon_row<F: PrimeField64>(trace: &mut [F; 208], row: usize, state: &[F; 16]) {
+    trace[row * 16..row * 16 + 16].copy_from_slice(state);
+}
+
 fn checked_table_end(path: &Path, start: usize, count: usize, row_len: usize, label: &str) -> ProofmanResult<usize> {
     start
         .checked_add(
@@ -970,6 +1125,8 @@ fn parse_custom_gates(
             3 => NativeRuntimeCustomGateKind::TreeSelector4,
             4 => NativeRuntimeCustomGateKind::SelectValue1,
             5 => NativeRuntimeCustomGateKind::FFT4,
+            6 => NativeRuntimeCustomGateKind::Poseidon16,
+            7 => NativeRuntimeCustomGateKind::CustPoseidon16,
             other => {
                 return Err(ProofmanError::InvalidSetup(format!(
                     "{} references unsupported native runtime custom gate kind {other}",
@@ -1025,7 +1182,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> ProofmanResult<u64> {
 
 #[cfg(test)]
 mod tests {
-    use fields::Goldilocks;
+    use fields::{Field, Goldilocks};
 
     use super::*;
 
@@ -1222,6 +1379,79 @@ mod tests {
         let expected = [11, 22, 33, 9, 18, 27, 44, 55, 66, 36, 45, 54];
         for (idx, expected) in expected.into_iter().enumerate() {
             assert_eq!(witness[13 + idx].as_canonical_u64(), expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn solves_poseidon16_custom_gate() -> ProofmanResult<()> {
+        let runtime = NativeRecursiveRuntime {
+            template_id: 0,
+            size_witness_words: 225,
+            n_publics: 0,
+            public_input_offset_words: 1,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 16,
+            source_sections: Vec::new(),
+            section_copy_ops: Vec::new(),
+            constraints: Vec::new(),
+            custom_gates: vec![NativeRuntimeCustomGate {
+                kind: NativeRuntimeCustomGateKind::Poseidon16,
+                parameters: Vec::new(),
+                signals: (1..=224).collect(),
+            }],
+        };
+        let source = (1..=16).collect::<Vec<_>>();
+
+        let witness = runtime.generate_witness::<Goldilocks>(&source, 225)?;
+        let mut input = [Goldilocks::ZERO; 16];
+        for idx in 0..16 {
+            input[idx] = Goldilocks::from_u64(source[idx]);
+        }
+        let expected = fields::poseidon2_hash::<Goldilocks, Poseidon16, 16>(&input);
+        for (idx, expected) in expected.into_iter().enumerate() {
+            assert_eq!(witness[209 + idx], expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn solves_cust_poseidon16_custom_gate() -> ProofmanResult<()> {
+        let runtime = NativeRecursiveRuntime {
+            template_id: 0,
+            size_witness_words: 227,
+            n_publics: 0,
+            public_input_offset_words: 1,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 18,
+            source_sections: Vec::new(),
+            section_copy_ops: Vec::new(),
+            constraints: Vec::new(),
+            custom_gates: vec![NativeRuntimeCustomGate {
+                kind: NativeRuntimeCustomGateKind::CustPoseidon16,
+                parameters: Vec::new(),
+                signals: (1..=226).collect(),
+            }],
+        };
+        let mut source = (1..=16).collect::<Vec<_>>();
+        source.push(1);
+        source.push(1);
+
+        let witness = runtime.generate_witness::<Goldilocks>(&source, 227)?;
+        let order = [1usize, 2, 3, 0];
+        let mut input = [Goldilocks::ZERO; 16];
+        for (dst_group, src_group) in order.into_iter().enumerate() {
+            for idx in 0..4 {
+                input[dst_group * 4 + idx] = Goldilocks::from_u64(source[src_group * 4 + idx]);
+            }
+        }
+        let expected = fields::poseidon2_hash::<Goldilocks, Poseidon16, 16>(&input);
+        for (idx, expected) in expected.into_iter().enumerate() {
+            assert_eq!(witness[211 + idx], expected);
         }
         Ok(())
     }
