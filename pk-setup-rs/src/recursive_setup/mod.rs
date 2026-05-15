@@ -16,7 +16,15 @@ pub mod runtime;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use pilout_crate::pilout::AirGroupValue;
+use serde::Serialize;
 
+use crate::pil_info::binfile::{write_expressions_bin_file, write_verifier_expressions_bin_file};
+use crate::pil_info::codegen::generate_pil_code;
+use crate::pil_info::stark::{build_air_stark_draft, AirInput};
+use crate::recursive_setup::plonk::{PlonkLayout, PlonkProgram};
+use crate::setup_layout::write_const_root_files;
+use crate::stark_struct::StarkStruct;
 pub use plonk::PlonkLayoutKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +36,31 @@ pub struct RecursiveLayoutArtifacts {
     pub n_rows: usize,
     pub n_constants: usize,
     pub n_committed_pols: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecursiveAirSetupConfig {
+    pub airgroup_id: u32,
+    pub air_id: u32,
+    pub air_name: String,
+    pub num_challenges: Vec<u32>,
+    pub stark_struct: StarkStruct,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecursiveSetupManifest {
+    airgroup_id: u32,
+    air_id: u32,
+    air_name: String,
+    kind: String,
+    namespace: String,
+    num_rows: usize,
+    n_bits: u32,
+    n_constants: usize,
+    n_committed_pols: usize,
+    n_publics: u32,
+    stark_struct: StarkStruct,
 }
 
 #[allow(dead_code)]
@@ -42,14 +75,59 @@ pub fn write_layout_from_r1cs_file(
     write_layout(&r1cs, setup_path, kind, namespace)
 }
 
+#[allow(dead_code)]
+pub fn write_setup_from_r1cs_file(
+    r1cs_path: &Path,
+    setup_path: &Path,
+    kind: PlonkLayoutKind,
+    namespace: &str,
+    config: RecursiveAirSetupConfig,
+) -> Result<RecursiveLayoutArtifacts> {
+    let r1cs = r1cs::read_r1cs(r1cs_path)
+        .with_context(|| format!("failed to read R1CS {}", r1cs_path.display()))?;
+    write_setup(&r1cs, setup_path, kind, namespace, config)
+}
+
 pub fn write_layout(
     r1cs: &r1cs::R1cs,
     setup_path: &Path,
     kind: PlonkLayoutKind,
     namespace: &str,
 ) -> Result<RecursiveLayoutArtifacts> {
+    let (program, layout) = build_layout_parts(r1cs, kind, namespace)?;
+    write_layout_artifacts(r1cs, setup_path, &program, &layout)
+}
+
+#[allow(dead_code)]
+pub fn write_setup(
+    r1cs: &r1cs::R1cs,
+    setup_path: &Path,
+    kind: PlonkLayoutKind,
+    namespace: &str,
+    config: RecursiveAirSetupConfig,
+) -> Result<RecursiveLayoutArtifacts> {
+    let (program, layout) = build_layout_parts(r1cs, kind, namespace)?;
+    let artifacts = write_layout_artifacts(r1cs, setup_path, &program, &layout)?;
+    write_air_setup_files(setup_path, &layout, kind, namespace, config)?;
+    Ok(artifacts)
+}
+
+fn build_layout_parts(
+    r1cs: &r1cs::R1cs,
+    kind: PlonkLayoutKind,
+    namespace: &str,
+) -> Result<(PlonkProgram, PlonkLayout)> {
     let program = plonk::r1cs_to_plonk(r1cs)?;
     let layout = plonk::build_layout_from_program(r1cs, &program, kind, namespace)?;
+    Ok((program, layout))
+}
+
+fn write_layout_artifacts(
+    r1cs: &r1cs::R1cs,
+    setup_path: &Path,
+    program: &PlonkProgram,
+    layout: &PlonkLayout,
+) -> Result<RecursiveLayoutArtifacts> {
     let const_path = setup_path.with_extension("const");
     let exec_path = setup_path.with_extension("exec");
     let dat_path = setup_path.with_extension("dat");
@@ -67,6 +145,104 @@ pub fn write_layout(
         n_constants: layout.fixed_columns.len(),
         n_committed_pols: layout.signal_map.len(),
     })
+}
+
+fn write_air_setup_files(
+    setup_path: &Path,
+    layout: &PlonkLayout,
+    kind: PlonkLayoutKind,
+    namespace: &str,
+    config: RecursiveAirSetupConfig,
+) -> Result<()> {
+    let recursive_air = air::build_air_layout(
+        layout,
+        config.airgroup_id,
+        config.air_id,
+        &config.air_name,
+        layout.shape.n_publics,
+    )?;
+    let empty_airgroup_values: &[AirGroupValue] = &[];
+    let mut draft = build_air_stark_draft(AirInput {
+        airgroup_id: config.airgroup_id,
+        air_id: config.air_id,
+        airgroup_values: empty_airgroup_values,
+        all_symbols: &recursive_air.symbols,
+        all_hints: &recursive_air.hints,
+        num_challenges: &config.num_challenges,
+        air: &recursive_air.air,
+        stark_struct: config.stark_struct.clone(),
+    })?;
+
+    std::fs::write(
+        setup_path.with_extension("starkinfo.json"),
+        serde_json::to_string_pretty(&draft.stark_info)
+            .context("failed to serialize recursive STARK info")?,
+    )
+    .with_context(|| format!("failed to write {}.starkinfo.json", setup_path.display()))?;
+
+    let (expressions_info, verifier_info) = generate_pil_code(
+        &draft.stark_info,
+        &draft.symbols,
+        &draft.constraints,
+        &mut draft.expressions,
+        &draft.hints,
+        false,
+    )?;
+    std::fs::write(
+        setup_path.with_extension("expressionsinfo.json"),
+        serde_json::to_string_pretty(&expressions_info)
+            .context("failed to serialize recursive expressions info")?,
+    )
+    .with_context(|| format!("failed to write {}.expressionsinfo.json", setup_path.display()))?;
+    std::fs::write(
+        setup_path.with_extension("verifierinfo.json"),
+        serde_json::to_string_pretty(&verifier_info)
+            .context("failed to serialize recursive verifier info")?,
+    )
+    .with_context(|| format!("failed to write {}.verifierinfo.json", setup_path.display()))?;
+    write_expressions_bin_file(
+        &setup_path.with_extension("bin"),
+        &draft.stark_info,
+        &expressions_info,
+    )
+    .with_context(|| format!("failed to write {}.bin", setup_path.display()))?;
+    write_verifier_expressions_bin_file(
+        &setup_path.with_extension("verifier.bin"),
+        &draft.stark_info,
+        &verifier_info,
+    )
+    .with_context(|| format!("failed to write {}.verifier.bin", setup_path.display()))?;
+    write_const_root_files(setup_path)?;
+
+    let manifest = RecursiveSetupManifest {
+        airgroup_id: config.airgroup_id,
+        air_id: config.air_id,
+        air_name: config.air_name,
+        kind: recursive_kind_name(kind).to_string(),
+        namespace: namespace.to_string(),
+        num_rows: layout.shape.n_rows,
+        n_bits: layout.shape.n_bits,
+        n_constants: layout.fixed_columns.len(),
+        n_committed_pols: layout.signal_map.len(),
+        n_publics: layout.shape.n_publics,
+        stark_struct: config.stark_struct,
+    };
+    std::fs::write(
+        setup_path.with_extension("setup-rs.json"),
+        serde_json::to_string_pretty(&manifest)
+            .context("failed to serialize recursive setup manifest")?,
+    )
+    .with_context(|| format!("failed to write {}.setup-rs.json", setup_path.display()))?;
+
+    Ok(())
+}
+
+fn recursive_kind_name(kind: PlonkLayoutKind) -> &'static str {
+    match kind {
+        PlonkLayoutKind::Aggregation => "aggregation",
+        PlonkLayoutKind::Compressor => "compressor",
+        PlonkLayoutKind::FinalVadcop => "final_vadcop",
+    }
 }
 
 #[cfg(test)]

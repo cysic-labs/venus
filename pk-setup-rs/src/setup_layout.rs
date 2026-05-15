@@ -174,7 +174,7 @@ fn write_basic_air(
     Ok(())
 }
 
-fn write_const_root_files(setup_path: &Path) -> Result<()> {
+pub(crate) fn write_const_root_files(setup_path: &Path) -> Result<()> {
     let stark_info_path = format!("{}.starkinfo.json", setup_path.display());
     let const_path = format!("{}.const", setup_path.display());
     let verkey_json_path = format!("{}.verkey.json", setup_path.display());
