@@ -50,6 +50,10 @@ struct Args {
     #[arg(long, default_value = "build-recursive-cache/provingKey")]
     recursive_cache_dir: PathBuf,
 
+    /// Optional manifest of native recursive R1CS layout jobs.
+    #[arg(long)]
+    recursive_layout_manifest: Option<PathBuf>,
+
     /// Verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -83,6 +87,8 @@ fn run() -> Result<()> {
     let pilout_path = resolve_path(&root, &args.airout);
     let starkstructs_path = resolve_path(&root, &args.starkstructs);
     let recursive_cache_dir = resolve_path(&root, &args.recursive_cache_dir);
+    let recursive_layout_manifest =
+        args.recursive_layout_manifest.as_ref().map(|path| resolve_path(&root, path));
     let proving_key_dir = build_dir.join("provingKey");
 
     prepare_directories(&build_dir, &fixed_dir, &proof_dir, &proving_key_dir)?;
@@ -104,12 +110,20 @@ fn run() -> Result<()> {
     setup_layout::write_basic_air_layout(&proving_key_dir, &fixed_dir, &pilout, &settings)?;
 
     if args.recursive {
-        recursive_cache::overlay_recursive_artifacts(
-            &recursive_cache_dir,
-            &proving_key_dir,
-            &pilout,
-            &global.info.name,
-        )?;
+        if let Some(manifest_path) = recursive_layout_manifest.as_ref() {
+            let artifacts = recursive_setup::manifest::write_layouts_from_manifest(
+                manifest_path,
+                &proving_key_dir,
+            )?;
+            info!("wrote {} native recursive layout artifact sets", artifacts.len());
+        } else {
+            recursive_cache::overlay_recursive_artifacts(
+                &recursive_cache_dir,
+                &proving_key_dir,
+                &pilout,
+                &global.info.name,
+            )?;
+        }
     }
 
     Ok(())

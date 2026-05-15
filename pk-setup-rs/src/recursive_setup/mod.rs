@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+pub mod manifest;
+#[allow(dead_code)]
 pub mod plonk;
 #[allow(dead_code)]
 pub mod r1cs;
