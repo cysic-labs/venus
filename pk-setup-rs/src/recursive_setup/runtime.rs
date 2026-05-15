@@ -18,7 +18,32 @@ pub struct RuntimeDescriptor {
     pub public_input_offset_words: u64,
     pub public_input_copy_words: u64,
     pub copy_indices: Vec<u64>,
+    pub source_assertions: Vec<RuntimeAssertion>,
     pub source_public_prefix_words: u64,
+    pub source_sections: Vec<RuntimeSection>,
+    pub section_copy_ops: Vec<RuntimeSectionCopyOp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAssertion {
+    pub source_word: u64,
+    pub expected: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSection {
+    pub start_word: u64,
+    pub word_len: u64,
+    pub kind: u64,
+    pub flags: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSectionCopyOp {
+    pub section_index: u64,
+    pub section_offset_words: u64,
+    pub word_len: u64,
+    pub witness_offset_words: u64,
 }
 
 impl RuntimeDescriptor {
@@ -31,7 +56,10 @@ impl RuntimeDescriptor {
             public_input_offset_words: 1,
             public_input_copy_words: n_publics,
             copy_indices: (0..n_publics).collect(),
+            source_assertions: Vec::new(),
             source_public_prefix_words: u64::from(r1cs.n_vars.saturating_sub(1)),
+            source_sections: Vec::new(),
+            section_copy_ops: Vec::new(),
         }
     }
 }
@@ -55,10 +83,26 @@ pub fn runtime_dat_buffer(descriptor: &RuntimeDescriptor) -> Result<Vec<u8>> {
         push_u64(&mut out, *index);
     }
 
-    push_u64(&mut out, 0); // source assertions
+    push_u64(&mut out, descriptor.source_assertions.len() as u64);
+    for assertion in &descriptor.source_assertions {
+        push_u64(&mut out, assertion.source_word);
+        push_u64(&mut out, assertion.expected);
+    }
     push_u64(&mut out, descriptor.source_public_prefix_words);
-    push_u64(&mut out, 0); // source sections
-    push_u64(&mut out, 0); // section copy ops
+    push_u64(&mut out, descriptor.source_sections.len() as u64);
+    for section in &descriptor.source_sections {
+        push_u64(&mut out, section.start_word);
+        push_u64(&mut out, section.word_len);
+        push_u64(&mut out, section.kind);
+        push_u64(&mut out, section.flags);
+    }
+    push_u64(&mut out, descriptor.section_copy_ops.len() as u64);
+    for copy_op in &descriptor.section_copy_ops {
+        push_u64(&mut out, copy_op.section_index);
+        push_u64(&mut out, copy_op.section_offset_words);
+        push_u64(&mut out, copy_op.word_len);
+        push_u64(&mut out, copy_op.witness_offset_words);
+    }
     Ok(out)
 }
 
