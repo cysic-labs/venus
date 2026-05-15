@@ -7,6 +7,7 @@ use pilout_crate::pilout_proxy::PilOutProxy;
 use serde::Serialize;
 use tracing::info;
 
+use crate::pil_info::binfile::{write_expressions_bin_file, write_verifier_expressions_bin_file};
 use crate::pil_info::codegen::generate_pil_code;
 use crate::pil_info::stark::{build_air_stark_draft, AirInput};
 use crate::stark_struct::{generate_stark_struct, StarkSettingsMap, StarkStruct};
@@ -156,6 +157,12 @@ fn write_basic_air(
             .context("failed to serialize AIR verifier info draft")?,
     )
     .with_context(|| format!("failed to write {}", verifier_path.display()))?;
+    let expressions_bin_path = files_dir.join(format!("{air_name}.bin-rs-draft"));
+    write_expressions_bin_file(&expressions_bin_path, &draft.stark_info, &expressions_info)
+        .with_context(|| format!("failed to write {}", expressions_bin_path.display()))?;
+    let verifier_bin_path = files_dir.join(format!("{air_name}.verifier.bin-rs-draft"));
+    write_verifier_expressions_bin_file(&verifier_bin_path, &draft.stark_info, &verifier_info)
+        .with_context(|| format!("failed to write {}", verifier_bin_path.display()))?;
     info!("prepared basic AIR layout for {airgroup_name}/{air_name}");
 
     Ok(())
