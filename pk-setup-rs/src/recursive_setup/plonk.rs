@@ -4,6 +4,43 @@ use anyhow::{bail, Result};
 
 use crate::recursive_setup::r1cs::{CustomGateUse, LinearCombination, R1cs, GOLDILOCKS_P};
 
+const GOLDILOCKS_K: u64 = 12_275_445_934_081_160_404;
+const GOLDILOCKS_GEN: [u64; 33] = [
+    1,
+    18446744069414584320,
+    281474976710656,
+    18446744069397807105,
+    17293822564807737345,
+    70368744161280,
+    549755813888,
+    17870292113338400769,
+    13797081185216407910,
+    1803076106186727246,
+    11353340290879379826,
+    455906449640507599,
+    17492915097719143606,
+    1532612707718625687,
+    16207902636198568418,
+    17776499369601055404,
+    6115771955107415310,
+    12380578893860276750,
+    9306717745644682924,
+    18146160046829613826,
+    3511170319078647661,
+    17654865857378133588,
+    5416168637041100469,
+    16905767614792059275,
+    9713644485405565297,
+    5456943929260765144,
+    17096174751763063430,
+    1213594585890690845,
+    6414415596519834757,
+    16116352524544190054,
+    9123114210336311365,
+    4614640910117430873,
+    1753635133440165772,
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlonkProgram {
     pub constraints: Vec<PlonkConstraint>,
@@ -80,6 +117,21 @@ pub struct PlonkLayoutShape {
     pub n_select_val1_rows: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedColumn {
+    pub name: String,
+    pub lengths: Vec<u32>,
+    pub values: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlonkLayout {
+    pub shape: PlonkLayoutShape,
+    pub signal_map: Vec<Vec<u32>>,
+    pub fixed_columns: Vec<FixedColumn>,
+    pub connections: usize,
+}
+
 pub fn r1cs_to_plonk(r1cs: &R1cs) -> Result<PlonkProgram> {
     let mut converter =
         Converter { constraints: Vec::new(), additions: Vec::new(), next_var: r1cs.n_vars };
@@ -153,6 +205,91 @@ pub fn calculate_layout_shape_from_program(
     })
 }
 
+pub fn build_layout(r1cs: &R1cs, kind: PlonkLayoutKind, namespace: &str) -> Result<PlonkLayout> {
+    let program = r1cs_to_plonk(r1cs)?;
+    build_layout_from_program(r1cs, &program, kind, namespace)
+}
+
+pub fn build_layout_from_program(
+    r1cs: &R1cs,
+    program: &PlonkProgram,
+    kind: PlonkLayoutKind,
+    namespace: &str,
+) -> Result<PlonkLayout> {
+    let policy = LayoutPolicy::for_kind(kind);
+    let shape = calculate_layout_shape_from_program(r1cs, program, kind)?;
+    let mut signal_map = vec![vec![0u32; shape.n_rows]; policy.committed_pols];
+    let mut c_cols = vec![vec![0u64; shape.n_rows]; 10];
+    let mut extra_rows = vec![Vec::<usize>::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut row = 0usize;
+
+    for gate_use in gate_uses(r1cs, program.custom_gates_info.poseidon12_id) {
+        place_poseidon_gate(&mut signal_map, gate_use, row, policy, false)?;
+        push_poseidon_extra_rows(&mut extra_rows, row, policy);
+        row += policy.poseidon_rows_per_gate;
+    }
+
+    for gate_use in gate_uses(r1cs, program.custom_gates_info.cust_poseidon12_id) {
+        place_poseidon_gate(&mut signal_map, gate_use, row, policy, true)?;
+        push_poseidon_extra_rows(&mut extra_rows, row, policy);
+        row += policy.poseidon_rows_per_gate;
+    }
+
+    place_cmul_gates(
+        &mut signal_map,
+        &gate_uses(r1cs, program.custom_gates_info.cmul_id),
+        &mut row,
+        policy,
+    )?;
+
+    for gate_use in gate_uses(r1cs, program.custom_gates_info.ev_pol4_id) {
+        ensure_signal_len(gate_use, 21, "EvPol4")?;
+        copy_signals(&mut signal_map, row, 0, &gate_use.signals[..21])?;
+        extra_rows[2].push(row);
+        row += 1;
+    }
+
+    for gate_use in fft4_gate_uses(r1cs, &program.custom_gates_info) {
+        ensure_signal_len(gate_use, 24, "FFT4")?;
+        copy_signals(&mut signal_map, row, 0, &gate_use.signals[..24])?;
+        place_fft4_constants(&mut c_cols, row, gate_use, &program.custom_gates_info)?;
+        row += 1;
+    }
+
+    for gate_use in gate_uses(r1cs, program.custom_gates_info.tree_selector4_id) {
+        ensure_signal_len(gate_use, 17, "TreeSelector4")?;
+        copy_signals(&mut signal_map, row, 0, &gate_use.signals[..17])?;
+        extra_rows[1].push(row);
+        row += 1;
+    }
+
+    for gate_use in gate_uses(r1cs, program.custom_gates_info.select_val1_id) {
+        ensure_signal_len(gate_use, 22, "SelectValue1")?;
+        copy_signals(&mut signal_map, row, 0, &gate_use.signals[..22])?;
+        extra_rows[3].push(row);
+        row += 1;
+    }
+
+    place_plonk_constraints(
+        &mut signal_map,
+        &mut c_cols,
+        &program.constraints,
+        &mut row,
+        policy,
+        &mut extra_rows,
+    )?;
+
+    if row != shape.n_used_rows {
+        bail!("recursive PLONK layout used {row} rows but expected {}", shape.n_used_rows);
+    }
+
+    let (s_cols, connections) = build_connection_polynomials(&signal_map, row, policy)?;
+    let fixed_columns =
+        build_fixed_columns(namespace, &shape, policy, s_cols, c_cols, &program.custom_gates_info)?;
+
+    Ok(PlonkLayout { shape, signal_map, fixed_columns, connections })
+}
+
 pub fn write_exec_buffer(additions: &[PlonkAddition], signal_map: &[Vec<u32>]) -> Result<Vec<u8>> {
     if signal_map.is_empty() {
         bail!("cannot write exec file for empty signal map");
@@ -192,10 +329,13 @@ struct Converter {
 #[derive(Debug, Clone, Copy)]
 struct LayoutPolicy {
     committed_pols: usize,
+    connection_cols: usize,
     cmul_per_row: usize,
     poseidon_rows_per_gate: usize,
+    poseidon_first_col: usize,
     normal_first_row_max: usize,
     normal_remainder_start: usize,
+    normal_remainder_max: usize,
     custom_rules: [ExtraRule; 4],
 }
 
@@ -204,10 +344,13 @@ impl LayoutPolicy {
         match kind {
             PlonkLayoutKind::Aggregation => Self {
                 committed_pols: 59,
+                connection_cols: 27,
                 cmul_per_row: 3,
                 poseidon_rows_per_gate: 5,
+                poseidon_first_col: 27,
                 normal_first_row_max: 2,
                 normal_remainder_start: 2,
+                normal_remainder_max: 9,
                 custom_rules: [
                     ExtraRule::Split { initial_max: 2, remainder_start: 2, remainder_max: 9 },
                     ExtraRule::Partial { used_after_current: 7, max_used: 9 },
@@ -217,10 +360,13 @@ impl LayoutPolicy {
             },
             PlonkLayoutKind::Compressor => Self {
                 committed_pols: 52,
+                connection_cols: 36,
                 cmul_per_row: 4,
                 poseidon_rows_per_gate: 10,
+                poseidon_first_col: 36,
                 normal_first_row_max: 6,
                 normal_remainder_start: 6,
+                normal_remainder_max: 12,
                 custom_rules: [
                     ExtraRule::Split { initial_max: 6, remainder_start: 6, remainder_max: 12 },
                     ExtraRule::Partial { used_after_current: 7, max_used: 12 },
@@ -230,10 +376,13 @@ impl LayoutPolicy {
             },
             PlonkLayoutKind::FinalVadcop => Self {
                 committed_pols: 65,
+                connection_cols: 33,
                 cmul_per_row: 3,
                 poseidon_rows_per_gate: 5,
+                poseidon_first_col: 33,
                 normal_first_row_max: 2,
                 normal_remainder_start: 2,
+                normal_remainder_max: 11,
                 custom_rules: [
                     ExtraRule::Split { initial_max: 2, remainder_start: 2, remainder_max: 11 },
                     ExtraRule::Partial { used_after_current: 7, max_used: 11 },
@@ -344,22 +493,12 @@ fn calculate_plonk_constraint_rows(
             remainder_rows.push(PartialRow {
                 n_used: policy.normal_remainder_start,
                 custom: false,
-                max_used: policy.custom_rules[0].max_remainder(),
+                max_used: policy.normal_remainder_max,
             });
         }
     }
 
     info
-}
-
-impl ExtraRule {
-    fn max_remainder(self) -> usize {
-        match self {
-            ExtraRule::Split { remainder_max, .. } => remainder_max,
-            ExtraRule::Partial { max_used, .. } => max_used,
-            ExtraRule::Single => 1,
-        }
-    }
 }
 
 fn count_constraint(info: &mut PlonkRowInfo, custom: bool) {
@@ -383,6 +522,512 @@ fn ceil_div(value: usize, divisor: usize) -> usize {
     } else {
         1 + (value - 1) / divisor
     }
+}
+
+fn gate_uses(r1cs: &R1cs, id: Option<usize>) -> Vec<&CustomGateUse> {
+    r1cs.custom_gate_uses.iter().filter(|gate_use| Some(gate_use.id as usize) == id).collect()
+}
+
+fn fft4_gate_uses<'a>(r1cs: &'a R1cs, info: &CustomGatesInfo) -> Vec<&'a CustomGateUse> {
+    r1cs.custom_gate_uses
+        .iter()
+        .filter(|gate_use| info.fft4_parameters.contains_key(&(gate_use.id as usize)))
+        .collect()
+}
+
+fn ensure_signal_len(gate_use: &CustomGateUse, expected: usize, gate: &str) -> Result<()> {
+    if gate_use.signals.len() != expected {
+        bail!(
+            "{gate} custom gate use must have {expected} signals, got {}",
+            gate_use.signals.len()
+        );
+    }
+    Ok(())
+}
+
+fn copy_signals(
+    signal_map: &mut [Vec<u32>],
+    row: usize,
+    start_col: usize,
+    signals: &[u64],
+) -> Result<()> {
+    if start_col + signals.len() > signal_map.len() {
+        bail!("signal map write exceeds committed-polynomial width");
+    }
+    for (offset, &signal) in signals.iter().enumerate() {
+        signal_map[start_col + offset][row] = checked_signal(signal)?;
+    }
+    Ok(())
+}
+
+fn checked_signal(signal: u64) -> Result<u32> {
+    u32::try_from(signal).map_err(|_| anyhow::anyhow!("R1CS signal id {signal} exceeds u32"))
+}
+
+fn place_poseidon_gate(
+    signal_map: &mut [Vec<u32>],
+    gate_use: &CustomGateUse,
+    row: usize,
+    policy: LayoutPolicy,
+    custom: bool,
+) -> Result<()> {
+    let expected = if custom { 14 * 16 + 2 } else { 14 * 16 };
+    ensure_signal_len(gate_use, expected, if custom { "CustPoseidon16" } else { "Poseidon16" })?;
+    let signals = &gate_use.signals;
+    let first_col = policy.poseidon_first_col;
+
+    let (input, rest) = signals.split_at(16);
+    let (first_bit, second_bit, rest) =
+        if custom { (Some(rest[0]), Some(rest[1]), &rest[2..]) } else { (None, None, rest) };
+
+    let round0 = &rest[0..16];
+    let round1 = &rest[16..32];
+    let round2 = &rest[32..48];
+    let round3 = &rest[48..64];
+    let round4 = &rest[64..80];
+    let im1 = &rest[80..96];
+    let im2 = &rest[112..128];
+    let round26 = &rest[128..144];
+    let round27 = &rest[144..160];
+    let round28 = &rest[160..176];
+    let round29 = &rest[176..192];
+    let output = &rest[192..208];
+
+    if policy.poseidon_rows_per_gate == 10 {
+        for i in 0..16 {
+            signal_map[i][row] = checked_signal(input[i])?;
+            signal_map[first_col + i][row] = checked_signal(round0[i])?;
+            signal_map[first_col + i][row + 1] = checked_signal(round1[i])?;
+            signal_map[first_col + i][row + 2] = checked_signal(round2[i])?;
+            signal_map[first_col + i][row + 3] = checked_signal(round3[i])?;
+            signal_map[first_col + i][row + 4] = checked_signal(round4[i])?;
+            signal_map[first_col + i][row + 6] = checked_signal(round26[i])?;
+            signal_map[first_col + i][row + 7] = checked_signal(round27[i])?;
+            signal_map[first_col + i][row + 8] = checked_signal(round28[i])?;
+            signal_map[first_col + i][row + 9] = checked_signal(round29[i])?;
+            signal_map[i][row + 9] = checked_signal(output[i])?;
+        }
+        for i in 0..11 {
+            signal_map[first_col + i][row + 5] = checked_signal(im1[i])?;
+            if i < 5 {
+                signal_map[first_col + 11 + i][row + 5] = checked_signal(im2[i])?;
+            } else {
+                signal_map[18 + i - 5][row] = checked_signal(im2[i])?;
+            }
+        }
+    } else {
+        for i in 0..16 {
+            signal_map[i][row] = checked_signal(input[i])?;
+            signal_map[first_col + i][row] = checked_signal(round0[i])?;
+            signal_map[first_col + 16 + i][row] = checked_signal(round1[i])?;
+            signal_map[first_col + i][row + 1] = checked_signal(round2[i])?;
+            signal_map[first_col + 16 + i][row + 1] = checked_signal(round3[i])?;
+            signal_map[first_col + i][row + 2] = checked_signal(round4[i])?;
+            signal_map[first_col + i][row + 3] = checked_signal(round26[i])?;
+            signal_map[first_col + 16 + i][row + 3] = checked_signal(round27[i])?;
+            signal_map[first_col + i][row + 4] = checked_signal(round28[i])?;
+            signal_map[first_col + 16 + i][row + 4] = checked_signal(round29[i])?;
+            signal_map[i][row + 4] = checked_signal(output[i])?;
+        }
+        for i in 0..11 {
+            signal_map[first_col + 16 + i][row + 2] = checked_signal(im1[i])?;
+            if i < 5 {
+                signal_map[first_col + 27 + i][row + 2] = checked_signal(im2[i])?;
+            } else {
+                signal_map[18 + i - 5][row] = checked_signal(im2[i])?;
+            }
+        }
+    }
+
+    if let Some(first_bit) = first_bit {
+        signal_map[16][row] = checked_signal(first_bit)?;
+    }
+    if let Some(second_bit) = second_bit {
+        signal_map[17][row] = checked_signal(second_bit)?;
+    }
+    Ok(())
+}
+
+fn push_poseidon_extra_rows(extra_rows: &mut [Vec<usize>], row: usize, policy: LayoutPolicy) {
+    if policy.poseidon_rows_per_gate == 10 {
+        extra_rows[3].push(row);
+        for offset in 1..=8 {
+            extra_rows[0].push(row + offset);
+        }
+        extra_rows[1].push(row + 9);
+    } else {
+        extra_rows[3].push(row);
+        extra_rows[0].push(row + 1);
+        extra_rows[0].push(row + 2);
+        extra_rows[0].push(row + 3);
+        extra_rows[1].push(row + 4);
+    }
+}
+
+fn place_cmul_gates(
+    signal_map: &mut [Vec<u32>],
+    gate_uses: &[&CustomGateUse],
+    row: &mut usize,
+    policy: LayoutPolicy,
+) -> Result<()> {
+    let mut partial_row = None::<(usize, usize)>;
+    for gate_use in gate_uses {
+        ensure_signal_len(gate_use, 9, "CMul")?;
+        if let Some((target_row, n_used)) = partial_row {
+            copy_signals(signal_map, target_row, 9 * n_used, &gate_use.signals)?;
+            let next_used = n_used + 1;
+            if next_used == policy.cmul_per_row {
+                partial_row = None;
+            } else {
+                partial_row = Some((target_row, next_used));
+            }
+        } else {
+            copy_signals(signal_map, *row, 0, &gate_use.signals)?;
+            partial_row = Some((*row, 1));
+            *row += 1;
+        }
+    }
+    Ok(())
+}
+
+fn place_fft4_constants(
+    c_cols: &mut [Vec<u64>],
+    row: usize,
+    gate_use: &CustomGateUse,
+    info: &CustomGatesInfo,
+) -> Result<()> {
+    let parameters = info
+        .fft4_parameters
+        .get(&(gate_use.id as usize))
+        .ok_or_else(|| anyhow::anyhow!("FFT4 parameters missing for gate id {}", gate_use.id))?;
+    if parameters.len() != 4 {
+        bail!("FFT4 custom gate must have 4 parameters");
+    }
+    let first_w = parameters[0];
+    let inc_w = parameters[1];
+    let scale = parameters[2];
+    let fft_type = parameters[3];
+    let first_w2 = mul_mod(first_w, first_w);
+    if fft_type == 4 {
+        c_cols[0][row] = scale;
+        c_cols[1][row] = mul_mod(scale, first_w2);
+        c_cols[2][row] = mul_mod(scale, first_w);
+        c_cols[3][row] = mul_mod(mul_mod(scale, first_w), first_w2);
+        c_cols[4][row] = mul_mod(mul_mod(scale, first_w), inc_w);
+        c_cols[5][row] = mul_mod(mul_mod(mul_mod(scale, first_w), first_w2), inc_w);
+    } else if fft_type == 2 {
+        c_cols[6][row] = scale;
+        c_cols[7][row] = mul_mod(scale, first_w);
+        c_cols[8][row] = mul_mod(mul_mod(scale, first_w), inc_w);
+    } else {
+        bail!("invalid FFT4 type {fft_type}");
+    }
+    Ok(())
+}
+
+fn place_plonk_constraints(
+    signal_map: &mut [Vec<u32>],
+    c_cols: &mut [Vec<u64>],
+    constraints: &[PlonkConstraint],
+    row: &mut usize,
+    policy: LayoutPolicy,
+    extra_rows: &mut [Vec<usize>],
+) -> Result<()> {
+    let mut partial_rows: HashMap<[u64; 5], PartialPlacement> = HashMap::new();
+    let mut remainder_rows: Vec<PartialPlacement> = Vec::new();
+
+    for constraint in constraints {
+        let key = [constraint.qm, constraint.ql, constraint.qr, constraint.qo, constraint.qc];
+        if let Some(placement) = partial_rows.get_mut(&key) {
+            fill_constraint_slots(
+                signal_map,
+                placement.row,
+                placement.n_used,
+                placement.n_used + 1,
+                constraint,
+            )?;
+            placement.n_used += 1;
+            if placement.n_used == placement.max_used {
+                partial_rows.remove(&key);
+            }
+        } else if !remainder_rows.is_empty() {
+            let mut placement = remainder_rows.remove(0);
+            set_q(c_cols, placement.row, 5, constraint);
+            fill_constraint_slots(
+                signal_map,
+                placement.row,
+                placement.n_used,
+                placement.max_used,
+                constraint,
+            )?;
+            placement.n_used += 1;
+            partial_rows.insert(key, placement);
+        } else if let Some((idx, rows)) =
+            extra_rows.iter_mut().enumerate().find(|(_, rows)| !rows.is_empty())
+        {
+            let target_row = rows.remove(0);
+            match policy.custom_rules[idx] {
+                ExtraRule::Split { initial_max, remainder_start, remainder_max } => {
+                    set_q(c_cols, target_row, 0, constraint);
+                    fill_constraint_slots(signal_map, target_row, 0, remainder_start, constraint)?;
+                    partial_rows.insert(
+                        key,
+                        PartialPlacement { row: target_row, n_used: 1, max_used: initial_max },
+                    );
+                    remainder_rows.push(PartialPlacement {
+                        row: target_row,
+                        n_used: remainder_start,
+                        max_used: remainder_max,
+                    });
+                }
+                ExtraRule::Partial { used_after_current, max_used } => {
+                    set_q(c_cols, target_row, 5, constraint);
+                    fill_constraint_slots(
+                        signal_map,
+                        target_row,
+                        used_after_current - 1,
+                        max_used,
+                        constraint,
+                    )?;
+                    partial_rows.insert(
+                        key,
+                        PartialPlacement { row: target_row, n_used: used_after_current, max_used },
+                    );
+                }
+                ExtraRule::Single => {
+                    set_q(c_cols, target_row, 5, constraint);
+                    fill_constraint_slots(
+                        signal_map,
+                        target_row,
+                        policy.normal_remainder_max - 1,
+                        policy.normal_remainder_max,
+                        constraint,
+                    )?;
+                }
+            }
+        } else {
+            set_q(c_cols, *row, 0, constraint);
+            fill_constraint_slots(signal_map, *row, 0, policy.normal_remainder_start, constraint)?;
+            partial_rows.insert(
+                key,
+                PartialPlacement { row: *row, n_used: 1, max_used: policy.normal_first_row_max },
+            );
+            remainder_rows.push(PartialPlacement {
+                row: *row,
+                n_used: policy.normal_remainder_start,
+                max_used: policy.normal_remainder_max,
+            });
+            *row += 1;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PartialPlacement {
+    row: usize,
+    n_used: usize,
+    max_used: usize,
+}
+
+fn set_q(c_cols: &mut [Vec<u64>], row: usize, offset: usize, constraint: &PlonkConstraint) {
+    c_cols[offset][row] = constraint.qm;
+    c_cols[offset + 1][row] = constraint.ql;
+    c_cols[offset + 2][row] = constraint.qr;
+    c_cols[offset + 3][row] = constraint.qo;
+    c_cols[offset + 4][row] = constraint.qc;
+}
+
+fn fill_constraint_slots(
+    signal_map: &mut [Vec<u32>],
+    row: usize,
+    start_slot: usize,
+    end_slot: usize,
+    constraint: &PlonkConstraint,
+) -> Result<()> {
+    for slot in start_slot..end_slot {
+        let col = 3 * slot;
+        if col + 2 >= signal_map.len() {
+            bail!("PLONK constraint slot {slot} exceeds committed-polynomial width");
+        }
+        signal_map[col][row] = constraint.sl;
+        signal_map[col + 1][row] = constraint.sr;
+        signal_map[col + 2][row] = constraint.so;
+    }
+    Ok(())
+}
+
+fn build_connection_polynomials(
+    signal_map: &[Vec<u32>],
+    used_rows: usize,
+    policy: LayoutPolicy,
+) -> Result<(Vec<Vec<u64>>, usize)> {
+    let n_rows = signal_map.first().map(|col| col.len()).unwrap_or(0);
+    let mut s_cols = vec![vec![0u64; n_rows]; policy.connection_cols];
+    let ks = get_ks(policy.connection_cols - 1);
+    let generator = *GOLDILOCKS_GEN
+        .get(checked_domain_bits(n_rows)? as usize)
+        .ok_or_else(|| anyhow::anyhow!("recursive PLONK domain exceeds Goldilocks generators"))?;
+    let mut w = 1;
+    for row in 0..n_rows {
+        s_cols[0][row] = w;
+        for col in 1..policy.connection_cols {
+            s_cols[col][row] = mul_mod(w, ks[col - 1]);
+        }
+        w = mul_mod(w, generator);
+    }
+
+    let mut connections = 0;
+    let mut last_signal = HashMap::<u32, (usize, usize)>::new();
+    for row in 0..used_rows {
+        for col in 0..policy.connection_cols {
+            let signal = signal_map[col][row];
+            if signal == 0 {
+                continue;
+            }
+            if let Some(&(last_col, last_row)) = last_signal.get(&signal) {
+                connections += 1;
+                let tmp = s_cols[last_col][last_row];
+                s_cols[last_col][last_row] = s_cols[col][row];
+                s_cols[col][row] = tmp;
+            } else {
+                last_signal.insert(signal, (col, row));
+            }
+        }
+    }
+    Ok((s_cols, connections))
+}
+
+fn build_fixed_columns(
+    namespace: &str,
+    shape: &PlonkLayoutShape,
+    policy: LayoutPolicy,
+    s_cols: Vec<Vec<u64>>,
+    c_cols: Vec<Vec<u64>>,
+    custom_gates_info: &CustomGatesInfo,
+) -> Result<Vec<FixedColumn>> {
+    let mut out = Vec::new();
+    for (idx, values) in s_cols.into_iter().enumerate() {
+        out.push(FixedColumn { name: format!("{namespace}.S"), lengths: vec![idx as u32], values });
+    }
+    for (idx, values) in c_cols.into_iter().enumerate() {
+        out.push(FixedColumn { name: format!("{namespace}.C"), lengths: vec![idx as u32], values });
+    }
+
+    out.push(flag_column(namespace, "POSEIDONSPONGE", shape.n_rows, |row| {
+        row < custom_gates_info.n_poseidon12 * policy.poseidon_rows_per_gate
+            && row % policy.poseidon_rows_per_gate == 0
+    }));
+    out.push(flag_column(namespace, "POSEIDONCOMPRESSION", shape.n_rows, |row| {
+        row >= custom_gates_info.n_poseidon12 * policy.poseidon_rows_per_gate
+            && row
+                < (custom_gates_info.n_poseidon12 + custom_gates_info.n_cust_poseidon12)
+                    * policy.poseidon_rows_per_gate
+            && row % policy.poseidon_rows_per_gate == 0
+    }));
+    out.push(flag_column(namespace, "POSEIDON_PARTIAL_ROUND", shape.n_rows, |row| {
+        row < (custom_gates_info.n_poseidon12 + custom_gates_info.n_cust_poseidon12)
+            * policy.poseidon_rows_per_gate
+            && row % policy.poseidon_rows_per_gate == policy.poseidon_rows_per_gate / 2
+    }));
+    out.push(flag_column(namespace, "POSEIDON_FINAL", shape.n_rows, |row| {
+        row < (custom_gates_info.n_poseidon12 + custom_gates_info.n_cust_poseidon12)
+            * policy.poseidon_rows_per_gate
+            && row % policy.poseidon_rows_per_gate == policy.poseidon_rows_per_gate - 1
+    }));
+
+    let mut start = (custom_gates_info.n_poseidon12 + custom_gates_info.n_cust_poseidon12)
+        * policy.poseidon_rows_per_gate;
+    push_range_flag(&mut out, namespace, "CMUL", shape.n_rows, start, shape.n_cmul_rows);
+    start += shape.n_cmul_rows;
+    push_range_flag(&mut out, namespace, "EVPOL4", shape.n_rows, start, shape.n_ev_pol4_rows);
+    start += shape.n_ev_pol4_rows;
+    push_range_flag(&mut out, namespace, "FFT4", shape.n_rows, start, shape.n_fft4_rows);
+    start += shape.n_fft4_rows;
+    push_range_flag(
+        &mut out,
+        namespace,
+        "TREESELECTOR4",
+        shape.n_rows,
+        start,
+        shape.n_tree_selector4_rows,
+    );
+    start += shape.n_tree_selector4_rows;
+    push_range_flag(
+        &mut out,
+        namespace,
+        "SELECTVAL1",
+        shape.n_rows,
+        start,
+        shape.n_select_val1_rows,
+    );
+    start += shape.n_select_val1_rows;
+    push_range_flag(&mut out, namespace, "PLONK", shape.n_rows, start, shape.n_plonk_rows);
+
+    out.push(id_column(namespace, shape.n_rows)?);
+    out.push(l1_column(shape.n_rows));
+    Ok(out)
+}
+
+fn flag_column(
+    namespace: &str,
+    name: &str,
+    n_rows: usize,
+    predicate: impl Fn(usize) -> bool,
+) -> FixedColumn {
+    let mut values = vec![0; n_rows];
+    for (row, value) in values.iter_mut().enumerate() {
+        if predicate(row) {
+            *value = 1;
+        }
+    }
+    FixedColumn { name: format!("{namespace}.{name}"), lengths: Vec::new(), values }
+}
+
+fn push_range_flag(
+    out: &mut Vec<FixedColumn>,
+    namespace: &str,
+    name: &str,
+    n_rows: usize,
+    start: usize,
+    len: usize,
+) {
+    out.push(flag_column(namespace, name, n_rows, |row| row >= start && row < start + len));
+}
+
+fn id_column(namespace: &str, n_rows: usize) -> Result<FixedColumn> {
+    let n_bits = checked_domain_bits(n_rows)?;
+    let generator = *GOLDILOCKS_GEN
+        .get(n_bits as usize)
+        .ok_or_else(|| anyhow::anyhow!("recursive PLONK domain exceeds Goldilocks generators"))?;
+    let mut values = vec![0; n_rows];
+    let mut w = 1;
+    for value in &mut values {
+        *value = w;
+        w = mul_mod(w, generator);
+    }
+    Ok(FixedColumn { name: format!("{namespace}.ID"), lengths: Vec::new(), values })
+}
+
+fn l1_column(n_rows: usize) -> FixedColumn {
+    let mut values = vec![0; n_rows];
+    if let Some(first) = values.first_mut() {
+        *first = 1;
+    }
+    FixedColumn { name: "__L1__".to_string(), lengths: Vec::new(), values }
+}
+
+fn get_ks(n: usize) -> Vec<u64> {
+    let mut ks = Vec::with_capacity(n);
+    if n == 0 {
+        return ks;
+    }
+    ks.push(GOLDILOCKS_K);
+    for idx in 1..n {
+        ks.push(mul_mod(ks[idx - 1], GOLDILOCKS_K));
+    }
+    ks
 }
 
 impl Converter {
@@ -786,6 +1431,84 @@ mod tests {
         assert_eq!(shape.n_bits, 3);
         assert_eq!(shape.n_rows, 8);
         Ok(())
+    }
+
+    #[test]
+    fn builds_aggregation_signal_map_and_fixed_columns() -> Result<()> {
+        let r1cs = empty_r1cs(0, 0);
+        let program = PlonkProgram {
+            constraints: vec![PlonkConstraint {
+                sl: 1,
+                sr: 2,
+                so: 3,
+                qm: 4,
+                ql: 5,
+                qr: 6,
+                qo: 7,
+                qc: 8,
+            }],
+            additions: Vec::new(),
+            n_vars: 4,
+            custom_gates_info: CustomGatesInfo::default(),
+        };
+
+        let layout =
+            build_layout_from_program(&r1cs, &program, PlonkLayoutKind::Aggregation, "Agg")?;
+        assert_eq!(layout.shape.n_used_rows, 1);
+        assert_eq!(layout.signal_map.len(), 59);
+        assert_eq!(
+            (0..6).map(|col| layout.signal_map[col][0]).collect::<Vec<_>>(),
+            vec![1, 2, 3, 1, 2, 3]
+        );
+        assert_eq!(layout.fixed_columns.len(), 49);
+        assert_eq!(layout.fixed_columns[0].name, "Agg.S");
+        assert_eq!(layout.fixed_columns[27].name, "Agg.C");
+        assert_eq!(layout.fixed_columns[27].values[0], 4);
+        assert_eq!(layout.fixed_columns[31].values[0], 8);
+        assert_eq!(layout.fixed_columns[46].name, "Agg.PLONK");
+        assert_eq!(layout.fixed_columns[46].values[0], 1);
+        assert_eq!(layout.fixed_columns[47].name, "Agg.ID");
+        assert_eq!(layout.fixed_columns[47].values[0], 1);
+        assert_eq!(layout.fixed_columns[48].name, "__L1__");
+        assert_eq!(layout.fixed_columns[48].values[0], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn builds_poseidon_flags_for_aggregation_layout() -> Result<()> {
+        let mut r1cs = empty_r1cs(0, 0);
+        r1cs.custom_gates
+            .push(CustomGate { template_name: "Poseidon16".to_string(), parameters: vec![] });
+        r1cs.custom_gate_uses.push(CustomGateUse { id: 0, signals: (1..=(14 * 16)).collect() });
+
+        let layout = build_layout(&r1cs, PlonkLayoutKind::Aggregation, "Agg")?;
+        assert_eq!(layout.shape.n_used_rows, 5);
+        assert_eq!(layout.shape.n_rows, 8);
+        assert_eq!(layout.fixed_columns[37].values, vec![1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(layout.fixed_columns[39].values, vec![0, 0, 1, 0, 0, 0, 0, 0]);
+        assert_eq!(layout.fixed_columns[40].values, vec![0, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(layout.signal_map[0][0], 1);
+        assert_eq!(layout.signal_map[27][0], 17);
+        assert_eq!(layout.signal_map[43][0], 33);
+        assert_eq!(layout.signal_map[0][4], 209);
+        Ok(())
+    }
+
+    fn empty_r1cs(n_outputs: u32, n_pub_inputs: u32) -> R1cs {
+        R1cs {
+            n8: 8,
+            prime: GOLDILOCKS_P,
+            n_vars: 1,
+            n_outputs,
+            n_pub_inputs,
+            n_prv_inputs: 0,
+            n_labels: 0,
+            n_constraints: 0,
+            constraints: Vec::new(),
+            wire_map: Vec::new(),
+            custom_gates: Vec::new(),
+            custom_gate_uses: Vec::new(),
+        }
     }
 
     fn lc(values: &[(u32, u64)]) -> LinearCombination {
