@@ -679,6 +679,19 @@ impl BinaryBasicFrops {
             full_table_count,
         )
     }
+    #[inline(always)]
+    pub fn generate_file(&mut self, output_file: &str) -> Result<(), Box<dyn Error>> {
+        self.build_table();
+        let full_table = self.generate_full_table();
+        let full_table_count = full_table.len();
+        self.table.generate_file(
+            "Zisk",
+            "BinaryBasicFrops",
+            output_file,
+            full_table,
+            full_table_count,
+        )
+    }
 }
 
 #[test]

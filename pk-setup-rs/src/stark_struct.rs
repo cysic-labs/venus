@@ -37,6 +37,8 @@ pub struct StarkStruct {
     pub pow_bits: u64,
     pub hash_commits: bool,
     pub steps: Vec<StarkStep>,
+    #[serde(rename = "nQueries", skip_serializing_if = "Option::is_none", default)]
+    pub n_queries: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,5 +131,6 @@ pub fn generate_stark_struct(settings: &StarkSettings, n_bits: u64) -> Result<St
         pow_bits,
         hash_commits,
         steps,
+        n_queries: None,
     })
 }

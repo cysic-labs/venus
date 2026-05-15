@@ -134,25 +134,19 @@ fn generate_frequent_op_fixed_tables(root: &Path) -> Result<()> {
     let result = (|| -> Result<()> {
         info!("generating arithmetic frequent-op fixed table");
         ArithFrops::new()
-            .generate_cmd("arith_frops_fixed_gen", "state-machines/arith/src/arith_frops_fixed.bin")
+            .generate_file("state-machines/arith/src/arith_frops_fixed.bin")
             .map_err(|err| anyhow::anyhow!("failed to generate arith_frops_fixed.bin: {err}"))?;
 
         info!("generating binary basic frequent-op fixed table");
         BinaryBasicFrops::new()
-            .generate_cmd(
-                "binary_basic_frops_fixed_gen",
-                "state-machines/binary/src/binary_basic_frops_fixed.bin",
-            )
+            .generate_file("state-machines/binary/src/binary_basic_frops_fixed.bin")
             .map_err(|err| {
                 anyhow::anyhow!("failed to generate binary_basic_frops_fixed.bin: {err}")
             })?;
 
         info!("generating binary extension frequent-op fixed table");
         BinaryExtensionFrops::new()
-            .generate_cmd(
-                "binary_extension_frops_fixed_gen",
-                "state-machines/binary/src/binary_extension_frops_fixed.bin",
-            )
+            .generate_file("state-machines/binary/src/binary_extension_frops_fixed.bin")
             .map_err(|err| {
                 anyhow::anyhow!("failed to generate binary_extension_frops_fixed.bin: {err}")
             })?;

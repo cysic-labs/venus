@@ -7,6 +7,7 @@ use pilout_crate::pilout_proxy::PilOutProxy;
 use serde::Serialize;
 use tracing::info;
 
+use crate::pil_info::stark::{build_air_stark_draft, AirInput};
 use crate::stark_struct::{generate_stark_struct, StarkSettingsMap, StarkStruct};
 
 #[derive(Debug, Serialize)]
@@ -45,6 +46,10 @@ pub fn write_basic_air_layout(
                 airgroup_name,
                 air_id,
                 air,
+                &root.symbols,
+                &root.hints,
+                &root.num_challenges,
+                &air_group.air_group_values,
                 settings,
             )?;
         }
@@ -61,6 +66,10 @@ fn write_basic_air(
     airgroup_name: &str,
     air_id: usize,
     air: &Air,
+    all_symbols: &[pilout_crate::pilout::Symbol],
+    all_hints: &[pilout_crate::pilout::Hint],
+    num_challenges: &[u32],
+    airgroup_values: &[pilout_crate::pilout::AirGroupValue],
     settings: &StarkSettingsMap,
 ) -> Result<()> {
     let air_name = air
@@ -105,6 +114,24 @@ fn write_basic_air(
             .context("failed to serialize AIR setup manifest")?,
     )
     .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+
+    let draft = build_air_stark_draft(AirInput {
+        airgroup_id: airgroup_id as u32,
+        air_id: air_id as u32,
+        airgroup_values,
+        all_symbols,
+        all_hints,
+        num_challenges,
+        air,
+        stark_struct: manifest.stark_struct.clone(),
+    })?;
+    let draft_path = files_dir.join(format!("{air_name}.starkinfo-rs-draft.json"));
+    fs::write(
+        &draft_path,
+        serde_json::to_string_pretty(&draft.stark_info)
+            .context("failed to serialize AIR STARK draft")?,
+    )
+    .with_context(|| format!("failed to write {}", draft_path.display()))?;
     info!("prepared basic AIR layout for {airgroup_name}/{air_name}");
 
     Ok(())

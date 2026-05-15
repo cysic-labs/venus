@@ -16,6 +16,8 @@ pub struct FormattedExpression {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<FormattedExpression>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
@@ -33,13 +35,35 @@ pub struct FormattedExpression {
     pub air_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_id: Option<u64>,
+    #[serde(rename = "expDeg", skip_serializing_if = "Option::is_none")]
+    pub exp_deg: Option<u64>,
+    #[serde(rename = "rowsOffsets", skip_serializing_if = "Option::is_none")]
+    pub rows_offsets: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub keep: bool,
+    #[serde(rename = "imPol", skip_serializing_if = "is_false")]
+    pub im_pol: bool,
+    #[serde(rename = "polId", skip_serializing_if = "Option::is_none")]
+    pub pol_id: Option<u64>,
+    #[serde(rename = "boundaryId", skip_serializing_if = "Option::is_none")]
+    pub boundary_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opening: Option<i64>,
+
+    #[serde(skip)]
+    pub degree_cache: Option<u64>,
 }
 
 impl FormattedExpression {
-    fn new(op: &str) -> Self {
+    pub fn new(op: &str) -> Self {
         Self {
             op: op.to_string(),
             values: Vec::new(),
+            name: None,
             id: None,
             value: None,
             row_offset: None,
@@ -49,20 +73,34 @@ impl FormattedExpression {
             airgroup_id: None,
             air_id: None,
             commit_id: None,
+            exp_deg: None,
+            rows_offsets: None,
+            line: None,
+            keep: false,
+            im_pol: false,
+            pol_id: None,
+            boundary_id: None,
+            boundary: None,
+            opening: None,
+            degree_cache: None,
         }
     }
 
-    fn binary(op: &str, lhs: FormattedExpression, rhs: FormattedExpression) -> Self {
+    pub fn binary(op: &str, lhs: FormattedExpression, rhs: FormattedExpression) -> Self {
         let mut expr = Self::new(op);
         expr.values = vec![lhs, rhs];
         expr
     }
 
-    fn unary(op: &str, value: FormattedExpression) -> Self {
+    pub fn unary(op: &str, value: FormattedExpression) -> Self {
         let mut expr = Self::new(op);
         expr.values = vec![value];
         expr
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,6 +126,12 @@ pub struct FormattedSymbol {
     pub commit_id: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lengths: Vec<u32>,
+    #[serde(rename = "stagePos", skip_serializing_if = "Option::is_none")]
+    pub stage_pos: Option<u64>,
+    #[serde(rename = "expId", skip_serializing_if = "Option::is_none")]
+    pub exp_id: Option<u64>,
+    #[serde(rename = "imPol", skip_serializing_if = "is_false")]
+    pub im_pol: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -433,6 +477,9 @@ fn format_symbols(symbols: &[Symbol], ctx: &AirFormatContext<'_>) -> Result<Vec<
                     air_id: None,
                     commit_id: None,
                     lengths: Vec::new(),
+                    stage_pos: None,
+                    exp_id: None,
+                    im_pol: false,
                 });
             }
             SymbolType::PublicValue => {
@@ -569,6 +616,9 @@ fn make_symbol(
         air_id: symbol.air_id.map(u64::from),
         commit_id: symbol.commit_id.map(u64::from),
         lengths,
+        stage_pos: None,
+        exp_id: None,
+        im_pol: false,
     }
 }
 
@@ -597,10 +647,11 @@ fn symbol_width(symbol: &Symbol) -> u32 {
 
 fn format_hint(
     hint: &Hint,
-    _ctx: &AirFormatContext<'_>,
+    ctx: &AirFormatContext<'_>,
     _expressions: &[FormattedExpression],
     _symbols: &[FormattedSymbol],
 ) -> Result<FormattedHint> {
+    let stage_widths = StageWidths::new(ctx.air);
     let fields = hint
         .hint_fields
         .first()
@@ -613,29 +664,46 @@ fn format_hint(
     let mut formatted_fields = Vec::with_capacity(fields.len());
     for field in fields {
         let name = field.name.clone().unwrap_or_default();
-        let (values, lengths) = format_hint_field(field)?;
+        let (value, lengths) = format_hint_field(field, ctx, &stage_widths)?;
+        let values = match (&value, &lengths) {
+            (serde_json::Value::Array(values), Some(_)) => values.clone(),
+            _ => vec![value],
+        };
         formatted_fields.push(FormattedHintValue { name, values, lengths });
     }
     Ok(FormattedHint { name: hint.name.clone(), fields: formatted_fields })
 }
 
-fn format_hint_field(field: &HintField) -> Result<(Vec<serde_json::Value>, Option<Vec<usize>>)> {
+fn format_hint_field(
+    field: &HintField,
+    ctx: &AirFormatContext<'_>,
+    stage_widths: &StageWidths,
+) -> Result<(serde_json::Value, Option<Vec<usize>>)> {
     match field.value.as_ref() {
         Some(hint_field::Value::StringValue(value)) => {
-            Ok((vec![serde_json::json!({ "op": "string", "string": value })], None))
+            Ok((serde_json::json!({ "op": "string", "string": value }), None))
         }
-        Some(hint_field::Value::Operand(_)) => {
-            anyhow::bail!("hint operand formatting is not implemented yet")
+        Some(hint_field::Value::Operand(operand)) => {
+            let formatted = format_operand(operand, ctx, stage_widths)?;
+            Ok((serde_json::to_value(formatted)?, None))
         }
         Some(hint_field::Value::HintFieldArray(array)) => {
             let mut values = Vec::with_capacity(array.hint_fields.len());
+            let mut lengths = vec![array.hint_fields.len()];
             for subfield in &array.hint_fields {
-                let (subvalues, _) = format_hint_field(subfield)?;
-                values.extend(subvalues);
+                let (subvalue, sublengths) = format_hint_field(subfield, ctx, stage_widths)?;
+                values.push(subvalue);
+                if let Some(sublengths) = sublengths {
+                    for (idx, length) in sublengths.into_iter().enumerate() {
+                        if lengths.len() <= idx + 1 {
+                            lengths.push(length);
+                        }
+                    }
+                }
             }
-            Ok((values, Some(vec![array.hint_fields.len()])))
+            Ok((serde_json::Value::Array(values), Some(lengths)))
         }
-        None => Ok((Vec::new(), None)),
+        None => Ok((serde_json::Value::Null, None)),
     }
 }
 

@@ -281,6 +281,17 @@ impl FrequentOpsHelpers {
 
         let output_file = matches.get_one::<String>("output").unwrap().as_str();
 
+        self.generate_file(airgroup_name, air_name, output_file, table, num_rows)
+    }
+
+    pub fn generate_file(
+        &self,
+        airgroup_name: &str,
+        air_name: &str,
+        output_file: &str,
+        table: Vec<(u8, u64, u64, u64, bool)>,
+        num_rows: usize,
+    ) -> Result<(), Box<dyn Error>> {
         // Generate the columns
         let (op, a0, a1, b0, b1, c0, c1, flag) = Self::cols_gen(table, num_rows);
 
