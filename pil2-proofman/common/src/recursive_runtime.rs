@@ -61,6 +61,7 @@ pub struct NativeRuntimeLcTerm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRuntimeCustomGate {
     pub kind: NativeRuntimeCustomGateKind,
+    pub parameters: Vec<u64>,
     pub signals: Vec<u64>,
 }
 
@@ -70,6 +71,7 @@ pub enum NativeRuntimeCustomGateKind {
     EvPol4,
     TreeSelector4,
     SelectValue1,
+    FFT4,
 }
 
 impl NativeRecursiveRuntime {
@@ -78,6 +80,14 @@ impl NativeRecursiveRuntime {
         if bytes.len() < 64 || &bytes[..8] != MAGIC {
             return Err(ProofmanError::InvalidSetup(format!(
                 "{} is not a native recursive runtime descriptor",
+                path.display()
+            )));
+        }
+
+        let version = read_u64(&bytes, 8)?;
+        if !(1..=2).contains(&version) {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "{} has unsupported native recursive runtime descriptor version {version}",
                 path.display()
             )));
         }
@@ -184,7 +194,7 @@ impl NativeRecursiveRuntime {
             (Vec::new(), copy_ops_end)
         };
         let custom_gates = if bytes.len() >= constraints_end + 8 {
-            parse_custom_gates(path, &bytes, constraints_end)?
+            parse_custom_gates(path, &bytes, constraints_end, version)?
         } else {
             Vec::new()
         };
@@ -394,6 +404,7 @@ impl NativeRecursiveRuntime {
             NativeRuntimeCustomGateKind::EvPol4 => solve_evpol4_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::TreeSelector4 => solve_tree_selector4_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::SelectValue1 => solve_select_value1_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::FFT4 => solve_fft4_gate(gate, witness, known),
         }
     }
 
@@ -408,6 +419,7 @@ impl NativeRecursiveRuntime {
             NativeRuntimeCustomGateKind::EvPol4 => verify_evpol4_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::TreeSelector4 => verify_tree_selector4_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::SelectValue1 => verify_select_value1_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::FFT4 => verify_fft4_gate(gate, witness, known),
         }
     }
 }
@@ -711,6 +723,45 @@ fn verify_select_value1_gate<F: PrimeField64>(
     )
 }
 
+fn solve_fft4_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &mut [F],
+    known: &mut [bool],
+) -> ProofmanResult<bool> {
+    if gate.signals.len() != 24 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "FFT4 native runtime gate must have 24 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals[..12].iter().any(|&signal| !known[signal]) {
+        return Ok(false);
+    }
+
+    let result = fft4(&gate.parameters, &signals, witness)?;
+    assign_gate_outputs("FFT4", &signals[12..24], result, witness, known)
+}
+
+fn verify_fft4_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &[F],
+    known: &[bool],
+) -> ProofmanResult<()> {
+    if gate.signals.len() != 24 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "FFT4 native runtime gate must have 24 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals.iter().any(|&signal| !known[signal]) {
+        return Ok(());
+    }
+    let result = fft4(&gate.parameters, &signals, witness)?;
+    verify_gate_outputs("FFT4", &signals[12..24], result, witness)
+}
+
 fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
     let mut out = Vec::with_capacity(signals.len());
     for &signal in signals {
@@ -811,6 +862,48 @@ fn evpol4<F: PrimeField64>(signals: &[usize], witness: &[F]) -> [F; 3] {
     cmul_add(acc, x, coefs[0])
 }
 
+fn fft4<F: PrimeField64>(parameters: &[u64], signals: &[usize], witness: &[F]) -> ProofmanResult<[F; 12]> {
+    if parameters.len() != 4 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "FFT4 native runtime gate must have 4 parameters, got {}",
+            parameters.len()
+        )));
+    }
+    let first_w = F::from_u64(parameters[0]);
+    let inc_w = F::from_u64(parameters[1]);
+    let scale = F::from_u64(parameters[2]);
+    let fft_type = parameters[3];
+    let first_w2 = first_w * first_w;
+    let mut c = [F::ZERO; 9];
+    if fft_type == 4 {
+        c[0] = scale;
+        c[1] = scale * first_w2;
+        c[2] = scale * first_w;
+        c[3] = scale * first_w * first_w2;
+        c[4] = scale * first_w * inc_w;
+        c[5] = scale * first_w * first_w2 * inc_w;
+    } else if fft_type == 2 {
+        c[6] = scale;
+        c[7] = scale * first_w;
+        c[8] = scale * first_w * inc_w;
+    } else {
+        return Err(ProofmanError::InvalidSetup(format!("FFT4 native runtime gate has invalid type {fft_type}")));
+    }
+
+    let mut out = [F::ZERO; 12];
+    for e in 0..3 {
+        let a0 = witness[signals[e]];
+        let a1 = witness[signals[3 + e]];
+        let a2 = witness[signals[6 + e]];
+        let a3 = witness[signals[9 + e]];
+        out[e] = c[0] * a0 + c[1] * a1 + c[2] * a2 + c[3] * a3 + c[6] * a0 + c[7] * a1;
+        out[3 + e] = c[0] * a0 - c[1] * a1 + c[4] * a2 - c[5] * a3 + c[6] * a0 - c[7] * a1;
+        out[6 + e] = c[0] * a0 + c[1] * a1 - c[2] * a2 - c[3] * a3 + c[6] * a2 + c[8] * a3;
+        out[9 + e] = c[0] * a0 - c[1] * a1 - c[4] * a2 + c[5] * a3 + c[6] * a2 - c[8] * a3;
+    }
+    Ok(out)
+}
+
 fn checked_table_end(path: &Path, start: usize, count: usize, row_len: usize, label: &str) -> ProofmanResult<usize> {
     start
         .checked_add(
@@ -864,6 +957,7 @@ fn parse_custom_gates(
     path: &Path,
     bytes: &[u8],
     custom_gates_offset: usize,
+    version: u64,
 ) -> ProofmanResult<Vec<NativeRuntimeCustomGate>> {
     let count = read_u64(bytes, custom_gates_offset)? as usize;
     let mut offset = custom_gates_offset + 8;
@@ -875,6 +969,7 @@ fn parse_custom_gates(
             2 => NativeRuntimeCustomGateKind::EvPol4,
             3 => NativeRuntimeCustomGateKind::TreeSelector4,
             4 => NativeRuntimeCustomGateKind::SelectValue1,
+            5 => NativeRuntimeCustomGateKind::FFT4,
             other => {
                 return Err(ProofmanError::InvalidSetup(format!(
                     "{} references unsupported native runtime custom gate kind {other}",
@@ -882,8 +977,27 @@ fn parse_custom_gates(
                 )))
             }
         };
-        let signal_count = read_u64(bytes, offset + 8)? as usize;
-        let signals_start = offset + 16;
+        let (parameters, signal_count_offset) = if version >= 2 {
+            let parameter_count = read_u64(bytes, offset + 8)? as usize;
+            let parameters_start = offset + 16;
+            let parameters_end =
+                checked_table_end(path, parameters_start, parameter_count, 8, "custom gate parameter")?;
+            if parameters_end > bytes.len() {
+                return Err(ProofmanError::InvalidSetup(format!(
+                    "{} has a truncated native runtime custom gate parameter table",
+                    path.display()
+                )));
+            }
+            let mut parameters = Vec::with_capacity(parameter_count);
+            for index in 0..parameter_count {
+                parameters.push(read_u64(bytes, parameters_start + index * 8)?);
+            }
+            (parameters, parameters_end)
+        } else {
+            (Vec::new(), offset + 8)
+        };
+        let signal_count = read_u64(bytes, signal_count_offset)? as usize;
+        let signals_start = signal_count_offset + 8;
         let signals_end = checked_table_end(path, signals_start, signal_count, 8, "custom gate signal")?;
         if signals_end > bytes.len() {
             return Err(ProofmanError::InvalidSetup(format!(
@@ -896,7 +1010,7 @@ fn parse_custom_gates(
             signals.push(read_u64(bytes, signals_start + index * 8)?);
         }
         offset = signals_end;
-        custom_gates.push(NativeRuntimeCustomGate { kind, signals });
+        custom_gates.push(NativeRuntimeCustomGate { kind, parameters, signals });
     }
     Ok(custom_gates)
 }
@@ -1006,6 +1120,7 @@ mod tests {
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::EvPol4,
+                parameters: Vec::new(),
                 signals: (1..=21).collect(),
             }],
         };
@@ -1038,6 +1153,7 @@ mod tests {
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::TreeSelector4,
+                parameters: Vec::new(),
                 signals: (1..=17).collect(),
             }],
         };
@@ -1066,6 +1182,7 @@ mod tests {
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::SelectValue1,
+                parameters: Vec::new(),
                 signals: (1..=22).collect(),
             }],
         };
@@ -1076,6 +1193,36 @@ mod tests {
         assert_eq!(witness[20].as_canonical_u64(), 32);
         assert_eq!(witness[21].as_canonical_u64(), 33);
         assert_eq!(witness[22].as_canonical_u64(), 34);
+        Ok(())
+    }
+
+    #[test]
+    fn solves_fft4_custom_gate() -> ProofmanResult<()> {
+        let runtime = NativeRecursiveRuntime {
+            template_id: 0,
+            size_witness_words: 25,
+            n_publics: 0,
+            public_input_offset_words: 1,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 12,
+            source_sections: Vec::new(),
+            section_copy_ops: Vec::new(),
+            constraints: Vec::new(),
+            custom_gates: vec![NativeRuntimeCustomGate {
+                kind: NativeRuntimeCustomGateKind::FFT4,
+                parameters: vec![1, 1, 1, 2],
+                signals: (1..=24).collect(),
+            }],
+        };
+        let source = vec![10, 20, 30, 1, 2, 3, 40, 50, 60, 4, 5, 6];
+
+        let witness = runtime.generate_witness::<Goldilocks>(&source, 25)?;
+        let expected = [11, 22, 33, 9, 18, 27, 44, 55, 66, 36, 45, 54];
+        for (idx, expected) in expected.into_iter().enumerate() {
+            assert_eq!(witness[13 + idx].as_canonical_u64(), expected);
+        }
         Ok(())
     }
 }

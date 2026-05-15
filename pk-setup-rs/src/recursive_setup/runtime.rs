@@ -7,7 +7,7 @@ use crate::recursive_setup::plonk::PlonkAddition;
 use crate::recursive_setup::r1cs::R1cs;
 
 const MAGIC: &[u8; 8] = b"PIL2RSPD";
-const VERSION: u64 = 1;
+const VERSION: u64 = 2;
 const TEMPLATE_PER_AIR: u64 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,15 +144,20 @@ fn append_custom_gates(out: &mut Vec<u8>, r1cs: &R1cs) {
                 "EvPol4" => Some(2u64),
                 "TreeSelector4" => Some(3u64),
                 "SelectValue1" => Some(4u64),
+                "FFT4" => Some(5u64),
                 _ => None,
             }?;
-            Some((kind, gate_use))
+            Some((kind, &gate.parameters, gate_use))
         })
         .collect::<Vec<_>>();
 
     push_u64(out, supported_gate_uses.len() as u64);
-    for (kind, gate_use) in supported_gate_uses {
+    for (kind, parameters, gate_use) in supported_gate_uses {
         push_u64(out, kind);
+        push_u64(out, parameters.len() as u64);
+        for &parameter in parameters {
+            push_u64(out, parameter);
+        }
         push_u64(out, gate_use.signals.len() as u64);
         for &signal in &gate_use.signals {
             push_u64(out, signal);
