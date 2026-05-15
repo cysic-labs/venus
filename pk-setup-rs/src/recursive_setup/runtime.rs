@@ -119,6 +119,7 @@ fn append_constraints(out: &mut Vec<u8>, r1cs: &R1cs) {
         append_linear_combination(out, &constraint.b);
         append_linear_combination(out, &constraint.c);
     }
+    append_custom_gates(out, r1cs);
 }
 
 fn append_linear_combination(
@@ -129,6 +130,30 @@ fn append_linear_combination(
     for (&signal, &coeff) in lc {
         push_u64(out, signal as u64);
         push_u64(out, coeff);
+    }
+}
+
+fn append_custom_gates(out: &mut Vec<u8>, r1cs: &R1cs) {
+    let supported_gate_uses = r1cs
+        .custom_gate_uses
+        .iter()
+        .filter_map(|gate_use| {
+            let gate = r1cs.custom_gates.get(gate_use.id as usize)?;
+            let kind = match gate.template_name.as_str() {
+                "CMul" => Some(1u64),
+                _ => None,
+            }?;
+            Some((kind, gate_use))
+        })
+        .collect::<Vec<_>>();
+
+    push_u64(out, supported_gate_uses.len() as u64);
+    for (kind, gate_use) in supported_gate_uses {
+        push_u64(out, kind);
+        push_u64(out, gate_use.signals.len() as u64);
+        for &signal in &gate_use.signals {
+            push_u64(out, signal);
+        }
     }
 }
 

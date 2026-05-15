@@ -20,6 +20,7 @@ pub struct NativeRecursiveRuntime {
     pub source_sections: Vec<NativeRuntimeSection>,
     pub section_copy_ops: Vec<NativeRuntimeSectionCopyOp>,
     pub constraints: Vec<NativeRuntimeConstraint>,
+    pub custom_gates: Vec<NativeRuntimeCustomGate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +56,17 @@ pub struct NativeRuntimeConstraint {
 pub struct NativeRuntimeLcTerm {
     pub signal: u64,
     pub coeff: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRuntimeCustomGate {
+    pub kind: NativeRuntimeCustomGateKind,
+    pub signals: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeRuntimeCustomGateKind {
+    CMul,
 }
 
 impl NativeRecursiveRuntime {
@@ -163,8 +175,16 @@ impl NativeRecursiveRuntime {
         } else {
             (Vec::new(), copy_ops_count_offset)
         };
-        let constraints =
-            if bytes.len() >= copy_ops_end + 8 { parse_constraints(path, &bytes, copy_ops_end)? } else { Vec::new() };
+        let (constraints, constraints_end) = if bytes.len() >= copy_ops_end + 8 {
+            parse_constraints(path, &bytes, copy_ops_end)?
+        } else {
+            (Vec::new(), copy_ops_end)
+        };
+        let custom_gates = if bytes.len() >= constraints_end + 8 {
+            parse_custom_gates(path, &bytes, constraints_end)?
+        } else {
+            Vec::new()
+        };
 
         Ok(Self {
             template_id,
@@ -178,6 +198,7 @@ impl NativeRecursiveRuntime {
             source_sections,
             section_copy_ops,
             constraints,
+            custom_gates,
         })
     }
 
@@ -302,6 +323,15 @@ impl NativeRecursiveRuntime {
                     solved_any = true;
                 }
             }
+            for gate in &self.custom_gates {
+                if self.try_solve_custom_gate(gate, witness, known)? {
+                    solved_any = true;
+                }
+            }
+        }
+
+        for gate in &self.custom_gates {
+            self.verify_custom_gate(gate, witness, known)?;
         }
 
         for constraint in &self.constraints {
@@ -348,6 +378,28 @@ impl NativeRecursiveRuntime {
         }
 
         Ok(false)
+    }
+
+    fn try_solve_custom_gate<F: PrimeField64>(
+        &self,
+        gate: &NativeRuntimeCustomGate,
+        witness: &mut [F],
+        known: &mut [bool],
+    ) -> ProofmanResult<bool> {
+        match gate.kind {
+            NativeRuntimeCustomGateKind::CMul => solve_cmul_gate(gate, witness, known),
+        }
+    }
+
+    fn verify_custom_gate<F: PrimeField64>(
+        &self,
+        gate: &NativeRuntimeCustomGate,
+        witness: &[F],
+        known: &[bool],
+    ) -> ProofmanResult<()> {
+        match gate.kind {
+            NativeRuntimeCustomGateKind::CMul => verify_cmul_gate(gate, witness, known),
+        }
     }
 }
 
@@ -408,6 +460,96 @@ fn solve_single_unknown<F: PrimeField64>(
     }
 }
 
+fn solve_cmul_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &mut [F],
+    known: &mut [bool],
+) -> ProofmanResult<bool> {
+    if gate.signals.len() != 9 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "CMul native runtime gate must have 9 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals[..6].iter().any(|&signal| !known[signal]) {
+        return Ok(false);
+    }
+
+    let a = [witness[signals[0]], witness[signals[1]], witness[signals[2]]];
+    let b = [witness[signals[3]], witness[signals[4]], witness[signals[5]]];
+    let result = cmul(a, b);
+    let mut changed = false;
+    for idx in 0..3 {
+        let signal = signals[6 + idx];
+        if known[signal] {
+            if witness[signal] != result[idx] {
+                return Err(ProofmanError::InvalidProof(format!(
+                    "native recursive CMul gate output mismatch at signal {signal}"
+                )));
+            }
+        } else {
+            witness[signal] = result[idx];
+            known[signal] = true;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn verify_cmul_gate<F: PrimeField64>(
+    gate: &NativeRuntimeCustomGate,
+    witness: &[F],
+    known: &[bool],
+) -> ProofmanResult<()> {
+    if gate.signals.len() != 9 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "CMul native runtime gate must have 9 signals, got {}",
+            gate.signals.len()
+        )));
+    }
+    let signals = gate_signals(&gate.signals, witness.len())?;
+    if signals.iter().any(|&signal| !known[signal]) {
+        return Ok(());
+    }
+    let a = [witness[signals[0]], witness[signals[1]], witness[signals[2]]];
+    let b = [witness[signals[3]], witness[signals[4]], witness[signals[5]]];
+    let result = cmul(a, b);
+    for idx in 0..3 {
+        let signal = signals[6 + idx];
+        if witness[signal] != result[idx] {
+            return Err(ProofmanError::InvalidProof(format!(
+                "native recursive CMul gate output mismatch at signal {signal}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
+    let mut out = Vec::with_capacity(signals.len());
+    for &signal in signals {
+        let signal = usize::try_from(signal).map_err(|_| {
+            ProofmanError::InvalidSetup(format!("native recursive custom gate signal {signal} is too large"))
+        })?;
+        if signal >= witness_len {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive custom gate signal {signal} is outside witness size {witness_len}"
+            )));
+        }
+        out.push(signal);
+    }
+    Ok(out)
+}
+
+fn cmul<F: PrimeField64>(a: [F; 3], b: [F; 3]) -> [F; 3] {
+    [
+        a[0] * b[0] + a[1] * b[2] + a[2] * b[1],
+        a[0] * b[1] + a[1] * b[0] + a[1] * b[2] + a[2] * b[1] + a[2] * b[2],
+        a[0] * b[2] + a[2] * b[2] + a[2] * b[0] + a[1] * b[1],
+    ]
+}
+
 fn checked_table_end(path: &Path, start: usize, count: usize, row_len: usize, label: &str) -> ProofmanResult<usize> {
     start
         .checked_add(
@@ -424,7 +566,7 @@ fn parse_constraints(
     path: &Path,
     bytes: &[u8],
     constraints_offset: usize,
-) -> ProofmanResult<Vec<NativeRuntimeConstraint>> {
+) -> ProofmanResult<(Vec<NativeRuntimeConstraint>, usize)> {
     let count = read_u64(bytes, constraints_offset)? as usize;
     let mut offset = constraints_offset + 8;
     let mut constraints = Vec::with_capacity(count);
@@ -435,7 +577,7 @@ fn parse_constraints(
         offset = next;
         constraints.push(NativeRuntimeConstraint { a, b, c });
     }
-    Ok(constraints)
+    Ok((constraints, offset))
 }
 
 fn parse_lc(path: &Path, bytes: &[u8], offset: usize) -> ProofmanResult<(Vec<NativeRuntimeLcTerm>, usize)> {
@@ -455,6 +597,44 @@ fn parse_lc(path: &Path, bytes: &[u8], offset: usize) -> ProofmanResult<(Vec<Nat
         terms.push(NativeRuntimeLcTerm { signal: read_u64(bytes, offset)?, coeff: read_u64(bytes, offset + 8)? });
     }
     Ok((terms, terms_end))
+}
+
+fn parse_custom_gates(
+    path: &Path,
+    bytes: &[u8],
+    custom_gates_offset: usize,
+) -> ProofmanResult<Vec<NativeRuntimeCustomGate>> {
+    let count = read_u64(bytes, custom_gates_offset)? as usize;
+    let mut offset = custom_gates_offset + 8;
+    let mut custom_gates = Vec::with_capacity(count);
+    for _ in 0..count {
+        let kind_id = read_u64(bytes, offset)?;
+        let kind = match kind_id {
+            1 => NativeRuntimeCustomGateKind::CMul,
+            other => {
+                return Err(ProofmanError::InvalidSetup(format!(
+                    "{} references unsupported native runtime custom gate kind {other}",
+                    path.display()
+                )))
+            }
+        };
+        let signal_count = read_u64(bytes, offset + 8)? as usize;
+        let signals_start = offset + 16;
+        let signals_end = checked_table_end(path, signals_start, signal_count, 8, "custom gate signal")?;
+        if signals_end > bytes.len() {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "{} has a truncated native runtime custom gate signal table",
+                path.display()
+            )));
+        }
+        let mut signals = Vec::with_capacity(signal_count);
+        for index in 0..signal_count {
+            signals.push(read_u64(bytes, signals_start + index * 8)?);
+        }
+        offset = signals_end;
+        custom_gates.push(NativeRuntimeCustomGate { kind, signals });
+    }
+    Ok(custom_gates)
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> ProofmanResult<u64> {
@@ -481,7 +661,7 @@ mod tests {
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&1u64.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&8u64.to_le_bytes());
+        bytes.extend_from_slice(&13u64.to_le_bytes());
         bytes.extend_from_slice(&3u64.to_le_bytes());
         bytes.extend_from_slice(&1u64.to_le_bytes());
         bytes.extend_from_slice(&3u64.to_le_bytes());
@@ -512,18 +692,25 @@ mod tests {
         bytes.extend_from_slice(&1u64.to_le_bytes());
         bytes.extend_from_slice(&8u64.to_le_bytes());
         bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&9u64.to_le_bytes());
+        for signal in [1u64, 2, 3, 4, 5, 6, 9, 10, 11] {
+            bytes.extend_from_slice(&signal.to_le_bytes());
+        }
         std::fs::write(&path, bytes)?;
 
         let runtime = NativeRecursiveRuntime::from_dat_file(&path)?;
-        assert_eq!(runtime.size_witness_words, 8);
+        assert_eq!(runtime.size_witness_words, 13);
         assert_eq!(runtime.copy_indices, vec![4, 2]);
         assert_eq!(runtime.source_assertions.len(), 1);
         assert_eq!(runtime.source_public_prefix_words, 6);
         assert_eq!(runtime.source_sections.len(), 1);
         assert_eq!(runtime.section_copy_ops.len(), 1);
         assert_eq!(runtime.constraints.len(), 1);
+        assert_eq!(runtime.custom_gates.len(), 1);
 
-        let witness = runtime.generate_witness::<Goldilocks>(&[10, 20, 30, 40, 50], 10)?;
+        let witness = runtime.generate_witness::<Goldilocks>(&[10, 20, 30, 40, 50], 13)?;
         assert_eq!(witness[0].as_canonical_u64(), 1);
         assert_eq!(witness[1].as_canonical_u64(), 50);
         assert_eq!(witness[2].as_canonical_u64(), 30);
@@ -531,6 +718,9 @@ mod tests {
         assert_eq!(witness[6].as_canonical_u64(), 30);
         assert_eq!(witness[7].as_canonical_u64(), 40);
         assert_eq!(witness[8].as_canonical_u64(), 1200);
+        assert_eq!(witness[9].as_canonical_u64(), 4400);
+        assert_eq!(witness[10].as_canonical_u64(), 7000);
+        assert_eq!(witness[11].as_canonical_u64(), 5100);
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())
