@@ -1,6 +1,8 @@
 #[allow(dead_code)]
 pub mod circuit;
 #[allow(dead_code)]
+pub mod gadgets;
+#[allow(dead_code)]
 pub mod manifest;
 #[allow(dead_code)]
 pub mod plonk;
