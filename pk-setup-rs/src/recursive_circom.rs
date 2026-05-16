@@ -1536,6 +1536,39 @@ pub fn render_recursive2_circom(
 }
 
 #[allow(dead_code)]
+pub fn render_final_compressed_circom(
+    stark_info: &CircomStarkInfo,
+    verifier_filename: &str,
+    n_publics: usize,
+) -> String {
+    let mut out = String::new();
+    line(&mut out, format_args!("pragma circom 2.1.0;"));
+    line(&mut out, format_args!("pragma custom_templates;"));
+    out.push('\n');
+    line(&mut out, format_args!("include \"{verifier_filename}\";"));
+    out.push('\n');
+    line(&mut out, format_args!("template FinalCompressed() {{"));
+    out.push_str(&render_define_stark_inputs(
+        stark_info,
+        "",
+        n_publics,
+        StarkInputOptions { add_publics: true, ..Default::default() },
+    ));
+    out.push('\n');
+    out.push_str(&render_assign_stark_inputs(
+        "sV",
+        stark_info,
+        "",
+        n_publics,
+        StarkInputOptions { add_publics: true, final_verifier: true, ..Default::default() },
+    ));
+    line(&mut out, format_args!("}}"));
+    out.push('\n');
+    line(&mut out, format_args!("component main {{public [ publics ]}}= FinalCompressed();"));
+    out
+}
+
+#[allow(dead_code)]
 pub fn render_calculate_fri_queries_template(stark_info: &CircomStarkInfo) -> String {
     let name = suffixed_name("calculateFRIQueries", stark_info.airgroup_id);
     let mut out = String::new();
@@ -4283,6 +4316,59 @@ mod tests {
         );
         let input = dir.join("recursive2.circom");
         let output = dir.join("recursive2.r1cs");
+        std::fs::write(&input, wrapper)?;
+        crate::circom_compile::compile_file_to_r1cs(
+            &input,
+            [dir.clone(), includes.gl, includes.vadcop],
+            &output,
+        )?;
+        let r1cs = crate::recursive_setup::r1cs::read_r1cs(&output)?;
+        assert!(r1cs.n_constraints > 0);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn compiles_sample_final_compressed_wrapper_circom() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir()
+            .join(format!("pk_setup_final_compressed_circom_test_{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir)?;
+        let includes = crate::circom_assets::write_recursive_include_assets(&dir)?;
+
+        let mut stark = sample_stark_info();
+        stark.airgroup_id = None;
+        stark.air_id = None;
+        stark.cm_pols_map = vec![
+            CircomPolMap {
+                name: "trace".to_string(),
+                stage: 1,
+                dim: 1,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+            CircomPolMap {
+                name: "q".to_string(),
+                stage: 2,
+                dim: 3,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+        ];
+        stark.map_sections_n.insert("cm2".to_string(), 3);
+        stark.ev_map = sample_q_evals();
+        let verifier = render_stark_verifier_circom(
+            &[1, 2, 3, 4],
+            &stark,
+            &sample_verifier_info(),
+            StarkVerifierOptions { skip_main: true, ..Default::default() },
+        );
+        std::fs::write(dir.join("sample_final_verifier.circom"), verifier)?;
+        let wrapper = render_final_compressed_circom(&stark, "sample_final_verifier.circom", 2);
+        let input = dir.join("final_compressed.circom");
+        let output = dir.join("final_compressed.r1cs");
         std::fs::write(&input, wrapper)?;
         crate::circom_compile::compile_file_to_r1cs(
             &input,
