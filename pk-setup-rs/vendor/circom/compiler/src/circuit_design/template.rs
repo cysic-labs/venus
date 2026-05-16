@@ -146,21 +146,13 @@ impl WriteWasm for TemplateCodeInfo {
                 .unwrap_or_else(|| panic!("unsupported extern_c custom template {}", self.name));
             let field_size = producer.get_size_32_bits_in_memory() * 4;
             for idx in 0..input_len {
-                instructions.push(set_constant(&producer.get_signal_memory_start().to_string()));
                 instructions.push(get_local(producer.get_signal_start_tag()));
-                instructions.push(set_constant(&idx.to_string()));
-                instructions.push(add32());
-                instructions.push(set_constant(&field_size.to_string()));
-                instructions.push(mul32());
+                instructions.push(set_constant(&(idx * field_size).to_string()));
                 instructions.push(add32());
                 instructions.push(call("$Fr_toLongNormal"));
             }
             instructions.push(set_constant(&kind.to_string()));
-            instructions.push(set_constant(&producer.get_signal_memory_start().to_string()));
             instructions.push(get_local(producer.get_signal_start_tag()));
-            instructions.push(set_constant(&field_size.to_string()));
-            instructions.push(mul32());
-            instructions.push(add32());
             instructions.push(call("$runCustomTemplate"));
         } else {
             for t in &self.body {
