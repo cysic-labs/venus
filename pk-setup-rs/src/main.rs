@@ -1,9 +1,9 @@
-mod circom_compile;
 mod circom_assets;
+mod circom_compile;
 mod pil_info;
 mod pilout_info;
-mod recursive_circom;
 mod recursive_cache;
+mod recursive_circom;
 mod recursive_setup;
 mod setup_layout;
 mod stark_struct;

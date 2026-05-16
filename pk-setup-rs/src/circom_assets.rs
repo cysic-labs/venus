@@ -70,7 +70,8 @@ mod tests {
 
     #[test]
     fn writes_recursive_circom_assets() -> Result<()> {
-        let dir = std::env::temp_dir().join(format!("pk_setup_circom_assets_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pk_setup_circom_assets_{}", std::process::id()));
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
         }

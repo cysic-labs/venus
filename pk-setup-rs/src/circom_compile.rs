@@ -65,14 +65,20 @@ pub fn compile_goldilocks_r1cs(config: &CircomR1csConfig) -> Result<()> {
             prime: GOLDILOCKS_PRIME.to_string(),
         },
     )
-    .map_err(|_| anyhow::anyhow!("failed to build Circom constraints for {}", config.input.display()))?;
+    .map_err(|_| {
+        anyhow::anyhow!("failed to build Circom constraints for {}", config.input.display())
+    })?;
 
     write_r1cs(exporter.as_ref(), &output, custom_gates)
         .map_err(|_| anyhow::anyhow!("failed to write R1CS {}", config.output.display()))?;
     Ok(())
 }
 
-fn write_r1cs(exporter: &dyn ConstraintExporter, output: &str, custom_gates: bool) -> Result<(), ()> {
+fn write_r1cs(
+    exporter: &dyn ConstraintExporter,
+    output: &str,
+    custom_gates: bool,
+) -> Result<(), ()> {
     exporter.r1cs(output, custom_gates)
 }
 
