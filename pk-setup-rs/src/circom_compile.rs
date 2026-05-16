@@ -16,8 +16,20 @@ pub struct CircomR1csConfig {
     pub output: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CircomR1csMetadata {
+    pub input_signal_start: u64,
+    pub input_signal_count: u64,
+}
+
 #[allow(dead_code)]
 pub fn compile_goldilocks_r1cs(config: &CircomR1csConfig) -> Result<()> {
+    compile_goldilocks_r1cs_with_metadata(config).map(|_| ())
+}
+
+pub fn compile_goldilocks_r1cs_with_metadata(
+    config: &CircomR1csConfig,
+) -> Result<CircomR1csMetadata> {
     let input = config.input.display().to_string();
     let output = config.output.display().to_string();
     let include_dirs = config.include_dirs.clone();
@@ -50,7 +62,7 @@ pub fn compile_goldilocks_r1cs(config: &CircomR1csConfig) -> Result<()> {
     }
 
     let custom_gates = program_archive.custom_gates;
-    let (exporter, _) = build_circuit(
+    let (exporter, vcp) = build_circuit(
         program_archive,
         BuildConfig {
             no_rounds: 0,
@@ -71,7 +83,13 @@ pub fn compile_goldilocks_r1cs(config: &CircomR1csConfig) -> Result<()> {
 
     write_r1cs(exporter.as_ref(), &output, custom_gates)
         .map_err(|_| anyhow::anyhow!("failed to write R1CS {}", config.output.display()))?;
-    Ok(())
+    let main = vcp.get_main_instance().ok_or_else(|| {
+        anyhow::anyhow!("Circom source {} has no main instance", config.input.display())
+    })?;
+    Ok(CircomR1csMetadata {
+        input_signal_start: (main.number_of_outputs + 1) as u64,
+        input_signal_count: main.number_of_inputs as u64,
+    })
 }
 
 fn write_r1cs(
@@ -89,6 +107,18 @@ pub fn compile_file_to_r1cs(
     output: impl AsRef<Path>,
 ) -> Result<()> {
     compile_goldilocks_r1cs(&CircomR1csConfig {
+        input: input.as_ref().to_path_buf(),
+        include_dirs: include_dirs.into_iter().map(Into::into).collect(),
+        output: output.as_ref().to_path_buf(),
+    })
+}
+
+pub fn compile_file_to_r1cs_with_metadata(
+    input: impl AsRef<Path>,
+    include_dirs: impl IntoIterator<Item = impl Into<PathBuf>>,
+    output: impl AsRef<Path>,
+) -> Result<CircomR1csMetadata> {
+    compile_goldilocks_r1cs_with_metadata(&CircomR1csConfig {
         input: input.as_ref().to_path_buf(),
         include_dirs: include_dirs.into_iter().map(Into::into).collect(),
         output: output.as_ref().to_path_buf(),

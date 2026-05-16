@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -62,6 +63,54 @@ impl RuntimeDescriptor {
             section_copy_ops: Vec::new(),
         }
     }
+
+    pub fn for_circom_main_inputs(
+        r1cs: &R1cs,
+        input_signal_start: u64,
+        input_signal_count: u64,
+    ) -> Self {
+        let n_publics = u64::from(r1cs.n_outputs + r1cs.n_pub_inputs);
+        let wire_map = if r1cs.wire_map.is_empty() {
+            (0..u64::from(r1cs.n_vars)).collect::<Vec<_>>()
+        } else {
+            r1cs.wire_map.clone()
+        };
+        let signal_to_wire = wire_map
+            .iter()
+            .enumerate()
+            .map(|(wire, &signal)| (signal, wire as u64))
+            .collect::<HashMap<_, _>>();
+        let mut section_copy_ops = Vec::new();
+        for source_offset in 0..input_signal_count {
+            let signal = input_signal_start + source_offset;
+            if let Some(&wire) = signal_to_wire.get(&signal) {
+                section_copy_ops.push(RuntimeSectionCopyOp {
+                    section_index: 0,
+                    section_offset_words: source_offset,
+                    word_len: 1,
+                    witness_offset_words: wire,
+                });
+            }
+        }
+
+        Self {
+            template_id: TEMPLATE_PER_AIR,
+            size_witness_words: u64::from(r1cs.n_vars),
+            n_publics,
+            public_input_offset_words: 0,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 0,
+            source_sections: vec![RuntimeSection {
+                start_word: 0,
+                word_len: input_signal_count,
+                kind: 0,
+                flags: 0,
+            }],
+            section_copy_ops,
+        }
+    }
 }
 
 pub fn write_runtime_dat_file(path: &Path, r1cs: &R1cs) -> Result<()> {
@@ -69,8 +118,24 @@ pub fn write_runtime_dat_file(path: &Path, r1cs: &R1cs) -> Result<()> {
         .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))
 }
 
+pub fn write_runtime_dat_file_with_descriptor(
+    path: &Path,
+    r1cs: &R1cs,
+    descriptor: &RuntimeDescriptor,
+) -> Result<()> {
+    fs::write(path, runtime_dat_buffer_for_descriptor(r1cs, descriptor)?)
+        .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", path.display()))
+}
+
 pub fn runtime_dat_buffer_for_r1cs(r1cs: &R1cs) -> Result<Vec<u8>> {
-    let mut out = runtime_dat_buffer(&RuntimeDescriptor::for_r1cs(r1cs))?;
+    runtime_dat_buffer_for_descriptor(r1cs, &RuntimeDescriptor::for_r1cs(r1cs))
+}
+
+pub fn runtime_dat_buffer_for_descriptor(
+    r1cs: &R1cs,
+    descriptor: &RuntimeDescriptor,
+) -> Result<Vec<u8>> {
+    let mut out = runtime_dat_buffer(descriptor)?;
     append_constraints(&mut out, r1cs);
     Ok(out)
 }
@@ -271,6 +336,25 @@ mod tests {
         assert_eq!(u64::from_le_bytes(buffer[56..64].try_into()?), 3);
         assert_eq!(u64::from_le_bytes(buffer[120..128].try_into()?), 0);
         Ok(())
+    }
+
+    #[test]
+    fn maps_circom_main_inputs_to_witness_wires() {
+        let mut r1cs = synthetic_r1cs();
+        r1cs.n_vars = 5;
+        r1cs.wire_map = vec![0, 12, 10, 11, 20];
+        let descriptor = RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3);
+        assert_eq!(descriptor.copy_indices, Vec::<u64>::new());
+        assert_eq!(descriptor.source_public_prefix_words, 0);
+        assert_eq!(descriptor.source_sections[0].start_word, 0);
+        assert_eq!(descriptor.source_sections[0].word_len, 3);
+        assert_eq!(descriptor.section_copy_ops.len(), 3);
+        assert_eq!(descriptor.section_copy_ops[0].section_offset_words, 0);
+        assert_eq!(descriptor.section_copy_ops[0].witness_offset_words, 2);
+        assert_eq!(descriptor.section_copy_ops[1].section_offset_words, 1);
+        assert_eq!(descriptor.section_copy_ops[1].witness_offset_words, 3);
+        assert_eq!(descriptor.section_copy_ops[2].section_offset_words, 2);
+        assert_eq!(descriptor.section_copy_ops[2].witness_offset_words, 1);
     }
 
     #[test]

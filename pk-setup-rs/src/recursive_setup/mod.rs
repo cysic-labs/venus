@@ -112,6 +112,26 @@ pub fn write_setup(
     Ok(artifacts)
 }
 
+pub fn write_setup_with_runtime_descriptor(
+    r1cs: &r1cs::R1cs,
+    setup_path: &Path,
+    kind: PlonkLayoutKind,
+    namespace: &str,
+    runtime_descriptor: &runtime::RuntimeDescriptor,
+    config: RecursiveAirSetupConfig,
+) -> Result<RecursiveLayoutArtifacts> {
+    let (program, layout) = build_layout_parts(r1cs, kind, namespace)?;
+    let artifacts = write_layout_artifacts_with_runtime_descriptor(
+        r1cs,
+        setup_path,
+        &program,
+        &layout,
+        Some(runtime_descriptor),
+    )?;
+    write_air_setup_files(setup_path, &layout, kind, namespace, config)?;
+    Ok(artifacts)
+}
+
 fn build_layout_parts(
     r1cs: &r1cs::R1cs,
     kind: PlonkLayoutKind,
@@ -128,12 +148,26 @@ fn write_layout_artifacts(
     program: &PlonkProgram,
     layout: &PlonkLayout,
 ) -> Result<RecursiveLayoutArtifacts> {
+    write_layout_artifacts_with_runtime_descriptor(r1cs, setup_path, program, layout, None)
+}
+
+fn write_layout_artifacts_with_runtime_descriptor(
+    r1cs: &r1cs::R1cs,
+    setup_path: &Path,
+    program: &PlonkProgram,
+    layout: &PlonkLayout,
+    runtime_descriptor: Option<&runtime::RuntimeDescriptor>,
+) -> Result<RecursiveLayoutArtifacts> {
     let const_path = setup_path.with_extension("const");
     let exec_path = setup_path.with_extension("exec");
     let dat_path = setup_path.with_extension("dat");
     plonk::write_const_file(&const_path, &layout.fixed_columns)?;
     plonk::write_exec_file(&exec_path, &program.additions, &layout.signal_map)?;
-    runtime::write_runtime_dat_file(&dat_path, r1cs)?;
+    if let Some(descriptor) = runtime_descriptor {
+        runtime::write_runtime_dat_file_with_descriptor(&dat_path, r1cs, descriptor)?;
+    } else {
+        runtime::write_runtime_dat_file(&dat_path, r1cs)?;
+    }
     runtime::write_exec_sidecars(setup_path, r1cs, &program.additions, &layout.signal_map)?;
 
     Ok(RecursiveLayoutArtifacts {
