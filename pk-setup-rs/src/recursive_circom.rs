@@ -4,6 +4,80 @@ use serde::Deserialize;
 
 use crate::stark_struct::StarkStruct;
 
+const MIN_CHUNK_SIZE: usize = 1000;
+const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
+const GOLDILOCKS_SHIFT: u64 = 49;
+const GOLDILOCKS_ROOTS: [u64; 33] = [
+    1,
+    18446744069414584320,
+    281474976710656,
+    16777216,
+    4096,
+    64,
+    8,
+    2198989700608,
+    4404853092538523347,
+    6434636298004421797,
+    4255134452441852017,
+    9113133275150391358,
+    4355325209153869931,
+    4308460244895131701,
+    7126024226993609386,
+    1873558160482552414,
+    8167150655112846419,
+    5718075921287398682,
+    3411401055030829696,
+    8982441859486529725,
+    1971462654193939361,
+    6553637399136210105,
+    8124823329697072476,
+    5936499541590631774,
+    2709866199236980323,
+    8877499657461974390,
+    3757607247483852735,
+    4969973714567017225,
+    2147253751702802259,
+    2530564950562219707,
+    1905180297017055339,
+    3524815499551269279,
+    7277203076849721926,
+];
+const GOLDILOCKS_INV_ROOTS: [u64; 33] = [
+    1,
+    18446744069414584320,
+    18446462594437873665,
+    18446742969902956801,
+    18442240469788262401,
+    18158513693329981441,
+    16140901060737761281,
+    274873712576,
+    9171943329124577373,
+    5464760906092500108,
+    4088309022520035137,
+    6141391951880571024,
+    386651765402340522,
+    11575992183625933494,
+    2841727033376697931,
+    8892493137794983311,
+    9071788333329385449,
+    15139302138664925958,
+    14996013474702747840,
+    5708508531096855759,
+    6451340039662992847,
+    5102364342718059185,
+    10420286214021487819,
+    13945510089405579673,
+    17538441494603169704,
+    16784649996768716373,
+    8974194941257008806,
+    16194875529212099076,
+    5506647088734794298,
+    7731871677141058814,
+    16558868196663692994,
+    9896756522253134970,
+    1644488454024429189,
+];
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -1006,6 +1080,733 @@ pub fn render_verify_fri_template(stark_info: &CircomStarkInfo) -> String {
     out
 }
 
+#[allow(dead_code)]
+pub fn render_verify_evaluations_templates(
+    stark_info: &CircomStarkInfo,
+    verifier_info: &CircomVerifierInfo,
+) -> String {
+    let chunks = build_expression_chunks(&verifier_info.q_verifier.code, MIN_CHUNK_SIZE);
+    let mut out = String::new();
+
+    for (idx, chunk) in chunks.chunks.iter().enumerate() {
+        line(&mut out, format_args!("template VerifyEvaluationsChunks{idx}() {{"));
+        render_challenge_stage_inputs(&mut out, stark_info, None);
+        line(&mut out, format_args!("    signal input challengeQ[3];"));
+        line(&mut out, format_args!("    signal input challengeXi[3];"));
+        line(&mut out, format_args!("    signal input evals[{}][3];", stark_info.ev_map.len()));
+        render_optional_value_inputs(&mut out, stark_info, None);
+        out.push('\n');
+        render_boundary_input_declarations(&mut out, stark_info, None);
+        out.push('\n');
+        for tmp in &chunk.inputs {
+            render_tmp_declaration(&mut out, "input", *tmp, &chunks.tmps);
+        }
+        out.push('\n');
+        for tmp in &chunk.outputs {
+            render_tmp_declaration(&mut out, "output", *tmp, &chunks.tmps);
+        }
+        let initialized =
+            chunk.inputs.iter().chain(chunk.outputs.iter()).copied().collect::<Vec<_>>();
+        out.push_str(&render_unrolled_code(stark_info, &chunk.code, &initialized));
+        line(&mut out, format_args!("}}"));
+        out.push('\n');
+    }
+
+    out.push_str(&render_verify_evaluations_template(stark_info, verifier_info, &chunks));
+    out
+}
+
+#[allow(dead_code)]
+pub fn render_calculate_fri_pol_templates(
+    stark_info: &CircomStarkInfo,
+    verifier_info: &CircomVerifierInfo,
+) -> String {
+    let chunks = build_expression_chunks(&verifier_info.query_verifier.block.code, MIN_CHUNK_SIZE);
+    let map_values_name = suffixed_name("MapValues", stark_info.airgroup_id);
+    let mut out = String::new();
+
+    for (idx, chunk) in chunks.chunks.iter().enumerate() {
+        line(&mut out, format_args!("template CalculateFRIPolChunks{idx}() {{"));
+        line(&mut out, format_args!("    signal input challengesFRI[2][3];"));
+        line(&mut out, format_args!("    signal input evals[{}][3];", stark_info.ev_map.len()));
+        out.push('\n');
+        render_cm_value_inputs(&mut out, stark_info, None);
+        line(&mut out, format_args!("    signal input consts[{}];", stark_info.n_constants));
+        render_custom_commit_value_inputs(&mut out, stark_info, None);
+        out.push('\n');
+        line(
+            &mut out,
+            format_args!("    signal input xDivXSubXi[{}][3];", stark_info.opening_points.len()),
+        );
+        out.push('\n');
+        line(&mut out, format_args!("    component mapValues = {map_values_name}();"));
+        render_map_values_assignments(&mut out, stark_info);
+        out.push('\n');
+        for tmp in &chunk.inputs {
+            render_tmp_declaration(&mut out, "input", *tmp, &chunks.tmps);
+        }
+        out.push('\n');
+        for tmp in &chunk.outputs {
+            render_tmp_declaration(&mut out, "output", *tmp, &chunks.tmps);
+        }
+        let initialized =
+            chunk.inputs.iter().chain(chunk.outputs.iter()).copied().collect::<Vec<_>>();
+        out.push_str(&render_unrolled_code(stark_info, &chunk.code, &initialized));
+        out.push('\n');
+        line(&mut out, format_args!("}}"));
+        out.push('\n');
+    }
+
+    out.push_str(&render_calculate_fri_pol_template(stark_info, verifier_info, &chunks));
+    out.push('\n');
+    out.push_str(&render_verify_query_template(stark_info));
+    out.push('\n');
+    out.push_str(&render_map_values_template(stark_info));
+    out
+}
+
+#[allow(dead_code)]
+pub fn render_verify_final_pol_template(stark_info: &CircomStarkInfo) -> String {
+    let name = suffixed_name("VerifyFinalPol", stark_info.airgroup_id);
+    let last_bits = stark_info.stark_struct.steps.last().map(|step| step.n_bits).unwrap_or(0);
+    let final_pol_size = pow2_u64(last_bits);
+    let max_deg_bits = last_bits
+        .saturating_sub(stark_info.stark_struct.n_bits_ext - stark_info.stark_struct.n_bits);
+    let max_degree = pow2_u64(max_deg_bits);
+    let mut out = String::new();
+    line(&mut out, format_args!("template {name}() {{"));
+    line(&mut out, format_args!("    ///////"));
+    line(&mut out, format_args!("    // Check Degree last pol"));
+    line(&mut out, format_args!("    ///////"));
+    line(&mut out, format_args!("    signal input finalPol[{final_pol_size}][3];"));
+    line(&mut out, format_args!("    signal input {{binary}} enable;"));
+    out.push('\n');
+    line(
+        &mut out,
+        format_args!(
+            "    signal lastIFFT[{final_pol_size}][3] <== FFT({last_bits}, 3, 1)(finalPol);"
+        ),
+    );
+    out.push('\n');
+    line(&mut out, format_args!("    for (var k= {max_degree}; k< {final_pol_size}; k++) {{"));
+    line(&mut out, format_args!("        for (var e=0; e<3; e++) {{"));
+    line(&mut out, format_args!("            enable * lastIFFT[k][e] === 0;"));
+    line(&mut out, format_args!("        }}"));
+    line(&mut out, format_args!("    }}"));
+    out.push('\n');
+    line(&mut out, format_args!("    for (var k= 0; k < {max_degree}; k++) {{"));
+    line(&mut out, format_args!("        _ <== lastIFFT[k];"));
+    line(&mut out, format_args!("    }}"));
+    line(&mut out, format_args!("}}"));
+    out
+}
+
+fn render_verify_evaluations_template(
+    stark_info: &CircomStarkInfo,
+    verifier_info: &CircomVerifierInfo,
+    chunks: &ExpressionChunks,
+) -> String {
+    let name = suffixed_name("VerifyEvaluations", stark_info.airgroup_id);
+    let q_stage = stark_info.q_stage();
+    let mut inputs = Vec::new();
+    let mut out = String::new();
+    line(&mut out, format_args!("template {name}() {{"));
+    render_challenge_stage_inputs(&mut out, stark_info, Some(&mut inputs));
+    line(&mut out, format_args!("    signal input challengeQ[3];"));
+    inputs.push("challengeQ".to_string());
+    line(&mut out, format_args!("    signal input challengeXi[3];"));
+    inputs.push("challengeXi".to_string());
+    line(&mut out, format_args!("    signal input evals[{}][3];", stark_info.ev_map.len()));
+    inputs.push("evals".to_string());
+    render_optional_value_inputs(&mut out, stark_info, Some(&mut inputs));
+    line(&mut out, format_args!("    signal input {{binary}} enable;"));
+    out.push('\n');
+
+    line(&mut out, format_args!("    signal zMul[{}][3];", stark_info.stark_struct.n_bits));
+    line(
+        &mut out,
+        format_args!("    for (var i=0; i< {} ; i++) {{", stark_info.stark_struct.n_bits),
+    );
+    line(&mut out, format_args!("        if(i==0){{"));
+    line(&mut out, format_args!("            zMul[i] <== CMul()(challengeXi, challengeXi);"));
+    line(&mut out, format_args!("        }} else {{"));
+    line(&mut out, format_args!("            zMul[i] <== CMul()(zMul[i-1], zMul[i-1]);"));
+    line(&mut out, format_args!("        }}"));
+    line(&mut out, format_args!("    }}"));
+    out.push('\n');
+    line(
+        &mut out,
+        format_args!(
+            "    signal Z[3] <== [zMul[{}][0] - 1, zMul[{}][1], zMul[{}][2]];",
+            stark_info.stark_struct.n_bits - 1,
+            stark_info.stark_struct.n_bits - 1,
+            stark_info.stark_struct.n_bits - 1
+        ),
+    );
+    line(&mut out, format_args!("    signal Zh[3] <== CInv()(Z);"));
+    inputs.push("Zh".to_string());
+    out.push('\n');
+
+    if stark_info.has_boundary("firstRow") {
+        line(
+            &mut out,
+            format_args!("    signal Zfirst[3] <== CInv()([challengeXi[0] - 1, challengeXi[1], challengeXi[2]]);"),
+        );
+        inputs.push("Zfirst".to_string());
+        out.push('\n');
+    }
+    if stark_info.has_boundary("lastRow") {
+        let root = goldilocks_pow(
+            root_at(stark_info.stark_struct.n_bits),
+            pow2_u64(stark_info.stark_struct.n_bits) - 1,
+        );
+        line(
+            &mut out,
+            format_args!("    signal Zlast[3] <== CInv()([challengeXi[0] - {root}, challengeXi[1], challengeXi[2]]);"),
+        );
+        inputs.push("Zlast".to_string());
+        out.push('\n');
+    }
+    for (idx, frame) in stark_info.frame_boundaries().iter().enumerate() {
+        let offset_min = frame.offset_min.unwrap_or(0);
+        let offset_max = frame.offset_max.unwrap_or(0);
+        line(&mut out, format_args!("    signal Zframe{idx}[{}][3];", offset_min + offset_max));
+        inputs.push(format!("Zframe{idx}"));
+        let mut c = 0u32;
+        for j in 0..offset_min {
+            let root = goldilocks_pow(root_at(stark_info.stark_struct.n_bits), j as u64);
+            render_zframe_step(&mut out, idx, c, root);
+            c += 1;
+        }
+        for _j in 0..offset_max {
+            let root = goldilocks_pow(
+                root_at(stark_info.stark_struct.n_bits),
+                pow2_u64(stark_info.stark_struct.n_bits) - idx as u64 - 1,
+            );
+            render_zframe_step(&mut out, idx, c, root);
+            c += 1;
+        }
+        out.push('\n');
+    }
+
+    for (idx, chunk) in chunks.chunks.iter().enumerate() {
+        for output in &chunk.outputs {
+            render_tmp_declaration(&mut out, "", *output, &chunks.tmps);
+        }
+        let outputs = join_tmp_names(&chunk.outputs);
+        let mut call_inputs = inputs.clone();
+        call_inputs.extend(chunk.inputs.iter().map(|tmp| format!("tmp_{tmp}")));
+        line(
+            &mut out,
+            format_args!(
+                "    ({outputs}) <== VerifyEvaluationsChunks{idx}()({});",
+                call_inputs.join(",")
+            ),
+        );
+    }
+    out.push('\n');
+
+    let q_index = stark_info
+        .cm_pols_map
+        .iter()
+        .position(|pol| pol.stage == q_stage && pol.stage_id.unwrap_or(u64::MAX) == 0)
+        .expect("q polynomial index");
+    let ev_id = stark_info
+        .ev_map
+        .iter()
+        .position(|ev| ev.ev_type == "cm" && ev.id == q_index as u64)
+        .expect("q evaluation id");
+    line(&mut out, format_args!("    signal xAcc[{}][3];", stark_info.q_deg));
+    line(&mut out, format_args!("    signal qStep[{}][3];", stark_info.q_deg.saturating_sub(1)));
+    line(&mut out, format_args!("    signal qAcc[{}][3];", stark_info.q_deg));
+    out.push('\n');
+    line(&mut out, format_args!("    for (var i=0; i< {}; i++) {{", stark_info.q_deg));
+    line(&mut out, format_args!("        if (i==0) {{"));
+    line(&mut out, format_args!("            xAcc[0] <== [1, 0, 0];"));
+    line(&mut out, format_args!("            qAcc[0] <== evals[{ev_id}+i];"));
+    line(&mut out, format_args!("        }} else {{"));
+    line(
+        &mut out,
+        format_args!(
+            "            xAcc[i] <== CMul()(xAcc[i-1], zMul[{}]);",
+            stark_info.stark_struct.n_bits - 1
+        ),
+    );
+    line(&mut out, format_args!("            qStep[i-1] <== CMul()(xAcc[i], evals[{ev_id}+i]);"));
+    line(&mut out, format_args!("            qAcc[i][0] <== qAcc[i-1][0] + qStep[i-1][0];"));
+    line(&mut out, format_args!("            qAcc[i][1] <== qAcc[i-1][1] + qStep[i-1][1];"));
+    line(&mut out, format_args!("            qAcc[i][2] <== qAcc[i-1][2] + qStep[i-1][2];"));
+    line(&mut out, format_args!("        }}"));
+    line(&mut out, format_args!("    }}"));
+    out.push('\n');
+    let result_tmp = last_dest_tmp_id(&verifier_info.q_verifier.code);
+    line(
+        &mut out,
+        format_args!(
+            "    enable * (tmp_{result_tmp}[0] - qAcc[{}][0]) === 0;",
+            stark_info.q_deg - 1
+        ),
+    );
+    line(
+        &mut out,
+        format_args!(
+            "    enable * (tmp_{result_tmp}[1] - qAcc[{}][1]) === 0;",
+            stark_info.q_deg - 1
+        ),
+    );
+    line(
+        &mut out,
+        format_args!(
+            "    enable * (tmp_{result_tmp}[2] - qAcc[{}][2]) === 0;",
+            stark_info.q_deg - 1
+        ),
+    );
+    line(&mut out, format_args!("}}"));
+    out
+}
+
+fn render_calculate_fri_pol_template(
+    stark_info: &CircomStarkInfo,
+    verifier_info: &CircomVerifierInfo,
+    chunks: &ExpressionChunks,
+) -> String {
+    let name = suffixed_name("CalculateFRIPolValue", stark_info.airgroup_id);
+    let mut inputs = Vec::new();
+    let mut out = String::new();
+    line(&mut out, format_args!("template {name}() {{"));
+    line(
+        &mut out,
+        format_args!(
+            "    signal input {{binary}} queriesFRI[{}];",
+            stark_info.stark_struct.steps[0].n_bits
+        ),
+    );
+    line(&mut out, format_args!("    signal input challengeXi[3];"));
+    line(&mut out, format_args!("    signal input challengesFRI[2][3];"));
+    inputs.push("challengesFRI".to_string());
+    line(&mut out, format_args!("    signal input evals[{}][3];", stark_info.ev_map.len()));
+    inputs.push("evals".to_string());
+    render_cm_value_inputs(&mut out, stark_info, Some(&mut inputs));
+    line(&mut out, format_args!("    signal input consts[{}];", stark_info.n_constants));
+    inputs.push("consts".to_string());
+    render_custom_commit_value_inputs(&mut out, stark_info, Some(&mut inputs));
+    out.push('\n');
+    line(&mut out, format_args!("    signal output queryVals[3];"));
+    out.push('\n');
+    line(&mut out, format_args!("    signal xacc[{}];", stark_info.stark_struct.steps[0].n_bits));
+    line(
+        &mut out,
+        format_args!(
+            "    xacc[0] <== queriesFRI[0]*({GOLDILOCKS_SHIFT} * roots({})-{GOLDILOCKS_SHIFT}) + {GOLDILOCKS_SHIFT};",
+            stark_info.stark_struct.steps[0].n_bits
+        ),
+    );
+    line(
+        &mut out,
+        format_args!("    for (var i=1; i<{}; i++) {{", stark_info.stark_struct.steps[0].n_bits),
+    );
+    line(
+        &mut out,
+        format_args!(
+            "        xacc[i] <== xacc[i-1] * ( queriesFRI[i]*(roots({} - i) - 1) +1);",
+            stark_info.stark_struct.steps[0].n_bits
+        ),
+    );
+    line(&mut out, format_args!("    }}"));
+    out.push('\n');
+    line(&mut out, format_args!("    signal xDivXSubXi[{}][3];", stark_info.opening_points.len()));
+    inputs.push("xDivXSubXi".to_string());
+    out.push('\n');
+    for (idx, opening) in stark_info.opening_points.iter().enumerate() {
+        let root = opening_root(stark_info.stark_struct.n_bits, *opening);
+        line(
+            &mut out,
+            format_args!(
+                "    xDivXSubXi[{idx}] <== CInv()([xacc[{}] - {root} * challengeXi[0], - {root} * challengeXi[1], - {root} * challengeXi[2]]);",
+                stark_info.stark_struct.steps[0].n_bits - 1
+            ),
+        );
+    }
+    out.push('\n');
+    for (idx, chunk) in chunks.chunks.iter().enumerate() {
+        for output in &chunk.outputs {
+            render_tmp_declaration(&mut out, "", *output, &chunks.tmps);
+        }
+        let outputs = join_tmp_names(&chunk.outputs);
+        let mut call_inputs = inputs.clone();
+        call_inputs.extend(chunk.inputs.iter().map(|tmp| format!("tmp_{tmp}")));
+        line(
+            &mut out,
+            format_args!(
+                "    ({outputs}) <== CalculateFRIPolChunks{idx}()({});",
+                call_inputs.join(",")
+            ),
+        );
+    }
+    out.push('\n');
+    let result_tmp = last_dest_tmp_id(&verifier_info.query_verifier.block.code);
+    line(&mut out, format_args!("    queryVals[0] <== tmp_{result_tmp}[0];"));
+    line(&mut out, format_args!("    queryVals[1] <== tmp_{result_tmp}[1];"));
+    line(&mut out, format_args!("    queryVals[2] <== tmp_{result_tmp}[2];"));
+    line(&mut out, format_args!("}}"));
+    out
+}
+
+fn render_verify_query_template(stark_info: &CircomStarkInfo) -> String {
+    let name = suffixed_name("VerifyQuery", stark_info.airgroup_id);
+    let mut out = String::new();
+    line(&mut out, format_args!("template {name}(currStepBits, nextStepBits) {{"));
+    line(&mut out, format_args!("    var nextStep = currStepBits - nextStepBits; "));
+    line(
+        &mut out,
+        format_args!(
+            "    signal input {{binary}} queriesFRI[{}];",
+            stark_info.stark_struct.steps[0].n_bits
+        ),
+    );
+    line(&mut out, format_args!("    signal input queryVals[3];"));
+    line(&mut out, format_args!("    signal input s1_vals[1 << nextStep][3];"));
+    line(&mut out, format_args!("    signal input {{binary}} enable;"));
+    out.push('\n');
+    line(&mut out, format_args!("    signal {{binary}} s0_keys_lowValues[nextStep];"));
+    line(&mut out, format_args!("    for(var i = 0; i < nextStep; i++) {{"));
+    line(&mut out, format_args!("        s0_keys_lowValues[i] <== queriesFRI[i + nextStepBits];"));
+    line(&mut out, format_args!("    }}"));
+    out.push('\n');
+    line(&mut out, format_args!("    for(var i = 0; i < nextStepBits; i++) {{"));
+    line(&mut out, format_args!("        _ <== queriesFRI[i];"));
+    line(&mut out, format_args!("    }}"));
+    out.push('\n');
+    line(
+        &mut out,
+        format_args!(
+            "    signal lowValues[3] <== TreeSelector(nextStep, 3)(s1_vals, s0_keys_lowValues);"
+        ),
+    );
+    out.push('\n');
+    line(&mut out, format_args!("    enable * (lowValues[0] - queryVals[0]) === 0;"));
+    line(&mut out, format_args!("    enable * (lowValues[1] - queryVals[1]) === 0;"));
+    line(&mut out, format_args!("    enable * (lowValues[2] - queryVals[2]) === 0;"));
+    line(&mut out, format_args!("}}"));
+    out
+}
+
+fn render_map_values_template(stark_info: &CircomStarkInfo) -> String {
+    let name = suffixed_name("MapValues", stark_info.airgroup_id);
+    let mut out = String::new();
+    line(&mut out, format_args!("template {name}() {{"));
+    render_cm_value_inputs(&mut out, stark_info, None);
+    render_custom_commit_value_inputs(&mut out, stark_info, None);
+
+    for stage in 1..=stark_info.q_stage() {
+        for (idx, pol) in stark_info.cm_pols_map.iter().filter(|pol| pol.stage == stage).enumerate()
+        {
+            render_map_output(
+                &mut out,
+                &format!("cm{stage}_{}", pol.stage_id.unwrap_or(idx as u64)),
+                pol.dim,
+            );
+        }
+    }
+    for (commit_idx, commit) in stark_info.custom_commits.iter().enumerate() {
+        for stage in 0..commit.stage_widths.len() as u64 {
+            for (idx, pol) in stark_info.custom_commits_map[commit_idx]
+                .iter()
+                .filter(|pol| pol.stage == stage)
+                .enumerate()
+            {
+                render_map_output(
+                    &mut out,
+                    &format!(
+                        "custom_{}_{}_{}",
+                        commit.name,
+                        stage,
+                        pol.stage_id.unwrap_or(idx as u64)
+                    ),
+                    pol.dim,
+                );
+            }
+        }
+    }
+    out.push('\n');
+
+    for (commit_idx, commit) in stark_info.custom_commits.iter().enumerate() {
+        for stage in 0..commit.stage_widths.len() as u64 {
+            for (idx, pol) in stark_info.custom_commits_map[commit_idx]
+                .iter()
+                .filter(|pol| pol.stage == stage)
+                .enumerate()
+            {
+                let output = format!(
+                    "custom_{}_{}_{}",
+                    commit.name,
+                    stage,
+                    pol.stage_id.unwrap_or(idx as u64)
+                );
+                let input = format!("vals_{}_0", commit.name);
+                render_map_assignment(&mut out, &output, &input, pol);
+            }
+        }
+    }
+    out.push('\n');
+    for stage in 1..=stark_info.q_stage() {
+        for (idx, pol) in stark_info.cm_pols_map.iter().filter(|pol| pol.stage == stage).enumerate()
+        {
+            let output = format!("cm{stage}_{}", pol.stage_id.unwrap_or(idx as u64));
+            let input = format!("vals{stage}");
+            render_map_assignment(&mut out, &output, &input, pol);
+        }
+    }
+    line(&mut out, format_args!("}}"));
+    out
+}
+
+fn render_challenge_stage_inputs(
+    out: &mut String,
+    stark_info: &CircomStarkInfo,
+    mut names: Option<&mut Vec<String>>,
+) {
+    for stage in 1..=stark_info.n_stages {
+        let count = stark_info.challenge_count(stage as u64);
+        if count == 0 {
+            continue;
+        }
+        line(out, format_args!("    signal input challengesStage{stage}[{count}][3];"));
+        if let Some(names) = names.as_mut() {
+            names.push(format!("challengesStage{stage}"));
+        }
+    }
+}
+
+fn render_optional_value_inputs(
+    out: &mut String,
+    stark_info: &CircomStarkInfo,
+    mut names: Option<&mut Vec<String>>,
+) {
+    if stark_info.n_publics > 0 {
+        line(out, format_args!("    signal input publics[{}];", stark_info.n_publics));
+        if let Some(names) = names.as_mut() {
+            names.push("publics".to_string());
+        }
+    }
+    if !stark_info.airgroup_values_map.is_empty() {
+        line(
+            out,
+            format_args!(
+                "    signal input airgroupvalues[{}][3];",
+                stark_info.airgroup_values_map.len()
+            ),
+        );
+        if let Some(names) = names.as_mut() {
+            names.push("airgroupvalues".to_string());
+        }
+    }
+    if !stark_info.air_values_map.is_empty() {
+        line(
+            out,
+            format_args!("    signal input airvalues[{}][3];", stark_info.air_values_map.len()),
+        );
+        if let Some(names) = names.as_mut() {
+            names.push("airvalues".to_string());
+        }
+    }
+    if !stark_info.proof_values_map.is_empty() {
+        line(
+            out,
+            format_args!("    signal input proofvalues[{}][3];", stark_info.proof_values_map.len()),
+        );
+        if let Some(names) = names.as_mut() {
+            names.push("proofvalues".to_string());
+        }
+    }
+}
+
+fn render_boundary_input_declarations(
+    out: &mut String,
+    stark_info: &CircomStarkInfo,
+    mut names: Option<&mut Vec<String>>,
+) {
+    line(out, format_args!("    signal input Zh[3];"));
+    if let Some(names) = names.as_mut() {
+        names.push("Zh".to_string());
+    }
+    if stark_info.has_boundary("firstRow") {
+        line(out, format_args!("    signal input Zfirst[3];"));
+        if let Some(names) = names.as_mut() {
+            names.push("Zfirst".to_string());
+        }
+    }
+    if stark_info.has_boundary("lastRow") {
+        line(out, format_args!("    signal input Zlast[3];"));
+        if let Some(names) = names.as_mut() {
+            names.push("Zlast".to_string());
+        }
+    }
+    for (idx, frame) in stark_info.frame_boundaries().iter().enumerate() {
+        let offset_min = frame.offset_min.unwrap_or(0);
+        let offset_max = frame.offset_max.unwrap_or(0);
+        line(out, format_args!("    signal input Zframe{idx}[{}][3];", offset_min + offset_max));
+        if let Some(names) = names.as_mut() {
+            names.push(format!("Zframe{idx}"));
+        }
+    }
+}
+
+fn render_cm_value_inputs(
+    out: &mut String,
+    stark_info: &CircomStarkInfo,
+    mut names: Option<&mut Vec<String>>,
+) {
+    for stage in 1..=stark_info.n_stages {
+        let width = stark_info.map_section_width(&format!("cm{stage}"));
+        if width == 0 {
+            continue;
+        }
+        line(out, format_args!("    signal input cm{stage}[{width}];"));
+        if let Some(names) = names.as_mut() {
+            names.push(format!("cm{stage}"));
+        }
+    }
+    let q_stage = stark_info.q_stage();
+    let width = stark_info.map_section_width(&format!("cm{q_stage}"));
+    line(out, format_args!("    signal input cm{q_stage}[{width}];"));
+    if let Some(names) = names.as_mut() {
+        names.push(format!("cm{q_stage}"));
+    }
+}
+
+fn render_custom_commit_value_inputs(
+    out: &mut String,
+    stark_info: &CircomStarkInfo,
+    mut names: Option<&mut Vec<String>>,
+) {
+    for commit in &stark_info.custom_commits {
+        let name = format!("custom_{}_0", commit.name);
+        let width = stark_info.map_section_width(&format!("{}0", commit.name));
+        line(out, format_args!("    signal input {name}[{width}];"));
+        if let Some(names) = names.as_mut() {
+            names.push(name);
+        }
+    }
+}
+
+fn render_map_values_assignments(out: &mut String, stark_info: &CircomStarkInfo) {
+    for stage in 1..=stark_info.n_stages {
+        if stark_info.map_section_width(&format!("cm{stage}")) > 0 {
+            line(out, format_args!("    mapValues.vals{stage} <== cm{stage};"));
+        }
+    }
+    let q_stage = stark_info.q_stage();
+    line(out, format_args!("    mapValues.vals{q_stage} <== cm{q_stage};"));
+    for commit in &stark_info.custom_commits {
+        line(
+            out,
+            format_args!("    mapValues.vals_{}_0 <== custom_{}_0;", commit.name, commit.name),
+        );
+    }
+}
+
+fn render_tmp_declaration(
+    out: &mut String,
+    qualifier: &str,
+    tmp_id: u64,
+    tmps: &BTreeMap<u64, TmpInfo>,
+) {
+    let dim = tmps.get(&tmp_id).expect("tmp declaration").dim;
+    let qualifier = if qualifier.is_empty() { String::new() } else { format!("{qualifier} ") };
+    if dim == 1 {
+        line(out, format_args!("    signal {qualifier}tmp_{tmp_id};"));
+    } else {
+        line(out, format_args!("    signal {qualifier}tmp_{tmp_id}[3];"));
+    }
+}
+
+fn render_map_output(out: &mut String, name: &str, dim: u64) {
+    if dim == 1 {
+        line(out, format_args!("    signal output {name};"));
+    } else {
+        line(out, format_args!("    signal output {name}[3];"));
+    }
+}
+
+fn render_map_assignment(out: &mut String, output: &str, input: &str, pol: &CircomPolMap) {
+    let stage_pos = pol.stage_pos.expect("polynomial stagePos");
+    if pol.dim == 1 {
+        line(out, format_args!("    {output} <== {input}[{stage_pos}];"));
+    } else {
+        line(
+            out,
+            format_args!(
+                "    {output} <== [{input}[{stage_pos}],{input}[{}] , {input}[{}]];",
+                stage_pos + 1,
+                stage_pos + 2
+            ),
+        );
+    }
+}
+
+fn render_zframe_step(out: &mut String, frame_idx: usize, position: u32, root: u64) {
+    if position == 0 {
+        line(
+            out,
+            format_args!("    Zframe{frame_idx}[{position}] <== CMul()(Zh, [challengeXi[0] - {root}, challengeXi[1], challengeXi[2]]);"),
+        );
+    } else {
+        line(
+            out,
+            format_args!("    Zframe{frame_idx}[{position}] <== CMul()(Zframe{frame_idx}[{}], [challengeXi[0] - {root}, challengeXi[1], challengeXi[2]]);", position - 1),
+        );
+    }
+}
+
+fn join_tmp_names(ids: &[u64]) -> String {
+    ids.iter().map(|id| format!("tmp_{id}")).collect::<Vec<_>>().join(",")
+}
+
+fn last_dest_tmp_id(code: &[CircomCodeLine]) -> u64 {
+    code.last().and_then(|line| line.dest.id).expect("verifier expression result tmp")
+}
+
+fn root_at(n_bits: u64) -> u64 {
+    GOLDILOCKS_ROOTS[n_bits as usize]
+}
+
+fn inv_root_at(n_bits: u64) -> u64 {
+    GOLDILOCKS_INV_ROOTS[n_bits as usize]
+}
+
+fn opening_root(n_bits: u64, opening: i64) -> u64 {
+    if opening >= 0 {
+        goldilocks_pow(root_at(n_bits), opening as u64)
+    } else {
+        goldilocks_pow(inv_root_at(n_bits), opening.unsigned_abs())
+    }
+}
+
+fn pow2_u64(bits: u64) -> u64 {
+    1u64.checked_shl(bits as u32).expect("power of two size")
+}
+
+fn goldilocks_pow(mut base: u64, mut exp: u64) -> u64 {
+    let mut result = 1u64;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = goldilocks_mul(result, base);
+        }
+        base = goldilocks_mul(base, base);
+        exp >>= 1;
+    }
+    result
+}
+
+fn goldilocks_inv(value: u64) -> u64 {
+    goldilocks_pow(value, GOLDILOCKS_P - 2)
+}
+
+fn goldilocks_mul(left: u64, right: u64) -> u64 {
+    ((left as u128 * right as u128) % GOLDILOCKS_P as u128) as u64
+}
+
 fn render_binary_op(
     out: &mut String,
     op: &str,
@@ -1387,6 +2188,18 @@ impl CircomStarkInfo {
         self.challenges_map.iter().filter(|challenge| challenge.stage == stage).count()
     }
 
+    fn q_stage(&self) -> u64 {
+        self.n_stages as u64 + 1
+    }
+
+    fn has_boundary(&self, name: &str) -> bool {
+        self.boundaries.iter().any(|boundary| boundary.name == name)
+    }
+
+    fn frame_boundaries(&self) -> Vec<&CircomBoundary> {
+        self.boundaries.iter().filter(|boundary| boundary.name == "everyFrame").collect()
+    }
+
     fn arity_bits(&self) -> u64 {
         self.stark_struct.merkle_tree_arity.ilog2() as u64
     }
@@ -1541,6 +2354,48 @@ mod tests {
         assert!(out.contains("queriesFRI[q][b] <== transcriptN2b_0[j];"));
     }
 
+    #[test]
+    fn renders_verifier_evaluation_and_fri_pol_templates() {
+        let mut stark = sample_stark_info();
+        stark.challenges_map =
+            vec![CircomChallengeMap { name: "alpha".to_string(), stage: 1, dim: 3, stage_id: 0 }];
+        stark.cm_pols_map = vec![
+            CircomPolMap {
+                name: "trace".to_string(),
+                stage: 1,
+                dim: 1,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+            CircomPolMap {
+                name: "q".to_string(),
+                stage: 2,
+                dim: 3,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+        ];
+        stark.map_sections_n.insert("cm2".to_string(), 3);
+        stark.ev_map[0].id = 1;
+        let verifier = sample_verifier_info();
+
+        let evals = render_verify_evaluations_templates(&stark, &verifier);
+        assert!(evals.contains("template VerifyEvaluationsChunks0()"));
+        assert!(evals.contains("signal input challengesStage1[1][3];"));
+        assert!(evals.contains("signal qAcc[3][3];"));
+        assert!(evals.contains("enable * (tmp_0[0] - qAcc[2][0]) === 0;"));
+
+        let fri = render_calculate_fri_pol_templates(&stark, &verifier);
+        assert!(fri.contains("component mapValues = MapValues0();"));
+        assert!(fri.contains("template CalculateFRIPolValue0()"));
+        assert!(fri.contains("xacc[0] <== queriesFRI[0]*(49 * roots(8)-49) + 49;"));
+        assert!(fri.contains("queryVals[0] <== tmp_1[0];"));
+
+        let final_pol = render_verify_final_pol_template(&stark);
+        assert!(final_pol.contains("template VerifyFinalPol0()"));
+        assert!(final_pol.contains("signal lastIFFT[32][3] <== FFT(5, 3, 1)(finalPol);"));
+    }
+
     fn sample_stark_info() -> CircomStarkInfo {
         let stark_struct = StarkStruct {
             n_bits: 5,
@@ -1596,11 +2451,69 @@ mod tests {
         }
     }
 
+    fn sample_verifier_info() -> CircomVerifierInfo {
+        CircomVerifierInfo {
+            q_verifier: CircomCodeBlock {
+                tmp_used: 1,
+                code: vec![CircomCodeLine {
+                    op: "mul".to_string(),
+                    dest: tmp_ref(0, 3),
+                    src: vec![eval_ref(0), challenge_ref(2, 0)],
+                }],
+            },
+            query_verifier: CircomExpressionCode {
+                block: CircomCodeBlock {
+                    tmp_used: 2,
+                    code: vec![
+                        CircomCodeLine {
+                            op: "add".to_string(),
+                            dest: tmp_ref(0, 1),
+                            src: vec![cm_ref(0, 1), const_ref(0)],
+                        },
+                        CircomCodeLine {
+                            op: "mul".to_string(),
+                            dest: tmp_ref(1, 3),
+                            src: vec![tmp_ref(0, 1), challenge_ref(4, 0)],
+                        },
+                    ],
+                },
+                exp_id: 0,
+                stage: 0,
+            },
+        }
+    }
+
     fn tmp_ref(id: u64, dim: u64) -> CircomCodeRef {
         CircomCodeRef {
             ref_type: "tmp".to_string(),
             id: Some(id),
             dim,
+            stage: None,
+            stage_id: None,
+            value: None,
+            boundary_id: None,
+            commit_id: None,
+        }
+    }
+
+    fn eval_ref(id: u64) -> CircomCodeRef {
+        CircomCodeRef {
+            ref_type: "eval".to_string(),
+            id: Some(id),
+            dim: 3,
+            stage: None,
+            stage_id: None,
+            value: None,
+            boundary_id: None,
+            commit_id: None,
+        }
+    }
+
+    fn const_ref(id: u64) -> CircomCodeRef {
+        CircomCodeRef {
+            ref_type: "const".to_string(),
+            id: Some(id),
+            dim: 1,
             stage: None,
             stage_id: None,
             value: None,
