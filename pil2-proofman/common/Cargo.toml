@@ -34,7 +34,7 @@ tracing-subscriber = { version = "0.3.19" }
 crossbeam-queue = "0.3.12"
 lazy_static = "1.5.0"
 yansi = "1.0.1"
-wasmi = "0.31.2"
+wasmtime = "18.0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

@@ -141,10 +141,24 @@ impl WriteWasm for TemplateCodeInfo {
         instructions.push(load32(None));
         instructions.push(set_local(producer.get_signal_start_tag()));
         //generate code
-
-        for t in &self.body {
-            let mut instructions_body = t.produce_wasm(producer);
-            instructions.append(&mut instructions_body);
+        if self.is_extern_c {
+            let (kind, input_len) = extern_c_runtime_template(&self.name)
+                .unwrap_or_else(|| panic!("unsupported extern_c custom template {}", self.name));
+            let field_size = producer.get_size_32_bits_in_memory() * 4;
+            for idx in 0..input_len {
+                instructions.push(get_local(producer.get_signal_start_tag()));
+                instructions.push(set_constant(&(idx * field_size).to_string()));
+                instructions.push(add32());
+                instructions.push(call("$Fr_toLongNormal"));
+            }
+            instructions.push(set_constant(&kind.to_string()));
+            instructions.push(get_local(producer.get_signal_start_tag()));
+            instructions.push(call("$runCustomTemplate"));
+        } else {
+            for t in &self.body {
+                let mut instructions_body = t.produce_wasm(producer);
+                instructions.append(&mut instructions_body);
+            }
         }
 
         //free stack
@@ -153,6 +167,15 @@ impl WriteWasm for TemplateCodeInfo {
         instructions.push(set_constant("0"));	
         instructions.push(")".to_string());
         instructions
+    }
+}
+
+fn extern_c_runtime_template(name: &str) -> Option<(usize, usize)> {
+    match name {
+        "Poseidon16" => Some((1, 16)),
+        "CustPoseidon16" => Some((2, 18)),
+        "EvPol4" => Some((3, 18)),
+        _ => None,
     }
 }
 

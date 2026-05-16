@@ -634,6 +634,10 @@ pub fn generate_imports_list() -> Vec<WasmInstruction> {
         "(import \"runtime\" \"showSharedRWMemory\" (func $showSharedRWMemory (type $_t_void)))"
             .to_string(),
     );
+    imports.push(
+        "(import \"runtime\" \"runCustomTemplate\" (func $runCustomTemplate (type $_t_i32i32)))"
+            .to_string(),
+    );
     imports
 }
 
@@ -667,6 +671,8 @@ pub fn generate_exports_list() -> Vec<WasmInstruction> {
     exports.push("(export \"writeSharedRWMemory\" (func $writeSharedRWMemory))".to_string());
     exports.push("(export \"init\" (func $init))".to_string());
     exports.push("(export \"setInputSignal\" (func $setInputSignal))".to_string());
+    exports.push("(export \"setInputSignalRaw\" (func $setInputSignalRaw))".to_string());
+    exports.push("(export \"run\" (func $run))".to_string());
     exports.push("(export \"getInputSignalSize\" (func $getInputSignalSize))".to_string());
     exports.push("(export \"getRawPrime\" (func $getRawPrime))".to_string());
     exports.push("(export \"getFieldNumLen32\" (func $getFieldNumLen32))".to_string());
@@ -1202,6 +1208,55 @@ pub fn set_input_signal_generator(producer: &WASMProducer) -> Vec<WasmInstructio
     instructions.push(add_end()); // end else if 3
     instructions.push(add_end()); // end else if 2
     instructions.push(add_end()); // end else if 1
+    instructions.push(")".to_string());
+    instructions
+}
+
+pub fn set_input_signal_raw_generator(producer: &WASMProducer) -> Vec<WasmInstruction> {
+    let mut instructions = vec![];
+    let header = "(func $setInputSignalRaw (type $_t_i32)".to_string();
+    instructions.push(header);
+    instructions.push(" (param $pos i32)".to_string());
+    instructions.push(" (local $sipm i32) ;; position in the signal memory".to_string());
+    instructions.push(get_local("$pos"));
+    instructions.push(set_constant(&producer.get_number_of_main_inputs().to_string()));
+    instructions.push(ge32_u());
+    instructions.push(add_if());
+    instructions.push(set_constant(&exception_code_input_array_access_exeeds_size().to_string()));
+    instructions.push(call("$exceptionHandler"));
+    instructions.push(add_else());
+    instructions.push(get_local("$pos"));
+    let input_start = producer.get_number_of_main_outputs() + 1;
+    instructions.push(set_constant(&input_start.to_string()));
+    instructions.push(add32());
+    let signal_size = producer.get_size_32_bits_in_memory() * 4;
+    instructions.push(set_constant(&signal_size.to_string()));
+    instructions.push(mul32());
+    instructions.push(set_constant(&producer.get_signal_memory_start().to_string()));
+    instructions.push(add32());
+    instructions.push(set_local("$sipm"));
+    instructions.push(get_local("$sipm"));
+    let p_fr_rw_memory = producer.get_shared_rw_memory_start() - 8;
+    instructions.push(set_constant(&p_fr_rw_memory.to_string()));
+    instructions.push(call("$Fr_copy"));
+    instructions.push(add_end());
+    instructions.push(")".to_string());
+    instructions
+}
+
+pub fn run_generator(producer: &WASMProducer) -> Vec<WasmInstruction> {
+    let mut instructions = vec![];
+    let header = "(func $run (type $_t_void)".to_string();
+    instructions.push(header);
+    instructions.push(format!(" (local {} i32)", producer.get_merror_tag()));
+    instructions.push(set_constant(&producer.get_component_tree_start().to_string()));
+    let funcname = format!("${}_run", producer.get_main_header());
+    instructions.push(call(&funcname));
+    instructions.push(tee_local(producer.get_merror_tag()));
+    instructions.push(add_if());
+    instructions.push(get_local(producer.get_merror_tag()));
+    instructions.push(call("$exceptionHandler"));
+    instructions.push(add_end());
     instructions.push(")".to_string());
     instructions
 }
@@ -1877,6 +1932,12 @@ mod tests {
         code.append(&mut code_aux);
 
         code_aux = set_input_signal_generator(&producer);
+        code.append(&mut code_aux);
+
+        code_aux = set_input_signal_raw_generator(&producer);
+        code.append(&mut code_aux);
+
+        code_aux = run_generator(&producer);
         code.append(&mut code_aux);
 
         code_aux = get_input_signal_size_generator(&producer);

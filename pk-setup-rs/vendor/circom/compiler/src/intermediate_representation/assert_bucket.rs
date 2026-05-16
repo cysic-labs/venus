@@ -48,6 +48,9 @@ impl WriteWasm for AssertBucket {
         if producer.needs_comments() {
             instructions.push(";; assert bucket".to_string());
 	}
+        if self.is_constraint_equality && producer.sanity_check_style < 1 {
+            return instructions;
+        }
         let mut instructions_eval = self.evaluate.produce_wasm(producer);
         instructions.append(&mut instructions_eval);
         instructions.push(call("$Fr_isTrue"));

@@ -850,7 +850,25 @@ fn generate_witness<F: PrimeField64>(
     witness_size += *setup.exec_data.read().unwrap().as_ref().unwrap().first().unwrap();
 
     if let Some(runtime) = setup.native_runtime.read().unwrap().as_ref() {
-        return runtime.generate_witness::<F>(zkin, witness_size);
+        return match runtime.generate_witness::<F>(zkin, witness_size) {
+            Ok(witness) => Ok(witness),
+            Err(e) => {
+                let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                let debug_file_path = output_dir_path.join(format!(
+                    "proof_{instance_id}_ag{}_air{}_t{:?}_native_{}.bin",
+                    setup.airgroup_id, setup.air_id, setup.setup_type, ts
+                ));
+                let mut file = File::create(&debug_file_path)?;
+                let proof_data = cast_slice(zkin);
+                file.write_all(proof_data)?;
+                file.flush()?;
+
+                Err(ProofmanError::InvalidProof(format!(
+                    "Error generating native witness for instance id {} [{}:{}] of type {:?}: {}",
+                    instance_id, setup.airgroup_id, setup.air_id, setup.setup_type, e
+                )))
+            }
+        };
     }
 
     let witness: Vec<F> = vec![F::ZERO; witness_size as usize];
