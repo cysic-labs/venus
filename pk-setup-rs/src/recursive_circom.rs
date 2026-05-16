@@ -878,6 +878,117 @@ pub fn render_assign_vadcop_inputs(
     out
 }
 
+#[allow(dead_code)]
+pub fn render_agg_vadcop_inputs(
+    vadcop_info: &CircomVadcopInfo,
+    airgroup_id: usize,
+    prefix1: &str,
+    prefix2: &str,
+    prefix3: &str,
+    prefix: &str,
+) -> String {
+    assert_eq!(vadcop_info.curve, "None", "only lattice VADCOP aggregation is supported");
+    let agg_types = vadcop_info.agg_types.get(airgroup_id).map(Vec::as_slice).unwrap_or(&[]);
+    let multiple_circuits = vadcop_info.air_groups.len() > 1
+        || vadcop_info.airs.first().map(|airs| airs.len()).unwrap_or(0) > 1;
+    let mut out = String::new();
+    line(
+        &mut out,
+        format_args!("    {prefix}_circuitType <== {};", if multiple_circuits { 1 } else { 0 }),
+    );
+    if !agg_types.is_empty() {
+        line(&mut out, format_args!("    {prefix}_aggregationTypes <== aggregationTypes;"));
+        line(&mut out, format_args!("    signal {{binary}} aggTypes[{}];", agg_types.len()));
+        line(&mut out, format_args!("    for (var i = 0; i < {}; i++) {{", agg_types.len()));
+        line(
+            &mut out,
+            format_args!(
+                "        {prefix}_aggregationTypes[i] * ({prefix}_aggregationTypes[i] - 1) === 0;"
+            ),
+        );
+        line(&mut out, format_args!("        aggTypes[i] <== {prefix}_aggregationTypes[i];"));
+        line(&mut out, format_args!("    }}"));
+        out.push('\n');
+    }
+
+    if multiple_circuits {
+        line(
+            &mut out,
+            format_args!(
+                "    signal {{binary}} AB_isNull <== IsZero()(2 - {prefix1}_isNull - {prefix2}_isNull);"
+            ),
+        );
+        if !agg_types.is_empty() {
+            line(&mut out, format_args!("    signal airgroupValues_AB[{}][3];", agg_types.len()));
+            line(&mut out, format_args!("    for (var i = 0; i < {}; i++) {{", agg_types.len()));
+            line(
+                &mut out,
+                format_args!("        airgroupValues_AB[i] <== AggregateAirgroupValuesNull()({prefix1}_airgroupvalues[i], {prefix2}_airgroupvalues[i], aggTypes[i], {prefix1}_isNull, {prefix2}_isNull);"),
+            );
+            line(
+                &mut out,
+                format_args!("        {prefix}_airgroupvalues[i] <== AggregateAirgroupValuesNull()(airgroupValues_AB[i], {prefix3}_airgroupvalues[i], aggTypes[i], AB_isNull, {prefix3}_isNull);"),
+            );
+            line(&mut out, format_args!("    }}"));
+        }
+        line(
+            &mut out,
+            format_args!("    signal {{binary}} isNull[3] <== [{prefix1}_isNull, {prefix2}_isNull, {prefix3}_isNull];"),
+        );
+        line(
+            &mut out,
+            format_args!("    {prefix}_aggregatedProofs <== AggregateProofsNull(3)([{prefix1}_aggregatedProofs, {prefix2}_aggregatedProofs, {prefix3}_aggregatedProofs], isNull);"),
+        );
+        line(
+            &mut out,
+            format_args!("    signal AB_stage1Hash[{}] <== AggregateValuesNull({})( {prefix1}_stage1Hash, {prefix2}_stage1Hash, {prefix1}_isNull, {prefix2}_isNull);", vadcop_info.lattice_size, vadcop_info.lattice_size),
+        );
+        line(
+            &mut out,
+            format_args!("    {prefix}_stage1Hash <== AggregateValuesNull({})(AB_stage1Hash, {prefix3}_stage1Hash, AB_isNull, {prefix3}_isNull);", vadcop_info.lattice_size),
+        );
+    } else {
+        if !agg_types.is_empty() {
+            line(&mut out, format_args!("    signal airgroupValuesAB[{}][3];", agg_types.len()));
+            line(&mut out, format_args!("    for (var i = 0; i < {}; i++) {{", agg_types.len()));
+            line(
+                &mut out,
+                format_args!(
+                    "        airgroupValuesAB[i] <== AggregateAirgroupValues()({prefix1}_airgroupvalues[i], {prefix2}_airgroupvalues[i], aggTypes[i]);"
+                ),
+            );
+            line(
+                &mut out,
+                format_args!(
+                    "        {prefix}_airgroupvalues[i] <== AggregateAirgroupValues()(airgroupValuesAB[i], {prefix3}_airgroupvalues[i], aggTypes[i]);"
+                ),
+            );
+            line(&mut out, format_args!("    }}"));
+        }
+        line(
+            &mut out,
+            format_args!(
+                "    {prefix}_aggregatedProofs <== AggregateProofs(3)([{prefix1}_aggregatedProofs, {prefix2}_aggregatedProofs, {prefix3}_aggregatedProofs]);"
+            ),
+        );
+        line(
+            &mut out,
+            format_args!(
+                "    signal AB_stage1Hash[{}] <== AggregateValues({})({prefix1}_stage1Hash, {prefix2}_stage1Hash);",
+                vadcop_info.lattice_size, vadcop_info.lattice_size
+            ),
+        );
+        line(
+            &mut out,
+            format_args!(
+                "    {prefix}_stage1Hash <== AggregateValues({})(AB_stage1Hash, {prefix3}_stage1Hash);",
+                vadcop_info.lattice_size
+            ),
+        );
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct ExpressionChunks {
@@ -1244,6 +1355,182 @@ pub fn render_compressor_circom(
     line(
         &mut out,
         format_args!("component main {{public [{}]}} = Compressor();", public_names.join(", ")),
+    );
+    out
+}
+
+#[allow(dead_code)]
+pub fn render_recursive2_circom(
+    stark_info: &CircomStarkInfo,
+    vadcop_info: &CircomVadcopInfo,
+    airgroup_id: usize,
+    verifier_filename: &str,
+    basic_verification_keys: &[Vec<u64>],
+) -> String {
+    let mut out = String::new();
+    line(&mut out, format_args!("pragma circom 2.1.0;"));
+    line(&mut out, format_args!("pragma custom_templates;"));
+    out.push('\n');
+    line(&mut out, format_args!("include \"select_vk.circom\";"));
+    line(&mut out, format_args!("include \"agg_values.circom\";"));
+    line(&mut out, format_args!("include \"acc_points.circom\";"));
+    line(&mut out, format_args!("include \"{verifier_filename}\";"));
+    out.push('\n');
+    line(&mut out, format_args!("template Recursive2() {{"));
+    let n_airs = vadcop_info.airs.get(airgroup_id).map(Vec::len).unwrap_or(0);
+    line(&mut out, format_args!("    var rootCBasics[{n_airs}][4];"));
+    for (idx, key) in basic_verification_keys.iter().enumerate() {
+        line(&mut out, format_args!("    rootCBasics[{idx}] = [{}];", join_u64(key)));
+    }
+    out.push('\n');
+    out.push_str(&render_define_vadcop_inputs(vadcop_info, airgroup_id, "sv", false));
+    out.push('\n');
+    if vadcop_info.n_publics > 0 {
+        line(&mut out, format_args!("    signal input publics[{}];", vadcop_info.n_publics));
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input proofValues[{}][3];",
+                vadcop_info.proof_values_map.len()
+            ),
+        );
+    }
+    line(&mut out, format_args!("    signal input globalChallenge[3];"));
+    line(&mut out, format_args!("    signal input rootCAgg[4];"));
+    out.push('\n');
+
+    for prefix in ["a", "b", "c"] {
+        out.push_str(&render_define_vadcop_inputs(
+            vadcop_info,
+            airgroup_id,
+            &format!("{prefix}_sv"),
+            true,
+        ));
+        out.push_str(&render_define_stark_inputs(
+            stark_info,
+            prefix,
+            vadcop_info.n_publics,
+            StarkInputOptions { add_publics: false, ..Default::default() },
+        ));
+        out.push('\n');
+    }
+
+    let agg_types = vadcop_info.agg_types.get(airgroup_id).map(Vec::as_slice).unwrap_or(&[]);
+    if !agg_types.is_empty() {
+        line(&mut out, format_args!("    signal aggregationTypes[{}];", agg_types.len()));
+        line(&mut out, format_args!("    for(var i = 0; i < {}; i++) {{", agg_types.len()));
+        line(&mut out, format_args!("        aggregationTypes[i] <== a_sv_aggregationTypes[i];"));
+        line(
+            &mut out,
+            format_args!("        a_sv_aggregationTypes[i] === b_sv_aggregationTypes[i];"),
+        );
+        line(
+            &mut out,
+            format_args!("        a_sv_aggregationTypes[i] === c_sv_aggregationTypes[i];"),
+        );
+        line(&mut out, format_args!("    }}"));
+    }
+
+    out.push_str(&render_assign_stark_inputs(
+        "vA",
+        stark_info,
+        "a",
+        vadcop_info.n_publics,
+        StarkInputOptions { add_publics: false, ..Default::default() },
+    ));
+    out.push_str(&render_assign_stark_inputs(
+        "vB",
+        stark_info,
+        "b",
+        vadcop_info.n_publics,
+        StarkInputOptions { add_publics: false, ..Default::default() },
+    ));
+    out.push_str(&render_assign_stark_inputs(
+        "vC",
+        stark_info,
+        "c",
+        vadcop_info.n_publics,
+        StarkInputOptions { add_publics: false, ..Default::default() },
+    ));
+    let multiple_circuits = vadcop_info.air_groups.len() > 1
+        || vadcop_info.airs.first().map(|airs| airs.len()).unwrap_or(0) > 1;
+    out.push_str(&render_assign_vadcop_inputs(
+        "vA",
+        vadcop_info,
+        "a_sv",
+        airgroup_id,
+        VadcopAssignOptions { add_prefix_agg_types: false, set_enable_input: multiple_circuits },
+    ));
+    out.push_str(&render_assign_vadcop_inputs(
+        "vB",
+        vadcop_info,
+        "b_sv",
+        airgroup_id,
+        VadcopAssignOptions { add_prefix_agg_types: false, set_enable_input: multiple_circuits },
+    ));
+    out.push_str(&render_assign_vadcop_inputs(
+        "vC",
+        vadcop_info,
+        "c_sv",
+        airgroup_id,
+        VadcopAssignOptions { add_prefix_agg_types: false, set_enable_input: multiple_circuits },
+    ));
+    out.push('\n');
+
+    let selector =
+        if multiple_circuits { "SelectVerificationKeyNull" } else { "SelectVerificationKey" };
+    line(
+        &mut out,
+        format_args!(
+            "    vA.rootC <== {selector}({n_airs})(a_sv_circuitType, rootCBasics, rootCAgg);"
+        ),
+    );
+    line(
+        &mut out,
+        format_args!(
+            "    vB.rootC <== {selector}({n_airs})(b_sv_circuitType, rootCBasics, rootCAgg);"
+        ),
+    );
+    line(
+        &mut out,
+        format_args!(
+            "    vC.rootC <== {selector}({n_airs})(c_sv_circuitType, rootCBasics, rootCAgg);"
+        ),
+    );
+    out.push('\n');
+    out.push_str(&render_agg_vadcop_inputs(vadcop_info, airgroup_id, "a_sv", "b_sv", "c_sv", "sv"));
+    out.push('\n');
+    line(&mut out, format_args!("    for (var i=0; i<4; i++) {{"));
+    line(
+        &mut out,
+        format_args!("        vA.publics[{} + i] <== rootCAgg[i];", stark_info.n_publics - 4),
+    );
+    line(
+        &mut out,
+        format_args!("        vB.publics[{} + i] <== rootCAgg[i];", stark_info.n_publics - 4),
+    );
+    line(
+        &mut out,
+        format_args!("        vC.publics[{} + i] <== rootCAgg[i];", stark_info.n_publics - 4),
+    );
+    line(&mut out, format_args!("    }}"));
+    line(&mut out, format_args!("}}"));
+    out.push('\n');
+
+    let mut public_names = Vec::new();
+    if vadcop_info.n_publics > 0 {
+        public_names.push("publics".to_string());
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        public_names.push("proofValues".to_string());
+    }
+    public_names.push("globalChallenge".to_string());
+    public_names.push("rootCAgg".to_string());
+    line(
+        &mut out,
+        format_args!("component main {{public [{}]}} = Recursive2();", public_names.join(", ")),
     );
     out
 }
@@ -3936,6 +4223,66 @@ mod tests {
             render_compressor_circom(&stark, &sample_vadcop_info(), "sample_verifier.circom");
         let input = dir.join("compressor.circom");
         let output = dir.join("compressor.r1cs");
+        std::fs::write(&input, wrapper)?;
+        crate::circom_compile::compile_file_to_r1cs(
+            &input,
+            [dir.clone(), includes.gl, includes.vadcop],
+            &output,
+        )?;
+        let r1cs = crate::recursive_setup::r1cs::read_r1cs(&output)?;
+        assert!(r1cs.n_constraints > 0);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn compiles_sample_recursive2_wrapper_circom() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir()
+            .join(format!("pk_setup_recursive2_circom_test_{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir)?;
+        let includes = crate::circom_assets::write_recursive_include_assets(&dir)?;
+
+        let vadcop = sample_vadcop_info();
+        let mut stark = sample_stark_info();
+        stark.n_publics = 31;
+        stark.airgroup_values_map = vec![CircomNamedMap { name: "agg".to_string(), stage: 2 }];
+        stark.cm_pols_map = vec![
+            CircomPolMap {
+                name: "trace".to_string(),
+                stage: 1,
+                dim: 1,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+            CircomPolMap {
+                name: "q".to_string(),
+                stage: 2,
+                dim: 3,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+        ];
+        stark.map_sections_n.insert("cm2".to_string(), 3);
+        stark.ev_map = sample_q_evals();
+        let verifier = render_stark_verifier_circom(
+            &[1, 2, 3, 4],
+            &stark,
+            &sample_verifier_info(),
+            StarkVerifierOptions { verkey_input: true, skip_main: true, ..Default::default() },
+        );
+        std::fs::write(dir.join("sample_recursive2_verifier.circom"), verifier)?;
+        let wrapper = render_recursive2_circom(
+            &stark,
+            &vadcop,
+            0,
+            "sample_recursive2_verifier.circom",
+            &[vec![1, 2, 3, 4]],
+        );
+        let input = dir.join("recursive2.circom");
+        let output = dir.join("recursive2.r1cs");
         std::fs::write(&input, wrapper)?;
         crate::circom_compile::compile_file_to_r1cs(
             &input,
