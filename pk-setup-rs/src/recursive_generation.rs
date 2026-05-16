@@ -7,7 +7,7 @@ use serde::Serialize;
 use tracing::info;
 
 use crate::circom_assets::write_recursive_include_assets;
-use crate::circom_compile::compile_file_to_r1cs_with_metadata;
+use crate::circom_compile::compile_file_with_witness_wasm;
 use crate::recursive_circom::{
     render_compressor_circom, render_final_circom, render_final_compressed_circom,
     render_recursive1_circom, render_recursive2_circom, render_stark_verifier_circom,
@@ -16,7 +16,9 @@ use crate::recursive_circom::{
 };
 use crate::recursive_setup::plonk::calculate_layout_shape;
 use crate::recursive_setup::r1cs::read_r1cs;
-use crate::recursive_setup::runtime::RuntimeDescriptor;
+use crate::recursive_setup::runtime::{
+    RuntimeCircomWasm, RuntimeCircomWasmInput, RuntimeDescriptor,
+};
 use crate::recursive_setup::{
     write_setup_with_runtime_descriptor, PlonkLayoutKind, RecursiveAirSetupConfig,
 };
@@ -466,7 +468,7 @@ fn compile_and_write_setup(
     let r1cs_path = r1cs_dir.join(format!("{circuit_name}.r1cs"));
     write_text(&circom_path, circuit)?;
     info!("compiling recursive Circom {}", circom_path.display());
-    let metadata = compile_file_to_r1cs_with_metadata(
+    let compiled = compile_file_with_witness_wasm(
         &circom_path,
         [circom_dir.to_path_buf(), gl_include.to_path_buf(), vadcop_include.to_path_buf()],
         &r1cs_path,
@@ -475,9 +477,22 @@ fn compile_and_write_setup(
     let r1cs = read_r1cs(&r1cs_path)?;
     let runtime_descriptor = RuntimeDescriptor::for_circom_main_inputs(
         &r1cs,
-        metadata.input_signal_start,
-        metadata.input_signal_count,
-    );
+        compiled.metadata.input_signal_start,
+        compiled.metadata.input_signal_count,
+    )
+    .with_circom_wasm(RuntimeCircomWasm {
+        wasm: compiled.witness_wasm.wasm,
+        inputs: compiled
+            .witness_wasm
+            .inputs
+            .into_iter()
+            .map(|input| RuntimeCircomWasmInput {
+                hash: input.hash,
+                source_offset_words: input.source_offset_words,
+                word_len: input.word_len,
+            })
+            .collect(),
+    });
     let shape = calculate_layout_shape(&r1cs, kind)?;
     let stark_struct = match stark_mode {
         StarkStructMode::Fixed(stark_struct) => {

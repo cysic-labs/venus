@@ -8,7 +8,7 @@ use crate::recursive_setup::plonk::PlonkAddition;
 use crate::recursive_setup::r1cs::R1cs;
 
 const MAGIC: &[u8; 8] = b"PIL2RSPD";
-const VERSION: u64 = 2;
+const VERSION: u64 = 3;
 const TEMPLATE_PER_AIR: u64 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,7 @@ pub struct RuntimeDescriptor {
     pub source_public_prefix_words: u64,
     pub source_sections: Vec<RuntimeSection>,
     pub section_copy_ops: Vec<RuntimeSectionCopyOp>,
+    pub circom_wasm: Option<RuntimeCircomWasm>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,19 @@ pub struct RuntimeSectionCopyOp {
     pub witness_offset_words: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCircomWasm {
+    pub wasm: Vec<u8>,
+    pub inputs: Vec<RuntimeCircomWasmInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCircomWasmInput {
+    pub hash: u64,
+    pub source_offset_words: u64,
+    pub word_len: u64,
+}
+
 impl RuntimeDescriptor {
     pub fn for_r1cs(r1cs: &R1cs) -> Self {
         let n_publics = u64::from(r1cs.n_outputs + r1cs.n_pub_inputs);
@@ -61,6 +75,7 @@ impl RuntimeDescriptor {
             source_public_prefix_words: u64::from(r1cs.n_vars.saturating_sub(1)),
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
+            circom_wasm: None,
         }
     }
 
@@ -109,7 +124,13 @@ impl RuntimeDescriptor {
                 flags: 0,
             }],
             section_copy_ops,
+            circom_wasm: None,
         }
+    }
+
+    pub fn with_circom_wasm(mut self, circom_wasm: RuntimeCircomWasm) -> Self {
+        self.circom_wasm = Some(circom_wasm);
+        self
     }
 }
 
@@ -174,7 +195,24 @@ pub fn runtime_dat_buffer(descriptor: &RuntimeDescriptor) -> Result<Vec<u8>> {
         push_u64(&mut out, copy_op.word_len);
         push_u64(&mut out, copy_op.witness_offset_words);
     }
+    append_circom_wasm(&mut out, descriptor);
     Ok(out)
+}
+
+fn append_circom_wasm(out: &mut Vec<u8>, descriptor: &RuntimeDescriptor) {
+    if let Some(circom_wasm) = &descriptor.circom_wasm {
+        push_u64(out, 1);
+        push_u64(out, circom_wasm.wasm.len() as u64);
+        out.extend_from_slice(&circom_wasm.wasm);
+        push_u64(out, circom_wasm.inputs.len() as u64);
+        for input in &circom_wasm.inputs {
+            push_u64(out, input.hash);
+            push_u64(out, input.source_offset_words);
+            push_u64(out, input.word_len);
+        }
+    } else {
+        push_u64(out, 0);
+    }
 }
 
 fn append_constraints(out: &mut Vec<u8>, r1cs: &R1cs) {

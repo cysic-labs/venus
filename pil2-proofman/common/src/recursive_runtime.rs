@@ -19,6 +19,7 @@ pub struct NativeRecursiveRuntime {
     pub source_public_prefix_words: u64,
     pub source_sections: Vec<NativeRuntimeSection>,
     pub section_copy_ops: Vec<NativeRuntimeSectionCopyOp>,
+    pub circom_wasm: Option<NativeCircomWasmRuntime>,
     pub constraints: Vec<NativeRuntimeConstraint>,
     pub custom_gates: Vec<NativeRuntimeCustomGate>,
 }
@@ -43,6 +44,19 @@ pub struct NativeRuntimeSectionCopyOp {
     pub section_offset_words: u64,
     pub word_len: u64,
     pub witness_offset_words: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCircomWasmRuntime {
+    pub wasm: Vec<u8>,
+    pub inputs: Vec<NativeCircomWasmInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCircomWasmInput {
+    pub hash: u64,
+    pub source_offset_words: u64,
+    pub word_len: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +101,7 @@ impl NativeRecursiveRuntime {
         }
 
         let version = read_u64(&bytes, 8)?;
-        if !(1..=2).contains(&version) {
+        if !(1..=3).contains(&version) {
             return Err(ProofmanError::InvalidSetup(format!(
                 "{} has unsupported native recursive runtime descriptor version {version}",
                 path.display()
@@ -190,10 +204,12 @@ impl NativeRecursiveRuntime {
         } else {
             (Vec::new(), copy_ops_count_offset)
         };
-        let (constraints, constraints_end) = if bytes.len() >= copy_ops_end + 8 {
-            parse_constraints(path, &bytes, copy_ops_end)?
+        let (circom_wasm, runtime_body_end) =
+            if version >= 3 { parse_circom_wasm_runtime(path, &bytes, copy_ops_end)? } else { (None, copy_ops_end) };
+        let (constraints, constraints_end) = if bytes.len() >= runtime_body_end + 8 {
+            parse_constraints(path, &bytes, runtime_body_end)?
         } else {
-            (Vec::new(), copy_ops_end)
+            (Vec::new(), runtime_body_end)
         };
         let custom_gates = if bytes.len() >= constraints_end + 8 {
             parse_custom_gates(path, &bytes, constraints_end, version)?
@@ -212,6 +228,7 @@ impl NativeRecursiveRuntime {
             source_public_prefix_words,
             source_sections,
             section_copy_ops,
+            circom_wasm,
             constraints,
             custom_gates,
         })
@@ -222,11 +239,11 @@ impl NativeRecursiveRuntime {
         source_words: &[u64],
         total_witness_words: u64,
     ) -> ProofmanResult<Vec<F>> {
-        if total_witness_words < self.size_witness_words {
-            return Err(ProofmanError::InvalidSetup(format!(
-                "native recursive witness buffer has {total_witness_words} words but base witness requires {}",
-                self.size_witness_words
-            )));
+        self.check_witness_size(total_witness_words)?;
+        self.check_source_assertions(source_words)?;
+
+        if let Some(circom_wasm) = &self.circom_wasm {
+            return self.generate_circom_wasm_witness(circom_wasm, source_words, total_witness_words);
         }
 
         let mut witness = vec![F::ZERO; total_witness_words as usize];
@@ -234,21 +251,6 @@ impl NativeRecursiveRuntime {
         if !witness.is_empty() {
             witness[0] = F::ONE;
             known[0] = true;
-        }
-
-        for assertion in &self.source_assertions {
-            let actual = source_words.get(assertion.source_word as usize).ok_or_else(|| {
-                ProofmanError::InvalidProof(format!(
-                    "native recursive source assertion reads missing word {}",
-                    assertion.source_word
-                ))
-            })?;
-            if *actual != assertion.expected {
-                return Err(ProofmanError::InvalidProof(format!(
-                    "native recursive source assertion failed at word {}: expected {}, got {}",
-                    assertion.source_word, assertion.expected, actual
-                )));
-            }
         }
 
         let prefix_words = self
@@ -322,6 +324,152 @@ impl NativeRecursiveRuntime {
 
         self.solve_constraints(&mut witness, &mut known)?;
 
+        Ok(witness)
+    }
+
+    fn check_witness_size(&self, total_witness_words: u64) -> ProofmanResult<()> {
+        if total_witness_words < self.size_witness_words {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive witness buffer has {total_witness_words} words but base witness requires {}",
+                self.size_witness_words
+            )));
+        }
+        Ok(())
+    }
+
+    fn check_source_assertions(&self, source_words: &[u64]) -> ProofmanResult<()> {
+        for assertion in &self.source_assertions {
+            let actual = source_words.get(assertion.source_word as usize).ok_or_else(|| {
+                ProofmanError::InvalidProof(format!(
+                    "native recursive source assertion reads missing word {}",
+                    assertion.source_word
+                ))
+            })?;
+            if *actual != assertion.expected {
+                return Err(ProofmanError::InvalidProof(format!(
+                    "native recursive source assertion failed at word {}: expected {}, got {}",
+                    assertion.source_word, assertion.expected, actual
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn generate_circom_wasm_witness<F: PrimeField64>(
+        &self,
+        circom_wasm: &NativeCircomWasmRuntime,
+        source_words: &[u64],
+        total_witness_words: u64,
+    ) -> ProofmanResult<Vec<F>> {
+        let engine = wasmi::Engine::default();
+        let module = wasmi::Module::new(&engine, &mut &circom_wasm.wasm[..])
+            .map_err(|err| ProofmanError::InvalidSetup(format!("invalid native Circom witness WASM: {err}")))?;
+        let mut store = wasmi::Store::new(&engine, NativeCircomWasmHost::default());
+        let mut linker = <wasmi::Linker<NativeCircomWasmHost>>::new(&engine);
+        linker
+            .func_wrap(
+                "runtime",
+                "exceptionHandler",
+                |mut caller: wasmi::Caller<'_, NativeCircomWasmHost>, code: i32| {
+                    caller.data_mut().exception = Some(code);
+                },
+            )
+            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to link Circom exception handler: {err}")))?;
+        linker
+            .func_wrap("runtime", "printErrorMessage", || {})
+            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to link Circom print handler: {err}")))?;
+        linker
+            .func_wrap("runtime", "writeBufferMessage", || {})
+            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to link Circom buffer handler: {err}")))?;
+        linker
+            .func_wrap("runtime", "showSharedRWMemory", || {})
+            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to link Circom memory handler: {err}")))?;
+
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to instantiate Circom witness WASM: {err}")))?
+            .start(&mut store)
+            .map_err(|err| ProofmanError::InvalidProof(format!("failed to start Circom witness WASM: {err}")))?;
+
+        let init = instance
+            .get_typed_func::<i32, ()>(&store, "init")
+            .map_err(|err| ProofmanError::InvalidSetup(format!("Circom witness WASM has no init export: {err}")))?;
+        let write_shared = instance.get_typed_func::<(i32, i32), ()>(&store, "writeSharedRWMemory").map_err(|err| {
+            ProofmanError::InvalidSetup(format!("Circom witness WASM has no writeSharedRWMemory export: {err}"))
+        })?;
+        let set_input = instance.get_typed_func::<(i32, i32, i32), ()>(&store, "setInputSignal").map_err(|err| {
+            ProofmanError::InvalidSetup(format!("Circom witness WASM has no setInputSignal export: {err}"))
+        })?;
+        let get_witness_size = instance.get_typed_func::<(), i32>(&store, "getWitnessSize").map_err(|err| {
+            ProofmanError::InvalidSetup(format!("Circom witness WASM has no getWitnessSize export: {err}"))
+        })?;
+        let get_witness = instance.get_typed_func::<i32, ()>(&store, "getWitness").map_err(|err| {
+            ProofmanError::InvalidSetup(format!("Circom witness WASM has no getWitness export: {err}"))
+        })?;
+        let read_shared = instance.get_typed_func::<i32, i32>(&store, "readSharedRWMemory").map_err(|err| {
+            ProofmanError::InvalidSetup(format!("Circom witness WASM has no readSharedRWMemory export: {err}"))
+        })?;
+
+        init.call(&mut store, 0)
+            .map_err(|err| ProofmanError::InvalidProof(format!("Circom witness init failed: {err}")))?;
+        check_circom_wasm_exception(&store)?;
+
+        for input in &circom_wasm.inputs {
+            let source_end = input
+                .source_offset_words
+                .checked_add(input.word_len)
+                .ok_or_else(|| ProofmanError::InvalidSetup("Circom WASM input source range overflows".to_string()))?;
+            if source_end > source_words.len() as u64 {
+                return Err(ProofmanError::InvalidProof(format!(
+                    "Circom WASM input reads source words [{}..{}) but source has {} words",
+                    input.source_offset_words,
+                    source_end,
+                    source_words.len()
+                )));
+            }
+            let hmsb = (input.hash >> 32) as u32 as i32;
+            let hlsb = input.hash as u32 as i32;
+            for offset in 0..input.word_len {
+                let value = source_words[(input.source_offset_words + offset) as usize];
+                write_shared.call(&mut store, (0, value as u32 as i32)).map_err(|err| {
+                    ProofmanError::InvalidProof(format!("failed to write Circom input low word: {err}"))
+                })?;
+                write_shared.call(&mut store, (1, (value >> 32) as u32 as i32)).map_err(|err| {
+                    ProofmanError::InvalidProof(format!("failed to write Circom input high word: {err}"))
+                })?;
+                set_input
+                    .call(&mut store, (hmsb, hlsb, offset as i32))
+                    .map_err(|err| ProofmanError::InvalidProof(format!("failed to set Circom input: {err}")))?;
+                check_circom_wasm_exception(&store)?;
+            }
+        }
+
+        let wasm_witness_size = get_witness_size
+            .call(&mut store, ())
+            .map_err(|err| ProofmanError::InvalidProof(format!("failed to read Circom witness size: {err}")))?
+            as u64;
+        if wasm_witness_size != self.size_witness_words {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "Circom witness WASM has witness size {wasm_witness_size}, expected {}",
+                self.size_witness_words
+            )));
+        }
+
+        let mut witness = vec![F::ZERO; total_witness_words as usize];
+        for index in 0..self.size_witness_words {
+            get_witness
+                .call(&mut store, index as i32)
+                .map_err(|err| ProofmanError::InvalidProof(format!("failed to read Circom witness {index}: {err}")))?;
+            let low = read_shared
+                .call(&mut store, 0)
+                .map_err(|err| ProofmanError::InvalidProof(format!("failed to read Circom witness low word: {err}")))?
+                as u32 as u64;
+            let high = read_shared
+                .call(&mut store, 1)
+                .map_err(|err| ProofmanError::InvalidProof(format!("failed to read Circom witness high word: {err}")))?
+                as u32 as u64;
+            witness[index as usize] = F::from_u64((high << 32) | low);
+        }
         Ok(witness)
     }
 
@@ -1071,6 +1219,73 @@ fn checked_table_end(path: &Path, start: usize, count: usize, row_len: usize, la
         })
 }
 
+#[derive(Default)]
+struct NativeCircomWasmHost {
+    exception: Option<i32>,
+}
+
+fn check_circom_wasm_exception(store: &wasmi::Store<NativeCircomWasmHost>) -> ProofmanResult<()> {
+    if let Some(code) = store.data().exception {
+        return Err(ProofmanError::InvalidProof(format!("Circom witness WASM raised exception code {code}")));
+    }
+    Ok(())
+}
+
+fn parse_circom_wasm_runtime(
+    path: &Path,
+    bytes: &[u8],
+    offset: usize,
+) -> ProofmanResult<(Option<NativeCircomWasmRuntime>, usize)> {
+    let tag = read_u64(bytes, offset)?;
+    let mut cursor = offset + 8;
+    match tag {
+        0 => Ok((None, cursor)),
+        1 => {
+            let wasm_len = usize::try_from(read_u64(bytes, cursor)?).map_err(|_| {
+                ProofmanError::InvalidSetup(format!("{} has an oversized Circom WASM runtime", path.display()))
+            })?;
+            cursor += 8;
+            let wasm_end = cursor.checked_add(wasm_len).ok_or_else(|| {
+                ProofmanError::InvalidSetup(format!("{} has an overflowing Circom WASM runtime", path.display()))
+            })?;
+            if wasm_end > bytes.len() {
+                return Err(ProofmanError::InvalidSetup(format!(
+                    "{} has a truncated Circom WASM runtime",
+                    path.display()
+                )));
+            }
+            let wasm = bytes[cursor..wasm_end].to_vec();
+            cursor = wasm_end;
+
+            let input_count = usize::try_from(read_u64(bytes, cursor)?).map_err(|_| {
+                ProofmanError::InvalidSetup(format!("{} has too many Circom WASM inputs", path.display()))
+            })?;
+            cursor += 8;
+            let inputs_end = checked_table_end(path, cursor, input_count, 24, "Circom WASM input")?;
+            if inputs_end > bytes.len() {
+                return Err(ProofmanError::InvalidSetup(format!(
+                    "{} has a truncated Circom WASM input table",
+                    path.display()
+                )));
+            }
+            let mut inputs = Vec::with_capacity(input_count);
+            for index in 0..input_count {
+                let input_offset = cursor + index * 24;
+                inputs.push(NativeCircomWasmInput {
+                    hash: read_u64(bytes, input_offset)?,
+                    source_offset_words: read_u64(bytes, input_offset + 8)?,
+                    word_len: read_u64(bytes, input_offset + 16)?,
+                });
+            }
+            Ok((Some(NativeCircomWasmRuntime { wasm, inputs }), inputs_end))
+        }
+        other => Err(ProofmanError::InvalidSetup(format!(
+            "{} has unsupported Circom WASM runtime tag {other}",
+            path.display()
+        ))),
+    }
+}
+
 fn parse_constraints(
     path: &Path,
     bytes: &[u8],
@@ -1274,6 +1489,7 @@ mod tests {
             source_public_prefix_words: 18,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
+            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::EvPol4,
@@ -1307,6 +1523,7 @@ mod tests {
             source_public_prefix_words: 14,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
+            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::TreeSelector4,
@@ -1336,6 +1553,7 @@ mod tests {
             source_public_prefix_words: 18,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
+            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::SelectValue1,
@@ -1366,6 +1584,7 @@ mod tests {
             source_public_prefix_words: 12,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
+            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::FFT4,
@@ -1396,6 +1615,7 @@ mod tests {
             source_public_prefix_words: 16,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
+            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::Poseidon16,
@@ -1430,6 +1650,7 @@ mod tests {
             source_public_prefix_words: 18,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
+            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::CustPoseidon16,

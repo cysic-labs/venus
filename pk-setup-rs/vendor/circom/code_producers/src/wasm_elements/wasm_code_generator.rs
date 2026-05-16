@@ -1770,18 +1770,12 @@ pub fn fr_code(prime: &String) -> Vec<WasmInstruction> {
 
 pub fn generate_generate_witness_js_file(js_folder: &PathBuf) -> std::io::Result<()> {
     let _ = js_folder;
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "JS witness generation is disabled in pk-setup-rs",
-    ))
+    Ok(())
 }
 
 pub fn generate_witness_calculator_js_file(js_folder: &PathBuf) -> std::io::Result<()> {
     let _ = js_folder;
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "JS witness generation is disabled in pk-setup-rs",
-    ))
+    Ok(())
 }
 
 #[cfg(test)]
