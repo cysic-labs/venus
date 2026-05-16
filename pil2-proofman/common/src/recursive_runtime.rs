@@ -392,8 +392,8 @@ impl NativeRecursiveRuntime {
             .func_wrap(
                 "runtime",
                 "runCustomTemplate",
-                |mut caller: wasmtime::Caller<'_, NativeCircomWasmHost>, kind: i32, signal_start: i32| {
-                    if let Err(err) = run_circom_custom_template::<F>(&mut caller, kind, signal_start) {
+                |mut caller: wasmtime::Caller<'_, NativeCircomWasmHost>, kind: i32, signal_base: i32| {
+                    if let Err(err) = run_circom_custom_template::<F>(&mut caller, kind, signal_base) {
                         caller.data_mut().exception = Some(4);
                         caller.data_mut().message = Some(err);
                     }
@@ -1305,16 +1305,16 @@ struct NativeCircomWasmHost {
 fn run_circom_custom_template<F: PrimeField64>(
     caller: &mut wasmtime::Caller<'_, NativeCircomWasmHost>,
     kind: i32,
-    signal_start: i32,
+    signal_base: i32,
 ) -> Result<(), String> {
-    if signal_start < 0 {
-        return Err(format!("Circom custom template has negative signal start {signal_start}"));
+    if signal_base < 0 {
+        return Err(format!("Circom custom template has negative signal base address {signal_base}"));
     }
     let memory = caller
         .get_export("memory")
         .and_then(|export| export.into_memory())
         .ok_or_else(|| "Circom custom template cannot access WASM memory".to_string())?;
-    let base = signal_start as usize;
+    let base = signal_base as usize;
 
     match kind {
         CUSTOM_TEMPLATE_POSEIDON16 => run_wasm_poseidon16::<F>(caller, &memory, base, false),
