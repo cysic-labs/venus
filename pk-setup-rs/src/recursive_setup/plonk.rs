@@ -246,7 +246,8 @@ pub fn build_layout_from_program(
 
     for gate_use in gate_uses(r1cs, program.custom_gates_info.ev_pol4_id) {
         ensure_signal_len(gate_use, 21, "EvPol4")?;
-        copy_signals(&mut signal_map, row, 0, &gate_use.signals[..21])?;
+        copy_signals(&mut signal_map, row, 0, &gate_use.signals[3..21])?;
+        copy_signals(&mut signal_map, row, 18, &gate_use.signals[..3])?;
         extra_rows[2].push(row);
         row += 1;
     }
@@ -610,22 +611,23 @@ fn place_poseidon_gate(
     let signals = &gate_use.signals;
     let first_col = policy.poseidon_first_col;
 
-    let (input, rest) = signals.split_at(16);
-    let (first_bit, second_bit, rest) =
-        if custom { (Some(rest[0]), Some(rest[1]), &rest[2..]) } else { (None, None, rest) };
+    let trace = &signals[..208];
+    let input = &signals[208..224];
+    let (first_bit, second_bit) =
+        if custom { (Some(signals[224]), Some(signals[225])) } else { (None, None) };
 
-    let round0 = &rest[0..16];
-    let round1 = &rest[16..32];
-    let round2 = &rest[32..48];
-    let round3 = &rest[48..64];
-    let round4 = &rest[64..80];
-    let im1 = &rest[80..96];
-    let im2 = &rest[112..128];
-    let round26 = &rest[128..144];
-    let round27 = &rest[144..160];
-    let round28 = &rest[160..176];
-    let round29 = &rest[176..192];
-    let output = &rest[192..208];
+    let round0 = &trace[0..16];
+    let round1 = &trace[16..32];
+    let round2 = &trace[32..48];
+    let round3 = &trace[48..64];
+    let round4 = &trace[64..80];
+    let im1 = &trace[80..96];
+    let im2 = &trace[112..128];
+    let round26 = &trace[128..144];
+    let round27 = &trace[144..160];
+    let round28 = &trace[160..176];
+    let round29 = &trace[176..192];
+    let output = &trace[192..208];
 
     if policy.poseidon_rows_per_gate == 10 {
         for i in 0..16 {
@@ -1521,10 +1523,10 @@ mod tests {
         assert_eq!(layout.fixed_columns[37].values, vec![1, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(layout.fixed_columns[39].values, vec![0, 0, 1, 0, 0, 0, 0, 0]);
         assert_eq!(layout.fixed_columns[40].values, vec![0, 0, 0, 0, 1, 0, 0, 0]);
-        assert_eq!(layout.signal_map[0][0], 1);
-        assert_eq!(layout.signal_map[27][0], 17);
-        assert_eq!(layout.signal_map[43][0], 33);
-        assert_eq!(layout.signal_map[0][4], 209);
+        assert_eq!(layout.signal_map[0][0], 209);
+        assert_eq!(layout.signal_map[27][0], 1);
+        assert_eq!(layout.signal_map[43][0], 17);
+        assert_eq!(layout.signal_map[0][4], 193);
         Ok(())
     }
 

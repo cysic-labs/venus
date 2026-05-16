@@ -536,9 +536,20 @@ impl NativeRecursiveRuntime {
                     let a = eval_lc(&constraint.a, witness, known)?;
                     let b = eval_lc(&constraint.b, witness, known)?;
                     let c = eval_lc(&constraint.c, witness, known)?;
-                    if a.unknown.is_empty() && b.unknown.is_empty() && c.unknown.is_empty() && a.value * b.value != c.value {
-                        return Err(ProofmanError::InvalidProof(format!(
-                            "native recursive R1CS witness does not satisfy constraint {constraint_index}"
+                    if a.unknown.is_empty()
+                        && b.unknown.is_empty()
+                        && c.unknown.is_empty()
+                        && a.value * b.value != c.value
+                    {
+                        return Err(ProofmanError::InvalidProof(format_constraint_failure(
+                            "native recursive R1CS witness does not satisfy constraint",
+                            constraint_index,
+                            constraint,
+                            &a,
+                            &b,
+                            &c,
+                            witness,
+                            known,
                         )));
                     }
                 }
@@ -559,8 +570,15 @@ impl NativeRecursiveRuntime {
             let b = eval_lc(&constraint.b, witness, known)?;
             let c = eval_lc(&constraint.c, witness, known)?;
             if a.unknown.is_empty() && b.unknown.is_empty() && c.unknown.is_empty() && a.value * b.value != c.value {
-                return Err(ProofmanError::InvalidProof(format!(
-                    "native recursive R1CS witness does not satisfy constraint {constraint_index}"
+                return Err(ProofmanError::InvalidProof(format_constraint_failure(
+                    "native recursive R1CS witness does not satisfy constraint",
+                    constraint_index,
+                    constraint,
+                    &a,
+                    &b,
+                    &c,
+                    witness,
+                    known,
                 )));
             }
         }
@@ -593,8 +611,15 @@ impl NativeRecursiveRuntime {
         }
 
         if a.unknown.is_empty() && b.unknown.is_empty() && c.unknown.is_empty() && a.value * b.value != c.value {
-            return Err(ProofmanError::InvalidProof(format!(
-                "native recursive R1CS constraint {constraint_index} failed during witness solving"
+            return Err(ProofmanError::InvalidProof(format_constraint_failure(
+                "native recursive R1CS constraint failed during witness solving",
+                constraint_index,
+                constraint,
+                &a,
+                &b,
+                &c,
+                witness,
+                known,
             )));
         }
 
@@ -663,6 +688,45 @@ fn eval_lc<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known:
         }
     }
     Ok(LcEval { value, unknown })
+}
+
+fn format_constraint_failure<F: PrimeField64>(
+    reason: &str,
+    constraint_index: usize,
+    constraint: &NativeRuntimeConstraint,
+    a: &LcEval<F>,
+    b: &LcEval<F>,
+    c: &LcEval<F>,
+    witness: &[F],
+    known: &[bool],
+) -> String {
+    format!(
+        "{reason} {constraint_index}: a={} b={} c={} a*b={} A=[{}] B=[{}] C=[{}]",
+        a.value.as_canonical_u64(),
+        b.value.as_canonical_u64(),
+        c.value.as_canonical_u64(),
+        (a.value * b.value).as_canonical_u64(),
+        format_lc_terms(&constraint.a, witness, known),
+        format_lc_terms(&constraint.b, witness, known),
+        format_lc_terms(&constraint.c, witness, known)
+    )
+}
+
+fn format_lc_terms<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known: &[bool]) -> String {
+    const MAX_TERMS: usize = 8;
+    let mut parts = Vec::with_capacity(terms.len().min(MAX_TERMS) + 1);
+    for term in terms.iter().take(MAX_TERMS) {
+        let value = usize::try_from(term.signal)
+            .ok()
+            .and_then(|signal| witness.get(signal).zip(known.get(signal)).map(|(value, known)| (value, known)))
+            .map(|(value, known)| if *known { value.as_canonical_u64().to_string() } else { "unknown".to_string() })
+            .unwrap_or_else(|| "out-of-bounds".to_string());
+        parts.push(format!("{}*w{}({})", term.coeff, term.signal, value));
+    }
+    if terms.len() > MAX_TERMS {
+        parts.push(format!("...{} more", terms.len() - MAX_TERMS));
+    }
+    parts.join(", ")
 }
 
 fn solve_single_unknown<F: PrimeField64>(
@@ -771,14 +835,14 @@ fn solve_evpol4_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals[..18].iter().any(|&signal| !known[signal]) {
+    if signals[3..21].iter().any(|&signal| !known[signal]) {
         return Ok(false);
     }
 
     let result = evpol4(&signals, witness);
     let mut changed = false;
     for idx in 0..3 {
-        let signal = signals[18 + idx];
+        let signal = signals[idx];
         if known[signal] {
             if witness[signal] != result[idx] {
                 return Err(ProofmanError::InvalidProof(format!(
@@ -811,7 +875,7 @@ fn verify_evpol4_gate<F: PrimeField64>(
     }
     let result = evpol4(&signals, witness);
     for idx in 0..3 {
-        let signal = signals[18 + idx];
+        let signal = signals[idx];
         if witness[signal] != result[idx] {
             return Err(ProofmanError::InvalidProof(format!(
                 "native recursive EvPol4 gate output mismatch at signal {signal}"
@@ -992,15 +1056,13 @@ fn solve_poseidon16_gate<F: PrimeField64>(
         return Err(ProofmanError::InvalidSetup(format!("{gate_name} native runtime gate must not have parameters")));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    let input_len = if custom { 18 } else { 16 };
-    if signals[..input_len].iter().any(|&signal| !known[signal]) {
+    if signals[208..].iter().any(|&signal| !known[signal]) {
         return Ok(false);
     }
 
     let input = poseidon16_input(gate_name, custom, &signals, witness)?;
     let result = poseidon16_trace(input);
-    let output_start = if custom { 18 } else { 16 };
-    assign_gate_outputs(gate_name, &signals[output_start..], result, witness, known)
+    assign_gate_outputs(gate_name, &signals[..208], result, witness, known)
 }
 
 fn verify_poseidon16_gate<F: PrimeField64>(
@@ -1027,8 +1089,7 @@ fn verify_poseidon16_gate<F: PrimeField64>(
 
     let input = poseidon16_input(gate_name, custom, &signals, witness)?;
     let result = poseidon16_trace(input);
-    let output_start = if custom { 18 } else { 16 };
-    verify_gate_outputs(gate_name, &signals[output_start..], result, witness)
+    verify_gate_outputs(gate_name, &signals[..208], result, witness)
 }
 
 fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
@@ -1118,13 +1179,13 @@ fn cmul_add<F: PrimeField64>(a: [F; 3], b: [F; 3], c: [F; 3]) -> [F; 3] {
 
 fn evpol4<F: PrimeField64>(signals: &[usize], witness: &[F]) -> [F; 3] {
     let coefs = [
-        [witness[signals[0]], witness[signals[1]], witness[signals[2]]],
         [witness[signals[3]], witness[signals[4]], witness[signals[5]]],
         [witness[signals[6]], witness[signals[7]], witness[signals[8]]],
         [witness[signals[9]], witness[signals[10]], witness[signals[11]]],
         [witness[signals[12]], witness[signals[13]], witness[signals[14]]],
+        [witness[signals[15]], witness[signals[16]], witness[signals[17]]],
     ];
-    let x = [witness[signals[15]], witness[signals[16]], witness[signals[17]]];
+    let x = [witness[signals[18]], witness[signals[19]], witness[signals[20]]];
     evpol4_values(coefs, x)
 }
 
@@ -1185,13 +1246,13 @@ fn poseidon16_input<F: PrimeField64>(
 ) -> ProofmanResult<[F; 16]> {
     let mut input = [F::ZERO; 16];
     for idx in 0..16 {
-        input[idx] = witness[signals[idx]];
+        input[idx] = witness[signals[208 + idx]];
     }
     if !custom {
         return Ok(input);
     }
 
-    order_cust_poseidon16_input(gate, input, witness[signals[16]], witness[signals[17]])
+    order_cust_poseidon16_input(gate, input, witness[signals[224]], witness[signals[225]])
 }
 
 fn order_cust_poseidon16_input<F: PrimeField64>(
@@ -1332,19 +1393,16 @@ fn run_wasm_poseidon16<F: PrimeField64>(
 ) -> Result<(), String> {
     let mut input = [F::ZERO; 16];
     for (idx, slot) in input.iter_mut().enumerate() {
-        *slot = read_wasm_field_at(caller, memory, base, idx)?;
+        *slot = read_wasm_field_at(caller, memory, base, 208 + idx)?;
     }
-    let output_start = if custom {
-        let key0 = read_wasm_field_at(caller, memory, base, 16)?;
-        let key1 = read_wasm_field_at(caller, memory, base, 17)?;
+    if custom {
+        let key0 = read_wasm_field_at(caller, memory, base, 224)?;
+        let key1 = read_wasm_field_at(caller, memory, base, 225)?;
         input = order_cust_poseidon16_input("CustPoseidon16", input, key0, key1).map_err(|err| err.to_string())?;
-        18
-    } else {
-        16
-    };
+    }
     let trace = poseidon16_trace(input);
     for (idx, value) in trace.into_iter().enumerate() {
-        write_wasm_field_at(caller, memory, base, output_start + idx, value)?;
+        write_wasm_field_at(caller, memory, base, idx, value)?;
     }
     Ok(())
 }
@@ -1354,21 +1412,20 @@ fn run_wasm_evpol4<F: PrimeField64>(
     memory: &wasmtime::Memory,
     base: usize,
 ) -> Result<(), String> {
-    let mut values = [F::ZERO; 18];
-    for (idx, slot) in values.iter_mut().enumerate() {
-        *slot = read_wasm_field_at(caller, memory, base, idx)?;
+    let mut coefs = [[F::ZERO; 3]; 5];
+    for coef_idx in 0..5 {
+        for limb in 0..3 {
+            coefs[coef_idx][limb] = read_wasm_field_at(caller, memory, base, 3 + coef_idx * 3 + limb)?;
+        }
     }
-    let coefs = [
-        [values[0], values[1], values[2]],
-        [values[3], values[4], values[5]],
-        [values[6], values[7], values[8]],
-        [values[9], values[10], values[11]],
-        [values[12], values[13], values[14]],
+    let x = [
+        read_wasm_field_at(caller, memory, base, 18)?,
+        read_wasm_field_at(caller, memory, base, 19)?,
+        read_wasm_field_at(caller, memory, base, 20)?,
     ];
-    let x = [values[15], values[16], values[17]];
     let result = evpol4_values(coefs, x);
     for (idx, value) in result.into_iter().enumerate() {
-        write_wasm_field_at(caller, memory, base, 18 + idx, value)?;
+        write_wasm_field_at(caller, memory, base, idx, value)?;
     }
     Ok(())
 }
@@ -1412,9 +1469,7 @@ fn read_wasm_fr<F: PrimeField64>(
     addr: usize,
 ) -> Result<F, String> {
     let data = memory.data(caller);
-    let end = addr
-        .checked_add(WASM_FIELD_BYTES)
-        .ok_or_else(|| "Circom field address overflows".to_string())?;
+    let end = addr.checked_add(WASM_FIELD_BYTES).ok_or_else(|| "Circom field address overflows".to_string())?;
     if end > data.len() {
         return Err(format!(
             "Circom custom template reads field [{addr}..{end}) outside WASM memory size {}",
@@ -1424,9 +1479,7 @@ fn read_wasm_fr<F: PrimeField64>(
     let marker = data[addr + 7];
     if marker & 0x80 == 0 {
         let raw = i32::from_le_bytes(
-            data[addr..addr + 4]
-                .try_into()
-                .map_err(|_| "failed to decode Circom short field".to_string())?,
+            data[addr..addr + 4].try_into().map_err(|_| "failed to decode Circom short field".to_string())?,
         );
         if raw >= 0 {
             Ok(F::from_u64(raw as u64))
@@ -1438,9 +1491,7 @@ fn read_wasm_fr<F: PrimeField64>(
             return Err("Circom custom template input was not converted out of Montgomery form".to_string());
         }
         let value = u64::from_le_bytes(
-            data[addr + 8..addr + 16]
-                .try_into()
-                .map_err(|_| "failed to decode Circom long field".to_string())?,
+            data[addr + 8..addr + 16].try_into().map_err(|_| "failed to decode Circom long field".to_string())?,
         );
         Ok(F::from_u64(value))
     }
@@ -1785,11 +1836,11 @@ mod tests {
             template_id: 0,
             size_witness_words: 22,
             n_publics: 0,
-            public_input_offset_words: 1,
-            public_input_copy_words: 0,
+            public_input_offset_words: 4,
+            public_input_copy_words: 18,
             copy_indices: Vec::new(),
             source_assertions: Vec::new(),
-            source_public_prefix_words: 18,
+            source_public_prefix_words: 0,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
             circom_wasm: None,
@@ -1807,9 +1858,9 @@ mod tests {
         source[17] = 13;
 
         let witness = runtime.generate_witness::<Goldilocks>(&source, 22)?;
-        assert_eq!(witness[19].as_canonical_u64(), 1);
-        assert_eq!(witness[20].as_canonical_u64(), 0);
-        assert_eq!(witness[21].as_canonical_u64(), 0);
+        assert_eq!(witness[1].as_canonical_u64(), 1);
+        assert_eq!(witness[2].as_canonical_u64(), 0);
+        assert_eq!(witness[3].as_canonical_u64(), 0);
         Ok(())
     }
 
@@ -1911,11 +1962,11 @@ mod tests {
             template_id: 0,
             size_witness_words: 225,
             n_publics: 0,
-            public_input_offset_words: 1,
-            public_input_copy_words: 0,
+            public_input_offset_words: 209,
+            public_input_copy_words: 16,
             copy_indices: Vec::new(),
             source_assertions: Vec::new(),
-            source_public_prefix_words: 16,
+            source_public_prefix_words: 0,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
             circom_wasm: None,
@@ -1935,7 +1986,7 @@ mod tests {
         }
         let expected = fields::poseidon2_hash::<Goldilocks, Poseidon16, 16>(&input);
         for (idx, expected) in expected.into_iter().enumerate() {
-            assert_eq!(witness[209 + idx], expected);
+            assert_eq!(witness[193 + idx], expected);
         }
         Ok(())
     }
@@ -1946,11 +1997,11 @@ mod tests {
             template_id: 0,
             size_witness_words: 227,
             n_publics: 0,
-            public_input_offset_words: 1,
-            public_input_copy_words: 0,
+            public_input_offset_words: 209,
+            public_input_copy_words: 18,
             copy_indices: Vec::new(),
             source_assertions: Vec::new(),
-            source_public_prefix_words: 18,
+            source_public_prefix_words: 0,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
             circom_wasm: None,
@@ -1975,7 +2026,7 @@ mod tests {
         }
         let expected = fields::poseidon2_hash::<Goldilocks, Poseidon16, 16>(&input);
         for (idx, expected) in expected.into_iter().enumerate() {
-            assert_eq!(witness[211 + idx], expected);
+            assert_eq!(witness[193 + idx], expected);
         }
         Ok(())
     }
