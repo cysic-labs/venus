@@ -246,8 +246,7 @@ pub fn build_layout_from_program(
 
     for gate_use in gate_uses(r1cs, program.custom_gates_info.ev_pol4_id) {
         ensure_signal_len(gate_use, 21, "EvPol4")?;
-        copy_signals(&mut signal_map, row, 0, &gate_use.signals[3..21])?;
-        copy_signals(&mut signal_map, row, 18, &gate_use.signals[..3])?;
+        copy_signals(&mut signal_map, row, 0, &gate_use.signals[..21])?;
         extra_rows[2].push(row);
         row += 1;
     }

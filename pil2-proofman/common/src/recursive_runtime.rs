@@ -835,14 +835,14 @@ fn solve_evpol4_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals[3..21].iter().any(|&signal| !known[signal]) {
+    if signals[..18].iter().any(|&signal| !known[signal]) {
         return Ok(false);
     }
 
     let result = evpol4(&signals, witness);
     let mut changed = false;
     for idx in 0..3 {
-        let signal = signals[idx];
+        let signal = signals[18 + idx];
         if known[signal] {
             if witness[signal] != result[idx] {
                 return Err(ProofmanError::InvalidProof(format!(
@@ -875,7 +875,7 @@ fn verify_evpol4_gate<F: PrimeField64>(
     }
     let result = evpol4(&signals, witness);
     for idx in 0..3 {
-        let signal = signals[idx];
+        let signal = signals[18 + idx];
         if witness[signal] != result[idx] {
             return Err(ProofmanError::InvalidProof(format!(
                 "native recursive EvPol4 gate output mismatch at signal {signal}"
@@ -1179,13 +1179,13 @@ fn cmul_add<F: PrimeField64>(a: [F; 3], b: [F; 3], c: [F; 3]) -> [F; 3] {
 
 fn evpol4<F: PrimeField64>(signals: &[usize], witness: &[F]) -> [F; 3] {
     let coefs = [
+        [witness[signals[0]], witness[signals[1]], witness[signals[2]]],
         [witness[signals[3]], witness[signals[4]], witness[signals[5]]],
         [witness[signals[6]], witness[signals[7]], witness[signals[8]]],
         [witness[signals[9]], witness[signals[10]], witness[signals[11]]],
         [witness[signals[12]], witness[signals[13]], witness[signals[14]]],
-        [witness[signals[15]], witness[signals[16]], witness[signals[17]]],
     ];
-    let x = [witness[signals[18]], witness[signals[19]], witness[signals[20]]];
+    let x = [witness[signals[15]], witness[signals[16]], witness[signals[17]]];
     evpol4_values(coefs, x)
 }
 
@@ -1412,20 +1412,21 @@ fn run_wasm_evpol4<F: PrimeField64>(
     memory: &wasmtime::Memory,
     base: usize,
 ) -> Result<(), String> {
-    let mut coefs = [[F::ZERO; 3]; 5];
-    for coef_idx in 0..5 {
-        for limb in 0..3 {
-            coefs[coef_idx][limb] = read_wasm_field_at(caller, memory, base, 3 + coef_idx * 3 + limb)?;
-        }
+    let mut values = [F::ZERO; 18];
+    for (idx, slot) in values.iter_mut().enumerate() {
+        *slot = read_wasm_field_at(caller, memory, base, idx)?;
     }
-    let x = [
-        read_wasm_field_at(caller, memory, base, 18)?,
-        read_wasm_field_at(caller, memory, base, 19)?,
-        read_wasm_field_at(caller, memory, base, 20)?,
+    let coefs = [
+        [values[0], values[1], values[2]],
+        [values[3], values[4], values[5]],
+        [values[6], values[7], values[8]],
+        [values[9], values[10], values[11]],
+        [values[12], values[13], values[14]],
     ];
+    let x = [values[15], values[16], values[17]];
     let result = evpol4_values(coefs, x);
     for (idx, value) in result.into_iter().enumerate() {
-        write_wasm_field_at(caller, memory, base, idx, value)?;
+        write_wasm_field_at(caller, memory, base, 18 + idx, value)?;
     }
     Ok(())
 }
@@ -1836,11 +1837,11 @@ mod tests {
             template_id: 0,
             size_witness_words: 22,
             n_publics: 0,
-            public_input_offset_words: 4,
-            public_input_copy_words: 18,
+            public_input_offset_words: 1,
+            public_input_copy_words: 0,
             copy_indices: Vec::new(),
             source_assertions: Vec::new(),
-            source_public_prefix_words: 0,
+            source_public_prefix_words: 18,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
             circom_wasm: None,
@@ -1858,9 +1859,9 @@ mod tests {
         source[17] = 13;
 
         let witness = runtime.generate_witness::<Goldilocks>(&source, 22)?;
-        assert_eq!(witness[1].as_canonical_u64(), 1);
-        assert_eq!(witness[2].as_canonical_u64(), 0);
-        assert_eq!(witness[3].as_canonical_u64(), 0);
+        assert_eq!(witness[19].as_canonical_u64(), 1);
+        assert_eq!(witness[20].as_canonical_u64(), 0);
+        assert_eq!(witness[21].as_canonical_u64(), 0);
         Ok(())
     }
 

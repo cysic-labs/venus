@@ -19,11 +19,11 @@ pub fn evpol4(
 ) -> Result<[Signal; 3]> {
     let out = alloc_array::<3>(builder);
     let mut signals = Vec::with_capacity(21);
-    signals.extend(out);
     for coef in coefs {
         signals.extend(coef);
     }
     signals.extend(x);
+    signals.extend(out);
     builder.add_custom_gate("EvPol4", Vec::new(), signals)?;
     Ok(out)
 }

@@ -174,7 +174,7 @@ fn extern_c_runtime_template(name: &str) -> Option<(usize, usize, usize)> {
     match name {
         "Poseidon16" => Some((1, 208, 16)),
         "CustPoseidon16" => Some((2, 208, 18)),
-        "EvPol4" => Some((3, 3, 18)),
+        "EvPol4" => Some((3, 0, 18)),
         _ => None,
     }
 }
