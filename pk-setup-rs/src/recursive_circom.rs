@@ -794,6 +794,47 @@ pub struct StarkVerifierOptions {
 }
 
 #[allow(dead_code)]
+pub fn render_stark_verifier_circom(
+    const_root: &[u64],
+    stark_info: &CircomStarkInfo,
+    verifier_info: &CircomVerifierInfo,
+    options: StarkVerifierOptions,
+) -> String {
+    let mut out = String::new();
+    line(&mut out, format_args!("pragma circom 2.1.0;"));
+    line(&mut out, format_args!("pragma custom_templates;"));
+    out.push('\n');
+    for include in [
+        "cmul.circom",
+        "cinv.circom",
+        "poseidon2.circom",
+        "bitify.circom",
+        "fft.circom",
+        "evalpol.circom",
+        "treeselector4.circom",
+        "pow.circom",
+        "merklehash.circom",
+    ] {
+        line(&mut out, format_args!("include \"{include}\";"));
+    }
+    out.push('\n');
+    out.push_str(&render_calculate_fri_queries_template(stark_info));
+    out.push('\n');
+    out.push_str(&render_transcript_template(stark_info, options));
+    out.push('\n');
+    out.push_str(&render_verify_fri_template(stark_info));
+    out.push('\n');
+    out.push_str(&render_verify_evaluations_templates(stark_info, verifier_info));
+    out.push('\n');
+    out.push_str(&render_calculate_fri_pol_templates(stark_info, verifier_info));
+    out.push('\n');
+    out.push_str(&render_verify_final_pol_template(stark_info));
+    out.push('\n');
+    out.push_str(&render_stark_verifier_template(const_root, stark_info, options));
+    out
+}
+
+#[allow(dead_code)]
 pub fn render_calculate_fri_queries_template(stark_info: &CircomStarkInfo) -> String {
     let name = suffixed_name("calculateFRIQueries", stark_info.airgroup_id);
     let mut out = String::new();
@@ -1201,6 +1242,328 @@ pub fn render_verify_final_pol_template(stark_info: &CircomStarkInfo) -> String 
     out
 }
 
+#[allow(dead_code)]
+pub fn render_stark_verifier_template(
+    const_root: &[u64],
+    stark_info: &CircomStarkInfo,
+    options: StarkVerifierOptions,
+) -> String {
+    assert_eq!(const_root.len(), 4, "const root must contain four field elements");
+    let verifier_name = suffixed_name("StarkVerifier", stark_info.airgroup_id);
+    let transcript_name = suffixed_name("Transcript", stark_info.airgroup_id);
+    let verify_evaluations_name = suffixed_name("VerifyEvaluations", stark_info.airgroup_id);
+    let calculate_fri_pol_name = suffixed_name("CalculateFRIPolValue", stark_info.airgroup_id);
+    let verify_query_name = suffixed_name("VerifyQuery", stark_info.airgroup_id);
+    let verify_fri_name = suffixed_name("VerifyFRI", stark_info.airgroup_id);
+    let verify_final_pol_name = suffixed_name("VerifyFinalPol", stark_info.airgroup_id);
+    let q_stage = stark_info.q_stage();
+    let steps = &stark_info.stark_struct.steps;
+    let mut out = String::new();
+
+    line(&mut out, format_args!("template {verifier_name}() {{"));
+    if stark_info.n_publics > 0 {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input publics[{}]; // publics polynomials",
+                stark_info.n_publics
+            ),
+        );
+    }
+    if !stark_info.airgroup_values_map.is_empty() {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input airgroupvalues[{}][3]; // airgroupvalue values",
+                stark_info.airgroup_values_map.len()
+            ),
+        );
+    }
+    if !stark_info.air_values_map.is_empty() {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input airvalues[{}][3]; // air values",
+                stark_info.air_values_map.len()
+            ),
+        );
+    }
+    if !stark_info.proof_values_map.is_empty() {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input proofvalues[{}][3]; // air values",
+                stark_info.proof_values_map.len()
+            ),
+        );
+    }
+    for stage in 1..=stark_info.n_stages {
+        line(
+            &mut out,
+            format_args!("    signal input root{stage}[4]; // Merkle tree root of stage {stage}"),
+        );
+    }
+    line(
+        &mut out,
+        format_args!(
+            "    signal input root{q_stage}[4]; // Merkle tree root of the evaluations of the quotient Q1 and Q2 polynomials"
+        ),
+    );
+    if options.verkey_input {
+        line(
+            &mut out,
+            format_args!("    signal input rootC[4]; // Merkle tree root of the evaluations of constant polynomials"),
+        );
+    } else if options.input_challenges {
+        line(
+            &mut out,
+            format_args!(
+                "    signal output rootC[4] <== [{}]; // Merkle tree root of the evaluations of constant polynomials",
+                join_u64(const_root)
+            ),
+        );
+    } else {
+        line(
+            &mut out,
+            format_args!(
+                "    signal rootC[4] <== [{}]; // Merkle tree root of the evaluations of constant polynomials",
+                join_u64(const_root)
+            ),
+        );
+    }
+    out.push('\n');
+    line(
+        &mut out,
+        format_args!(
+            "    signal input evals[{}][3]; // Evaluations of the set polynomials at a challenge value z and gz",
+            stark_info.ev_map.len()
+        ),
+    );
+    out.push('\n');
+
+    for stage in 1..=stark_info.n_stages {
+        let width = stark_info.map_section_width(&format!("cm{stage}"));
+        if width > 0 {
+            line(
+                &mut out,
+                format_args!(
+                    "    signal input s0_vals{stage}[{}][{width}];",
+                    stark_info.n_queries()
+                ),
+            );
+        }
+    }
+    line(
+        &mut out,
+        format_args!(
+            "    signal input s0_vals{q_stage}[{}][{}];",
+            stark_info.n_queries(),
+            stark_info.map_section_width(&format!("cm{q_stage}"))
+        ),
+    );
+    line(
+        &mut out,
+        format_args!(
+            "    signal input s0_valsC[{}][{}];",
+            stark_info.n_queries(),
+            stark_info.n_constants
+        ),
+    );
+    for commit in &stark_info.custom_commits {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input s0_vals_{}_0[{}][{}];",
+                commit.name,
+                stark_info.n_queries(),
+                stark_info.map_section_width(&format!("{}0", commit.name))
+            ),
+        );
+    }
+    out.push('\n');
+
+    render_s0_sibling_inputs(&mut out, stark_info);
+    out.push('\n');
+
+    let mut si_roots = Vec::new();
+    for step in 1..steps.len() {
+        si_roots.push(format!("s{step}_root"));
+        line(&mut out, format_args!("    signal input s{step}_root[4];"));
+    }
+    out.push('\n');
+    for step in 1..steps.len() {
+        let vals_width = pow2_u64(steps[step - 1].n_bits - steps[step].n_bits) * 3;
+        line(
+            &mut out,
+            format_args!(
+                "    signal input s{step}_vals[{}][{vals_width}];",
+                stark_info.n_queries()
+            ),
+        );
+        line(
+            &mut out,
+            format_args!(
+                "    signal input s{step}_siblings[{}][{}][{}];",
+                stark_info.n_queries(),
+                stark_info.step_sibling_levels(step),
+                stark_info.sibling_width()
+            ),
+        );
+        if stark_info.stark_struct.last_level_verification > 0 {
+            line(
+                &mut out,
+                format_args!(
+                    "    signal input s{step}_last_mt_levels[{}][4];",
+                    stark_info.last_level_size()
+                ),
+            );
+        }
+    }
+    out.push('\n');
+    let final_pol_size = pow2_u64(steps.last().map(|step| step.n_bits).unwrap_or(0));
+    line(&mut out, format_args!("    signal input finalPol[{final_pol_size}][3];"));
+    if stark_info.stark_struct.pow_bits > 0 {
+        line(&mut out, format_args!("    signal input nonce;"));
+    }
+    out.push('\n');
+
+    line(&mut out, format_args!("    signal {{binary}} enabled;"));
+    if options.enable_input {
+        line(&mut out, format_args!("    signal input enable;"));
+        line(&mut out, format_args!("    enable * (enable -1) === 0;"));
+        line(&mut out, format_args!("    enabled <== enable;"));
+    } else {
+        line(&mut out, format_args!("    enabled <== 1;"));
+    }
+    out.push('\n');
+    if options.input_challenges {
+        line(&mut out, format_args!("    signal input globalChallenge[3];"));
+        out.push('\n');
+    }
+
+    if options.multi_fri {
+        line(&mut out, format_args!("    signal output queryVals[{}][3];", stark_info.n_queries()));
+    } else {
+        line(&mut out, format_args!("    signal queryVals[{}][3];", stark_info.n_queries()));
+    }
+    out.push('\n');
+
+    let mut challenge_names = Vec::new();
+    for stage in 1..=stark_info.n_stages {
+        let count = stark_info.challenge_count(stage as u64);
+        if count > 0 {
+            line(&mut out, format_args!("    signal challengesStage{stage}[{count}][3];"));
+            challenge_names.push(format!("challengesStage{stage}"));
+        }
+    }
+    line(&mut out, format_args!("    signal challengeQ[3];"));
+    line(&mut out, format_args!("    signal challengeXi[3];"));
+    line(&mut out, format_args!("    signal challengesFRI[2][3];"));
+    challenge_names.extend([
+        "challengeQ".to_string(),
+        "challengeXi".to_string(),
+        "challengesFRI".to_string(),
+    ]);
+    line(&mut out, format_args!("    signal challengesFRISteps[{}][3];", steps.len() + 1));
+    line(
+        &mut out,
+        format_args!(
+            "    signal {{binary}} queriesFRI[{}][{}];",
+            stark_info.n_queries(),
+            steps[0].n_bits
+        ),
+    );
+    out.push('\n');
+
+    let mut transcript_inputs = Vec::new();
+    if !options.input_challenges {
+        if stark_info.n_publics > 0 {
+            transcript_inputs.push("publics".to_string());
+        }
+        transcript_inputs.push("rootC".to_string());
+        transcript_inputs.push("root1".to_string());
+    } else {
+        transcript_inputs.push("globalChallenge".to_string());
+    }
+    if !stark_info.air_values_map.is_empty() {
+        transcript_inputs.push("airvalues".to_string());
+    }
+    for stage in 2..=stark_info.n_stages {
+        transcript_inputs.push(format!("root{stage}"));
+    }
+    transcript_inputs.push(format!("root{q_stage}"));
+    transcript_inputs.push("evals".to_string());
+    transcript_inputs.extend(si_roots.iter().cloned());
+    transcript_inputs.push("finalPol".to_string());
+    if stark_info.stark_struct.pow_bits > 0 {
+        transcript_inputs.push("nonce".to_string());
+    }
+    transcript_inputs.push("enabled".to_string());
+    line(
+        &mut out,
+        format_args!(
+            "    ({},challengesFRISteps,queriesFRI) <== {transcript_name}()({});",
+            challenge_names.join(","),
+            transcript_inputs.join(",")
+        ),
+    );
+    out.push('\n');
+
+    let mut verify_eval_inputs = Vec::new();
+    for stage in 1..=stark_info.n_stages {
+        if stark_info.challenge_count(stage as u64) > 0 {
+            verify_eval_inputs.push(format!("challengesStage{stage}"));
+        }
+    }
+    verify_eval_inputs.extend([
+        "challengeQ".to_string(),
+        "challengeXi".to_string(),
+        "evals".to_string(),
+    ]);
+    if stark_info.n_publics > 0 {
+        verify_eval_inputs.push("publics".to_string());
+    }
+    if !stark_info.airgroup_values_map.is_empty() {
+        verify_eval_inputs.push("airgroupvalues".to_string());
+    }
+    if !stark_info.air_values_map.is_empty() {
+        verify_eval_inputs.push("airvalues".to_string());
+    }
+    if !stark_info.proof_values_map.is_empty() {
+        verify_eval_inputs.push("proofvalues".to_string());
+    }
+    verify_eval_inputs.push("enabled".to_string());
+    line(
+        &mut out,
+        format_args!("    {verify_evaluations_name}()({});", verify_eval_inputs.join(", ")),
+    );
+    out.push('\n');
+
+    render_preprocess_values(&mut out, stark_info);
+    out.push('\n');
+    render_merkle_verifications(&mut out, stark_info);
+    out.push('\n');
+    render_fri_polynomial_checks(
+        &mut out,
+        stark_info,
+        &calculate_fri_pol_name,
+        &verify_query_name,
+        &verify_fri_name,
+    );
+    out.push('\n');
+    line(&mut out, format_args!("    {verify_final_pol_name}()(finalPol, enabled);"));
+    line(&mut out, format_args!("}}"));
+    if !options.skip_main {
+        out.push('\n');
+        if stark_info.n_publics > 0 {
+            line(&mut out, format_args!("component main {{public [publics]}}= {verifier_name}();"));
+        } else {
+            line(&mut out, format_args!("component main = {verifier_name}();"));
+        }
+    }
+    out
+}
+
 fn render_verify_evaluations_template(
     stark_info: &CircomStarkInfo,
     verifier_info: &CircomVerifierInfo,
@@ -1495,8 +1858,7 @@ fn render_map_values_template(stark_info: &CircomStarkInfo) -> String {
     let name = suffixed_name("MapValues", stark_info.airgroup_id);
     let mut out = String::new();
     line(&mut out, format_args!("template {name}() {{"));
-    render_cm_value_inputs(&mut out, stark_info, None);
-    render_custom_commit_value_inputs(&mut out, stark_info, None);
+    render_map_values_raw_inputs(&mut out, stark_info);
 
     for stage in 1..=stark_info.q_stage() {
         for (idx, pol) in stark_info.cm_pols_map.iter().filter(|pol| pol.stage == stage).enumerate()
@@ -1576,6 +1938,524 @@ fn render_challenge_stage_inputs(
             names.push(format!("challengesStage{stage}"));
         }
     }
+}
+
+fn render_s0_sibling_inputs(out: &mut String, stark_info: &CircomStarkInfo) {
+    for stage in 1..=stark_info.n_stages {
+        if stark_info.map_section_width(&format!("cm{stage}")) == 0 {
+            continue;
+        }
+        line(
+            out,
+            format_args!(
+                "    signal input s0_siblings{stage}[{}][{}][{}];",
+                stark_info.n_queries(),
+                stark_info.s0_sibling_levels(),
+                stark_info.sibling_width()
+            ),
+        );
+        if stark_info.stark_struct.last_level_verification > 0 {
+            line(
+                out,
+                format_args!(
+                    "    signal input s0_last_mt_levels{stage}[{}][4];",
+                    stark_info.last_level_size()
+                ),
+            );
+        }
+    }
+    let q_stage = stark_info.q_stage();
+    line(
+        out,
+        format_args!(
+            "    signal input s0_siblings{q_stage}[{}][{}][{}];",
+            stark_info.n_queries(),
+            stark_info.s0_sibling_levels(),
+            stark_info.sibling_width()
+        ),
+    );
+    if stark_info.stark_struct.last_level_verification > 0 {
+        line(
+            out,
+            format_args!(
+                "    signal input s0_last_mt_levels{q_stage}[{}][4];",
+                stark_info.last_level_size()
+            ),
+        );
+    }
+    line(
+        out,
+        format_args!(
+            "    signal input s0_siblingsC[{}][{}][{}];",
+            stark_info.n_queries(),
+            stark_info.s0_sibling_levels(),
+            stark_info.sibling_width()
+        ),
+    );
+    if stark_info.stark_struct.last_level_verification > 0 {
+        line(
+            out,
+            format_args!(
+                "    signal input s0_last_mt_levelsC[{}][4];",
+                stark_info.last_level_size()
+            ),
+        );
+    }
+    for commit in &stark_info.custom_commits {
+        line(
+            out,
+            format_args!(
+                "    signal input s0_siblings_{}_0[{}][{}][{}];",
+                commit.name,
+                stark_info.n_queries(),
+                stark_info.s0_sibling_levels(),
+                stark_info.sibling_width()
+            ),
+        );
+        if stark_info.stark_struct.last_level_verification > 0 {
+            line(
+                out,
+                format_args!(
+                    "    signal input s0_last_mt_levels_{}_0[{}][4];",
+                    commit.name,
+                    stark_info.last_level_size()
+                ),
+            );
+        }
+    }
+}
+
+fn render_preprocess_values(out: &mut String, stark_info: &CircomStarkInfo) {
+    let q_stage = stark_info.q_stage();
+    let steps = &stark_info.stark_struct.steps;
+    for stage in 1..=stark_info.n_stages {
+        let width = stark_info.map_section_width(&format!("cm{stage}"));
+        if width > 0 {
+            line(
+                out,
+                format_args!("    var s0_vals{stage}_p[{}][{width}][1];", stark_info.n_queries()),
+            );
+        }
+    }
+    line(
+        out,
+        format_args!(
+            "    var s0_vals{q_stage}_p[{}][{}][1];",
+            stark_info.n_queries(),
+            stark_info.map_section_width(&format!("cm{q_stage}"))
+        ),
+    );
+    line(
+        out,
+        format_args!(
+            "    var s0_valsC_p[{}][{}][1];",
+            stark_info.n_queries(),
+            stark_info.n_constants
+        ),
+    );
+    for commit in &stark_info.custom_commits {
+        line(
+            out,
+            format_args!(
+                "    var s0_vals_{}_0_p[{}][{}][1];",
+                commit.name,
+                stark_info.n_queries(),
+                stark_info.map_section_width(&format!("{}0", commit.name))
+            ),
+        );
+    }
+    for step in 0..steps.len() {
+        let exponent =
+            if step == 0 { 1 } else { pow2_u64(steps[step - 1].n_bits - steps[step].n_bits) };
+        line(
+            out,
+            format_args!("    var s{step}_vals_p[{}][{exponent}][3]; ", stark_info.n_queries()),
+        );
+    }
+    out.push('\n');
+    line(out, format_args!("    for (var q=0; q<{}; q++) {{", stark_info.n_queries()));
+    for stage in 1..=stark_info.n_stages {
+        let width = stark_info.map_section_width(&format!("cm{stage}"));
+        if width > 0 {
+            line(out, format_args!("        for (var i = 0; i < {width}; i++) {{"));
+            line(
+                out,
+                format_args!("            s0_vals{stage}_p[q][i][0] = s0_vals{stage}[q][i];"),
+            );
+            line(out, format_args!("        }}"));
+        }
+    }
+    let q_width = stark_info.map_section_width(&format!("cm{q_stage}"));
+    line(out, format_args!("        for (var i = 0; i < {q_width}; i++) {{"));
+    line(out, format_args!("            s0_vals{q_stage}_p[q][i][0] = s0_vals{q_stage}[q][i];"));
+    line(out, format_args!("        }}"));
+    line(out, format_args!("        for (var i = 0; i < {}; i++) {{", stark_info.n_constants));
+    line(out, format_args!("            s0_valsC_p[q][i][0] = s0_valsC[q][i];"));
+    line(out, format_args!("        }}"));
+    for commit in &stark_info.custom_commits {
+        let width = stark_info.map_section_width(&format!("{}0", commit.name));
+        line(out, format_args!("        for (var i = 0; i < {width}; i++) {{"));
+        line(
+            out,
+            format_args!(
+                "            s0_vals_{}_0_p[q][i][0] = s0_vals_{}_0[q][i];",
+                commit.name, commit.name
+            ),
+        );
+        line(out, format_args!("        }}"));
+    }
+    out.push('\n');
+    line(out, format_args!("        for(var e=0; e < 3; e++) {{"));
+    for step in 1..steps.len() {
+        let exponent = pow2_u64(steps[step - 1].n_bits - steps[step].n_bits);
+        line(out, format_args!("            for(var c=0; c < {exponent}; c++) {{"));
+        line(
+            out,
+            format_args!("                s{step}_vals_p[q][c][e] = s{step}_vals[q][c*3+e];"),
+        );
+        line(out, format_args!("            }}"));
+    }
+    line(out, format_args!("        }}"));
+    line(out, format_args!("    }}"));
+}
+
+fn render_merkle_verifications(out: &mut String, stark_info: &CircomStarkInfo) {
+    let q_stage = stark_info.q_stage();
+    let arity = stark_info.stark_struct.merkle_tree_arity;
+    let arity_bits = stark_info.arity_bits();
+    let s0_tree_depth = ceil_div(stark_info.stark_struct.steps[0].n_bits, arity_bits);
+    line(
+        out,
+        format_args!(
+            "    signal {{binary}} queriesFRIBits[{}][{}][{}];",
+            stark_info.n_queries(),
+            s0_tree_depth,
+            arity_bits
+        ),
+    );
+    line(out, format_args!("    for(var i = 0; i < {}; i++) {{", stark_info.n_queries()));
+    line(out, format_args!("        for(var j = 0; j < {s0_tree_depth}; j++) {{"));
+    line(out, format_args!("            for(var k = 0; k < {arity_bits}; k++) {{"));
+    line(
+        out,
+        format_args!(
+            "                if (k + j * {arity_bits} >= {}) {{",
+            stark_info.stark_struct.steps[0].n_bits
+        ),
+    );
+    line(out, format_args!("                    queriesFRIBits[i][j][k] <== 0;"));
+    line(out, format_args!("                }} else {{"));
+    line(
+        out,
+        format_args!(
+            "                    queriesFRIBits[i][j][k] <== queriesFRI[i][j*{arity_bits} + k];"
+        ),
+    );
+    line(out, format_args!("                }}"));
+    line(out, format_args!("            }}"));
+    line(out, format_args!("        }}"));
+    line(out, format_args!("    }}"));
+    out.push('\n');
+
+    for stage in 1..=stark_info.n_stages {
+        let width = stark_info.map_section_width(&format!("cm{stage}"));
+        if width == 0 {
+            continue;
+        }
+        render_s0_merkle_query_loop(
+            out,
+            stark_info,
+            1,
+            width,
+            &format!("s0_vals{stage}_p[q]"),
+            &format!("s0_siblings{stage}[q]"),
+            &format!("root{stage}"),
+            &format!("s0_last_mt_levels{stage}"),
+        );
+    }
+    render_s0_merkle_query_loop(
+        out,
+        stark_info,
+        1,
+        stark_info.map_section_width(&format!("cm{q_stage}")),
+        &format!("s0_vals{q_stage}_p[q]"),
+        &format!("s0_siblings{q_stage}[q]"),
+        &format!("root{q_stage}"),
+        &format!("s0_last_mt_levels{q_stage}"),
+    );
+    render_s0_merkle_query_loop(
+        out,
+        stark_info,
+        1,
+        stark_info.n_constants as u64,
+        "s0_valsC_p[q]",
+        "s0_siblingsC[q]",
+        "rootC",
+        "s0_last_mt_levelsC",
+    );
+    for commit in &stark_info.custom_commits {
+        line(
+            out,
+            format_args!(
+                "    signal root_{}_0[4] <== [publics[{}], publics[{}], publics[{}], publics[{}]];",
+                commit.name,
+                commit.public_values.first().map(|value| value.idx).unwrap_or(0),
+                commit.public_values.get(1).map(|value| value.idx).unwrap_or(0),
+                commit.public_values.get(2).map(|value| value.idx).unwrap_or(0),
+                commit.public_values.get(3).map(|value| value.idx).unwrap_or(0)
+            ),
+        );
+        render_s0_merkle_query_loop(
+            out,
+            stark_info,
+            1,
+            stark_info.map_section_width(&format!("{}0", commit.name)),
+            &format!("s0_vals_{}_0_p[q]", commit.name),
+            &format!("s0_siblings_{}_0[q]", commit.name),
+            &format!("root_{}_0", commit.name),
+            &format!("s0_last_mt_levels_{}_0", commit.name),
+        );
+    }
+
+    for step in 1..stark_info.stark_struct.steps.len() {
+        let step_bits = stark_info.stark_struct.steps[step].n_bits;
+        let tree_depth = ceil_div(step_bits, arity_bits);
+        let values = pow2_u64(
+            stark_info.stark_struct.steps[step - 1].n_bits
+                - stark_info.stark_struct.steps[step].n_bits,
+        );
+        line(
+            out,
+            format_args!(
+                "    signal {{binary}} s{step}_keys_merkle_bits[{}][{tree_depth}][{arity_bits}];",
+                stark_info.n_queries()
+            ),
+        );
+        line(out, format_args!("    for (var q=0; q<{}; q++) {{", stark_info.n_queries()));
+        line(out, format_args!("        for(var j = 0; j < {tree_depth}; j++) {{"));
+        line(out, format_args!("            for(var k = 0; k < {arity_bits}; k++) {{"));
+        line(out, format_args!("                if (k + j * {arity_bits} >= {step_bits}) {{"));
+        line(out, format_args!("                    s{step}_keys_merkle_bits[q][j][k] <== 0;"));
+        line(out, format_args!("                }} else {{"));
+        line(
+            out,
+            format_args!(
+                "                    s{step}_keys_merkle_bits[q][j][k] <== queriesFRI[q][j*{arity_bits} + k];"
+            ),
+        );
+        line(out, format_args!("                }}"));
+        line(out, format_args!("            }}"));
+        line(out, format_args!("        }}"));
+        if stark_info.stark_struct.last_level_verification > 0 {
+            let levels = tree_depth.saturating_sub(stark_info.stark_struct.last_level_verification);
+            if levels == 0 {
+                line(
+                    out,
+                    format_args!(
+                        "        VerifyMerkleHashUntilLevelEmpty(3, {values}, {arity}, {}, {})(s{step}_vals_p[q], s{step}_keys_merkle_bits[q], s{step}_last_mt_levels, enabled);",
+                        stark_info.stark_struct.last_level_verification,
+                        pow2_u64(step_bits)
+                    ),
+                );
+            } else {
+                line(
+                    out,
+                    format_args!(
+                        "        VerifyMerkleHashUntilLevel(3, {values}, {arity}, {levels}, {}, {})(s{step}_vals_p[q], s{step}_siblings[q], s{step}_keys_merkle_bits[q], s{step}_last_mt_levels, enabled);",
+                        stark_info.stark_struct.last_level_verification,
+                        pow2_u64(step_bits)
+                    ),
+                );
+            }
+        } else {
+            line(
+                out,
+                format_args!(
+                    "        VerifyMerkleHash(3, {values}, {arity}, {tree_depth})(s{step}_vals_p[q], s{step}_siblings[q], s{step}_keys_merkle_bits[q], s{step}_root, enabled);"
+                ),
+            );
+        }
+        line(out, format_args!("    }}"));
+    }
+
+    if stark_info.stark_struct.last_level_verification > 0 {
+        for stage in 1..=stark_info.n_stages {
+            if stark_info.map_section_width(&format!("cm{stage}")) > 0 {
+                render_merkle_root_check(
+                    out,
+                    stark_info,
+                    &format!("s0_last_mt_levels{stage}"),
+                    &format!("root{stage}"),
+                    pow2_u64(stark_info.stark_struct.n_bits_ext),
+                );
+            }
+        }
+        render_merkle_root_check(
+            out,
+            stark_info,
+            &format!("s0_last_mt_levels{q_stage}"),
+            &format!("root{q_stage}"),
+            pow2_u64(stark_info.stark_struct.n_bits_ext),
+        );
+        render_merkle_root_check(
+            out,
+            stark_info,
+            "s0_last_mt_levelsC",
+            "rootC",
+            pow2_u64(stark_info.stark_struct.n_bits_ext),
+        );
+        for commit in &stark_info.custom_commits {
+            render_merkle_root_check(
+                out,
+                stark_info,
+                &format!("s0_last_mt_levels_{}_0", commit.name),
+                &format!("root_{}_0", commit.name),
+                pow2_u64(stark_info.stark_struct.n_bits_ext),
+            );
+        }
+        for step in 1..stark_info.stark_struct.steps.len() {
+            render_merkle_root_check(
+                out,
+                stark_info,
+                &format!("s{step}_last_mt_levels"),
+                &format!("s{step}_root"),
+                pow2_u64(stark_info.stark_struct.steps[step].n_bits),
+            );
+        }
+    }
+}
+
+fn render_s0_merkle_query_loop(
+    out: &mut String,
+    stark_info: &CircomStarkInfo,
+    dim: u64,
+    width: u64,
+    values: &str,
+    siblings: &str,
+    root: &str,
+    last_levels: &str,
+) {
+    let arity = stark_info.stark_struct.merkle_tree_arity;
+    let tree_depth = ceil_div(stark_info.stark_struct.steps[0].n_bits, stark_info.arity_bits());
+    line(out, format_args!("    for (var q=0; q<{}; q++) {{", stark_info.n_queries()));
+    if stark_info.stark_struct.last_level_verification > 0 {
+        line(
+            out,
+            format_args!(
+                "        VerifyMerkleHashUntilLevel({dim}, {width}, {arity}, {}, {}, {} )({values}, {siblings}, queriesFRIBits[q], {last_levels}, enabled);",
+                tree_depth.saturating_sub(stark_info.stark_struct.last_level_verification),
+                stark_info.stark_struct.last_level_verification,
+                pow2_u64(stark_info.stark_struct.n_bits_ext)
+            ),
+        );
+    } else {
+        line(
+            out,
+            format_args!(
+                "        VerifyMerkleHash({dim}, {width}, {arity}, {tree_depth})({values}, {siblings}, queriesFRIBits[q], {root}, enabled);"
+            ),
+        );
+    }
+    line(out, format_args!("    }}"));
+}
+
+fn render_merkle_root_check(
+    out: &mut String,
+    stark_info: &CircomStarkInfo,
+    levels: &str,
+    root: &str,
+    tree_size: u64,
+) {
+    line(
+        out,
+        format_args!(
+            "    VerifyMerkleRoot({}, {}, {tree_size})({levels}, {root}, enabled);",
+            stark_info.stark_struct.last_level_verification,
+            stark_info.stark_struct.merkle_tree_arity
+        ),
+    );
+}
+
+fn render_fri_polynomial_checks(
+    out: &mut String,
+    stark_info: &CircomStarkInfo,
+    calculate_fri_pol_name: &str,
+    verify_query_name: &str,
+    verify_fri_name: &str,
+) {
+    let q_stage = stark_info.q_stage();
+    let steps = &stark_info.stark_struct.steps;
+    line(out, format_args!("    for (var q=0; q<{}; q++) {{", stark_info.n_queries()));
+    let mut query_vals = Vec::new();
+    for stage in 1..=stark_info.n_stages {
+        if stark_info.map_section_width(&format!("cm{stage}")) > 0 {
+            query_vals.push(format!("s0_vals{stage}[q]"));
+        }
+    }
+    query_vals.push(format!("s0_vals{q_stage}[q]"));
+    query_vals.push("s0_valsC[q]".to_string());
+    for commit in &stark_info.custom_commits {
+        query_vals.push(format!("s0_vals_{}_0[q]", commit.name));
+    }
+    line(
+        out,
+        format_args!(
+            "        queryVals[q] <== {calculate_fri_pol_name}()(queriesFRI[q], challengeXi, challengesFRI, evals, {});",
+            query_vals.join(", ")
+        ),
+    );
+    line(out, format_args!("    }}"));
+    out.push('\n');
+
+    for step in 1..steps.len() {
+        line(
+            out,
+            format_args!(
+                "    signal {{binary}} s{step}_queriesFRI[{}][{}];",
+                stark_info.n_queries(),
+                steps[step].n_bits
+            ),
+        );
+    }
+    out.push('\n');
+    line(out, format_args!("    for (var q=0; q<{}; q++) {{", stark_info.n_queries()));
+    let next_vals_pol = if steps.len() > 1 { "s1_vals_p[q]" } else { "finalPol" };
+    let next_step = if steps.len() > 1 { steps[1].n_bits } else { 0 };
+    line(
+        out,
+        format_args!(
+            "        {verify_query_name}({}, {next_step})(queriesFRI[q], queryVals[q], {next_vals_pol}, enabled);",
+            steps[0].n_bits
+        ),
+    );
+    out.push('\n');
+    for step in 1..steps.len() {
+        line(
+            out,
+            format_args!(
+                "        for(var i = 0; i < {}; i++) {{ s{step}_queriesFRI[q][i] <== queriesFRI[q][i]; }}  ",
+                steps[step].n_bits
+            ),
+        );
+        let next_pol = if step < steps.len() - 1 {
+            format!("s{}_vals_p[q]", step + 1)
+        } else {
+            "finalPol".to_string()
+        };
+        let next_step_bits = if step < steps.len() - 1 { steps[step + 1].n_bits } else { 0 };
+        let exponent = pow2_u64(stark_info.stark_struct.n_bits_ext - steps[step - 1].n_bits);
+        let e0 = goldilocks_inv(goldilocks_pow(GOLDILOCKS_SHIFT, exponent));
+        line(
+            out,
+            format_args!(
+                "        {verify_fri_name}({}, {}, {}, {next_step_bits}, {e0})(s{step}_queriesFRI[q], challengesFRISteps[{step}], s{step}_vals_p[q], {next_pol}, enabled);",
+                stark_info.stark_struct.n_bits_ext,
+                steps[step - 1].n_bits,
+                steps[step].n_bits
+            ),
+        );
+    }
+    line(out, format_args!("    }}"));
 }
 
 fn render_optional_value_inputs(
@@ -1690,6 +2570,22 @@ fn render_custom_commit_value_inputs(
     }
 }
 
+fn render_map_values_raw_inputs(out: &mut String, stark_info: &CircomStarkInfo) {
+    for stage in 1..=stark_info.n_stages {
+        let width = stark_info.map_section_width(&format!("cm{stage}"));
+        if width > 0 {
+            line(out, format_args!("    signal input vals{stage}[{width}];"));
+        }
+    }
+    let q_stage = stark_info.q_stage();
+    let q_width = stark_info.map_section_width(&format!("cm{q_stage}"));
+    line(out, format_args!("    signal input vals{q_stage}[{q_width}];"));
+    for commit in &stark_info.custom_commits {
+        let width = stark_info.map_section_width(&format!("{}0", commit.name));
+        line(out, format_args!("    signal input vals_{}_0[{width}];", commit.name));
+    }
+}
+
 fn render_map_values_assignments(out: &mut String, stark_info: &CircomStarkInfo) {
     for stage in 1..=stark_info.n_stages {
         if stark_info.map_section_width(&format!("cm{stage}")) > 0 {
@@ -1761,6 +2657,10 @@ fn render_zframe_step(out: &mut String, frame_idx: usize, position: u32, root: u
 
 fn join_tmp_names(ids: &[u64]) -> String {
     ids.iter().map(|id| format!("tmp_{id}")).collect::<Vec<_>>().join(",")
+}
+
+fn join_u64(values: &[u64]) -> String {
+    values.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
 }
 
 fn last_dest_tmp_id(code: &[CircomCodeLine]) -> u64 {
@@ -2376,7 +3276,7 @@ mod tests {
             },
         ];
         stark.map_sections_n.insert("cm2".to_string(), 3);
-        stark.ev_map[0].id = 1;
+        stark.ev_map = sample_q_evals();
         let verifier = sample_verifier_info();
 
         let evals = render_verify_evaluations_templates(&stark, &verifier);
@@ -2394,6 +3294,102 @@ mod tests {
         let final_pol = render_verify_final_pol_template(&stark);
         assert!(final_pol.contains("template VerifyFinalPol0()"));
         assert!(final_pol.contains("signal lastIFFT[32][3] <== FFT(5, 3, 1)(finalPol);"));
+    }
+
+    #[test]
+    fn renders_stark_verifier_wrapper() {
+        let mut stark = sample_stark_info();
+        stark.cm_pols_map = vec![
+            CircomPolMap {
+                name: "trace".to_string(),
+                stage: 1,
+                dim: 1,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+            CircomPolMap {
+                name: "q".to_string(),
+                stage: 2,
+                dim: 3,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+        ];
+        stark.map_sections_n.insert("cm2".to_string(), 3);
+        stark.ev_map = sample_q_evals();
+        let out = render_stark_verifier_template(
+            &[1, 2, 3, 4],
+            &stark,
+            StarkVerifierOptions {
+                input_challenges: true,
+                enable_input: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(out.contains("template StarkVerifier0()"));
+        assert!(out.contains("signal output rootC[4] <== [1,2,3,4];"));
+        assert!(out.contains(
+            "(challengeQ,challengeXi,challengesFRI,challengesFRISteps,queriesFRI) <== Transcript0()("
+        ));
+        assert!(out.contains("VerifyMerkleHashUntilLevel(1, 4, 4"));
+        assert!(out.contains("queryVals[q] <== CalculateFRIPolValue0()"));
+        assert!(out.contains("VerifyFRI0(8, 8, 5, 0,"));
+        assert!(out.contains("VerifyFinalPol0()(finalPol, enabled);"));
+    }
+
+    #[test]
+    fn compiles_sample_stark_verifier_circom() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir()
+            .join(format!("pk_setup_recursive_verifier_circom_test_{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir)?;
+        let includes = crate::circom_assets::write_recursive_include_assets(&dir)?;
+
+        let mut stark = sample_stark_info();
+        stark.cm_pols_map = vec![
+            CircomPolMap {
+                name: "trace".to_string(),
+                stage: 1,
+                dim: 1,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+            CircomPolMap {
+                name: "q".to_string(),
+                stage: 2,
+                dim: 3,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+        ];
+        stark.map_sections_n.insert("cm2".to_string(), 3);
+        stark.ev_map = sample_q_evals();
+        let verifier = sample_verifier_info();
+        let source = render_stark_verifier_circom(
+            &[1, 2, 3, 4],
+            &stark,
+            &verifier,
+            StarkVerifierOptions {
+                input_challenges: true,
+                enable_input: true,
+                ..Default::default()
+            },
+        );
+        let input = dir.join("sample_verifier.circom");
+        let output = dir.join("sample_verifier.r1cs");
+        std::fs::write(&input, source)?;
+        crate::circom_compile::compile_file_to_r1cs(
+            &input,
+            [dir.clone(), includes.gl, includes.vadcop],
+            &output,
+        )?;
+        let r1cs = crate::recursive_setup::r1cs::read_r1cs(&output)?;
+        assert!(r1cs.n_constraints > 0);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 
     fn sample_stark_info() -> CircomStarkInfo {
@@ -2481,6 +3477,18 @@ mod tests {
                 stage: 0,
             },
         }
+    }
+
+    fn sample_q_evals() -> Vec<CircomEvMap> {
+        (0..3)
+            .map(|opening_pos| CircomEvMap {
+                ev_type: "cm".to_string(),
+                id: 1,
+                prime: 0,
+                opening_pos,
+                commit_id: None,
+            })
+            .collect()
     }
 
     fn tmp_ref(id: u64, dim: u64) -> CircomCodeRef {
