@@ -198,6 +198,22 @@ pub struct CircomVerifierInfo {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct CircomGlobalConstraintsInfo {
+    #[serde(default)]
+    pub constraints: Vec<CircomGlobalConstraint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct CircomGlobalConstraint {
+    #[serde(flatten)]
+    pub block: CircomCodeBlock,
+    pub boundary: Option<String>,
+    pub line: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub struct CircomExpressionCode {
@@ -241,6 +257,8 @@ pub struct CircomCodeRef {
     pub boundary_id: Option<u64>,
     #[serde(rename = "commitId")]
     pub commit_id: Option<u64>,
+    #[serde(rename = "airgroupId")]
+    pub airgroup_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -260,6 +278,8 @@ pub struct CircomVadcopInfo {
     pub n_publics: usize,
     #[serde(rename = "proofValuesMap", default)]
     pub proof_values_map: Vec<CircomNamedMap>,
+    #[serde(rename = "numChallenges", default)]
+    pub num_challenges: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1147,6 +1167,53 @@ pub fn render_unrolled_code(
     out
 }
 
+fn render_global_unrolled_code(code: &[CircomCodeLine], initialized: &[u64]) -> String {
+    let initialized = initialized.iter().copied().collect::<BTreeSet<_>>();
+    let mut out = String::new();
+    for inst in code {
+        let dest = render_global_ref(&inst.dest, true, &initialized);
+        let lhs = inst.src.first().expect("missing first source");
+        let rhs = inst.src.get(1);
+        let lhs_dim = ref_dim(lhs);
+        let rhs_dim = rhs.map(ref_dim);
+        match inst.op.as_str() {
+            "add" => render_global_binary_op(
+                &mut out,
+                "+",
+                &dest,
+                lhs,
+                rhs.expect("missing rhs"),
+                lhs_dim,
+                rhs_dim.unwrap(),
+            ),
+            "sub" => render_global_sub(
+                &mut out,
+                &dest,
+                lhs,
+                rhs.expect("missing rhs"),
+                lhs_dim,
+                rhs_dim.unwrap(),
+            ),
+            "mul" => render_global_mul(
+                &mut out,
+                &dest,
+                lhs,
+                rhs.expect("missing rhs"),
+                lhs_dim,
+                rhs_dim.unwrap(),
+            ),
+            "copy" => {
+                line(
+                    &mut out,
+                    format_args!("    {dest} <== {};", render_global_ref(lhs, false, &initialized)),
+                );
+            }
+            op => panic!("unsupported global constraint instruction op {op}"),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 #[allow(dead_code)]
 pub struct StarkVerifierOptions {
@@ -1565,6 +1632,333 @@ pub fn render_final_compressed_circom(
     line(&mut out, format_args!("}}"));
     out.push('\n');
     line(&mut out, format_args!("component main {{public [ publics ]}}= FinalCompressed();"));
+    out
+}
+
+#[allow(dead_code)]
+pub fn render_final_circom(
+    stark_infos: &[CircomStarkInfo],
+    vadcop_info: &CircomVadcopInfo,
+    global_constraints: &CircomGlobalConstraintsInfo,
+    verifier_filenames: &[String],
+    aggregated_verification_keys: &[Vec<u64>],
+    basic_verification_keys: &[Vec<Vec<u64>>],
+) -> String {
+    let transcript_stark = stark_infos.first().expect("final verifier stark info");
+    let mut out = String::new();
+    line(&mut out, format_args!("pragma circom 2.1.0;"));
+    line(&mut out, format_args!("pragma custom_templates;"));
+    out.push('\n');
+    for verifier in verifier_filenames {
+        line(&mut out, format_args!("include \"{verifier}\";"));
+    }
+    line(&mut out, format_args!("include \"iszero.circom\";"));
+    line(&mut out, format_args!("include \"select_vk.circom\";"));
+    line(&mut out, format_args!("include \"agg_values.circom\";"));
+    out.push('\n');
+    out.push_str(&render_verify_global_challenges_template(transcript_stark, vadcop_info));
+    out.push('\n');
+    out.push_str(&render_verify_global_constraints_templates(
+        transcript_stark,
+        vadcop_info,
+        global_constraints,
+    ));
+    out.push('\n');
+    line(&mut out, format_args!("template Final() {{"));
+    if vadcop_info.n_publics > 0 {
+        line(&mut out, format_args!("    signal input publics[{}];", vadcop_info.n_publics));
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input proofValues[{}][3];",
+                vadcop_info.proof_values_map.len()
+            ),
+        );
+    }
+    line(&mut out, format_args!("    signal input globalChallenge[3];"));
+    out.push('\n');
+
+    for group_idx in 0..vadcop_info.agg_types.len() {
+        let stark_info =
+            if stark_infos.len() > 1 { &stark_infos[group_idx] } else { &stark_infos[0] };
+        out.push_str(&render_define_vadcop_inputs(
+            vadcop_info,
+            group_idx,
+            &format!("s{group_idx}_sv"),
+            true,
+        ));
+        out.push_str(&render_define_stark_inputs(
+            stark_info,
+            &format!("s{group_idx}"),
+            vadcop_info.n_publics,
+            StarkInputOptions { add_publics: false, ..Default::default() },
+        ));
+        out.push('\n');
+    }
+
+    let multiple_circuits = vadcop_info.air_groups.len() > 1
+        || vadcop_info.airs.first().map(|airs| airs.len()).unwrap_or(0) > 1;
+    for group_idx in 0..vadcop_info.agg_types.len() {
+        let stark_info =
+            if stark_infos.len() > 1 { &stark_infos[group_idx] } else { &stark_infos[0] };
+        out.push_str(&render_assign_stark_inputs(
+            &format!("sV{group_idx}"),
+            stark_info,
+            &format!("s{group_idx}"),
+            vadcop_info.n_publics,
+            StarkInputOptions { add_publics: false, ..Default::default() },
+        ));
+        out.push_str(&render_assign_vadcop_inputs(
+            &format!("sV{group_idx}"),
+            vadcop_info,
+            &format!("s{group_idx}_sv"),
+            group_idx,
+            VadcopAssignOptions { add_prefix_agg_types: true, set_enable_input: multiple_circuits },
+        ));
+        let agg_vk =
+            aggregated_verification_keys.get(group_idx).map(Vec::as_slice).unwrap_or(&[0, 0, 0, 0]);
+        line(
+            &mut out,
+            format_args!("    var s{group_idx}_sv_rootCAgg[4] = [{}];", join_u64(agg_vk)),
+        );
+        let basic_keys = basic_verification_keys.get(group_idx).map(Vec::as_slice).unwrap_or(&[]);
+        line(
+            &mut out,
+            format_args!("    var s{group_idx}_sv_rootCBasics[{}][4];", basic_keys.len()),
+        );
+        for (key_idx, key) in basic_keys.iter().enumerate() {
+            line(
+                &mut out,
+                format_args!("    s{group_idx}_sv_rootCBasics[{key_idx}] = [{}];", join_u64(key)),
+            );
+        }
+        let selector =
+            if multiple_circuits { "SelectVerificationKeyNull" } else { "SelectVerificationKey" };
+        line(
+            &mut out,
+            format_args!("    sV{group_idx}.rootC <== {selector}({})(s{group_idx}_sv_circuitType, s{group_idx}_sv_rootCBasics, s{group_idx}_sv_rootCAgg);", basic_keys.len()),
+        );
+        line(&mut out, format_args!("    for (var i=0; i<4; i++) {{"));
+        line(
+            &mut out,
+            format_args!(
+                "        sV{group_idx}.publics[{} + i] <== s{group_idx}_sv_rootCAgg[i];",
+                stark_info.n_publics - 4
+            ),
+        );
+        line(&mut out, format_args!("    }}"));
+        out.push('\n');
+    }
+
+    line(&mut out, format_args!("    component verifyChallenges = VerifyGlobalChallenges();"));
+    if vadcop_info.n_publics > 0 {
+        line(&mut out, format_args!("    verifyChallenges.publics <== publics;"));
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        line(&mut out, format_args!("    verifyChallenges.proofValues <== proofValues;"));
+    }
+    for group_idx in 0..vadcop_info.agg_types.len() {
+        line(
+            &mut out,
+            format_args!(
+                "    verifyChallenges.stage1Hash[{group_idx}] <== s{group_idx}_sv_stage1Hash;"
+            ),
+        );
+    }
+    line(&mut out, format_args!("    verifyChallenges.globalChallenge <== globalChallenge;"));
+    out.push('\n');
+
+    line(
+        &mut out,
+        format_args!("    component verifyGlobalConstraints = VerifyGlobalConstraints();"),
+    );
+    if vadcop_info.n_publics > 0 {
+        line(&mut out, format_args!("    verifyGlobalConstraints.publics <== publics;"));
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        line(&mut out, format_args!("    verifyGlobalConstraints.proofValues <== proofValues;"));
+    }
+    line(
+        &mut out,
+        format_args!("    verifyGlobalConstraints.globalChallenge <== globalChallenge;"),
+    );
+    for group_idx in 0..vadcop_info.agg_types.len() {
+        if !vadcop_info.agg_types[group_idx].is_empty() {
+            line(
+                &mut out,
+                format_args!(
+                    "    verifyGlobalConstraints.s{group_idx}_airgroupvalues <== s{group_idx}_sv_airgroupvalues;"
+                ),
+            );
+        }
+    }
+    out.push('\n');
+
+    line(&mut out, format_args!("    signal {{binary}} isNull[{}];", vadcop_info.agg_types.len()));
+    line(&mut out, format_args!("    signal nAggregatedProofs[{}];", vadcop_info.agg_types.len()));
+    for group_idx in 0..vadcop_info.agg_types.len() {
+        line(
+            &mut out,
+            format_args!("    isNull[{group_idx}] <== IsZero()(s{group_idx}_sv_circuitType);"),
+        );
+        line(
+            &mut out,
+            format_args!(
+                "    nAggregatedProofs[{group_idx}] <== s{group_idx}_sv_aggregatedProofs;"
+            ),
+        );
+    }
+    line(
+        &mut out,
+        format_args!(
+            "    _ <== AggregateProofsNull({})(nAggregatedProofs, isNull);",
+            vadcop_info.agg_types.len()
+        ),
+    );
+    line(&mut out, format_args!("}}"));
+    out.push('\n');
+    if vadcop_info.n_publics > 0 {
+        line(&mut out, format_args!("component main {{public [publics]}}= Final();"));
+    } else {
+        line(&mut out, format_args!("component main = Final();"));
+    }
+    out
+}
+
+#[allow(dead_code)]
+pub fn render_verify_global_challenges_template(
+    stark_info: &CircomStarkInfo,
+    vadcop_info: &CircomVadcopInfo,
+) -> String {
+    assert_eq!(vadcop_info.curve, "None", "only lattice VADCOP global challenge is supported");
+    let mut out = String::new();
+    line(&mut out, format_args!("template VerifyGlobalChallenges() {{"));
+    if vadcop_info.n_publics > 0 {
+        line(&mut out, format_args!("    signal input publics[{}];", vadcop_info.n_publics));
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input proofValues[{}][3];",
+                vadcop_info.proof_values_map.len()
+            ),
+        );
+    }
+    line(
+        &mut out,
+        format_args!(
+            "    signal input stage1Hash[{}][{}];",
+            vadcop_info.agg_types.len(),
+            vadcop_info.lattice_size
+        ),
+    );
+    line(&mut out, format_args!("    signal input globalChallenge[3];"));
+    line(&mut out, format_args!("    signal calculatedGlobalChallenge[3];"));
+    out.push('\n');
+
+    let mut transcript = TranscriptRenderer::new(stark_info, Some("global".to_string()));
+    if vadcop_info.n_publics > 0 {
+        transcript.put("publics", Some(vadcop_info.n_publics));
+    }
+    for (idx, proof_value) in vadcop_info.proof_values_map.iter().enumerate() {
+        if proof_value.stage == 1 {
+            transcript.put(&format!("proofValues[{idx}]"), Some(1));
+        } else {
+            transcript
+                .code
+                .push(format!("_ <== proofValues[{idx}]; // Unused proof values at stage 1"));
+        }
+    }
+    for group_idx in 0..vadcop_info.agg_types.len() {
+        transcript.put(&format!("stage1Hash[{group_idx}]"), Some(vadcop_info.lattice_size));
+    }
+    transcript.get_field("calculatedGlobalChallenge");
+    out.push_str(&transcript.take_code());
+    out.push('\n');
+    line(&mut out, format_args!("    globalChallenge === calculatedGlobalChallenge;"));
+    line(&mut out, format_args!("}}"));
+    out
+}
+
+#[allow(dead_code)]
+pub fn render_verify_global_constraints_templates(
+    stark_info: &CircomStarkInfo,
+    vadcop_info: &CircomVadcopInfo,
+    global_constraints: &CircomGlobalConstraintsInfo,
+) -> String {
+    let challenge_count = vadcop_info.num_challenges.get(1).copied().unwrap_or(0) as usize;
+    let mut out = String::new();
+    let mut chunk_sets = Vec::new();
+    for constraint in &global_constraints.constraints {
+        chunk_sets.push(build_expression_chunks(&constraint.block.code, 50));
+    }
+
+    for (constraint_idx, chunks) in chunk_sets.iter().enumerate() {
+        for (chunk_idx, chunk) in chunks.chunks.iter().enumerate() {
+            line(
+                &mut out,
+                format_args!("template GlobalConstraint{constraint_idx}_chunk{chunk_idx}() {{"),
+            );
+            render_global_constraint_common_inputs(&mut out, vadcop_info, challenge_count);
+            for tmp in &chunk.inputs {
+                render_tmp_declaration(&mut out, "input", *tmp, &chunks.tmps);
+            }
+            for tmp in &chunk.outputs {
+                render_tmp_declaration(&mut out, "output", *tmp, &chunks.tmps);
+            }
+            let initialized =
+                chunk.inputs.iter().chain(chunk.outputs.iter()).copied().collect::<Vec<_>>();
+            out.push_str(&render_global_unrolled_code(&chunk.code, &initialized));
+            line(&mut out, format_args!("}}"));
+            out.push('\n');
+        }
+    }
+
+    line(&mut out, format_args!("template VerifyGlobalConstraints() {{"));
+    let mut inputs = Vec::new();
+    render_global_constraint_main_inputs(&mut out, vadcop_info, &mut inputs);
+    line(&mut out, format_args!("    signal input globalChallenge[3];"));
+    line(&mut out, format_args!("    signal challenges[{challenge_count}][3];"));
+    let mut transcript = TranscriptRenderer::new(stark_info, Some("globalConstraints".to_string()));
+    transcript.put("globalChallenge", Some(3));
+    for idx in 0..challenge_count {
+        transcript.get_field(&format!("challenges[{idx}]"));
+    }
+    out.push_str(&transcript.take_code());
+    inputs.push("challenges".to_string());
+    out.push('\n');
+
+    for (constraint_idx, chunks) in chunk_sets.iter().enumerate() {
+        for (chunk_idx, chunk) in chunks.chunks.iter().enumerate() {
+            for output in &chunk.outputs {
+                render_tmp_declaration(&mut out, "", *output, &chunks.tmps);
+            }
+            let outputs = join_tmp_names(&chunk.outputs);
+            let mut call_inputs = inputs.clone();
+            call_inputs.extend(chunk.inputs.iter().map(|tmp| format!("tmp_{tmp}")));
+            line(
+                &mut out,
+                format_args!(
+                    "    ({outputs}) <== GlobalConstraint{constraint_idx}_chunk{chunk_idx}()({});",
+                    call_inputs.join(",")
+                ),
+            );
+        }
+        if let Some(last) = global_constraints.constraints[constraint_idx].block.code.last() {
+            let result = last.dest.id.expect("global constraint result tmp");
+            if last.dest.dim == 1 {
+                line(&mut out, format_args!("    tmp_{result} === 0;"));
+            } else {
+                line(&mut out, format_args!("    tmp_{result}[0] === 0;"));
+                line(&mut out, format_args!("    tmp_{result}[1] === 0;"));
+                line(&mut out, format_args!("    tmp_{result}[2] === 0;"));
+            }
+        }
+    }
+    line(&mut out, format_args!("}}"));
     out
 }
 
@@ -2759,6 +3153,54 @@ fn render_s0_sibling_inputs(out: &mut String, stark_info: &CircomStarkInfo) {
     }
 }
 
+fn render_global_constraint_common_inputs(
+    out: &mut String,
+    vadcop_info: &CircomVadcopInfo,
+    challenge_count: usize,
+) {
+    for (idx, agg_types) in vadcop_info.agg_types.iter().enumerate() {
+        line(out, format_args!("    signal input s{idx}_airgroupvalues[{}][3];", agg_types.len()));
+    }
+    if vadcop_info.n_publics > 0 {
+        line(out, format_args!("    signal input publics[{}];", vadcop_info.n_publics));
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        line(
+            out,
+            format_args!(
+                "    signal input proofValues[{}][3];",
+                vadcop_info.proof_values_map.len()
+            ),
+        );
+    }
+    line(out, format_args!("    signal input challenges[{challenge_count}][3];"));
+}
+
+fn render_global_constraint_main_inputs(
+    out: &mut String,
+    vadcop_info: &CircomVadcopInfo,
+    inputs: &mut Vec<String>,
+) {
+    for (idx, agg_types) in vadcop_info.agg_types.iter().enumerate() {
+        line(out, format_args!("    signal input s{idx}_airgroupvalues[{}][3];", agg_types.len()));
+        inputs.push(format!("s{idx}_airgroupvalues"));
+    }
+    if vadcop_info.n_publics > 0 {
+        line(out, format_args!("    signal input publics[{}];", vadcop_info.n_publics));
+        inputs.push("publics".to_string());
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        line(
+            out,
+            format_args!(
+                "    signal input proofValues[{}][3];",
+                vadcop_info.proof_values_map.len()
+            ),
+        );
+        inputs.push("proofValues".to_string());
+    }
+}
+
 fn vadcop_public_input_names(
     vadcop_info: &CircomVadcopInfo,
     airgroup_id: usize,
@@ -3456,6 +3898,133 @@ fn goldilocks_mul(left: u64, right: u64) -> u64 {
     ((left as u128 * right as u128) % GOLDILOCKS_P as u128) as u64
 }
 
+fn render_global_binary_op(
+    out: &mut String,
+    op: &str,
+    dest: &str,
+    lhs: &CircomCodeRef,
+    rhs: &CircomCodeRef,
+    lhs_dim: u64,
+    rhs_dim: u64,
+) {
+    let lhs_ref = render_global_ref(lhs, false, &BTreeSet::new());
+    let rhs_ref = render_global_ref(rhs, false, &BTreeSet::new());
+    match (lhs_dim, rhs_dim) {
+        (1, 1) => line(out, format_args!("    {dest} <== {lhs_ref} {op} {rhs_ref};")),
+        (1, 3) => line(
+            out,
+            format_args!(
+                "    {dest} <== [{lhs_ref} {op} {rhs_ref}[0], {rhs_ref}[1],  {rhs_ref}[2]];"
+            ),
+        ),
+        (3, 1) => line(
+            out,
+            format_args!(
+                "    {dest} <== [{lhs_ref}[0] {op} {rhs_ref}, {lhs_ref}[1], {lhs_ref}[2]];"
+            ),
+        ),
+        (3, 3) => line(
+            out,
+            format_args!(
+                "    {dest} <== [{lhs_ref}[0] {op} {rhs_ref}[0], {lhs_ref}[1] {op} {rhs_ref}[1], {lhs_ref}[2] {op} {rhs_ref}[2]];"
+            ),
+        ),
+        _ => panic!("unsupported global binary op dimensions {lhs_dim}, {rhs_dim}"),
+    }
+}
+
+fn render_global_sub(
+    out: &mut String,
+    dest: &str,
+    lhs: &CircomCodeRef,
+    rhs: &CircomCodeRef,
+    lhs_dim: u64,
+    rhs_dim: u64,
+) {
+    let lhs_ref = render_global_ref(lhs, false, &BTreeSet::new());
+    let rhs_ref = render_global_ref(rhs, false, &BTreeSet::new());
+    match (lhs_dim, rhs_dim) {
+        (1, 1) => line(out, format_args!("    {dest} <== {lhs_ref} - {rhs_ref};")),
+        (1, 3) => line(
+            out,
+            format_args!("    {dest} <== [{lhs_ref} - {rhs_ref}[0], -{rhs_ref}[1], -{rhs_ref}[2]];"),
+        ),
+        (3, 1) => line(
+            out,
+            format_args!("    {dest} <== [{lhs_ref}[0] - {rhs_ref}, {lhs_ref}[1], {lhs_ref}[2]];"),
+        ),
+        (3, 3) => line(
+            out,
+            format_args!(
+                "    {dest} <== [{lhs_ref}[0] - {rhs_ref}[0], {lhs_ref}[1] - {rhs_ref}[1], {lhs_ref}[2] - {rhs_ref}[2]];"
+            ),
+        ),
+        _ => panic!("unsupported global subtraction dimensions {lhs_dim}, {rhs_dim}"),
+    }
+}
+
+fn render_global_mul(
+    out: &mut String,
+    dest: &str,
+    lhs: &CircomCodeRef,
+    rhs: &CircomCodeRef,
+    lhs_dim: u64,
+    rhs_dim: u64,
+) {
+    let lhs_ref = render_global_ref(lhs, false, &BTreeSet::new());
+    let rhs_ref = render_global_ref(rhs, false, &BTreeSet::new());
+    match (lhs_dim, rhs_dim) {
+        (1, 1) => line(out, format_args!("    {dest} <== {lhs_ref} * {rhs_ref};")),
+        (1, 3) => line(
+            out,
+            format_args!(
+                "    {dest} <== [{lhs_ref} * {rhs_ref}[0], {lhs_ref} * {rhs_ref}[1], {lhs_ref} * {rhs_ref}[2]];"
+            ),
+        ),
+        (3, 1) => line(
+            out,
+            format_args!(
+                "    {dest} <== [{lhs_ref}[0] * {rhs_ref}, {lhs_ref}[1] * {rhs_ref}, {lhs_ref}[2] * {rhs_ref}];"
+            ),
+        ),
+        (3, 3) => line(out, format_args!("    {dest} <== CMul()({lhs_ref}, {rhs_ref});")),
+        _ => panic!("unsupported global multiplication dimensions {lhs_dim}, {rhs_dim}"),
+    }
+}
+
+fn render_global_ref(reference: &CircomCodeRef, dest: bool, initialized: &BTreeSet<u64>) -> String {
+    match reference.ref_type.as_str() {
+        "public" => format!("publics[{}]", reference.id.expect("public id")),
+        "proofvalue" => {
+            if reference.dim == 1 {
+                format!("proofValues[{}][0]", reference.id.expect("proofvalue id"))
+            } else {
+                format!("proofValues[{}]", reference.id.expect("proofvalue id"))
+            }
+        }
+        "tmp" => {
+            let id = reference.id.expect("tmp id");
+            if dest && !initialized.contains(&id) {
+                if reference.dim == 1 {
+                    format!("signal tmp_{id}")
+                } else {
+                    format!("signal tmp_{id}[3]")
+                }
+            } else {
+                format!("tmp_{id}")
+            }
+        }
+        "number" => reference.value.clone().expect("number value"),
+        "challenge" => format!("challenges[{}]", reference.id.expect("challenge id")),
+        "airgroupvalue" => format!(
+            "s{}_airgroupvalues[{}]",
+            reference.airgroup_id.unwrap_or(0),
+            reference.id.expect("airgroupvalue id")
+        ),
+        other => panic!("unsupported global constraint reference {other}"),
+    }
+}
+
 fn render_binary_op(
     out: &mut String,
     op: &str,
@@ -3936,6 +4505,7 @@ mod tests {
             lattice_size: 368,
             n_publics: 2,
             proof_values_map: Vec::new(),
+            num_challenges: vec![0, 2],
         };
         let out = render_define_vadcop_inputs(&vadcop, 0, "sv", true);
 
@@ -4381,6 +4951,69 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn compiles_sample_final_wrapper_circom() -> anyhow::Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("pk_setup_final_circom_test_{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir)?;
+        let includes = crate::circom_assets::write_recursive_include_assets(&dir)?;
+
+        let vadcop = sample_vadcop_info();
+        let mut stark = sample_stark_info();
+        stark.n_publics = 31;
+        stark.airgroup_values_map = vec![CircomNamedMap { name: "agg".to_string(), stage: 1 }];
+        stark.cm_pols_map = vec![
+            CircomPolMap {
+                name: "trace".to_string(),
+                stage: 1,
+                dim: 1,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+            CircomPolMap {
+                name: "q".to_string(),
+                stage: 2,
+                dim: 3,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+        ];
+        stark.map_sections_n.insert("cm2".to_string(), 3);
+        stark.ev_map = sample_q_evals();
+        let verifier = render_stark_verifier_circom(
+            &[1, 2, 3, 4],
+            &stark,
+            &sample_verifier_info(),
+            StarkVerifierOptions { verkey_input: true, skip_main: true, ..Default::default() },
+        );
+        std::fs::write(dir.join("sample_final_recursive2_verifier.circom"), verifier)?;
+
+        let global_constraints = CircomGlobalConstraintsInfo { constraints: Vec::new() };
+        let wrapper = render_final_circom(
+            &[stark],
+            &vadcop,
+            &global_constraints,
+            &["sample_final_recursive2_verifier.circom".to_string()],
+            &[vec![1, 2, 3, 4]],
+            &[vec![vec![1, 2, 3, 4]]],
+        );
+        let input = dir.join("final.circom");
+        let output = dir.join("final.r1cs");
+        std::fs::write(&input, wrapper)?;
+        crate::circom_compile::compile_file_to_r1cs(
+            &input,
+            [dir.clone(), includes.gl, includes.vadcop],
+            &output,
+        )?;
+        let r1cs = crate::recursive_setup::r1cs::read_r1cs(&output)?;
+        assert!(r1cs.n_constraints > 0);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
     fn sample_stark_info() -> CircomStarkInfo {
         let stark_struct = StarkStruct {
             n_bits: 5,
@@ -4450,6 +5083,7 @@ mod tests {
             lattice_size: 16,
             n_publics: 2,
             proof_values_map: Vec::new(),
+            num_challenges: vec![0, 2],
         }
     }
 
@@ -4507,6 +5141,7 @@ mod tests {
             value: None,
             boundary_id: None,
             commit_id: None,
+            airgroup_id: None,
         }
     }
 
@@ -4520,6 +5155,7 @@ mod tests {
             value: None,
             boundary_id: None,
             commit_id: None,
+            airgroup_id: None,
         }
     }
 
@@ -4533,6 +5169,7 @@ mod tests {
             value: None,
             boundary_id: None,
             commit_id: None,
+            airgroup_id: None,
         }
     }
 
@@ -4546,6 +5183,7 @@ mod tests {
             value: Some(value.to_string()),
             boundary_id: None,
             commit_id: None,
+            airgroup_id: None,
         }
     }
 
@@ -4559,6 +5197,7 @@ mod tests {
             value: None,
             boundary_id: None,
             commit_id: None,
+            airgroup_id: None,
         }
     }
 
@@ -4572,6 +5211,7 @@ mod tests {
             value: None,
             boundary_id: None,
             commit_id: None,
+            airgroup_id: None,
         }
     }
 }
