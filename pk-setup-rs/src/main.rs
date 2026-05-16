@@ -2,8 +2,8 @@ mod circom_assets;
 mod circom_compile;
 mod pil_info;
 mod pilout_info;
-mod recursive_cache;
 mod recursive_circom;
+mod recursive_generation;
 mod recursive_setup;
 mod setup_layout;
 mod stark_struct;
@@ -49,10 +49,6 @@ struct Args {
     #[arg(short = 'r', long, default_value_t = true)]
     recursive: bool,
 
-    /// Cache containing previously generated recursive aggregation artifacts.
-    #[arg(long, default_value = "build-recursive-cache/provingKey")]
-    recursive_cache_dir: PathBuf,
-
     /// Optional manifest of native recursive R1CS layout jobs.
     #[arg(long)]
     recursive_layout_manifest: Option<PathBuf>,
@@ -89,7 +85,6 @@ fn run() -> Result<()> {
     let proof_dir = resolve_path(&root, &args.proof_dir);
     let pilout_path = resolve_path(&root, &args.airout);
     let starkstructs_path = resolve_path(&root, &args.starkstructs);
-    let recursive_cache_dir = resolve_path(&root, &args.recursive_cache_dir);
     let recursive_layout_manifest =
         args.recursive_layout_manifest.as_ref().map(|path| resolve_path(&root, path));
     let proving_key_dir = build_dir.join("provingKey");
@@ -120,12 +115,7 @@ fn run() -> Result<()> {
             )?;
             info!("wrote {} native recursive layout artifact sets", artifacts.len());
         } else {
-            recursive_cache::overlay_recursive_artifacts(
-                &recursive_cache_dir,
-                &proving_key_dir,
-                &pilout,
-                &global.info.name,
-            )?;
+            recursive_generation::write_recursive_artifacts(&build_dir, &proving_key_dir)?;
         }
     }
 
