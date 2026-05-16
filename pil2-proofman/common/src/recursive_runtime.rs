@@ -1412,21 +1412,20 @@ fn run_wasm_evpol4<F: PrimeField64>(
     memory: &wasmtime::Memory,
     base: usize,
 ) -> Result<(), String> {
-    let mut values = [F::ZERO; 18];
-    for (idx, slot) in values.iter_mut().enumerate() {
-        *slot = read_wasm_field_at(caller, memory, base, idx)?;
+    let mut coefs = [[F::ZERO; 3]; 5];
+    for coef_idx in 0..5 {
+        for limb in 0..3 {
+            coefs[coef_idx][limb] = read_wasm_field_at(caller, memory, base, 3 + coef_idx * 3 + limb)?;
+        }
     }
-    let coefs = [
-        [values[0], values[1], values[2]],
-        [values[3], values[4], values[5]],
-        [values[6], values[7], values[8]],
-        [values[9], values[10], values[11]],
-        [values[12], values[13], values[14]],
+    let x = [
+        read_wasm_field_at(caller, memory, base, 18)?,
+        read_wasm_field_at(caller, memory, base, 19)?,
+        read_wasm_field_at(caller, memory, base, 20)?,
     ];
-    let x = [values[15], values[16], values[17]];
     let result = evpol4_values(coefs, x);
     for (idx, value) in result.into_iter().enumerate() {
-        write_wasm_field_at(caller, memory, base, 18 + idx, value)?;
+        write_wasm_field_at(caller, memory, base, idx, value)?;
     }
     Ok(())
 }
