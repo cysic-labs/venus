@@ -1088,6 +1088,167 @@ pub fn render_stark_verifier_circom(
 }
 
 #[allow(dead_code)]
+pub fn render_recursive1_circom(
+    stark_info: &CircomStarkInfo,
+    vadcop_info: &CircomVadcopInfo,
+    verifier_filename: &str,
+    has_compressor: bool,
+) -> String {
+    let airgroup_id = stark_info.airgroup_id.unwrap_or(0) as usize;
+    let mut out = String::new();
+    line(&mut out, format_args!("pragma circom 2.1.0;"));
+    line(&mut out, format_args!("pragma custom_templates;"));
+    out.push('\n');
+    line(&mut out, format_args!("include \"iszero.circom\";"));
+    line(&mut out, format_args!("include \"{verifier_filename}\";"));
+    if !has_compressor {
+        line(&mut out, format_args!("include \"elliptic_curve.circom\";"));
+        out.push_str(&render_calculate_stage1_hash_template(stark_info, vadcop_info));
+        out.push('\n');
+    }
+    out.push('\n');
+    line(&mut out, format_args!("template Recursive1() {{"));
+    out.push_str(&render_define_vadcop_inputs(vadcop_info, airgroup_id, "sv", has_compressor));
+    out.push('\n');
+    out.push_str(&render_define_stark_inputs(
+        stark_info,
+        "",
+        vadcop_info.n_publics,
+        StarkInputOptions { add_publics: false, ..Default::default() },
+    ));
+    if vadcop_info.n_publics > 0 {
+        line(&mut out, format_args!("    signal input publics[{}];", vadcop_info.n_publics));
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input proofValues[{}][3];",
+                vadcop_info.proof_values_map.len()
+            ),
+        );
+    }
+    line(&mut out, format_args!("    signal input globalChallenge[3];"));
+    line(&mut out, format_args!("    signal input rootCAgg[4];"));
+    out.push('\n');
+    out.push_str(&render_assign_stark_inputs(
+        "sV",
+        stark_info,
+        "",
+        vadcop_info.n_publics,
+        StarkInputOptions { add_publics: !has_compressor, ..Default::default() },
+    ));
+    out.push('\n');
+    if !has_compressor {
+        out.push_str(&render_init_vadcop_inputs(
+            "sV",
+            "sv",
+            "",
+            airgroup_id,
+            stark_info,
+            vadcop_info,
+        ));
+    } else {
+        out.push_str(&render_assign_vadcop_inputs(
+            "sV",
+            vadcop_info,
+            "sv",
+            airgroup_id,
+            VadcopAssignOptions { add_prefix_agg_types: true, set_enable_input: false },
+        ));
+    }
+    line(&mut out, format_args!("}}"));
+    out.push('\n');
+
+    let mut public_names = Vec::new();
+    if has_compressor {
+        public_names.extend(vadcop_public_input_names(vadcop_info, airgroup_id, "sv"));
+    }
+    if vadcop_info.n_publics > 0 {
+        public_names.push("publics".to_string());
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        public_names.push("proofValues".to_string());
+    }
+    public_names.push("globalChallenge".to_string());
+    public_names.push("rootCAgg".to_string());
+    line(
+        &mut out,
+        format_args!("component main {{public [{}]}} = Recursive1();", public_names.join(", ")),
+    );
+    out
+}
+
+#[allow(dead_code)]
+pub fn render_compressor_circom(
+    stark_info: &CircomStarkInfo,
+    vadcop_info: &CircomVadcopInfo,
+    verifier_filename: &str,
+) -> String {
+    let airgroup_id = stark_info.airgroup_id.unwrap_or(0) as usize;
+    let mut out = String::new();
+    line(&mut out, format_args!("pragma circom 2.1.0;"));
+    line(&mut out, format_args!("pragma custom_templates;"));
+    out.push('\n');
+    line(&mut out, format_args!("include \"{verifier_filename}\";"));
+    line(&mut out, format_args!("include \"elliptic_curve.circom\";"));
+    out.push_str(&render_calculate_stage1_hash_template(stark_info, vadcop_info));
+    out.push('\n');
+    line(&mut out, format_args!("template Compressor() {{"));
+    if vadcop_info.n_publics > 0 {
+        line(&mut out, format_args!("    signal input publics[{}];", vadcop_info.n_publics));
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input proofValues[{}][3];",
+                vadcop_info.proof_values_map.len()
+            ),
+        );
+    }
+    line(&mut out, format_args!("    signal input globalChallenge[3];"));
+    out.push('\n');
+    out.push_str(&render_define_stark_inputs(
+        stark_info,
+        "",
+        vadcop_info.n_publics,
+        StarkInputOptions { add_publics: false, ..Default::default() },
+    ));
+    out.push('\n');
+    out.push_str(&render_define_vadcop_inputs(vadcop_info, airgroup_id, "sv", false));
+    out.push('\n');
+    out.push_str(&render_assign_stark_inputs(
+        "sV",
+        stark_info,
+        "",
+        vadcop_info.n_publics,
+        StarkInputOptions { add_publics: false, ..Default::default() },
+    ));
+    if vadcop_info.n_publics > 0 {
+        line(&mut out, format_args!("    for (var i=0; i< {}; i++) {{", vadcop_info.n_publics));
+        line(&mut out, format_args!("        sV.publics[i] <== publics[i];"));
+        line(&mut out, format_args!("    }}"));
+    }
+    out.push_str(&render_init_vadcop_inputs("sV", "sv", "", airgroup_id, stark_info, vadcop_info));
+    line(&mut out, format_args!("}}"));
+    out.push('\n');
+    let mut public_names = Vec::new();
+    if vadcop_info.n_publics > 0 {
+        public_names.push("publics".to_string());
+    }
+    if !vadcop_info.proof_values_map.is_empty() {
+        public_names.push("proofValues".to_string());
+    }
+    public_names.push("globalChallenge".to_string());
+    line(
+        &mut out,
+        format_args!("component main {{public [{}]}} = Compressor();", public_names.join(", ")),
+    );
+    out
+}
+
+#[allow(dead_code)]
 pub fn render_calculate_fri_queries_template(stark_info: &CircomStarkInfo) -> String {
     let name = suffixed_name("calculateFRIQueries", stark_info.airgroup_id);
     let mut out = String::new();
@@ -2276,6 +2437,21 @@ fn render_s0_sibling_inputs(out: &mut String, stark_info: &CircomStarkInfo) {
             );
         }
     }
+}
+
+fn vadcop_public_input_names(
+    vadcop_info: &CircomVadcopInfo,
+    airgroup_id: usize,
+    prefix: &str,
+) -> Vec<String> {
+    let prefix = prefixed(prefix);
+    let mut names = vec![format!("{prefix}circuitType"), format!("{prefix}aggregatedProofs")];
+    if vadcop_info.agg_types.get(airgroup_id).map(Vec::is_empty).unwrap_or(true) == false {
+        names.push(format!("{prefix}aggregationTypes"));
+        names.push(format!("{prefix}airgroupvalues"));
+    }
+    names.push(format!("{prefix}stage1Hash"));
+    names
 }
 
 fn render_preprocess_values(out: &mut String, stark_info: &CircomStarkInfo) {
@@ -3662,6 +3838,116 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn compiles_sample_recursive1_wrapper_circom() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir()
+            .join(format!("pk_setup_recursive1_circom_test_{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir)?;
+        let includes = crate::circom_assets::write_recursive_include_assets(&dir)?;
+
+        let mut stark = sample_stark_info();
+        stark.airgroup_values_map = vec![CircomNamedMap { name: "agg".to_string(), stage: 2 }];
+        stark.cm_pols_map = vec![
+            CircomPolMap {
+                name: "trace".to_string(),
+                stage: 1,
+                dim: 1,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+            CircomPolMap {
+                name: "q".to_string(),
+                stage: 2,
+                dim: 3,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+        ];
+        stark.map_sections_n.insert("cm2".to_string(), 3);
+        stark.ev_map = sample_q_evals();
+        let verifier = render_stark_verifier_circom(
+            &[1, 2, 3, 4],
+            &stark,
+            &sample_verifier_info(),
+            StarkVerifierOptions { input_challenges: true, skip_main: true, ..Default::default() },
+        );
+        std::fs::write(dir.join("sample_verifier.circom"), verifier)?;
+        let wrapper = render_recursive1_circom(
+            &stark,
+            &sample_vadcop_info(),
+            "sample_verifier.circom",
+            false,
+        );
+        let input = dir.join("recursive1.circom");
+        let output = dir.join("recursive1.r1cs");
+        std::fs::write(&input, wrapper)?;
+        crate::circom_compile::compile_file_to_r1cs(
+            &input,
+            [dir.clone(), includes.gl, includes.vadcop],
+            &output,
+        )?;
+        let r1cs = crate::recursive_setup::r1cs::read_r1cs(&output)?;
+        assert!(r1cs.n_constraints > 0);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn compiles_sample_compressor_wrapper_circom() -> anyhow::Result<()> {
+        let dir = std::env::temp_dir()
+            .join(format!("pk_setup_compressor_circom_test_{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::create_dir_all(&dir)?;
+        let includes = crate::circom_assets::write_recursive_include_assets(&dir)?;
+
+        let mut stark = sample_stark_info();
+        stark.airgroup_values_map = vec![CircomNamedMap { name: "agg".to_string(), stage: 2 }];
+        stark.cm_pols_map = vec![
+            CircomPolMap {
+                name: "trace".to_string(),
+                stage: 1,
+                dim: 1,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+            CircomPolMap {
+                name: "q".to_string(),
+                stage: 2,
+                dim: 3,
+                stage_id: Some(0),
+                stage_pos: Some(0),
+            },
+        ];
+        stark.map_sections_n.insert("cm2".to_string(), 3);
+        stark.ev_map = sample_q_evals();
+        let verifier = render_stark_verifier_circom(
+            &[1, 2, 3, 4],
+            &stark,
+            &sample_verifier_info(),
+            StarkVerifierOptions { input_challenges: true, skip_main: true, ..Default::default() },
+        );
+        std::fs::write(dir.join("sample_verifier.circom"), verifier)?;
+        let wrapper =
+            render_compressor_circom(&stark, &sample_vadcop_info(), "sample_verifier.circom");
+        let input = dir.join("compressor.circom");
+        let output = dir.join("compressor.r1cs");
+        std::fs::write(&input, wrapper)?;
+        crate::circom_compile::compile_file_to_r1cs(
+            &input,
+            [dir.clone(), includes.gl, includes.vadcop],
+            &output,
+        )?;
+        let r1cs = crate::recursive_setup::r1cs::read_r1cs(&output)?;
+        assert!(r1cs.n_constraints > 0);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
     fn sample_stark_info() -> CircomStarkInfo {
         let stark_struct = StarkStruct {
             n_bits: 5,
@@ -3714,6 +4000,23 @@ mod tests {
                     commit_id: None,
                 },
             ],
+        }
+    }
+
+    fn sample_vadcop_info() -> CircomVadcopInfo {
+        CircomVadcopInfo {
+            name: "zisk".to_string(),
+            airs: vec![vec![CircomVadcopAir {
+                name: "Main".to_string(),
+                num_rows: 8,
+                has_compressor: None,
+            }]],
+            air_groups: vec!["Zisk".to_string()],
+            agg_types: vec![vec![CircomAggType { agg_type: 1, stage: 2 }]],
+            curve: "None".to_string(),
+            lattice_size: 16,
+            n_publics: 2,
+            proof_values_map: Vec::new(),
         }
     }
 
