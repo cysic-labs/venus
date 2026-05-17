@@ -610,10 +610,11 @@ fn place_poseidon_gate(
     let signals = &gate_use.signals;
     let first_col = policy.poseidon_first_col;
 
-    let trace = &signals[..208];
-    let input = &signals[208..224];
+    let input = &signals[..16];
     let (first_bit, second_bit) =
-        if custom { (Some(signals[224]), Some(signals[225])) } else { (None, None) };
+        if custom { (Some(signals[16]), Some(signals[17])) } else { (None, None) };
+    let trace_start = if custom { 18 } else { 16 };
+    let trace = &signals[trace_start..trace_start + 208];
 
     let round0 = &trace[0..16];
     let round1 = &trace[16..32];
@@ -1522,10 +1523,10 @@ mod tests {
         assert_eq!(layout.fixed_columns[37].values, vec![1, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(layout.fixed_columns[39].values, vec![0, 0, 1, 0, 0, 0, 0, 0]);
         assert_eq!(layout.fixed_columns[40].values, vec![0, 0, 0, 0, 1, 0, 0, 0]);
-        assert_eq!(layout.signal_map[0][0], 209);
-        assert_eq!(layout.signal_map[27][0], 1);
-        assert_eq!(layout.signal_map[43][0], 17);
-        assert_eq!(layout.signal_map[0][4], 193);
+        assert_eq!(layout.signal_map[0][0], 1);
+        assert_eq!(layout.signal_map[27][0], 17);
+        assert_eq!(layout.signal_map[43][0], 33);
+        assert_eq!(layout.signal_map[0][4], 209);
         Ok(())
     }
 

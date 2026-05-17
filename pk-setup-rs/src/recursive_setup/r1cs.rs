@@ -159,7 +159,7 @@ pub fn read_r1cs(path: &Path) -> Result<R1cs> {
         Vec::new()
     };
 
-    Ok(R1cs {
+    let mut r1cs = R1cs {
         n8,
         prime,
         n_vars,
@@ -172,7 +172,82 @@ pub fn read_r1cs(path: &Path) -> Result<R1cs> {
         wire_map,
         custom_gates,
         custom_gate_uses,
-    })
+    };
+    normalize_custom_gate_aliases(&mut r1cs);
+    Ok(r1cs)
+}
+
+fn normalize_custom_gate_aliases(r1cs: &mut R1cs) {
+    if r1cs.custom_gate_uses.is_empty() || r1cs.n_vars == 0 {
+        return;
+    }
+
+    let mut parent = (0..u64::from(r1cs.n_vars)).collect::<Vec<_>>();
+    for constraint in &r1cs.constraints {
+        if let Some((left, right)) = direct_equality(&constraint.c)
+            .filter(|_| constraint.a.is_empty() && constraint.b.is_empty())
+        {
+            union_alias(&mut parent, left, right);
+        }
+    }
+
+    for gate_use in &mut r1cs.custom_gate_uses {
+        for signal in &mut gate_use.signals {
+            if (*signal as usize) < parent.len() {
+                *signal = find_alias(&mut parent, *signal);
+            }
+        }
+    }
+}
+
+fn direct_equality(lc: &LinearCombination) -> Option<(u64, u64)> {
+    if lc.len() != 2 {
+        return None;
+    }
+    let mut positive = None;
+    let mut negative = None;
+    for (&signal, &coeff) in lc {
+        if signal == 0 {
+            return None;
+        }
+        if coeff == 1 {
+            positive = Some(u64::from(signal));
+        } else if coeff == GOLDILOCKS_P - 1 {
+            negative = Some(u64::from(signal));
+        } else {
+            return None;
+        }
+    }
+    positive.zip(negative)
+}
+
+fn union_alias(parent: &mut [u64], left: u64, right: u64) {
+    if left as usize >= parent.len() || right as usize >= parent.len() {
+        return;
+    }
+    let left_root = find_alias(parent, left);
+    let right_root = find_alias(parent, right);
+    if left_root == right_root {
+        return;
+    }
+    let root = left_root.min(right_root);
+    let child = left_root.max(right_root);
+    parent[child as usize] = root;
+}
+
+fn find_alias(parent: &mut [u64], signal: u64) -> u64 {
+    let mut current = signal;
+    while parent[current as usize] != current {
+        current = parent[current as usize];
+    }
+    let root = current;
+    current = signal;
+    while parent[current as usize] != current {
+        let next = parent[current as usize];
+        parent[current as usize] = root;
+        current = next;
+    }
+    root
 }
 
 pub fn write_r1cs(path: &Path, r1cs: &R1cs) -> Result<()> {
@@ -407,6 +482,34 @@ mod tests {
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())
+    }
+
+    #[test]
+    fn normalizes_custom_gate_alias_signals() {
+        let mut r1cs = R1cs {
+            n8: 8,
+            prime: GOLDILOCKS_P,
+            n_vars: 6,
+            n_outputs: 0,
+            n_pub_inputs: 0,
+            n_prv_inputs: 0,
+            n_labels: 0,
+            n_constraints: 1,
+            constraints: vec![R1csConstraint {
+                a: LinearCombination::new(),
+                b: LinearCombination::new(),
+                c: [(2, GOLDILOCKS_P - 1), (4, 1)].into_iter().collect(),
+            }],
+            wire_map: Vec::new(),
+            custom_gates: vec![CustomGate {
+                template_name: "CMul".to_string(),
+                parameters: Vec::new(),
+            }],
+            custom_gate_uses: vec![CustomGateUse { id: 0, signals: vec![1, 2, 3, 4] }],
+        };
+
+        normalize_custom_gate_aliases(&mut r1cs);
+        assert_eq!(r1cs.custom_gate_uses[0].signals, vec![1, 2, 3, 2]);
     }
 
     fn lc(values: &[(u32, u64)]) -> LinearCombination {

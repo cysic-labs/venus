@@ -6,7 +6,7 @@ use crate::stark_struct::StarkStruct;
 
 const MIN_CHUNK_SIZE: usize = 1000;
 const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
-const GOLDILOCKS_SHIFT: u64 = 49;
+const GOLDILOCKS_SHIFT: u64 = 7;
 const GOLDILOCKS_ROOTS: [u64; 33] = [
     1,
     18446744069414584320,
@@ -1287,13 +1287,13 @@ pub fn render_recursive1_circom(
     out.push('\n');
     line(&mut out, format_args!("template Recursive1() {{"));
     out.push_str(&render_define_vadcop_inputs(vadcop_info, airgroup_id, "sv", has_compressor));
-    out.push('\n');
     out.push_str(&render_define_stark_inputs(
         stark_info,
         "",
         vadcop_info.n_publics,
         StarkInputOptions { add_publics: false, ..Default::default() },
     ));
+    out.push('\n');
     if vadcop_info.n_publics > 0 {
         line(&mut out, format_args!("    signal input publics[{}];", vadcop_info.n_publics));
     }
@@ -4532,6 +4532,40 @@ mod tests {
     }
 
     #[test]
+    fn recursive1_inputs_follow_flat_proof_layout() {
+        let stark = sample_stark_info();
+        let mut vadcop = sample_vadcop_info();
+        vadcop.proof_values_map = vec![CircomNamedMap { name: "value".to_string(), stage: 1 }];
+
+        let out = render_recursive1_circom(&stark, &vadcop, "sample_verifier.circom", false);
+        let out = recursive1_template(&out);
+        assert_order(
+            out,
+            &[
+                "signal input root1[4];",
+                "signal input publics[2];",
+                "signal input proofValues[1][3];",
+                "signal input globalChallenge[3];",
+                "signal input rootCAgg[4];",
+            ],
+        );
+
+        let out = render_recursive1_circom(&stark, &vadcop, "sample_verifier.circom", true);
+        let out = recursive1_template(&out);
+        assert_order(
+            out,
+            &[
+                "signal input sv_circuitType;",
+                "signal input sv_aggregatedProofs;",
+                "signal input sv_stage1Hash[16];",
+                "signal input root1[4];",
+                "signal input publics[2];",
+                "signal input proofValues[1][3];",
+            ],
+        );
+    }
+
+    #[test]
     fn chunks_and_unrolls_verifier_code() {
         let mut stark = sample_stark_info();
         stark.cm_pols_map = vec![CircomPolMap {
@@ -4624,7 +4658,7 @@ mod tests {
         let fri = render_calculate_fri_pol_templates(&stark, &verifier);
         assert!(fri.contains("component mapValues = MapValues0();"));
         assert!(fri.contains("template CalculateFRIPolValue0()"));
-        assert!(fri.contains("xacc[0] <== queriesFRI[0]*(49 * roots(8)-49) + 49;"));
+        assert!(fri.contains("xacc[0] <== queriesFRI[0]*(7 * roots(8)-7) + 7;"));
         assert!(fri.contains("queryVals[0] <== tmp_1[0];"));
 
         let final_pol = render_verify_final_pol_template(&stark);
@@ -5012,6 +5046,26 @@ mod tests {
         assert!(r1cs.n_constraints > 0);
         std::fs::remove_dir_all(&dir)?;
         Ok(())
+    }
+
+    fn assert_order(out: &str, needles: &[&str]) {
+        let mut previous = 0;
+        for needle in needles {
+            let idx = out
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing expected declaration: {needle}"));
+            assert!(
+                idx >= previous,
+                "declaration `{needle}` appears before the previous expected declaration"
+            );
+            previous = idx;
+        }
+    }
+
+    fn recursive1_template(out: &str) -> &str {
+        out.split_once("template Recursive1() {")
+            .map(|(_, rest)| rest)
+            .expect("missing Recursive1 template")
     }
 
     fn sample_stark_info() -> CircomStarkInfo {

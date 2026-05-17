@@ -2,6 +2,7 @@
 use super::{ConstraintStorage, EncodingIterator, SEncoded, Simplifier, A, C, S};
 use crate::SignalMap;
 use circom_algebra::num_bigint::BigInt;
+use circom_algebra::num_traits::One;
 use constraint_writers::json_writer::SubstitutionJSON;
 use std::collections::{HashMap, HashSet, LinkedList, BTreeSet};
 use std::sync::Arc;
@@ -14,6 +15,39 @@ fn log_substitutions(substitutions: &LinkedList<S>, writer: &mut Option<Substitu
             w.write_substitution(&from, &to).unwrap();
         }
     }
+}
+
+fn collect_direct_signal_replacements(substitutions: &LinkedList<S>, replacements: &mut HashMap<usize, usize>) {
+    for substitution in substitutions {
+        let to = substitution.to();
+        if to.len() != 1 {
+            continue;
+        }
+        if let Some((&signal, coeff)) = to.iter().next() {
+            if coeff.is_one() {
+                replacements.insert(*substitution.from(), signal);
+            }
+        }
+    }
+}
+
+fn resolve_signal_replacements(replacements: HashMap<usize, usize>) -> Vec<(usize, usize)> {
+    let mut resolved = Vec::with_capacity(replacements.len());
+    for (&from, &to) in &replacements {
+        let mut current = to;
+        let mut seen = HashSet::new();
+        seen.insert(from);
+        while let Some(&next) = replacements.get(&current) {
+            if !seen.insert(current) {
+                break;
+            }
+            current = next;
+        }
+        resolved.push((from, current));
+    }
+    resolved.sort_unstable();
+    resolved.dedup();
+    resolved
 }
 
 #[derive(Default, Clone)]
@@ -439,7 +473,7 @@ fn remove_not_relevant(substitutions: &mut SEncoded, relevant: &HashSet<usize>) 
 
 
 // returns the constraints, the assignment of the witness and the number of inputs in the witness
-pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, usize) {
+pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, usize, Vec<(usize, usize)>) {
     use super::non_linear_utils::obtain_and_simplify_non_linear;
     use circom_algebra::simplification_utils::build_encoded_fast_substitutions;
     use circom_algebra::simplification_utils::fast_encoded_constraint_substitution;
@@ -464,6 +498,7 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
     let mut lconst = LinkedList::new();
     let mut no_rounds = smp.no_rounds;
     let remove_unused = true;
+    let mut signal_replacements = HashMap::new();
 
     let relevant_signals = {
         // println!("Creating first relevant set");
@@ -489,6 +524,7 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
             &mut substitution_log,
         );
 
+        collect_direct_signal_replacements(&subs, &mut signal_replacements);
         LinkedList::append(&mut lconst, &mut cons);
         let mut substitutions = build_encoded_fast_substitutions(subs);
         for constraint in &mut linear {
@@ -515,6 +551,7 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
         let now = SystemTime::now();
         let (subs, mut cons) =
             constant_eq_simplification(cons_equalities, &forbidden, &field, &mut substitution_log);
+        collect_direct_signal_replacements(&subs, &mut signal_replacements);
         LinkedList::append(&mut lconst, &mut cons);
         let substitutions = build_encoded_fast_substitutions(subs);
         for constraint in &mut linear {
@@ -551,6 +588,7 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
             &field,
             use_old_heuristics,
         );
+        collect_direct_signal_replacements(&subs, &mut signal_replacements);
         // println!("Building substitution map");
         let now0 = SystemTime::now();
         let mut only_relevant = LinkedList::new();
@@ -726,8 +764,10 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
         w.end().unwrap();
     }
     // println!("NO CONSTANTS: {}", constraint_storage.no_constants());
-    (constraint_storage, signal_map, smp.no_private_inputs - deleted_inputs)
+    (
+        constraint_storage,
+        signal_map,
+        smp.no_private_inputs - deleted_inputs,
+        resolve_signal_replacements(signal_replacements),
+    )
 }
-
-
-

@@ -23,7 +23,6 @@ pub struct RuntimeDescriptor {
     pub source_public_prefix_words: u64,
     pub source_sections: Vec<RuntimeSection>,
     pub section_copy_ops: Vec<RuntimeSectionCopyOp>,
-    pub circom_wasm: Option<RuntimeCircomWasm>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,19 +47,6 @@ pub struct RuntimeSectionCopyOp {
     pub witness_offset_words: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeCircomWasm {
-    pub wasm: Vec<u8>,
-    pub inputs: Vec<RuntimeCircomWasmInput>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeCircomWasmInput {
-    pub hash: u64,
-    pub source_offset_words: u64,
-    pub word_len: u64,
-}
-
 impl RuntimeDescriptor {
     pub fn for_r1cs(r1cs: &R1cs) -> Self {
         let n_publics = u64::from(r1cs.n_outputs + r1cs.n_pub_inputs);
@@ -75,7 +61,6 @@ impl RuntimeDescriptor {
             source_public_prefix_words: u64::from(r1cs.n_vars.saturating_sub(1)),
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
-            circom_wasm: None,
         }
     }
 
@@ -83,6 +68,7 @@ impl RuntimeDescriptor {
         r1cs: &R1cs,
         input_signal_start: u64,
         input_signal_count: u64,
+        signal_replacements: &[(u64, u64)],
     ) -> Self {
         let n_publics = u64::from(r1cs.n_outputs + r1cs.n_pub_inputs);
         let wire_map = if r1cs.wire_map.is_empty() {
@@ -95,10 +81,12 @@ impl RuntimeDescriptor {
             .enumerate()
             .map(|(wire, &signal)| (signal, wire as u64))
             .collect::<HashMap<_, _>>();
+        let replacement_map = signal_replacements.iter().copied().collect::<HashMap<_, _>>();
         let mut section_copy_ops = Vec::new();
         for source_offset in 0..input_signal_count {
             let signal = input_signal_start + source_offset;
-            if let Some(&wire) = signal_to_wire.get(&signal) {
+            if let Some(wire) = resolve_input_signal_wire(signal, &signal_to_wire, &replacement_map)
+            {
                 section_copy_ops.push(RuntimeSectionCopyOp {
                     section_index: 0,
                     section_offset_words: source_offset,
@@ -124,14 +112,30 @@ impl RuntimeDescriptor {
                 flags: 0,
             }],
             section_copy_ops,
-            circom_wasm: None,
         }
     }
+}
 
-    pub fn with_circom_wasm(mut self, circom_wasm: RuntimeCircomWasm) -> Self {
-        self.circom_wasm = Some(circom_wasm);
-        self
+fn resolve_input_signal_wire(
+    signal: u64,
+    signal_to_wire: &HashMap<u64, u64>,
+    replacement_map: &HashMap<u64, u64>,
+) -> Option<u64> {
+    if let Some(&wire) = signal_to_wire.get(&signal) {
+        return Some(wire);
     }
+    let mut current = signal;
+    for _ in 0..32 {
+        let next = *replacement_map.get(&current)?;
+        if let Some(&wire) = signal_to_wire.get(&next) {
+            return Some(wire);
+        }
+        if next == current {
+            return None;
+        }
+        current = next;
+    }
+    None
 }
 
 pub fn write_runtime_dat_file(path: &Path, r1cs: &R1cs) -> Result<()> {
@@ -195,24 +199,12 @@ pub fn runtime_dat_buffer(descriptor: &RuntimeDescriptor) -> Result<Vec<u8>> {
         push_u64(&mut out, copy_op.word_len);
         push_u64(&mut out, copy_op.witness_offset_words);
     }
-    append_circom_wasm(&mut out, descriptor);
+    append_circom_wasm(&mut out);
     Ok(out)
 }
 
-fn append_circom_wasm(out: &mut Vec<u8>, descriptor: &RuntimeDescriptor) {
-    if let Some(circom_wasm) = &descriptor.circom_wasm {
-        push_u64(out, 1);
-        push_u64(out, circom_wasm.wasm.len() as u64);
-        out.extend_from_slice(&circom_wasm.wasm);
-        push_u64(out, circom_wasm.inputs.len() as u64);
-        for input in &circom_wasm.inputs {
-            push_u64(out, input.hash);
-            push_u64(out, input.source_offset_words);
-            push_u64(out, input.word_len);
-        }
-    } else {
-        push_u64(out, 0);
-    }
+fn append_circom_wasm(out: &mut Vec<u8>) {
+    push_u64(out, 0);
 }
 
 fn append_constraints(out: &mut Vec<u8>, r1cs: &R1cs) {
@@ -381,7 +373,7 @@ mod tests {
         let mut r1cs = synthetic_r1cs();
         r1cs.n_vars = 5;
         r1cs.wire_map = vec![0, 12, 10, 11, 20];
-        let descriptor = RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3);
+        let descriptor = RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[]);
         assert_eq!(descriptor.copy_indices, Vec::<u64>::new());
         assert_eq!(descriptor.source_public_prefix_words, 0);
         assert_eq!(descriptor.source_sections[0].start_word, 0);
@@ -393,6 +385,19 @@ mod tests {
         assert_eq!(descriptor.section_copy_ops[1].witness_offset_words, 3);
         assert_eq!(descriptor.section_copy_ops[2].section_offset_words, 2);
         assert_eq!(descriptor.section_copy_ops[2].witness_offset_words, 1);
+    }
+
+    #[test]
+    fn maps_simplified_circom_inputs_to_replacement_wires() {
+        let mut r1cs = synthetic_r1cs();
+        r1cs.n_vars = 6;
+        r1cs.wire_map = vec![0, 50, 51, 12, 80, 81];
+        let descriptor =
+            RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[(10, 80), (11, 81)]);
+        assert_eq!(descriptor.section_copy_ops.len(), 3);
+        assert_eq!(descriptor.section_copy_ops[0].witness_offset_words, 4);
+        assert_eq!(descriptor.section_copy_ops[1].witness_offset_words, 5);
+        assert_eq!(descriptor.section_copy_ops[2].witness_offset_words, 3);
     }
 
     #[test]

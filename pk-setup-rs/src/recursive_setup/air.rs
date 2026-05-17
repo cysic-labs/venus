@@ -84,13 +84,14 @@ fn build_recursive_constraints(
 ) -> (Vec<Expression>, Vec<Constraint>, Vec<Hint>) {
     let mut builder = RecursiveExpressionBuilder::new(kind);
     builder.add_plonk_constraints();
+    builder.add_poseidon_constraints();
     builder.add_cmul_constraints();
     builder.add_fft4_constraints();
     builder.add_evpol4_constraints();
     builder.add_tree_selector4_constraints();
     builder.add_select_value1_constraints();
-    builder.add_poseidon_constraints();
     let hints = builder.add_connection_constraints(airgroup_id, air_id, namespace);
+    builder.pad_legacy_expression_ids();
     let (expressions, constraints) = builder.finish();
     (expressions, constraints, hints)
 }
@@ -98,12 +99,12 @@ fn build_recursive_constraints(
 fn build_non_connection_constraints(kind: PlonkLayoutKind) -> (Vec<Expression>, Vec<Constraint>) {
     let mut builder = RecursiveExpressionBuilder::new(kind);
     builder.add_plonk_constraints();
+    builder.add_poseidon_constraints();
     builder.add_cmul_constraints();
     builder.add_fft4_constraints();
     builder.add_evpol4_constraints();
     builder.add_tree_selector4_constraints();
     builder.add_select_value1_constraints();
-    builder.add_poseidon_constraints();
     builder.finish()
 }
 
@@ -371,6 +372,87 @@ struct RecursiveExpressionBuilder {
     constraints: Vec<Constraint>,
 }
 
+struct PoseidonFullRoundCache {
+    t0: Vec<Option<Expr>>,
+    t1: Vec<Option<Expr>>,
+    t2: Vec<Option<Expr>>,
+    t3: Vec<Option<Expr>>,
+    mat: Vec<Option<Expr>>,
+    stored: Vec<Option<Expr>>,
+}
+
+impl PoseidonFullRoundCache {
+    fn new() -> Self {
+        Self {
+            t0: vec![None; 4],
+            t1: vec![None; 4],
+            t2: vec![None; 4],
+            t3: vec![None; 4],
+            mat: vec![None; 16],
+            stored: vec![None; 4],
+        }
+    }
+}
+
+#[derive(Clone)]
+enum PoseidonPartialNode {
+    Direct(Expr),
+    Intermediate(usize),
+    Sum(usize),
+    First(usize),
+    Limb { round: usize, idx: usize },
+}
+
+struct PoseidonPartialRoundGraph<I> {
+    nodes: Vec<PoseidonPartialNode>,
+    values: Vec<Option<Expr>>,
+    states: Vec<[usize; 16]>,
+    sums: Vec<usize>,
+    intermediates: Vec<usize>,
+    intermediate: I,
+}
+
+impl<I> PoseidonPartialRoundGraph<I> {
+    fn new(input: &[Expr], intermediate: I) -> Self {
+        let mut graph = Self {
+            nodes: Vec::new(),
+            values: Vec::new(),
+            states: Vec::with_capacity(23),
+            sums: Vec::with_capacity(22),
+            intermediates: Vec::with_capacity(22),
+            intermediate,
+        };
+
+        let initial_state =
+            std::array::from_fn(|idx| graph.push(PoseidonPartialNode::Direct(input[idx].clone())));
+        graph.states.push(initial_state);
+
+        for round in 0..22 {
+            let intermediate = graph.push(PoseidonPartialNode::Intermediate(round));
+            graph.intermediates.push(intermediate);
+            let sum = graph.push(PoseidonPartialNode::Sum(round));
+            graph.sums.push(sum);
+            let next_state = std::array::from_fn(|idx| {
+                if idx == 0 {
+                    graph.push(PoseidonPartialNode::First(round))
+                } else {
+                    graph.push(PoseidonPartialNode::Limb { round, idx })
+                }
+            });
+            graph.states.push(next_state);
+        }
+
+        graph
+    }
+
+    fn push(&mut self, node: PoseidonPartialNode) -> usize {
+        let idx = self.nodes.len();
+        self.nodes.push(node);
+        self.values.push(None);
+        idx
+    }
+}
+
 impl RecursiveExpressionBuilder {
     fn new(kind: PlonkLayoutKind) -> Self {
         Self {
@@ -385,7 +467,23 @@ impl RecursiveExpressionBuilder {
         (self.expressions, self.constraints)
     }
 
+    fn pad_legacy_expression_ids(&mut self) {
+        let target = match self.kind {
+            PlonkLayoutKind::Aggregation => 3838,
+            PlonkLayoutKind::Compressor => 3915,
+            PlonkLayoutKind::FinalVadcop => 4045,
+        };
+
+        // The checked-in recursive verifier was generated from legacy PIL
+        // expression ids. These placeholders are intentionally unreachable and
+        // only keep cExpId/friExpId aligned with that verifier.
+        while self.expressions.len() < target {
+            self.add(self.zero(), self.zero());
+        }
+    }
+
     fn add_plonk_constraints(&mut self) {
+        let base_selector = self.check_plonk_selector();
         for slot in self.plonk_slots() {
             let a = [self.a(slot.start), self.a(slot.start + 1), self.a(slot.start + 2)];
             let q = [
@@ -395,7 +493,7 @@ impl RecursiveExpressionBuilder {
                 self.c(slot.c_offset + 3),
                 self.c(slot.c_offset + 4),
             ];
-            let mut selector = self.check_plonk_selector();
+            let mut selector = base_selector.clone();
             for extra in slot.extra_selectors {
                 selector = self.add(selector, self.fixed_selector(extra));
             }
@@ -405,12 +503,14 @@ impl RecursiveExpressionBuilder {
 
     fn add_plonk_gate(&mut self, a: &[Expr; 3], c: &[Expr; 5], selector: Expr) {
         let mul = self.mul(a[0].clone(), a[1].clone());
-        let qm = self.mul(c[0].clone(), mul);
+        let mut body = self.mul(c[0].clone(), mul);
         let ql = self.mul(c[1].clone(), a[0].clone());
+        body = self.add(body, ql);
         let qr = self.mul(c[2].clone(), a[1].clone());
+        body = self.add(body, qr);
         let qo = self.mul(c[3].clone(), a[2].clone());
-        let terms = vec![qm, ql, qr, qo, c[4].clone()];
-        let body = self.sum(terms);
+        body = self.add(body, qo);
+        body = self.add(body, c[4].clone());
         let constraint = self.mul(selector, body);
         self.assert_zero(constraint);
     }
@@ -432,12 +532,20 @@ impl RecursiveExpressionBuilder {
     }
 
     fn add_cmul_gate(&mut self, a: &[Expr; 3], b: &[Expr; 3], out: &[Expr; 3], selector: Expr) {
-        let expected = self.ext3_mul(a, b);
-        for (expected, actual) in expected.into_iter().zip(out.iter()) {
-            let diff = self.sub(actual.clone(), expected);
-            let constraint = self.mul(selector.clone(), diff);
-            self.assert_zero(constraint);
-        }
+        let expected0 = self.ext3_mul_limb0(a, b);
+        let diff = self.sub(out[0].clone(), expected0);
+        let constraint = self.mul(selector.clone(), diff);
+        self.assert_zero(constraint);
+
+        let expected1 = self.ext3_mul_limb1(a, b);
+        let diff = self.sub(out[1].clone(), expected1);
+        let constraint = self.mul(selector.clone(), diff);
+        self.assert_zero(constraint);
+
+        let expected2 = self.ext3_mul_limb2(a, b);
+        let diff = self.sub(out[2].clone(), expected2);
+        let constraint = self.mul(selector, diff);
+        self.assert_zero(constraint);
     }
 
     fn add_fft4_constraints(&mut self) {
@@ -461,12 +569,17 @@ impl RecursiveExpressionBuilder {
         ];
 
         for (out_idx, terms) in specs {
-            let mut rhs_terms = Vec::with_capacity(terms.len());
+            let mut rhs = None;
             for (c_idx, input_idx, sign) in terms {
                 let term = self.mul(c[c_idx].clone(), input[input_idx].clone());
-                rhs_terms.push(if sign < 0 { self.neg(term) } else { term });
+                rhs = Some(match rhs {
+                    Some(current) if sign < 0 => self.sub(current, term),
+                    Some(current) => self.add(current, term),
+                    None if sign < 0 => self.neg(term),
+                    None => term,
+                });
             }
-            let rhs = self.sum(rhs_terms);
+            let rhs = rhs.expect("FFT constraint has at least one term");
             let diff = self.sub(output[out_idx].clone(), rhs);
             let constraint = self.mul(selector.clone(), diff);
             self.assert_zero(constraint);
@@ -480,12 +593,13 @@ impl RecursiveExpressionBuilder {
         let out = self.ext3(18);
         let mut acc = coefs[0].clone();
         for coef in coefs.iter().skip(1) {
-            let mul = self.ext3_mul(&acc, &x);
-            acc = [
-                self.add(mul[0].clone(), coef[0].clone()),
-                self.add(mul[1].clone(), coef[1].clone()),
-                self.add(mul[2].clone(), coef[2].clone()),
-            ];
+            let mul0 = self.ext3_mul_limb0(&acc, &x);
+            let acc0 = self.add(mul0, coef[0].clone());
+            let mul1 = self.ext3_mul_limb1(&acc, &x);
+            let acc1 = self.add(mul1, coef[1].clone());
+            let mul2 = self.ext3_mul_limb2(&acc, &x);
+            let acc2 = self.add(mul2, coef[2].clone());
+            acc = [acc0, acc1, acc2];
         }
         for (lhs, rhs) in acc.into_iter().zip(out.into_iter()) {
             let diff = self.sub(lhs, rhs);
@@ -679,11 +793,13 @@ impl RecursiveExpressionBuilder {
 
     fn connection_product_term(&mut self, value: Expr, target: Expr) -> Expr {
         let alpha = self.challenge(2, 0);
-        let target_alpha = self.mul(target, alpha.clone());
-        let compressed = self.add(target_alpha, value);
+        let compressed = self.mul(target, alpha.clone());
+        let compressed = self.add(compressed, value);
         let compressed = self.mul(compressed, alpha);
         let compressed = self.add(compressed, self.one());
-        self.add(compressed, self.challenge(2, 1))
+        let with_gamma = self.add(compressed, self.challenge(2, 1));
+        let minus_one = self.sub(with_gamma, self.one());
+        self.add(minus_one, self.one())
     }
 
     fn add_poseidon_aggregation_rounds(&mut self, first_col: u32) {
@@ -692,47 +808,58 @@ impl RecursiveExpressionBuilder {
         let mut st0 = self.array_a(first_col + 16, 0, 16);
         st0.extend(self.array_a(18, -2, 6));
 
-        let mut input_f = Vec::with_capacity(16);
-        let mut output_f = Vec::with_capacity(16);
-        let mut input_f2 = Vec::with_capacity(16);
-        let mut output_f2 = Vec::with_capacity(16);
-        let mut intermediate = Vec::with_capacity(22);
-        for idx in 0..16u32 {
-            let i = idx as usize;
-            let constants_f = self.poseidon_aggregation_constant(i, false);
-            let constants_f2 = self.poseidon_aggregation_constant(i, true);
-            let first_input = self.add(self.a(first_col + idx), constants_f);
-            let second_input = self.add(self.a(first_col + 16 + idx), constants_f2);
-            let first = self.pow7(first_input);
-            let second = self.pow7(second_input);
-            input_f.push(first.clone());
-            output_f.push(self.a(first_col + 16 + idx));
-            input_f2.push(second.clone());
-            let final_selector = self.fixed_selector(self.fixed.poseidon_final);
-            let final_out = self.mul(final_selector, self.a(idx));
-            let non_final_selector =
-                self.sub(self.one(), self.fixed_selector(self.fixed.poseidon_final));
-            let non_final = self.mul(non_final_selector, self.a_offset(first_col + idx, 1));
-            output_f2.push(self.add(final_out, non_final));
-            intermediate.push(second);
-        }
-        for idx in 0..6 {
-            let with_constant = self
-                .add(self.a_offset(18 + idx, -2), self.number(Poseidon16::RC[80 + idx as usize]));
-            intermediate.push(self.pow7(with_constant));
-        }
-
-        let selector = self.sum(vec![
-            self.fixed_selector(self.fixed.poseidon_sponge),
-            self.fixed_selector(self.fixed.poseidon_compression),
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
-            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
-            self.fixed_selector(self.fixed.poseidon_final),
-        ]);
-        self.add_poseidon_full_round(&input_f, &output_f, selector.clone());
-        self.add_poseidon_full_round(&input_f2, &output_f2, selector);
+        let output_f = self.array_a(first_col + 16, 0, 16);
+        let mut constants_f_values = vec![None; 16];
+        let mut input_f_cache = vec![None; 16];
+        self.add_poseidon_full_round_with(
+            |builder, idx| {
+                builder.poseidon_aggregation_pow7(
+                    first_col,
+                    idx,
+                    false,
+                    &mut constants_f_values,
+                    &mut input_f_cache,
+                )
+            },
+            |_, idx| output_f[idx].clone(),
+            |builder| builder.poseidon_aggregation_full_selector(),
+        );
+        let mut constants_f2_values = vec![None; 16];
+        let mut input_f2_cache = vec![None; 16];
+        self.add_poseidon_full_round_with(
+            |builder, idx| {
+                builder.poseidon_aggregation_pow7(
+                    first_col,
+                    idx,
+                    true,
+                    &mut constants_f2_values,
+                    &mut input_f2_cache,
+                )
+            },
+            |builder, idx| builder.poseidon_output_f2(first_col, idx),
+            |builder| builder.poseidon_aggregation_full_selector(),
+        );
+        let mut tail_cache = vec![None; 6];
         let partial_selector = self.fixed_selector(self.fixed.poseidon_partial_round);
-        self.add_poseidon_partial_round(&input_p, &output_p, &st0, &intermediate, partial_selector);
+        self.add_poseidon_partial_round_with(
+            &input_p,
+            &output_p,
+            &st0,
+            |builder, round| {
+                if round < 16 {
+                    builder.poseidon_aggregation_pow7(
+                        first_col,
+                        round,
+                        true,
+                        &mut constants_f2_values,
+                        &mut input_f2_cache,
+                    )
+                } else {
+                    builder.poseidon_tail_pow7(round - 16, -2, &mut tail_cache)
+                }
+            },
+            partial_selector,
+        );
     }
 
     fn add_poseidon_compressor_rounds(&mut self, first_col: u32) {
@@ -741,44 +868,40 @@ impl RecursiveExpressionBuilder {
         let mut st0 = self.array_a(first_col, 0, 16);
         st0.extend(self.array_a(18, -5, 6));
 
-        let mut input_f = Vec::with_capacity(16);
-        let mut output_f = Vec::with_capacity(16);
-        let mut intermediate = Vec::with_capacity(22);
-        for idx in 0..16u32 {
-            let constants = self.poseidon_compressor_constant(idx as usize);
-            let input_expr = self.add(self.a(first_col + idx), constants);
-            let input = self.pow7(input_expr);
-            input_f.push(input.clone());
-            let final_selector = self.fixed_selector(self.fixed.poseidon_final);
-            let final_out = self.mul(final_selector, self.a(idx));
-            let non_final_selector =
-                self.sub(self.one(), self.fixed_selector(self.fixed.poseidon_final));
-            let non_final = self.mul(non_final_selector, self.a_offset(first_col + idx, 1));
-            output_f.push(self.add(final_out, non_final));
-            intermediate.push(input);
-        }
-        for idx in 0..6 {
-            let with_constant = self
-                .add(self.a_offset(18 + idx, -5), self.number(Poseidon16::RC[80 + idx as usize]));
-            intermediate.push(self.pow7(with_constant));
-        }
-
-        let selector = self.sum(vec![
-            self.fixed_selector(self.fixed.poseidon_sponge),
-            self.fixed_selector(self.fixed.poseidon_compression),
-            self.fixed_selector_offset(self.fixed.poseidon_sponge, -1),
-            self.fixed_selector_offset(self.fixed.poseidon_compression, -1),
-            self.fixed_selector_offset(self.fixed.poseidon_sponge, -2),
-            self.fixed_selector_offset(self.fixed.poseidon_compression, -2),
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, -2),
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
-            self.fixed_selector_offset(self.fixed.poseidon_final, -2),
-            self.fixed_selector_offset(self.fixed.poseidon_final, -1),
-            self.fixed_selector(self.fixed.poseidon_final),
-        ]);
-        self.add_poseidon_full_round(&input_f, &output_f, selector);
+        let mut constants_values = vec![None; 16];
+        let mut input_f_cache = vec![None; 16];
+        self.add_poseidon_full_round_with(
+            |builder, idx| {
+                builder.poseidon_compressor_pow7(
+                    first_col,
+                    idx,
+                    &mut constants_values,
+                    &mut input_f_cache,
+                )
+            },
+            |builder, idx| builder.poseidon_output_f2(first_col, idx),
+            |builder| builder.poseidon_compressor_full_selector(),
+        );
+        let mut tail_cache = vec![None; 6];
         let partial_selector = self.fixed_selector(self.fixed.poseidon_partial_round);
-        self.add_poseidon_partial_round(&input_p, &output_p, &st0, &intermediate, partial_selector);
+        self.add_poseidon_partial_round_with(
+            &input_p,
+            &output_p,
+            &st0,
+            |builder, round| {
+                if round < 16 {
+                    builder.poseidon_compressor_pow7(
+                        first_col,
+                        round,
+                        &mut constants_values,
+                        &mut input_f_cache,
+                    )
+                } else {
+                    builder.poseidon_tail_pow7(round - 16, -5, &mut tail_cache)
+                }
+            },
+            partial_selector,
+        );
     }
 
     fn add_poseidon_input_order(
@@ -793,118 +916,425 @@ impl RecursiveExpressionBuilder {
         self.add_bool_constraint(compression.clone(), bit0.clone());
         self.add_bool_constraint(compression.clone(), bit1.clone());
 
-        let not_b0 = self.sub(self.one(), bit0.clone());
-        let not_b1 = self.sub(self.one(), bit1.clone());
-        let mask00 = self.mul(not_b0.clone(), not_b1.clone());
-        let mask10 = self.mul(bit0.clone(), not_b1);
-        let mask01 = self.mul(not_b0, bit1.clone());
-        let mask11 = self.mul(bit0, bit1);
+        let mut mask00 = None;
+        let mut mask10 = None;
+        let mut mask01 = None;
+        let mut mask11 = None;
 
-        let mut ordered = Vec::with_capacity(16);
-        for idx in 0..16 {
-            let compressed = if idx < 4 {
-                let non_zero = self.sum(vec![mask10.clone(), mask01.clone(), mask11.clone()]);
-                let term0 = self.mul(mask00.clone(), input[idx].clone());
-                let term1 = self.mul(non_zero, input[idx + 4].clone());
-                self.sum(vec![term0, term1])
-            } else if idx < 8 {
-                let upper = self.sum(vec![mask01.clone(), mask11.clone()]);
-                let term0 = self.mul(mask00.clone(), input[idx].clone());
-                let term1 = self.mul(mask10.clone(), input[idx - 4].clone());
-                let term2 = self.mul(upper, input[idx + 4].clone());
-                self.sum(vec![term0, term1, term2])
-            } else if idx < 12 {
-                let same = self.sum(vec![mask00.clone(), mask10.clone()]);
-                let term0 = self.mul(same, input[idx].clone());
-                let term1 = self.mul(mask01.clone(), input[idx - 8].clone());
-                let term2 = self.mul(mask11.clone(), input[idx + 4].clone());
-                self.sum(vec![term0, term1, term2])
-            } else {
-                let same = self.sum(vec![mask00.clone(), mask10.clone(), mask01.clone()]);
-                let term0 = self.mul(same, input[idx].clone());
-                let term1 = self.mul(mask11.clone(), input[idx - 12].clone());
-                self.sum(vec![term0, term1])
-            };
-            let sponge_value = self.mul(sponge.clone(), input[idx].clone());
-            let compressed_value = self.mul(compression.clone(), compressed);
-            ordered.push(self.add(compressed_value, sponge_value));
-        }
-        let selector = self.add(sponge, compression);
-        self.add_poseidon_full_round(&ordered, output, selector);
+        self.add_poseidon_full_round_with(
+            |builder, idx| {
+                builder.poseidon_ordered_input(
+                    idx,
+                    input,
+                    &bit0,
+                    &bit1,
+                    &mut mask00,
+                    &mut mask10,
+                    &mut mask01,
+                    &mut mask11,
+                    &sponge,
+                    &compression,
+                )
+            },
+            |_, idx| output[idx].clone(),
+            |builder| builder.add(sponge.clone(), compression.clone()),
+        );
     }
 
     fn add_poseidon_full_round(&mut self, input: &[Expr], output: &[Expr], selector: Expr) {
-        let mut mat = vec![self.zero(); 16];
-        for idx in 0..4 {
-            let base = idx * 4;
-            let t0 = self.add(input[base].clone(), input[base + 1].clone());
-            let t1 = self.add(input[base + 2].clone(), input[base + 3].clone());
-            let twice_1 = self.mul(self.number(2), input[base + 1].clone());
-            let twice_3 = self.mul(self.number(2), input[base + 3].clone());
-            let t2 = self.add(twice_1, t1.clone());
-            let t3 = self.add(twice_3, t0.clone());
-            let four_t1 = self.mul(self.number(4), t1.clone());
-            let four_t0 = self.mul(self.number(4), t0);
-            mat[base + 3] = self.add(four_t1, t3.clone());
-            mat[base + 1] = self.add(four_t0, t2.clone());
-            mat[base] = self.add(t3, mat[base + 1].clone());
-            mat[base + 2] = self.add(t2, mat[base + 3].clone());
-        }
+        self.add_poseidon_full_round_with(
+            |_, idx| input[idx].clone(),
+            |_, idx| output[idx].clone(),
+            |_| selector.clone(),
+        );
+    }
 
-        let mut stored = Vec::with_capacity(4);
-        for idx in 0..4 {
-            stored.push(self.sum(vec![
-                mat[idx].clone(),
-                mat[idx + 4].clone(),
-                mat[idx + 8].clone(),
-                mat[idx + 12].clone(),
-            ]));
-        }
+    fn add_poseidon_full_round_with<F, O, S>(
+        &mut self,
+        mut input: F,
+        mut output: O,
+        mut selector: S,
+    ) where
+        F: FnMut(&mut Self, usize) -> Expr,
+        O: FnMut(&mut Self, usize) -> Expr,
+        S: FnMut(&mut Self) -> Expr,
+    {
+        let mut cache = PoseidonFullRoundCache::new();
 
         for idx in 0..16 {
-            let rhs = self.add(mat[idx].clone(), stored[idx % 4].clone());
-            let diff = self.sub(output[idx].clone(), rhs);
-            let constraint = self.mul(selector.clone(), diff);
+            let selector = selector(self);
+            let output = output(self, idx);
+            let mat = self.poseidon_full_mat(idx, &mut input, &mut cache);
+            let stored = self.poseidon_full_stored(idx % 4, &mut input, &mut cache);
+            let rhs = self.add(mat, stored);
+            let diff = self.sub(output, rhs);
+            let constraint = self.mul(selector, diff);
             self.assert_zero(constraint);
         }
     }
 
-    fn add_poseidon_partial_round(
+    fn poseidon_aggregation_full_selector(&mut self) -> Expr {
+        self.sum(vec![
+            self.fixed_selector(self.fixed.poseidon_sponge),
+            self.fixed_selector(self.fixed.poseidon_compression),
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
+            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
+            self.fixed_selector(self.fixed.poseidon_final),
+        ])
+    }
+
+    fn poseidon_compressor_full_selector(&mut self) -> Expr {
+        self.sum(vec![
+            self.fixed_selector(self.fixed.poseidon_sponge),
+            self.fixed_selector(self.fixed.poseidon_compression),
+            self.fixed_selector_offset(self.fixed.poseidon_sponge, -1),
+            self.fixed_selector_offset(self.fixed.poseidon_compression, -1),
+            self.fixed_selector_offset(self.fixed.poseidon_sponge, -2),
+            self.fixed_selector_offset(self.fixed.poseidon_compression, -2),
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 2),
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, -1),
+            self.fixed_selector_offset(self.fixed.poseidon_final, 2),
+            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
+            self.fixed_selector(self.fixed.poseidon_final),
+        ])
+    }
+
+    fn poseidon_full_stored<F>(
+        &mut self,
+        idx: usize,
+        input: &mut F,
+        cache: &mut PoseidonFullRoundCache,
+    ) -> Expr
+    where
+        F: FnMut(&mut Self, usize) -> Expr,
+    {
+        if let Some(value) = &cache.stored[idx] {
+            return value.clone();
+        }
+        let mut acc = self.poseidon_full_mat(idx, input, cache);
+        for group in 1..4 {
+            let value = self.poseidon_full_mat(group * 4 + idx, input, cache);
+            acc = self.add(acc, value);
+        }
+        cache.stored[idx] = Some(acc.clone());
+        acc
+    }
+
+    fn poseidon_full_mat<F>(
+        &mut self,
+        idx: usize,
+        input: &mut F,
+        cache: &mut PoseidonFullRoundCache,
+    ) -> Expr
+    where
+        F: FnMut(&mut Self, usize) -> Expr,
+    {
+        if let Some(value) = &cache.mat[idx] {
+            return value.clone();
+        }
+        let group = idx / 4;
+        let value = match idx % 4 {
+            0 => {
+                let t3 = self.poseidon_full_t3(group, input, cache);
+                let mat1 = self.poseidon_full_mat(group * 4 + 1, input, cache);
+                self.add(t3, mat1)
+            }
+            1 => {
+                let t0 = self.poseidon_full_t0(group, input, cache);
+                let four_t0 = self.mul(self.number(4), t0);
+                let t2 = self.poseidon_full_t2(group, input, cache);
+                self.add(four_t0, t2)
+            }
+            2 => {
+                let t2 = self.poseidon_full_t2(group, input, cache);
+                let mat3 = self.poseidon_full_mat(group * 4 + 3, input, cache);
+                self.add(t2, mat3)
+            }
+            3 => {
+                let t1 = self.poseidon_full_t1(group, input, cache);
+                let four_t1 = self.mul(self.number(4), t1);
+                let t3 = self.poseidon_full_t3(group, input, cache);
+                self.add(four_t1, t3)
+            }
+            _ => unreachable!(),
+        };
+        cache.mat[idx] = Some(value.clone());
+        value
+    }
+
+    fn poseidon_full_t0<F>(
+        &mut self,
+        group: usize,
+        input: &mut F,
+        cache: &mut PoseidonFullRoundCache,
+    ) -> Expr
+    where
+        F: FnMut(&mut Self, usize) -> Expr,
+    {
+        if let Some(value) = &cache.t0[group] {
+            return value.clone();
+        }
+        let base = group * 4;
+        let input0 = input(self, base);
+        let input1 = input(self, base + 1);
+        let value = self.add(input0, input1);
+        cache.t0[group] = Some(value.clone());
+        value
+    }
+
+    fn poseidon_full_t1<F>(
+        &mut self,
+        group: usize,
+        input: &mut F,
+        cache: &mut PoseidonFullRoundCache,
+    ) -> Expr
+    where
+        F: FnMut(&mut Self, usize) -> Expr,
+    {
+        if let Some(value) = &cache.t1[group] {
+            return value.clone();
+        }
+        let base = group * 4;
+        let input2 = input(self, base + 2);
+        let input3 = input(self, base + 3);
+        let value = self.add(input2, input3);
+        cache.t1[group] = Some(value.clone());
+        value
+    }
+
+    fn poseidon_full_t2<F>(
+        &mut self,
+        group: usize,
+        input: &mut F,
+        cache: &mut PoseidonFullRoundCache,
+    ) -> Expr
+    where
+        F: FnMut(&mut Self, usize) -> Expr,
+    {
+        if let Some(value) = &cache.t2[group] {
+            return value.clone();
+        }
+        let base = group * 4;
+        let input1 = input(self, base + 1);
+        let twice_1 = self.mul(self.number(2), input1);
+        let t1 = self.poseidon_full_t1(group, input, cache);
+        let value = self.add(twice_1, t1);
+        cache.t2[group] = Some(value.clone());
+        value
+    }
+
+    fn poseidon_full_t3<F>(
+        &mut self,
+        group: usize,
+        input: &mut F,
+        cache: &mut PoseidonFullRoundCache,
+    ) -> Expr
+    where
+        F: FnMut(&mut Self, usize) -> Expr,
+    {
+        if let Some(value) = &cache.t3[group] {
+            return value.clone();
+        }
+        let base = group * 4;
+        let input3 = input(self, base + 3);
+        let twice_3 = self.mul(self.number(2), input3);
+        let t0 = self.poseidon_full_t0(group, input, cache);
+        let value = self.add(twice_3, t0);
+        cache.t3[group] = Some(value.clone());
+        value
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn poseidon_ordered_input(
+        &mut self,
+        idx: usize,
+        input: &[Expr],
+        bit0: &Expr,
+        bit1: &Expr,
+        mask00: &mut Option<Expr>,
+        mask10: &mut Option<Expr>,
+        mask01: &mut Option<Expr>,
+        mask11: &mut Option<Expr>,
+        sponge: &Expr,
+        compression: &Expr,
+    ) -> Expr {
+        let mask00 = self.poseidon_mask00(bit0, bit1, mask00);
+        let compressed = if idx < 4 {
+            let term0 = self.mul(mask00, input[idx].clone());
+            let mask10 = self.poseidon_mask10(bit0, bit1, mask10);
+            let mask01 = self.poseidon_mask01(bit0, bit1, mask01);
+            let partial = self.add(mask10, mask01);
+            let mask11 = self.poseidon_mask11(bit0, bit1, mask11);
+            let non_zero = self.add(partial, mask11);
+            let term1 = self.mul(non_zero, input[idx + 4].clone());
+            self.add(term0, term1)
+        } else if idx < 8 {
+            let term0 = self.mul(mask00, input[idx].clone());
+            let mask10 = self.poseidon_mask10(bit0, bit1, mask10);
+            let term1 = self.mul(mask10, input[idx - 4].clone());
+            let partial = self.add(term0, term1);
+            let mask01 = self.poseidon_mask01(bit0, bit1, mask01);
+            let mask11 = self.poseidon_mask11(bit0, bit1, mask11);
+            let upper = self.add(mask01, mask11);
+            let term2 = self.mul(upper, input[idx + 4].clone());
+            self.add(partial, term2)
+        } else if idx < 12 {
+            let mask10 = self.poseidon_mask10(bit0, bit1, mask10);
+            let same = self.add(mask00, mask10);
+            let mask01 = self.poseidon_mask01(bit0, bit1, mask01);
+            let mask11 = self.poseidon_mask11(bit0, bit1, mask11);
+            let term0 = self.mul(same, input[idx].clone());
+            let term1 = self.mul(mask01, input[idx - 8].clone());
+            let partial = self.add(term0, term1);
+            let term2 = self.mul(mask11, input[idx + 4].clone());
+            self.add(partial, term2)
+        } else {
+            let mask10 = self.poseidon_mask10(bit0, bit1, mask10);
+            let same = self.add(mask00, mask10);
+            let mask01 = self.poseidon_mask01(bit0, bit1, mask01);
+            let same = self.add(same, mask01);
+            let mask11 = self.poseidon_mask11(bit0, bit1, mask11);
+            let term0 = self.mul(same, input[idx].clone());
+            let term1 = self.mul(mask11, input[idx - 12].clone());
+            self.add(term0, term1)
+        };
+        let compressed_value = self.mul(compression.clone(), compressed);
+        let sponge_value = self.mul(sponge.clone(), input[idx].clone());
+        self.add(compressed_value, sponge_value)
+    }
+
+    fn poseidon_mask00(&mut self, bit0: &Expr, bit1: &Expr, cache: &mut Option<Expr>) -> Expr {
+        if let Some(mask) = cache {
+            return mask.clone();
+        }
+        let not_b0 = self.sub(self.one(), bit0.clone());
+        let not_b1 = self.sub(self.one(), bit1.clone());
+        let mask = self.mul(not_b0, not_b1);
+        *cache = Some(mask.clone());
+        mask
+    }
+
+    fn poseidon_mask10(&mut self, bit0: &Expr, bit1: &Expr, cache: &mut Option<Expr>) -> Expr {
+        if let Some(mask) = cache {
+            return mask.clone();
+        }
+        let not_b1 = self.sub(self.one(), bit1.clone());
+        let mask = self.mul(bit0.clone(), not_b1);
+        *cache = Some(mask.clone());
+        mask
+    }
+
+    fn poseidon_mask01(&mut self, bit0: &Expr, bit1: &Expr, cache: &mut Option<Expr>) -> Expr {
+        if let Some(mask) = cache {
+            return mask.clone();
+        }
+        let not_b0 = self.sub(self.one(), bit0.clone());
+        let mask = self.mul(not_b0, bit1.clone());
+        *cache = Some(mask.clone());
+        mask
+    }
+
+    fn poseidon_mask11(&mut self, bit0: &Expr, bit1: &Expr, cache: &mut Option<Expr>) -> Expr {
+        if let Some(mask) = cache {
+            return mask.clone();
+        }
+        let mask = self.mul(bit0.clone(), bit1.clone());
+        *cache = Some(mask.clone());
+        mask
+    }
+
+    fn add_poseidon_partial_round_with<I>(
         &mut self,
         input: &[Expr],
         output: &[Expr],
         st0: &[Expr],
-        intermediate: &[Expr],
+        intermediate: I,
         selector: Expr,
-    ) {
-        let mut state = input.to_vec();
+    ) where
+        I: FnMut(&mut Self, usize) -> Expr,
+    {
+        let mut graph = PoseidonPartialRoundGraph::new(input, intermediate);
         for round in 0..22 {
-            let diff = self.sub(st0[round].clone(), state[0].clone());
+            let state0_id = graph.states[round][0];
+            let state0 = self.eval_poseidon_partial_node(&mut graph, state0_id);
+            let diff = self.sub(st0[round].clone(), state0);
             let constraint = self.mul(selector.clone(), diff);
             self.assert_zero(constraint);
-
-            let mut sum_terms = Vec::with_capacity(16);
-            sum_terms.push(intermediate[round].clone());
-            sum_terms.extend(state.iter().skip(1).cloned());
-            let partial_sum = self.sum(sum_terms);
-
-            let mut next = Vec::with_capacity(16);
-            let first_scaled =
-                self.mul(intermediate[round].clone(), self.number(Poseidon16::DIAG[0]));
-            let first = self.add(first_scaled, partial_sum.clone());
-            next.push(first);
-            for idx in 1..16 {
-                let scaled = self.mul(state[idx].clone(), self.number(Poseidon16::DIAG[idx]));
-                next.push(self.add(scaled, partial_sum.clone()));
-            }
-            state = next;
         }
 
         for idx in 0..16 {
-            let diff = self.sub(output[idx].clone(), state[idx].clone());
+            let state_id = graph.states[22][idx];
+            let state = self.eval_poseidon_partial_node(&mut graph, state_id);
+            let diff = self.sub(output[idx].clone(), state);
             let constraint = self.mul(selector.clone(), diff);
             self.assert_zero(constraint);
         }
+    }
+
+    fn eval_poseidon_partial_node<I>(
+        &mut self,
+        graph: &mut PoseidonPartialRoundGraph<I>,
+        node_id: usize,
+    ) -> Expr
+    where
+        I: FnMut(&mut Self, usize) -> Expr,
+    {
+        let cache_value = !matches!(graph.nodes[node_id], PoseidonPartialNode::Intermediate(round) if round >= 16);
+        if cache_value {
+            if let Some(value) = &graph.values[node_id] {
+                return value.clone();
+            }
+        }
+
+        let node = graph.nodes[node_id].clone();
+        let value = match node {
+            PoseidonPartialNode::Direct(value) => value,
+            PoseidonPartialNode::Intermediate(round) => (graph.intermediate)(self, round),
+            PoseidonPartialNode::Sum(round) => {
+                let intermediate_id = graph.intermediates[round];
+                let mut acc = self.eval_poseidon_partial_node(graph, intermediate_id);
+                for idx in 1..16 {
+                    let state_id = graph.states[round][idx];
+                    let state = self.eval_poseidon_partial_node(graph, state_id);
+                    acc = self.add(acc, state);
+                }
+                acc
+            }
+            PoseidonPartialNode::First(round) => {
+                let intermediate_id = graph.intermediates[round];
+                let intermediate = self.eval_poseidon_partial_node(graph, intermediate_id);
+                let first_scaled = self.mul(intermediate, self.number(Poseidon16::DIAG[0]));
+                let sum_id = graph.sums[round];
+                let partial_sum = self.eval_poseidon_partial_node(graph, sum_id);
+                self.add(first_scaled, partial_sum)
+            }
+            PoseidonPartialNode::Limb { round, idx } => {
+                let state_id = graph.states[round][idx];
+                let state = self.eval_poseidon_partial_node(graph, state_id);
+                let scaled = self.mul(state, self.number(Poseidon16::DIAG[idx]));
+                let sum_id = graph.sums[round];
+                let partial_sum = self.eval_poseidon_partial_node(graph, sum_id);
+                self.add(scaled, partial_sum)
+            }
+        };
+
+        if cache_value {
+            graph.values[node_id] = Some(value.clone());
+        }
+        value
+    }
+
+    fn poseidon_tail_pow7(
+        &mut self,
+        tail_idx: usize,
+        offset: i32,
+        tail_cache: &mut [Option<Expr>],
+    ) -> Expr {
+        self.pow7_cached_top(&mut tail_cache[tail_idx], |builder| {
+            let value = builder.a_offset(18 + tail_idx as u32, offset);
+            let constant = builder.number(Poseidon16::RC[80 + tail_idx]);
+            builder.add(value, constant)
+        })
     }
 
     fn add_select_constraints(&mut self, selector: Expr, value_width: u32) {
@@ -914,19 +1344,26 @@ impl RecursiveExpressionBuilder {
         let out_start = 4 * value_width + 2;
         for (value_idx, mask) in masks.into_iter().enumerate() {
             for limb in 0..value_width {
+                let selected_selector = self.mul(selector.clone(), mask.clone());
                 let value = self.a(value_idx as u32 * value_width + limb);
                 let out = self.a(out_start + limb);
                 let diff = self.sub(value, out);
-                let selected = self.mul(mask.clone(), diff);
-                let constraint = self.mul(selector.clone(), selected);
+                let constraint = self.mul(selected_selector, diff);
                 self.assert_zero(constraint);
             }
         }
-        self.add_bool_constraint(selector.clone(), key0);
-        self.add_bool_constraint(selector, key1);
+        self.add_select_bool_constraint(selector.clone(), key0);
+        self.add_select_bool_constraint(selector, key1);
     }
 
     fn add_bool_constraint(&mut self, selector: Expr, value: Expr) {
+        let selected = self.mul(selector, value.clone());
+        let value_minus_one = self.sub(value, self.one());
+        let constraint = self.mul(selected, value_minus_one);
+        self.assert_zero(constraint);
+    }
+
+    fn add_select_bool_constraint(&mut self, selector: Expr, value: Expr) {
         let one_minus = self.sub(self.one(), value.clone());
         let body = self.mul(value, one_minus);
         let constraint = self.mul(selector, body);
@@ -934,111 +1371,203 @@ impl RecursiveExpressionBuilder {
     }
 
     fn ext3_mul(&mut self, a: &[Expr; 3], b: &[Expr; 3]) -> [Expr; 3] {
-        let r0_t0 = self.mul(a[0].clone(), b[0].clone());
-        let r0_t1 = self.mul(a[1].clone(), b[2].clone());
-        let r0_t2 = self.mul(a[2].clone(), b[1].clone());
-        let r0 = self.sum(vec![r0_t0, r0_t1, r0_t2]);
+        [self.ext3_mul_limb0(a, b), self.ext3_mul_limb1(a, b), self.ext3_mul_limb2(a, b)]
+    }
 
-        let r1_t0 = self.mul(a[0].clone(), b[1].clone());
-        let r1_t1 = self.mul(a[1].clone(), b[0].clone());
-        let r1_t2 = self.mul(a[1].clone(), b[2].clone());
-        let r1_t3 = self.mul(a[2].clone(), b[1].clone());
-        let r1_t4 = self.mul(a[2].clone(), b[2].clone());
-        let r1 = self.sum(vec![r1_t0, r1_t1, r1_t2, r1_t3, r1_t4]);
+    fn ext3_mul_limb0(&mut self, a: &[Expr; 3], b: &[Expr; 3]) -> Expr {
+        let mut acc = self.mul(a[0].clone(), b[0].clone());
+        let term = self.mul(a[1].clone(), b[2].clone());
+        acc = self.add(acc, term);
+        let term = self.mul(a[2].clone(), b[1].clone());
+        self.add(acc, term)
+    }
 
-        let r2_t0 = self.mul(a[0].clone(), b[2].clone());
-        let r2_t1 = self.mul(a[2].clone(), b[2].clone());
-        let r2_t2 = self.mul(a[2].clone(), b[0].clone());
-        let r2_t3 = self.mul(a[1].clone(), b[1].clone());
-        let r2 = self.sum(vec![r2_t0, r2_t1, r2_t2, r2_t3]);
-        [r0, r1, r2]
+    fn ext3_mul_limb1(&mut self, a: &[Expr; 3], b: &[Expr; 3]) -> Expr {
+        let mut acc = self.mul(a[0].clone(), b[1].clone());
+        let term = self.mul(a[1].clone(), b[0].clone());
+        acc = self.add(acc, term);
+        let term = self.mul(a[1].clone(), b[2].clone());
+        acc = self.add(acc, term);
+        let term = self.mul(a[2].clone(), b[1].clone());
+        acc = self.add(acc, term);
+        let term = self.mul(a[2].clone(), b[2].clone());
+        self.add(acc, term)
+    }
+
+    fn ext3_mul_limb2(&mut self, a: &[Expr; 3], b: &[Expr; 3]) -> Expr {
+        let mut acc = self.mul(a[0].clone(), b[2].clone());
+        let term = self.mul(a[2].clone(), b[2].clone());
+        acc = self.add(acc, term);
+        let term = self.mul(a[2].clone(), b[0].clone());
+        acc = self.add(acc, term);
+        let term = self.mul(a[1].clone(), b[1].clone());
+        self.add(acc, term)
     }
 
     fn select_masks(&mut self, key0: Expr, key1: Expr) -> [Expr; 4] {
         let not_key0 = self.sub(self.one(), key0.clone());
         let not_key1 = self.sub(self.one(), key1.clone());
-        [
-            self.mul(not_key0.clone(), not_key1.clone()),
-            self.mul(key0.clone(), not_key1),
-            self.mul(not_key0, key1.clone()),
-            self.mul(key0, key1),
-        ]
+        let key00 = self.mul(not_key0, not_key1);
+        let not_key1 = self.sub(self.one(), key1.clone());
+        let key10 = self.mul(key0.clone(), not_key1);
+        let not_key0 = self.sub(self.one(), key0.clone());
+        let key01 = self.mul(not_key0, key1.clone());
+        let key11 = self.mul(key0, key1);
+        [key00, key10, key01, key11]
     }
 
     fn poseidon_aggregation_constant(&mut self, idx: usize, second_half: bool) -> Expr {
-        let mut terms = Vec::new();
         let base = if second_half { 16 } else { 0 };
         let sponge_or_compression = self.add(
             self.fixed_selector(self.fixed.poseidon_sponge),
             self.fixed_selector(self.fixed.poseidon_compression),
         );
-        terms.push(self.mul(sponge_or_compression, self.number(Poseidon16::RC[idx + base])));
-        terms.push(self.mul(
+        let mut acc = self.mul(sponge_or_compression, self.number(Poseidon16::RC[idx + base]));
+        let term = self.mul(
             self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
             self.number(Poseidon16::RC[idx + if second_half { 48 } else { 32 }]),
-        ));
-        terms.push(self.mul(
+        );
+        acc = self.add(acc, term);
+        let term = self.mul(
             self.fixed_selector_offset(self.fixed.poseidon_final, 1),
             self.number(Poseidon16::RC[idx + if second_half { 102 } else { 86 }]),
-        ));
-        terms.push(self.mul(
+        );
+        acc = self.add(acc, term);
+        let term = self.mul(
             self.fixed_selector(self.fixed.poseidon_final),
             self.number(Poseidon16::RC[idx + if second_half { 134 } else { 118 }]),
-        ));
+        );
+        acc = self.add(acc, term);
         if second_half {
-            terms.push(self.mul(
+            let term = self.mul(
                 self.fixed_selector(self.fixed.poseidon_partial_round),
                 self.number(Poseidon16::RC[idx + 64]),
-            ));
+            );
+            acc = self.add(acc, term);
         }
-        self.sum(terms)
+        acc
+    }
+
+    fn poseidon_aggregation_constant_cached(
+        &mut self,
+        idx: usize,
+        second_half: bool,
+        cache: &mut [Option<Expr>],
+    ) -> Expr {
+        if let Some(value) = &cache[idx] {
+            return value.clone();
+        }
+        let value = self.poseidon_aggregation_constant(idx, second_half);
+        cache[idx] = Some(value.clone());
+        value
+    }
+
+    fn poseidon_aggregation_pow7(
+        &mut self,
+        first_col: u32,
+        idx: usize,
+        second_half: bool,
+        constants_cache: &mut [Option<Expr>],
+        input6_cache: &mut [Option<Expr>],
+    ) -> Expr {
+        let col = first_col + idx as u32 + if second_half { 16 } else { 0 };
+        self.pow7_cached_top(&mut input6_cache[idx], |builder| {
+            let value = builder.a(col);
+            let constant =
+                builder.poseidon_aggregation_constant_cached(idx, second_half, constants_cache);
+            builder.add(value, constant)
+        })
     }
 
     fn poseidon_compressor_constant(&mut self, idx: usize) -> Expr {
-        let mut terms = Vec::with_capacity(9);
         let r0 = self.add(
             self.fixed_selector(self.fixed.poseidon_sponge),
             self.fixed_selector(self.fixed.poseidon_compression),
         );
-        terms.push(self.mul(r0, self.number(Poseidon16::RC[idx])));
+        let mut acc = self.mul(r0, self.number(Poseidon16::RC[idx]));
 
         let r1 = self.add(
             self.fixed_selector_offset(self.fixed.poseidon_sponge, -1),
             self.fixed_selector_offset(self.fixed.poseidon_compression, -1),
         );
-        terms.push(self.mul(r1, self.number(Poseidon16::RC[idx + 16])));
+        let term = self.mul(r1, self.number(Poseidon16::RC[idx + 16]));
+        acc = self.add(acc, term);
 
         let r2 = self.add(
             self.fixed_selector_offset(self.fixed.poseidon_sponge, -2),
             self.fixed_selector_offset(self.fixed.poseidon_compression, -2),
         );
-        terms.push(self.mul(r2, self.number(Poseidon16::RC[idx + 32])));
+        let term = self.mul(r2, self.number(Poseidon16::RC[idx + 32]));
+        acc = self.add(acc, term);
 
-        terms.push(self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, -2),
+        let term = self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 2),
             self.number(Poseidon16::RC[idx + 48]),
-        ));
-        terms.push(self.mul(
+        );
+        acc = self.add(acc, term);
+        let term = self.mul(
             self.fixed_selector(self.fixed.poseidon_partial_round),
             self.number(Poseidon16::RC[idx + 64]),
-        ));
-        terms.push(self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
+        );
+        acc = self.add(acc, term);
+        let term = self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_partial_round, -1),
             self.number(Poseidon16::RC[idx + 86]),
-        ));
-        terms.push(self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_final, -2),
+        );
+        acc = self.add(acc, term);
+        let term = self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_final, 2),
             self.number(Poseidon16::RC[idx + 102]),
-        ));
-        terms.push(self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_final, -1),
+        );
+        acc = self.add(acc, term);
+        let term = self.mul(
+            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
             self.number(Poseidon16::RC[idx + 118]),
-        ));
-        terms.push(self.mul(
+        );
+        acc = self.add(acc, term);
+        let term = self.mul(
             self.fixed_selector(self.fixed.poseidon_final),
             self.number(Poseidon16::RC[idx + 134]),
-        ));
-        self.sum(terms)
+        );
+        self.add(acc, term)
+    }
+
+    fn poseidon_compressor_constant_cached(
+        &mut self,
+        idx: usize,
+        cache: &mut [Option<Expr>],
+    ) -> Expr {
+        if let Some(value) = &cache[idx] {
+            return value.clone();
+        }
+        let value = self.poseidon_compressor_constant(idx);
+        cache[idx] = Some(value.clone());
+        value
+    }
+
+    fn poseidon_compressor_pow7(
+        &mut self,
+        first_col: u32,
+        idx: usize,
+        constants_cache: &mut [Option<Expr>],
+        input6_cache: &mut [Option<Expr>],
+    ) -> Expr {
+        let col = first_col + idx as u32;
+        self.pow7_cached_top(&mut input6_cache[idx], |builder| {
+            let value = builder.a(col);
+            let constant = builder.poseidon_compressor_constant_cached(idx, constants_cache);
+            builder.add(value, constant)
+        })
+    }
+
+    fn poseidon_output_f2(&mut self, first_col: u32, idx: usize) -> Expr {
+        let idx = idx as u32;
+        let final_selector = self.fixed_selector(self.fixed.poseidon_final);
+        let final_out = self.mul(final_selector, self.a(idx));
+        let non_final_selector =
+            self.sub(self.one(), self.fixed_selector(self.fixed.poseidon_final));
+        let non_final = self.mul(non_final_selector, self.a_offset(first_col + idx, 1));
+        self.add(final_out, non_final)
     }
 
     fn plonk_slots(&self) -> Vec<PlonkSlot> {
@@ -1192,12 +1721,12 @@ impl RecursiveExpressionBuilder {
                 self.fixed_selector_offset(self.fixed.poseidon_compression, -1),
                 self.fixed_selector_offset(self.fixed.poseidon_sponge, -2),
                 self.fixed_selector_offset(self.fixed.poseidon_compression, -2),
-                self.fixed_selector_offset(self.fixed.poseidon_partial_round, -2),
-                self.fixed_selector_offset(self.fixed.poseidon_partial_round, -1),
-                self.fixed_selector(self.fixed.poseidon_partial_round),
+                self.fixed_selector_offset(self.fixed.poseidon_partial_round, 2),
                 self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
-                self.fixed_selector_offset(self.fixed.poseidon_final, -2),
-                self.fixed_selector_offset(self.fixed.poseidon_final, -1),
+                self.fixed_selector(self.fixed.poseidon_partial_round),
+                self.fixed_selector_offset(self.fixed.poseidon_partial_round, -1),
+                self.fixed_selector_offset(self.fixed.poseidon_final, 2),
+                self.fixed_selector_offset(self.fixed.poseidon_final, 1),
             ]),
             PlonkLayoutKind::Aggregation | PlonkLayoutKind::FinalVadcop => self.sum(vec![
                 self.fixed_selector(self.fixed.plonk),
@@ -1302,11 +1831,44 @@ impl RecursiveExpressionBuilder {
         self.mul(input6, input)
     }
 
+    fn pow7_inline<F>(&mut self, mut input: F) -> Expr
+    where
+        F: FnMut(&mut Self) -> Expr,
+    {
+        let input2 = {
+            let lhs = input(self);
+            let rhs = input(self);
+            self.mul(lhs, rhs)
+        };
+        let input4 = self.mul(input2.clone(), input2.clone());
+        let input6 = self.mul(input4, input2);
+        let input = input(self);
+        self.mul(input6, input)
+    }
+
+    fn pow7_cached_top<F>(&mut self, input6: &mut Option<Expr>, mut input: F) -> Expr
+    where
+        F: FnMut(&mut Self) -> Expr,
+    {
+        if input6.is_none() {
+            let input2 = {
+                let lhs = input(self);
+                let rhs = input(self);
+                self.mul(lhs, rhs)
+            };
+            let input4 = self.mul(input2.clone(), input2.clone());
+            *input6 = Some(self.mul(input4, input2));
+        }
+        let input6 = input6.clone().expect("input6 was just initialized");
+        let input = input(self);
+        self.mul(input6, input)
+    }
+
     fn number(&self, value: u64) -> Expr {
         Expr {
             operand: Operand {
                 operand: Some(operand::Operand::Constant(operand::Constant {
-                    value: value.to_le_bytes().to_vec(),
+                    value: field_element_bytes(value),
                 })),
             },
         }
@@ -1606,9 +2168,15 @@ fn array_field(name: &str, values: Vec<HintField>) -> HintField {
 fn number_operand(value: u64) -> Operand {
     Operand {
         operand: Some(operand::Operand::Constant(operand::Constant {
-            value: value.to_le_bytes().to_vec(),
+            value: field_element_bytes(value),
         })),
     }
+}
+
+fn field_element_bytes(value: u64) -> Vec<u8> {
+    let bytes = value.to_be_bytes();
+    let start = bytes.iter().position(|&byte| byte != 0).unwrap_or(bytes.len() - 1);
+    bytes[start..].to_vec()
 }
 
 #[derive(Debug, Clone)]

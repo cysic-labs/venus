@@ -271,7 +271,7 @@ fn format_operand(
     match operand {
         operand::Operand::Constant(constant) => {
             let mut expr = FormattedExpression::new("number");
-            expr.value = Some(le_bytes_to_u64(&constant.value)?.to_string());
+            expr.value = Some(decode_field_element(&constant.value)?.to_string());
             Ok(expr)
         }
         operand::Operand::Challenge(challenge) => {
@@ -376,11 +376,6 @@ fn format_operand(
             Ok(expr)
         }
         operand::Operand::Expression(expression) => {
-            if let Some(simplified) =
-                simplify_expression_operand(expression.idx, ctx, stage_widths)?
-            {
-                return Ok(simplified);
-            }
             let mut expr = FormattedExpression::new("exp");
             expr.id = Some(expression.idx as u64);
             Ok(expr)
@@ -433,7 +428,7 @@ fn constant_operand_is_zero(operand: &Operand) -> Result<bool> {
     let Some(operand::Operand::Constant(constant)) = operand.operand.as_ref() else {
         return Ok(false);
     };
-    Ok(le_bytes_to_u64(&constant.value)? == 0)
+    Ok(decode_field_element(&constant.value)? == 0)
 }
 
 fn format_constraint(constraint: &Constraint) -> Result<FormattedConstraint> {
@@ -746,6 +741,13 @@ fn format_hint_field(
             Ok((serde_json::json!({ "op": "string", "string": value }), None))
         }
         Some(hint_field::Value::Operand(operand)) => {
+            if let Some(operand::Operand::Expression(expression)) = operand.operand.as_ref() {
+                if let Some(simplified) =
+                    simplify_expression_operand(expression.idx, ctx, stage_widths)?
+                {
+                    return Ok((serde_json::to_value(simplified)?, None));
+                }
+            }
             let formatted = format_operand(operand, ctx, stage_widths)?;
             Ok((serde_json::to_value(formatted)?, None))
         }
@@ -782,7 +784,7 @@ fn required_expression_idx(
         .with_context(|| format!("{label} is missing expressionIdx"))
 }
 
-fn le_bytes_to_u64(bytes: &[u8]) -> Result<u64> {
+fn decode_field_element(bytes: &[u8]) -> Result<u64> {
     if bytes.len() > 8 {
         anyhow::bail!("field element is wider than u64: {} bytes", bytes.len());
     }
@@ -810,5 +812,21 @@ impl StageWidths {
             .map(|(idx, commit)| (idx as u32, commit.stage_widths.clone()))
             .collect();
         Self { witness: air.stage_widths.clone(), custom }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_compiler_constant_bytes_as_big_endian() -> Result<()> {
+        assert_eq!(decode_field_element(&[1])?, 1);
+        assert_eq!(decode_field_element(&[0x01, 0x4b])?, 331);
+        assert_eq!(
+            decode_field_element(&0x0102_0304_0506_0708u64.to_be_bytes())?,
+            0x0102_0304_0506_0708
+        );
+        Ok(())
     }
 }

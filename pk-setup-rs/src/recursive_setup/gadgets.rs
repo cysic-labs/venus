@@ -84,11 +84,11 @@ pub fn poseidon16(builder: &mut CircuitBuilder, input: [Signal; 16]) -> Result<[
     let im = alloc_matrix::<12, 16>(builder);
     let out = alloc_array::<16>(builder);
     let mut signals = Vec::with_capacity(224);
+    signals.extend(input);
     for row in im {
         signals.extend(row);
     }
     signals.extend(out);
-    signals.extend(input);
     builder.add_custom_gate("Poseidon16", Vec::new(), signals)?;
     Ok(out)
 }
@@ -101,12 +101,12 @@ pub fn cust_poseidon16(
     let im = alloc_matrix::<12, 16>(builder);
     let out = alloc_array::<16>(builder);
     let mut signals = Vec::with_capacity(226);
+    signals.extend(input);
+    signals.extend(key);
     for row in im {
         signals.extend(row);
     }
     signals.extend(out);
-    signals.extend(input);
-    signals.extend(key);
     builder.add_custom_gate("CustPoseidon16", Vec::new(), signals)?;
     Ok(out)
 }
@@ -134,11 +134,11 @@ mod tests {
 
         assert_eq!(r1cs.custom_gates[0].template_name, "Poseidon16");
         assert_eq!(r1cs.custom_gate_uses[0].signals.len(), 224);
+        assert_eq!(&r1cs.custom_gate_uses[0].signals[..16], &(1u64..=16).collect::<Vec<_>>());
         assert_eq!(
-            &r1cs.custom_gate_uses[0].signals[192..208],
+            &r1cs.custom_gate_uses[0].signals[208..224],
             &out.map(|signal| u64::from(signal.0))
         );
-        assert_eq!(&r1cs.custom_gate_uses[0].signals[208..224], &(1u64..=16).collect::<Vec<_>>());
         Ok(())
     }
 

@@ -98,7 +98,7 @@ fn format_global_operand(operand: &GlobalOperand, root: &PilOut) -> Result<Forma
     match operand {
         global_operand::Operand::Constant(constant) => {
             let mut expr = FormattedExpression::new("number");
-            expr.value = Some(le_bytes_to_u64(&constant.value)?.to_string());
+            expr.value = Some(decode_field_element(&constant.value)?.to_string());
             Ok(expr)
         }
         global_operand::Operand::Challenge(challenge) => {
@@ -206,7 +206,7 @@ fn simplified_global_expression_reference(
 fn is_zero_global_operand(operand: &GlobalOperand) -> Result<bool> {
     match operand.operand.as_ref() {
         Some(global_operand::Operand::Constant(constant)) => {
-            Ok(le_bytes_to_u64(&constant.value)? == 0)
+            Ok(decode_field_element(&constant.value)? == 0)
         }
         _ => Ok(false),
     }
@@ -384,7 +384,7 @@ fn format_global_hint_operand(
     match operand {
         operand::Operand::Constant(constant) => {
             let mut expr = FormattedExpression::new("number");
-            expr.value = Some(le_bytes_to_u64(&constant.value)?.to_string());
+            expr.value = Some(decode_field_element(&constant.value)?.to_string());
             Ok(expr)
         }
         operand::Operand::Challenge(challenge) => {
@@ -500,7 +500,7 @@ fn required_global_operand<'a>(
     operand.with_context(|| format!("{label} is missing operand"))
 }
 
-fn le_bytes_to_u64(bytes: &[u8]) -> Result<u64> {
+fn decode_field_element(bytes: &[u8]) -> Result<u64> {
     if bytes.len() > 8 {
         anyhow::bail!("field element is wider than u64: {} bytes", bytes.len());
     }
@@ -542,6 +542,22 @@ fn expand_symbol(
         &mut indexes,
         out,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_compiler_constant_bytes_as_big_endian() -> Result<()> {
+        assert_eq!(decode_field_element(&[1])?, 1);
+        assert_eq!(decode_field_element(&[0x01, 0x4b])?, 331);
+        assert_eq!(
+            decode_field_element(&0x0102_0304_0506_0708u64.to_be_bytes())?,
+            0x0102_0304_0506_0708
+        );
+        Ok(())
+    }
 }
 
 fn expand_array_symbol(

@@ -1,17 +1,20 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use fields::{add, matmul_external, pow7, pow7add, prodadd, Poseidon16, Poseidon2Constants, PrimeField64};
 
 use crate::{ProofmanError, ProofmanResult};
 
 const MAGIC: &[u8; 8] = b"PIL2RSPD";
+const GOLDILOCKS_MODULUS: u64 = 0xFFFF_FFFF_0000_0001;
+const GOLDILOCKS_P_MINUS_ONE: u64 = GOLDILOCKS_MODULUS - 1;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct NativeRecursiveRuntime {
     pub template_id: u64,
     pub size_witness_words: u64,
@@ -26,6 +29,38 @@ pub struct NativeRecursiveRuntime {
     pub circom_wasm: Option<NativeCircomWasmRuntime>,
     pub constraints: Vec<NativeRuntimeConstraint>,
     pub custom_gates: Vec<NativeRuntimeCustomGate>,
+    solver_index: OnceLock<NativeRuntimeSolverIndex>,
+}
+
+#[derive(Debug)]
+struct NativeRuntimeSolverIndex {
+    dependencies: Vec<NativeRuntimeDependency>,
+    boolean_signals: Vec<u64>,
+    inverse_protected_signals: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeRuntimeDependency {
+    signal: u64,
+    code: u32,
+    part: u8,
+    bit_term: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConstraintSolveState {
+    a_unknown: usize,
+    b_unknown: usize,
+    c_unknown: usize,
+    c_unknown_non_bit: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GateSolveState {
+    a_unknown: usize,
+    b_unknown: usize,
+    output_unknown: usize,
+    cmul: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +127,160 @@ pub enum NativeRuntimeCustomGateKind {
     FFT4,
     Poseidon16,
     CustPoseidon16,
+}
+
+const DEPENDENCY_GATE_FLAG: u32 = 1 << 31;
+const DEP_PART_A: u8 = 0;
+const DEP_PART_B: u8 = 1;
+const DEP_PART_C: u8 = 2;
+
+impl NativeRuntimeSolverIndex {
+    fn build(runtime: &NativeRecursiveRuntime) -> Self {
+        let mut boolean_signals = Vec::new();
+        let mut inverse_protected_signals = Vec::new();
+
+        for constraint in &runtime.constraints {
+            if let Some(signal) = boolean_signal(constraint) {
+                boolean_signals.push(signal);
+            }
+            if !direct_signal_equality(constraint) {
+                push_lc_signals(&mut inverse_protected_signals, &constraint.a);
+                push_lc_signals(&mut inverse_protected_signals, &constraint.b);
+                push_lc_signals(&mut inverse_protected_signals, &constraint.c);
+            }
+        }
+        boolean_signals.sort_unstable();
+        boolean_signals.dedup();
+        inverse_protected_signals.sort_unstable();
+        inverse_protected_signals.dedup();
+
+        let mut dependencies = Vec::new();
+        for (constraint_index, constraint) in runtime.constraints.iter().enumerate() {
+            if constraint_index >= DEPENDENCY_GATE_FLAG as usize {
+                break;
+            }
+            let code = constraint_index as u32;
+            push_lc_dependencies(&mut dependencies, &constraint.a, code, DEP_PART_A, &boolean_signals);
+            push_lc_dependencies(&mut dependencies, &constraint.b, code, DEP_PART_B, &boolean_signals);
+            push_lc_dependencies(&mut dependencies, &constraint.c, code, DEP_PART_C, &boolean_signals);
+        }
+        for (gate_index, gate) in runtime.custom_gates.iter().enumerate() {
+            if gate_index >= DEPENDENCY_GATE_FLAG as usize {
+                break;
+            }
+            let code = DEPENDENCY_GATE_FLAG | gate_index as u32;
+            push_gate_dependencies(&mut dependencies, gate, code);
+        }
+        dependencies.sort_unstable_by_key(|dependency| (dependency.signal, dependency.code, dependency.part));
+        Self { dependencies, boolean_signals, inverse_protected_signals }
+    }
+
+    fn dependency_range(&self, signal: u64) -> std::ops::Range<usize> {
+        let start = self.dependencies.partition_point(|dependency| dependency.signal < signal);
+        let end = start + self.dependencies[start..].partition_point(|dependency| dependency.signal == signal);
+        start..end
+    }
+
+    fn is_boolean_signal(&self, signal: u64) -> bool {
+        self.boolean_signals.binary_search(&signal).is_ok()
+    }
+
+    fn can_inverse_solve(&self, signals: &[usize]) -> bool {
+        signals.iter().all(|&signal| self.inverse_protected_signals.binary_search(&(signal as u64)).is_err())
+    }
+}
+
+fn push_lc_dependencies(
+    dependencies: &mut Vec<NativeRuntimeDependency>,
+    terms: &[NativeRuntimeLcTerm],
+    code: u32,
+    part: u8,
+    boolean_signals: &[u64],
+) {
+    for term in terms {
+        dependencies.push(NativeRuntimeDependency {
+            signal: term.signal,
+            code,
+            part,
+            bit_term: boolean_signals.binary_search(&term.signal).is_ok()
+                && coefficient_power_of_two(term.coeff).is_some(),
+        });
+    }
+}
+
+fn push_gate_dependencies(dependencies: &mut Vec<NativeRuntimeDependency>, gate: &NativeRuntimeCustomGate, code: u32) {
+    let (a_range, b_range, output_range) = gate_dependency_ranges(gate);
+    for signal in gate.signals.get(a_range).unwrap_or_default() {
+        dependencies.push(NativeRuntimeDependency { signal: *signal, code, part: DEP_PART_A, bit_term: false });
+    }
+    for signal in gate.signals.get(b_range).unwrap_or_default() {
+        dependencies.push(NativeRuntimeDependency { signal: *signal, code, part: DEP_PART_B, bit_term: false });
+    }
+    for signal in gate.signals.get(output_range).unwrap_or_default() {
+        dependencies.push(NativeRuntimeDependency { signal: *signal, code, part: DEP_PART_C, bit_term: false });
+    }
+}
+
+fn gate_dependency_ranges(
+    gate: &NativeRuntimeCustomGate,
+) -> (std::ops::Range<usize>, std::ops::Range<usize>, std::ops::Range<usize>) {
+    match gate.kind {
+        NativeRuntimeCustomGateKind::CMul => (0..3, 3..6, 6..9),
+        NativeRuntimeCustomGateKind::EvPol4 => (0..18, 0..0, 18..21),
+        NativeRuntimeCustomGateKind::TreeSelector4 => (0..14, 0..0, 14..17),
+        NativeRuntimeCustomGateKind::SelectValue1 => (0..18, 0..0, 18..22),
+        NativeRuntimeCustomGateKind::FFT4 => (0..12, 0..0, 12..24),
+        NativeRuntimeCustomGateKind::Poseidon16 => (0..16, 0..0, 16..224),
+        NativeRuntimeCustomGateKind::CustPoseidon16 => (0..18, 0..0, 18..226),
+    }
+}
+
+fn push_lc_signals(signals: &mut Vec<u64>, terms: &[NativeRuntimeLcTerm]) {
+    for term in terms {
+        if term.signal != 0 {
+            signals.push(term.signal);
+        }
+    }
+}
+
+fn direct_signal_equality(constraint: &NativeRuntimeConstraint) -> bool {
+    if !constraint.a.is_empty() || !constraint.b.is_empty() || constraint.c.len() != 2 {
+        return false;
+    }
+    let left = &constraint.c[0];
+    let right = &constraint.c[1];
+    if left.signal == 0 || right.signal == 0 {
+        return false;
+    }
+    (left.coeff == 1 && right.coeff == GOLDILOCKS_P_MINUS_ONE)
+        || (left.coeff == GOLDILOCKS_P_MINUS_ONE && right.coeff == 1)
+}
+
+fn boolean_signal(constraint: &NativeRuntimeConstraint) -> Option<u64> {
+    if !constraint.c.is_empty() {
+        return None;
+    }
+    boolean_signal_from_lcs(&constraint.a, &constraint.b)
+        .or_else(|| boolean_signal_from_lcs(&constraint.b, &constraint.a))
+}
+
+fn boolean_signal_from_lcs(a: &[NativeRuntimeLcTerm], b: &[NativeRuntimeLcTerm]) -> Option<u64> {
+    if a.len() != 2 || b.len() != 1 || b[0].coeff != 1 {
+        return None;
+    }
+    let signal = b[0].signal;
+    let mut has_signal = false;
+    let mut has_minus_one = false;
+    for term in a {
+        if term.signal == signal && term.coeff == 1 {
+            has_signal = true;
+        } else if term.signal == 0 && term.coeff == GOLDILOCKS_P_MINUS_ONE {
+            has_minus_one = true;
+        } else {
+            return None;
+        }
+    }
+    (has_signal && has_minus_one).then_some(signal)
 }
 
 impl NativeRecursiveRuntime {
@@ -235,6 +424,7 @@ impl NativeRecursiveRuntime {
             circom_wasm,
             constraints,
             custom_gates,
+            solver_index: OnceLock::new(),
         })
     }
 
@@ -243,10 +433,12 @@ impl NativeRecursiveRuntime {
         source_words: &[u64],
         total_witness_words: u64,
     ) -> ProofmanResult<Vec<F>> {
+        let timing = std::env::var_os("PROOFMAN_DEBUG_NATIVE_TIMING").is_some();
+        let total_start = Instant::now();
         self.check_witness_size(total_witness_words)?;
         self.check_source_assertions(source_words)?;
 
-        if std::env::var_os("PROOFMAN_DISABLE_CIRCOM_WASM").is_none() {
+        if std::env::var_os("PROOFMAN_ENABLE_CIRCOM_WASM").is_some() {
             if let Some(circom_wasm) = &self.circom_wasm {
                 return self.generate_circom_wasm_witness(circom_wasm, source_words, total_witness_words);
             }
@@ -328,7 +520,33 @@ impl NativeRecursiveRuntime {
             }
         }
 
+        let copy_elapsed = total_start.elapsed();
         self.solve_constraints(&mut witness, &mut known)?;
+        if timing {
+            tracing::error!(
+                "Native recursive witness timing: witness_words={} source_words={} publics={} constraints={} gates={} copy_ops={} copy_ms={} total_ms={}",
+                total_witness_words,
+                source_words.len(),
+                self.n_publics,
+                self.constraints.len(),
+                self.custom_gates.len(),
+                self.section_copy_ops.len(),
+                copy_elapsed.as_millis(),
+                total_start.elapsed().as_millis()
+            );
+        }
+        if std::env::var_os("PROOFMAN_DEBUG_CHALLENGE").is_some() && self.n_publics > 0 {
+            let public_end = (1 + self.n_publics as usize).min(witness.len());
+            let unknown_publics = known[1..public_end].iter().filter(|&&is_known| !is_known).count();
+            let prefix_end = (1 + 16usize).min(public_end);
+            let prefix = witness[1..prefix_end].iter().map(|value| value.as_canonical_u64()).collect::<Vec<_>>();
+            tracing::error!(
+                "Native recursive witness publics: n_publics={} unknown_publics={} prefix={:?}",
+                self.n_publics,
+                unknown_publics,
+                prefix
+            );
+        }
 
         Ok(witness)
     }
@@ -525,12 +743,64 @@ impl NativeRecursiveRuntime {
             return Ok(());
         }
 
-        let mut solved_any = true;
-        while solved_any {
-            solved_any = false;
-            for (constraint_index, constraint) in self.constraints.iter().enumerate() {
-                if self.try_solve_constraint(constraint_index, constraint, witness, known)? {
-                    solved_any = true;
+        let timing = std::env::var_os("PROOFMAN_DEBUG_NATIVE_TIMING").is_some();
+        let index_ready = self.solver_index.get().is_some();
+        let index_start = Instant::now();
+        let solver_index = self.solver_index.get_or_init(|| NativeRuntimeSolverIndex::build(self));
+        if timing && !index_ready {
+            tracing::error!(
+                "Native recursive solver index built: constraints={} gates={} dependencies={} ms={}",
+                self.constraints.len(),
+                self.custom_gates.len(),
+                solver_index.dependencies.len(),
+                index_start.elapsed().as_millis()
+            );
+        }
+        let solve_start = Instant::now();
+        let mut constraint_states = build_constraint_states(&self.constraints, known, solver_index)?;
+        let mut gate_states = build_gate_states(&self.custom_gates, known)?;
+        let mut queue = VecDeque::with_capacity(self.constraints.len() + self.custom_gates.len());
+        let mut queued_constraints = vec![false; self.constraints.len()];
+        let mut queued_gates = vec![false; self.custom_gates.len()];
+        for (constraint_index, constraint) in self.constraints.iter().enumerate() {
+            if constraint_state_maybe_ready(constraint, constraint_states[constraint_index]) {
+                queued_constraints[constraint_index] = true;
+                queue.push_back(constraint_index as u32);
+            }
+        }
+        for (gate_index, _) in self.custom_gates.iter().enumerate() {
+            if gate_state_maybe_ready(gate_states[gate_index]) {
+                queued_gates[gate_index] = true;
+                queue.push_back(DEPENDENCY_GATE_FLAG | gate_index as u32);
+            }
+        }
+
+        let mut processed_constraints = 0usize;
+        let mut processed_gates = 0usize;
+        let mut solved_constraints = 0usize;
+        let mut solved_gates = 0usize;
+        while let Some(code) = queue.pop_front() {
+            if code & DEPENDENCY_GATE_FLAG == 0 {
+                let constraint_index = code as usize;
+                queued_constraints[constraint_index] = false;
+                let constraint = &self.constraints[constraint_index];
+                processed_constraints += 1;
+                let solved_signals =
+                    self.try_solve_constraint(constraint_index, constraint, witness, known, solver_index)?;
+                if !solved_signals.is_empty() {
+                    solved_constraints += 1;
+                    for signal in solved_signals {
+                        enqueue_dependents(
+                            signal as u64,
+                            self,
+                            solver_index,
+                            &mut constraint_states,
+                            &mut gate_states,
+                            &mut queue,
+                            &mut queued_constraints,
+                            &mut queued_gates,
+                        )?;
+                    }
                 }
                 if std::env::var_os("PROOFMAN_VALIDATE_CIRCOM_WASM").is_some() {
                     let a = eval_lc(&constraint.a, witness, known)?;
@@ -553,18 +823,88 @@ impl NativeRecursiveRuntime {
                         )));
                     }
                 }
+            } else {
+                let gate_index = (code & !DEPENDENCY_GATE_FLAG) as usize;
+                queued_gates[gate_index] = false;
+                let gate = &self.custom_gates[gate_index];
+                processed_gates += 1;
+                let unknown_before = gate
+                    .signals
+                    .iter()
+                    .copied()
+                    .filter(|&signal| {
+                        usize::try_from(signal)
+                            .ok()
+                            .and_then(|idx| known.get(idx))
+                            .map(|is_known| !*is_known)
+                            .unwrap_or(false)
+                    })
+                    .collect::<Vec<_>>();
+                if self.try_solve_custom_gate(gate, witness, known, solver_index)? {
+                    solved_gates += 1;
+                    for signal in unknown_before {
+                        if usize::try_from(signal).ok().and_then(|idx| known.get(idx)).copied() != Some(true) {
+                            continue;
+                        }
+                        enqueue_dependents(
+                            signal,
+                            self,
+                            solver_index,
+                            &mut constraint_states,
+                            &mut gate_states,
+                            &mut queue,
+                            &mut queued_constraints,
+                            &mut queued_gates,
+                        )?;
+                    }
+                }
             }
-            for gate in &self.custom_gates {
-                if self.try_solve_custom_gate(gate, witness, known)? {
-                    solved_any = true;
+        }
+        let solve_elapsed = solve_start.elapsed();
+
+        if std::env::var_os("PROOFMAN_DEBUG_NATIVE_UNRESOLVED").is_some() {
+            let unknown_count = known.iter().filter(|&&is_known| !is_known).count();
+            let first_unknown = known.iter().position(|&is_known| !is_known);
+            tracing::error!(
+                "Native recursive unresolved witness signals: unknown_count={} first_unknown={:?} witness_len={}",
+                unknown_count,
+                first_unknown,
+                known.len()
+            );
+            for (gate_index, gate) in self.custom_gates.iter().enumerate() {
+                let unresolved = gate
+                    .signals
+                    .iter()
+                    .copied()
+                    .filter(|&signal| {
+                        usize::try_from(signal)
+                            .ok()
+                            .and_then(|idx| known.get(idx))
+                            .map(|is_known| !*is_known)
+                            .unwrap_or(true)
+                    })
+                    .take(16)
+                    .collect::<Vec<_>>();
+                if !unresolved.is_empty() {
+                    tracing::error!(
+                        "Native recursive first unresolved custom gate: index={} kind={:?} unresolved_prefix={:?} signals_prefix={:?}",
+                        gate_index,
+                        gate.kind,
+                        unresolved,
+                        &gate.signals[..gate.signals.len().min(24)]
+                    );
+                    break;
                 }
             }
         }
 
+        let verify_gates_start = Instant::now();
         for gate in &self.custom_gates {
             self.verify_custom_gate(gate, witness, known)?;
         }
+        let verify_gates_elapsed = verify_gates_start.elapsed();
 
+        let verify_constraints_start = Instant::now();
         for (constraint_index, constraint) in self.constraints.iter().enumerate() {
             let a = eval_lc(&constraint.a, witness, known)?;
             let b = eval_lc(&constraint.b, witness, known)?;
@@ -582,6 +922,20 @@ impl NativeRecursiveRuntime {
                 )));
             }
         }
+        if timing {
+            tracing::error!(
+                "Native recursive solver timing: constraints={} gates={} processed_constraints={} processed_gates={} solved_constraints={} solved_gates={} queue_ms={} verify_gates_ms={} verify_constraints_ms={}",
+                self.constraints.len(),
+                self.custom_gates.len(),
+                processed_constraints,
+                processed_gates,
+                solved_constraints,
+                solved_gates,
+                solve_elapsed.as_millis(),
+                verify_gates_elapsed.as_millis(),
+                verify_constraints_start.elapsed().as_millis()
+            );
+        }
 
         Ok(())
     }
@@ -592,7 +946,8 @@ impl NativeRecursiveRuntime {
         constraint: &NativeRuntimeConstraint,
         witness: &mut [F],
         known: &mut [bool],
-    ) -> ProofmanResult<bool> {
+        solver_index: &NativeRuntimeSolverIndex,
+    ) -> ProofmanResult<Vec<usize>> {
         let a = eval_lc(&constraint.a, witness, known)?;
         let b = eval_lc(&constraint.b, witness, known)?;
         let c = eval_lc(&constraint.c, witness, known)?;
@@ -609,6 +964,15 @@ impl NativeRecursiveRuntime {
             let desired = a.value * b.value;
             return solve_single_unknown(&c, desired, witness, known);
         }
+        if c.unknown.len() == 1
+            && ((a.unknown.is_empty() && a.value.is_zero()) || (b.unknown.is_empty() && b.value.is_zero()))
+        {
+            return solve_single_unknown(&c, F::ZERO, witness, known);
+        }
+
+        if let Some(signals) = try_solve_bit_decomposition(constraint, witness, known, solver_index)? {
+            return Ok(signals);
+        }
 
         if a.unknown.is_empty() && b.unknown.is_empty() && c.unknown.is_empty() && a.value * b.value != c.value {
             return Err(ProofmanError::InvalidProof(format_constraint_failure(
@@ -623,7 +987,7 @@ impl NativeRecursiveRuntime {
             )));
         }
 
-        Ok(false)
+        Ok(Vec::new())
     }
 
     fn try_solve_custom_gate<F: PrimeField64>(
@@ -631,9 +995,10 @@ impl NativeRecursiveRuntime {
         gate: &NativeRuntimeCustomGate,
         witness: &mut [F],
         known: &mut [bool],
+        solver_index: &NativeRuntimeSolverIndex,
     ) -> ProofmanResult<bool> {
         match gate.kind {
-            NativeRuntimeCustomGateKind::CMul => solve_cmul_gate(gate, witness, known),
+            NativeRuntimeCustomGateKind::CMul => solve_cmul_gate(gate, witness, known, solver_index),
             NativeRuntimeCustomGateKind::EvPol4 => solve_evpol4_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::TreeSelector4 => solve_tree_selector4_gate(gate, witness, known),
             NativeRuntimeCustomGateKind::SelectValue1 => solve_select_value1_gate(gate, witness, known),
@@ -729,18 +1094,348 @@ fn format_lc_terms<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F]
     parts.join(", ")
 }
 
+fn enqueue_dependents(
+    signal: u64,
+    runtime: &NativeRecursiveRuntime,
+    solver_index: &NativeRuntimeSolverIndex,
+    constraint_states: &mut [ConstraintSolveState],
+    gate_states: &mut [GateSolveState],
+    queue: &mut VecDeque<u32>,
+    queued_constraints: &mut [bool],
+    queued_gates: &mut [bool],
+) -> ProofmanResult<()> {
+    let mut touched_constraints = Vec::new();
+    let mut touched_gates = Vec::new();
+    for dependency_index in solver_index.dependency_range(signal) {
+        let dependency = solver_index.dependencies[dependency_index];
+        let code = dependency.code;
+        if code & DEPENDENCY_GATE_FLAG == 0 {
+            let constraint_index = code as usize;
+            apply_constraint_dependency(&mut constraint_states[constraint_index], dependency);
+            touched_constraints.push(constraint_index);
+        } else {
+            let gate_index = (code & !DEPENDENCY_GATE_FLAG) as usize;
+            apply_gate_dependency(&mut gate_states[gate_index], dependency);
+            touched_gates.push(gate_index);
+        }
+    }
+
+    touched_constraints.sort_unstable();
+    touched_constraints.dedup();
+    for constraint_index in touched_constraints {
+        if !queued_constraints[constraint_index]
+            && constraint_state_maybe_ready(&runtime.constraints[constraint_index], constraint_states[constraint_index])
+        {
+            queued_constraints[constraint_index] = true;
+            queue.push_back(constraint_index as u32);
+        }
+    }
+
+    touched_gates.sort_unstable();
+    touched_gates.dedup();
+    for gate_index in touched_gates {
+        if !queued_gates[gate_index] && gate_state_maybe_ready(gate_states[gate_index]) {
+            queued_gates[gate_index] = true;
+            queue.push_back(DEPENDENCY_GATE_FLAG | gate_index as u32);
+        }
+    }
+    Ok(())
+}
+
+fn apply_constraint_dependency(state: &mut ConstraintSolveState, dependency: NativeRuntimeDependency) {
+    match dependency.part {
+        DEP_PART_A => decrement_unknown(&mut state.a_unknown),
+        DEP_PART_B => decrement_unknown(&mut state.b_unknown),
+        DEP_PART_C => {
+            decrement_unknown(&mut state.c_unknown);
+            if !dependency.bit_term {
+                decrement_unknown(&mut state.c_unknown_non_bit);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_gate_dependency(state: &mut GateSolveState, dependency: NativeRuntimeDependency) {
+    match dependency.part {
+        DEP_PART_A => decrement_unknown(&mut state.a_unknown),
+        DEP_PART_B => decrement_unknown(&mut state.b_unknown),
+        DEP_PART_C => decrement_unknown(&mut state.output_unknown),
+        _ => {}
+    }
+}
+
+fn decrement_unknown(count: &mut usize) {
+    if *count > 0 {
+        *count -= 1;
+    }
+}
+
+fn constraint_state_maybe_ready(constraint: &NativeRuntimeConstraint, state: ConstraintSolveState) -> bool {
+    if state.a_unknown == 1 && state.b_unknown == 0 && state.c_unknown == 0 {
+        return true;
+    }
+    if state.b_unknown == 1 && state.a_unknown == 0 && state.c_unknown == 0 {
+        return true;
+    }
+    if state.c_unknown == 1 && (state.a_unknown == 0 || state.b_unknown == 0) {
+        return true;
+    }
+    if !constraint.a.is_empty() || !constraint.b.is_empty() || constraint.c.is_empty() {
+        return false;
+    }
+    (1..=u64::BITS as usize).contains(&state.c_unknown) && state.c_unknown_non_bit == 0
+}
+
+fn build_constraint_states(
+    constraints: &[NativeRuntimeConstraint],
+    known: &[bool],
+    solver_index: &NativeRuntimeSolverIndex,
+) -> ProofmanResult<Vec<ConstraintSolveState>> {
+    let mut states = Vec::with_capacity(constraints.len());
+    for constraint in constraints {
+        states.push(ConstraintSolveState {
+            a_unknown: count_lc_unknown(&constraint.a, known)?,
+            b_unknown: count_lc_unknown(&constraint.b, known)?,
+            c_unknown: count_lc_unknown(&constraint.c, known)?,
+            c_unknown_non_bit: count_lc_unknown_non_bit(&constraint.c, known, solver_index)?,
+        });
+    }
+    Ok(states)
+}
+
+fn count_lc_unknown_non_bit(
+    terms: &[NativeRuntimeLcTerm],
+    known: &[bool],
+    solver_index: &NativeRuntimeSolverIndex,
+) -> ProofmanResult<usize> {
+    let mut unknown_non_bit = 0usize;
+    for term in terms {
+        let signal = usize::try_from(term.signal).map_err(|_| {
+            ProofmanError::InvalidSetup(format!("native recursive R1CS signal {} is too large", term.signal))
+        })?;
+        let Some(&is_known) = known.get(signal) else {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive R1CS signal {signal} is outside witness size {}",
+                known.len()
+            )));
+        };
+        if !is_known {
+            let is_bit_term =
+                solver_index.is_boolean_signal(signal as u64) && coefficient_power_of_two(term.coeff).is_some();
+            if !is_bit_term {
+                unknown_non_bit += 1;
+            }
+        }
+    }
+    Ok(unknown_non_bit)
+}
+
+fn build_gate_states(custom_gates: &[NativeRuntimeCustomGate], known: &[bool]) -> ProofmanResult<Vec<GateSolveState>> {
+    let mut states = Vec::with_capacity(custom_gates.len());
+    for gate in custom_gates {
+        states.push(gate_solve_state(gate, known)?);
+    }
+    Ok(states)
+}
+
+fn gate_solve_state(gate: &NativeRuntimeCustomGate, known: &[bool]) -> ProofmanResult<GateSolveState> {
+    let signals = gate_signal_indices(&gate.signals, known.len())?;
+    match gate.kind {
+        NativeRuntimeCustomGateKind::CMul => {
+            if signals.len() != 9 {
+                return Err(ProofmanError::InvalidSetup(format!(
+                    "CMul native runtime gate must have 9 signals, got {}",
+                    signals.len()
+                )));
+            }
+            Ok(GateSolveState {
+                a_unknown: count_unknown_signals(&signals[..3], known),
+                b_unknown: count_unknown_signals(&signals[3..6], known),
+                output_unknown: count_unknown_signals(&signals[6..9], known),
+                cmul: true,
+            })
+        }
+        NativeRuntimeCustomGateKind::EvPol4 => gate_forward_state("EvPol4", &signals, known, 21, 18, 21),
+        NativeRuntimeCustomGateKind::TreeSelector4 => gate_forward_state("TreeSelector4", &signals, known, 17, 14, 17),
+        NativeRuntimeCustomGateKind::SelectValue1 => gate_forward_state("SelectValue1", &signals, known, 22, 18, 22),
+        NativeRuntimeCustomGateKind::FFT4 => gate_forward_state("FFT4", &signals, known, 24, 12, 24),
+        NativeRuntimeCustomGateKind::Poseidon16 => gate_forward_state("Poseidon16", &signals, known, 224, 16, 224),
+        NativeRuntimeCustomGateKind::CustPoseidon16 => {
+            gate_forward_state("CustPoseidon16", &signals, known, 226, 18, 226)
+        }
+    }
+}
+
+fn gate_forward_state(
+    gate: &str,
+    signals: &[usize],
+    known: &[bool],
+    expected_len: usize,
+    input_len: usize,
+    output_end: usize,
+) -> ProofmanResult<GateSolveState> {
+    if signals.len() != expected_len {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "{gate} native runtime gate must have {expected_len} signals, got {}",
+            signals.len()
+        )));
+    }
+    Ok(GateSolveState {
+        a_unknown: count_unknown_signals(&signals[..input_len], known),
+        b_unknown: 0,
+        output_unknown: count_unknown_signals(&signals[input_len..output_end], known),
+        cmul: false,
+    })
+}
+
+fn gate_state_maybe_ready(state: GateSolveState) -> bool {
+    if !state.cmul {
+        return state.a_unknown == 0 && state.output_unknown > 0;
+    }
+    (state.a_unknown == 0 && state.b_unknown == 0 && state.output_unknown > 0)
+        || (state.a_unknown == 0 && state.output_unknown == 0 && state.b_unknown > 0)
+        || (state.b_unknown == 0 && state.output_unknown == 0 && state.a_unknown > 0)
+}
+
+fn gate_signal_indices(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
+    let mut out = Vec::with_capacity(signals.len());
+    for &signal in signals {
+        let signal = usize::try_from(signal).map_err(|_| {
+            ProofmanError::InvalidSetup(format!("native recursive custom gate signal {signal} is too large"))
+        })?;
+        if signal >= witness_len {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive custom gate signal {signal} is outside witness size {witness_len}"
+            )));
+        }
+        out.push(signal);
+    }
+    Ok(out)
+}
+
+fn count_unknown_signals(signals: &[usize], known: &[bool]) -> usize {
+    signals.iter().filter(|&&signal| !known[signal]).count()
+}
+
+fn count_lc_unknown(terms: &[NativeRuntimeLcTerm], known: &[bool]) -> ProofmanResult<usize> {
+    let mut unknown = 0usize;
+    for term in terms {
+        let signal = usize::try_from(term.signal).map_err(|_| {
+            ProofmanError::InvalidSetup(format!("native recursive R1CS signal {} is too large", term.signal))
+        })?;
+        let Some(&is_known) = known.get(signal) else {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive R1CS signal {signal} is outside witness size {}",
+                known.len()
+            )));
+        };
+        if !is_known {
+            unknown += 1;
+        }
+    }
+    Ok(unknown)
+}
+
+fn try_solve_bit_decomposition<F: PrimeField64>(
+    constraint: &NativeRuntimeConstraint,
+    witness: &mut [F],
+    known: &mut [bool],
+    solver_index: &NativeRuntimeSolverIndex,
+) -> ProofmanResult<Option<Vec<usize>>> {
+    if !constraint.a.is_empty() || !constraint.b.is_empty() || constraint.c.is_empty() {
+        return Ok(None);
+    }
+
+    let mut known_value = F::ZERO;
+    let mut unknown = Vec::new();
+    for term in &constraint.c {
+        let signal = usize::try_from(term.signal).map_err(|_| {
+            ProofmanError::InvalidSetup(format!("native recursive R1CS signal {} is too large", term.signal))
+        })?;
+        if signal >= witness.len() {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive R1CS signal {signal} is outside witness size {}",
+                witness.len()
+            )));
+        }
+        if known[signal] {
+            known_value += witness[signal] * F::from_u64(term.coeff);
+        } else {
+            unknown.push((signal, term.coeff));
+        }
+    }
+    if unknown.is_empty() || unknown.len() > u64::BITS as usize {
+        return Ok(None);
+    }
+
+    let mut sign = None;
+    let mut covered_bits = 0u64;
+    let mut unknown_with_powers = Vec::with_capacity(unknown.len());
+    for (signal, coeff) in unknown {
+        if !solver_index.is_boolean_signal(signal as u64) {
+            return Ok(None);
+        }
+        let Some((term_sign, power)) = coefficient_power_of_two(coeff) else {
+            return Ok(None);
+        };
+        if sign.get_or_insert(term_sign) != &term_sign {
+            return Ok(None);
+        }
+        if covered_bits & power != 0 {
+            return Ok(None);
+        }
+        covered_bits |= power;
+        unknown_with_powers.push((signal, power));
+    }
+
+    let target = if sign == Some(-1) { known_value } else { -known_value }.as_canonical_u64();
+    if target & !covered_bits != 0 {
+        return Ok(None);
+    }
+
+    let mut solved = Vec::with_capacity(unknown_with_powers.len());
+    for (signal, power) in unknown_with_powers {
+        let value = if target & power == 0 { F::ZERO } else { F::ONE };
+        if known[signal] {
+            if witness[signal] != value {
+                return Err(ProofmanError::InvalidProof(format!(
+                    "native recursive bit decomposition solved conflicting value for signal {signal}"
+                )));
+            }
+        } else {
+            witness[signal] = value;
+            known[signal] = true;
+            solved.push(signal);
+        }
+    }
+
+    Ok((!solved.is_empty()).then_some(solved))
+}
+
+fn coefficient_power_of_two(coeff: u64) -> Option<(i8, u64)> {
+    if coeff != 0 && coeff.is_power_of_two() {
+        return Some((1, coeff));
+    }
+    let negative = GOLDILOCKS_MODULUS.checked_sub(coeff)?;
+    if negative != 0 && negative.is_power_of_two() {
+        return Some((-1, negative));
+    }
+    None
+}
+
 fn solve_single_unknown<F: PrimeField64>(
     lc: &LcEval<F>,
     desired: F,
     witness: &mut [F],
     known: &mut [bool],
-) -> ProofmanResult<bool> {
+) -> ProofmanResult<Vec<usize>> {
     if lc.unknown.len() != 1 {
-        return Ok(false);
+        return Ok(Vec::new());
     }
     let (signal, coeff) = lc.unknown[0];
     if coeff.is_zero() {
-        return Ok(false);
+        return Ok(Vec::new());
     }
     let value = (desired - lc.value) / coeff;
     if known[signal] {
@@ -749,11 +1444,11 @@ fn solve_single_unknown<F: PrimeField64>(
                 "native recursive R1CS solved conflicting value for signal {signal}"
             )));
         }
-        Ok(false)
+        Ok(Vec::new())
     } else {
         witness[signal] = value;
         known[signal] = true;
-        Ok(true)
+        Ok(vec![signal])
     }
 }
 
@@ -761,6 +1456,7 @@ fn solve_cmul_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &mut [F],
     known: &mut [bool],
+    solver_index: &NativeRuntimeSolverIndex,
 ) -> ProofmanResult<bool> {
     if gate.signals.len() != 9 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -769,29 +1465,34 @@ fn solve_cmul_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals[..6].iter().any(|&signal| !known[signal]) {
-        return Ok(false);
+    let a_known = signals[..3].iter().all(|&signal| known[signal]);
+    let b_known = signals[3..6].iter().all(|&signal| known[signal]);
+    let output_known = signals[6..9].iter().all(|&signal| known[signal]);
+
+    if a_known && b_known {
+        let a = [witness[signals[0]], witness[signals[1]], witness[signals[2]]];
+        let b = [witness[signals[3]], witness[signals[4]], witness[signals[5]]];
+        let result = cmul(a, b);
+        return assign_gate_outputs("CMul", &signals[6..9], result, witness, known);
     }
 
-    let a = [witness[signals[0]], witness[signals[1]], witness[signals[2]]];
-    let b = [witness[signals[3]], witness[signals[4]], witness[signals[5]]];
-    let result = cmul(a, b);
-    let mut changed = false;
-    for idx in 0..3 {
-        let signal = signals[6 + idx];
-        if known[signal] {
-            if witness[signal] != result[idx] {
-                return Err(ProofmanError::InvalidProof(format!(
-                    "native recursive CMul gate output mismatch at signal {signal}"
-                )));
-            }
-        } else {
-            witness[signal] = result[idx];
-            known[signal] = true;
-            changed = true;
+    if a_known && output_known && solver_index.can_inverse_solve(&signals[3..6]) {
+        let a = [witness[signals[0]], witness[signals[1]], witness[signals[2]]];
+        let output = [witness[signals[6]], witness[signals[7]], witness[signals[8]]];
+        if let Some(b) = cdiv(output, a) {
+            return assign_gate_outputs("CMul", &signals[3..6], b, witness, known);
         }
     }
-    Ok(changed)
+
+    if b_known && output_known && solver_index.can_inverse_solve(&signals[..3]) {
+        let b = [witness[signals[3]], witness[signals[4]], witness[signals[5]]];
+        let output = [witness[signals[6]], witness[signals[7]], witness[signals[8]]];
+        if let Some(a) = cdiv(output, b) {
+            return assign_gate_outputs("CMul", &signals[..3], a, witness, known);
+        }
+    }
+
+    Ok(false)
 }
 
 fn verify_cmul_gate<F: PrimeField64>(
@@ -1056,13 +1757,15 @@ fn solve_poseidon16_gate<F: PrimeField64>(
         return Err(ProofmanError::InvalidSetup(format!("{gate_name} native runtime gate must not have parameters")));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals[208..].iter().any(|&signal| !known[signal]) {
+    let input_end = if custom { 18 } else { 16 };
+    let output_start = input_end;
+    if signals[..input_end].iter().any(|&signal| !known[signal]) {
         return Ok(false);
     }
 
     let input = poseidon16_input(gate_name, custom, &signals, witness)?;
     let result = poseidon16_trace(input);
-    assign_gate_outputs(gate_name, &signals[..208], result, witness, known)
+    assign_gate_outputs(gate_name, &signals[output_start..output_start + 208], result, witness, known)
 }
 
 fn verify_poseidon16_gate<F: PrimeField64>(
@@ -1089,7 +1792,8 @@ fn verify_poseidon16_gate<F: PrimeField64>(
 
     let input = poseidon16_input(gate_name, custom, &signals, witness)?;
     let result = poseidon16_trace(input);
-    verify_gate_outputs(gate_name, &signals[..208], result, witness)
+    let output_start = if custom { 18 } else { 16 };
+    verify_gate_outputs(gate_name, &signals[output_start..output_start + 208], result, witness)
 }
 
 fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
@@ -1136,7 +1840,9 @@ fn assign_gate_outputs<F: PrimeField64, const N: usize>(
         if known[signal] {
             if witness[signal] != expected[idx] {
                 return Err(ProofmanError::InvalidProof(format!(
-                    "native recursive {gate} gate output mismatch at signal {signal}"
+                    "native recursive {gate} gate output mismatch at signal {signal}: expected {} got {}",
+                    expected[idx].as_canonical_u64(),
+                    witness[signal].as_canonical_u64()
                 )));
             }
         } else {
@@ -1170,6 +1876,49 @@ fn cmul<F: PrimeField64>(a: [F; 3], b: [F; 3]) -> [F; 3] {
         a[0] * b[1] + a[1] * b[0] + a[1] * b[2] + a[2] * b[1] + a[2] * b[2],
         a[0] * b[2] + a[2] * b[2] + a[2] * b[0] + a[1] * b[1],
     ]
+}
+
+fn cdiv<F: PrimeField64>(output: [F; 3], divisor: [F; 3]) -> Option<[F; 3]> {
+    let [d0, d1, d2] = divisor;
+    solve_linear3([[d0, d2, d1, output[0]], [d1, d0 + d2, d1 + d2, output[1]], [d2, d1, d0 + d2, output[2]]])
+}
+
+fn solve_linear3<F: PrimeField64>(mut rows: [[F; 4]; 3]) -> Option<[F; 3]> {
+    let mut pivots = [0usize; 3];
+    let mut pivot_count = 0usize;
+
+    for col in 0..3 {
+        let pivot = (pivot_count..3).find(|&row| !rows[row][col].is_zero())?;
+        rows.swap(pivot_count, pivot);
+
+        let inv_pivot = F::ONE / rows[pivot_count][col];
+        for entry in col..4 {
+            rows[pivot_count][entry] *= inv_pivot;
+        }
+
+        for row in 0..3 {
+            if row == pivot_count || rows[row][col].is_zero() {
+                continue;
+            }
+            let factor = rows[row][col];
+            for entry in col..4 {
+                rows[row][entry] -= factor * rows[pivot_count][entry];
+            }
+        }
+
+        pivots[pivot_count] = col;
+        pivot_count += 1;
+    }
+
+    if pivot_count != 3 {
+        return None;
+    }
+
+    let mut out = [F::ZERO; 3];
+    for row in 0..3 {
+        out[pivots[row]] = rows[row][3];
+    }
+    Some(out)
 }
 
 fn cmul_add<F: PrimeField64>(a: [F; 3], b: [F; 3], c: [F; 3]) -> [F; 3] {
@@ -1246,13 +1995,13 @@ fn poseidon16_input<F: PrimeField64>(
 ) -> ProofmanResult<[F; 16]> {
     let mut input = [F::ZERO; 16];
     for idx in 0..16 {
-        input[idx] = witness[signals[208 + idx]];
+        input[idx] = witness[signals[idx]];
     }
     if !custom {
         return Ok(input);
     }
 
-    order_cust_poseidon16_input(gate, input, witness[signals[224]], witness[signals[225]])
+    order_cust_poseidon16_input(gate, input, witness[signals[16]], witness[signals[17]])
 }
 
 fn order_cust_poseidon16_input<F: PrimeField64>(
@@ -1831,6 +2580,188 @@ mod tests {
     }
 
     #[test]
+    fn solves_bit_decomposition_constraints() -> ProofmanResult<()> {
+        let bit_constraints = (2..=5)
+            .map(|signal| NativeRuntimeConstraint {
+                a: vec![
+                    NativeRuntimeLcTerm { signal: 0, coeff: GOLDILOCKS_P_MINUS_ONE },
+                    NativeRuntimeLcTerm { signal, coeff: 1 },
+                ],
+                b: vec![NativeRuntimeLcTerm { signal, coeff: 1 }],
+                c: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let mut constraints = bit_constraints;
+        constraints.push(NativeRuntimeConstraint {
+            a: Vec::new(),
+            b: Vec::new(),
+            c: vec![
+                NativeRuntimeLcTerm { signal: 1, coeff: 1 },
+                NativeRuntimeLcTerm { signal: 2, coeff: GOLDILOCKS_P_MINUS_ONE },
+                NativeRuntimeLcTerm { signal: 3, coeff: GOLDILOCKS_MODULUS - 2 },
+                NativeRuntimeLcTerm { signal: 4, coeff: GOLDILOCKS_MODULUS - 4 },
+                NativeRuntimeLcTerm { signal: 5, coeff: GOLDILOCKS_MODULUS - 8 },
+            ],
+        });
+        let runtime = NativeRecursiveRuntime {
+            template_id: 0,
+            size_witness_words: 6,
+            n_publics: 0,
+            public_input_offset_words: 1,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 1,
+            source_sections: Vec::new(),
+            section_copy_ops: Vec::new(),
+            circom_wasm: None,
+            constraints,
+            custom_gates: Vec::new(),
+            solver_index: OnceLock::new(),
+        };
+
+        let witness = runtime.generate_witness::<Goldilocks>(&[10], 6)?;
+        assert_eq!(witness[2].as_canonical_u64(), 0);
+        assert_eq!(witness[3].as_canonical_u64(), 1);
+        assert_eq!(witness[4].as_canonical_u64(), 0);
+        assert_eq!(witness[5].as_canonical_u64(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn inverse_solves_unprotected_cmul_input() -> ProofmanResult<()> {
+        let a = [Goldilocks::from_u64(2), Goldilocks::from_u64(3), Goldilocks::from_u64(4)];
+        let b = [Goldilocks::from_u64(5), Goldilocks::from_u64(7), Goldilocks::from_u64(11)];
+        let output = cmul(a, b);
+        let runtime = NativeRecursiveRuntime {
+            template_id: 0,
+            size_witness_words: 10,
+            n_publics: 0,
+            public_input_offset_words: 0,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 0,
+            source_sections: vec![NativeRuntimeSection { start_word: 0, word_len: 6, kind: 0, flags: 0 }],
+            section_copy_ops: vec![
+                NativeRuntimeSectionCopyOp {
+                    section_index: 0,
+                    section_offset_words: 0,
+                    word_len: 3,
+                    witness_offset_words: 1,
+                },
+                NativeRuntimeSectionCopyOp {
+                    section_index: 0,
+                    section_offset_words: 3,
+                    word_len: 3,
+                    witness_offset_words: 7,
+                },
+            ],
+            circom_wasm: None,
+            constraints: Vec::new(),
+            custom_gates: vec![NativeRuntimeCustomGate {
+                kind: NativeRuntimeCustomGateKind::CMul,
+                parameters: Vec::new(),
+                signals: (1..=9).collect(),
+            }],
+            solver_index: OnceLock::new(),
+        };
+        let source = a.into_iter().chain(output).map(|value| value.as_canonical_u64()).collect::<Vec<_>>();
+
+        let witness = runtime.generate_witness::<Goldilocks>(&source, 10)?;
+        assert_eq!(witness[4], b[0]);
+        assert_eq!(witness[5], b[1]);
+        assert_eq!(witness[6], b[2]);
+        Ok(())
+    }
+
+    #[test]
+    fn does_not_inverse_solve_protected_cmul_input() -> ProofmanResult<()> {
+        let a = [Goldilocks::from_u64(2), Goldilocks::from_u64(3), Goldilocks::from_u64(4)];
+        let b = [Goldilocks::from_u64(5), Goldilocks::from_u64(7), Goldilocks::from_u64(11)];
+        let output = cmul(a, b);
+        let runtime = NativeRecursiveRuntime {
+            template_id: 0,
+            size_witness_words: 14,
+            n_publics: 0,
+            public_input_offset_words: 0,
+            public_input_copy_words: 0,
+            copy_indices: Vec::new(),
+            source_assertions: Vec::new(),
+            source_public_prefix_words: 0,
+            source_sections: vec![NativeRuntimeSection { start_word: 0, word_len: 10, kind: 0, flags: 0 }],
+            section_copy_ops: vec![
+                NativeRuntimeSectionCopyOp {
+                    section_index: 0,
+                    section_offset_words: 0,
+                    word_len: 3,
+                    witness_offset_words: 1,
+                },
+                NativeRuntimeSectionCopyOp {
+                    section_index: 0,
+                    section_offset_words: 3,
+                    word_len: 3,
+                    witness_offset_words: 7,
+                },
+                NativeRuntimeSectionCopyOp {
+                    section_index: 0,
+                    section_offset_words: 6,
+                    word_len: 4,
+                    witness_offset_words: 10,
+                },
+            ],
+            circom_wasm: None,
+            constraints: vec![
+                NativeRuntimeConstraint {
+                    a: Vec::new(),
+                    b: Vec::new(),
+                    c: vec![
+                        NativeRuntimeLcTerm { signal: 4, coeff: 1 },
+                        NativeRuntimeLcTerm { signal: 10, coeff: 1 },
+                        NativeRuntimeLcTerm { signal: 11, coeff: GOLDILOCKS_P_MINUS_ONE },
+                    ],
+                },
+                NativeRuntimeConstraint {
+                    a: Vec::new(),
+                    b: Vec::new(),
+                    c: vec![
+                        NativeRuntimeLcTerm { signal: 5, coeff: 1 },
+                        NativeRuntimeLcTerm { signal: 10, coeff: 1 },
+                        NativeRuntimeLcTerm { signal: 12, coeff: GOLDILOCKS_P_MINUS_ONE },
+                    ],
+                },
+                NativeRuntimeConstraint {
+                    a: Vec::new(),
+                    b: Vec::new(),
+                    c: vec![
+                        NativeRuntimeLcTerm { signal: 6, coeff: 1 },
+                        NativeRuntimeLcTerm { signal: 10, coeff: 1 },
+                        NativeRuntimeLcTerm { signal: 13, coeff: GOLDILOCKS_P_MINUS_ONE },
+                    ],
+                },
+            ],
+            custom_gates: vec![NativeRuntimeCustomGate {
+                kind: NativeRuntimeCustomGateKind::CMul,
+                parameters: Vec::new(),
+                signals: (1..=9).collect(),
+            }],
+            solver_index: OnceLock::new(),
+        };
+        let two = Goldilocks::from_u64(2);
+        let protected_b = [b[0] + two, b[1] + two, b[2] + two];
+        let source = a
+            .into_iter()
+            .chain(output)
+            .chain([Goldilocks::ONE, protected_b[0], protected_b[1], protected_b[2]])
+            .map(|value| value.as_canonical_u64())
+            .collect::<Vec<_>>();
+
+        let err = runtime.generate_witness::<Goldilocks>(&source, 14).unwrap_err();
+        assert!(err.to_string().contains("CMul gate output mismatch"));
+        Ok(())
+    }
+
+    #[test]
     fn solves_evpol4_custom_gate() -> ProofmanResult<()> {
         let runtime = NativeRecursiveRuntime {
             template_id: 0,
@@ -1850,6 +2781,7 @@ mod tests {
                 parameters: Vec::new(),
                 signals: (1..=21).collect(),
             }],
+            solver_index: OnceLock::new(),
         };
         let mut source = vec![0u64; 18];
         source[0] = 1;
@@ -1884,6 +2816,7 @@ mod tests {
                 parameters: Vec::new(),
                 signals: (1..=17).collect(),
             }],
+            solver_index: OnceLock::new(),
         };
         let source = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 1];
 
@@ -1914,6 +2847,7 @@ mod tests {
                 parameters: Vec::new(),
                 signals: (1..=22).collect(),
             }],
+            solver_index: OnceLock::new(),
         };
         let source = vec![1, 2, 3, 4, 11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34, 1, 1];
 
@@ -1945,6 +2879,7 @@ mod tests {
                 parameters: vec![1, 1, 1, 2],
                 signals: (1..=24).collect(),
             }],
+            solver_index: OnceLock::new(),
         };
         let source = vec![10, 20, 30, 1, 2, 3, 40, 50, 60, 4, 5, 6];
 
@@ -1962,7 +2897,7 @@ mod tests {
             template_id: 0,
             size_witness_words: 225,
             n_publics: 0,
-            public_input_offset_words: 209,
+            public_input_offset_words: 1,
             public_input_copy_words: 16,
             copy_indices: Vec::new(),
             source_assertions: Vec::new(),
@@ -1976,6 +2911,7 @@ mod tests {
                 parameters: Vec::new(),
                 signals: (1..=224).collect(),
             }],
+            solver_index: OnceLock::new(),
         };
         let source = (1..=16).collect::<Vec<_>>();
 
@@ -1986,7 +2922,7 @@ mod tests {
         }
         let expected = fields::poseidon2_hash::<Goldilocks, Poseidon16, 16>(&input);
         for (idx, expected) in expected.into_iter().enumerate() {
-            assert_eq!(witness[193 + idx], expected);
+            assert_eq!(witness[209 + idx], expected);
         }
         Ok(())
     }
@@ -1997,7 +2933,7 @@ mod tests {
             template_id: 0,
             size_witness_words: 227,
             n_publics: 0,
-            public_input_offset_words: 209,
+            public_input_offset_words: 1,
             public_input_copy_words: 18,
             copy_indices: Vec::new(),
             source_assertions: Vec::new(),
@@ -2011,6 +2947,7 @@ mod tests {
                 parameters: Vec::new(),
                 signals: (1..=226).collect(),
             }],
+            solver_index: OnceLock::new(),
         };
         let mut source = (1..=16).collect::<Vec<_>>();
         source.push(1);
@@ -2026,7 +2963,7 @@ mod tests {
         }
         let expected = fields::poseidon2_hash::<Goldilocks, Poseidon16, 16>(&input);
         for (idx, expected) in expected.into_iter().enumerate() {
-            assert_eq!(witness[193 + idx], expected);
+            assert_eq!(witness[211 + idx], expected);
         }
         Ok(())
     }
