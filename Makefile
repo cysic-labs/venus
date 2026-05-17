@@ -31,7 +31,7 @@ ROM_SETUP_HINTS :=
 PROVE_ARGS := -i $(INPUT)
 PROVE_PREPARE :=
 endif
-PROVE_GPU_ARGS ?= -t 2 -h 2
+PROVE_GPU_ARGS ?= -t 2 -h 1
 
 .PHONY: all setup build install-toolchain check-key generate-key generate-key-rs generate-key-js build-guest build-guest-native \
         generate-hints rom-setup compile-key prove verify clean purge help
