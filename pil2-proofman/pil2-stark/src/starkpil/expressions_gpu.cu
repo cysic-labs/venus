@@ -178,9 +178,12 @@ void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, 
     
     assert(bufferCommitSize  + 9  < 32);
     size_t ptrMem = 32 * sizeof(Goldilocks::Element);
-    size_t tmpMem = (h_expsArgs.maxTemp1Size + h_expsArgs.maxTemp3Size) * sizeof(Goldilocks::Element);
+    size_t tmp1Mem = h_expsArgs.maxTemp1Size * sizeof(Goldilocks::Element);
+    size_t tmp3Mem = h_expsArgs.maxTemp3Size * sizeof(Goldilocks::Element);
+    size_t tmpMem = tmp1Mem + tmp3Mem;
     bool useTmpInShared = tmpMem <= 40960 && tmpMem > 0;
-    size_t sharedMem = useTmpInShared ? (ptrMem + tmpMem) : ptrMem;
+    bool useTmp3InShared = !useTmpInShared && tmp3Mem <= 40960 && tmp3Mem > 0;
+    size_t sharedMem = ptrMem + (useTmpInShared ? tmpMem : useTmp3InShared ? tmp3Mem : 0);
 
     TimerStartCategoryGPU(timer, EXPRESSIONS);
     computeExpressions_<<<nBlocks_, nThreads_, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams, constraints);
@@ -311,9 +314,12 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
     assert(bufferCommitSize  + 9  < 32);
     // Include temp buffers in dynamic shared memory if they fit in 40KB budget
     size_t ptrMem = 32 * sizeof(Goldilocks::Element);
-    size_t tmpMem = (h_expsArgs.maxTemp1Size + h_expsArgs.maxTemp3Size) * sizeof(Goldilocks::Element);
+    size_t tmp1Mem = h_expsArgs.maxTemp1Size * sizeof(Goldilocks::Element);
+    size_t tmp3Mem = h_expsArgs.maxTemp3Size * sizeof(Goldilocks::Element);
+    size_t tmpMem = tmp1Mem + tmp3Mem;
     bool useTmpInShared = tmpMem <= 40960 && tmpMem > 0;
-    size_t sharedMem = useTmpInShared ? (ptrMem + tmpMem) : ptrMem;
+    bool useTmp3InShared = !useTmpInShared && tmp3Mem <= 40960 && tmp3Mem > 0;
+    size_t sharedMem = ptrMem + (useTmpInShared ? tmpMem : useTmp3InShared ? tmp3Mem : 0);
 
     // Dispatch to generated standalone kernel by expId, fallback to interpreter
     uint64_t qExpId = dest.params[0].expId;
@@ -682,6 +688,7 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
     Goldilocks::Element *smem_after_ptrs_s = scratchpad + 32;
     uint64_t tmpTotal_s = d_expsArgs->maxTemp1Size + d_expsArgs->maxTemp3Size;
     bool useTmpSmem_s = tmpTotal_s > 0 && tmpTotal_s <= 5120;
+    bool useTmp3Smem_s = !useTmpSmem_s && d_expsArgs->maxTemp3Size > 0 && d_expsArgs->maxTemp3Size <= 5120;
 
     if (threadIdx.x == 0)
     {
@@ -690,7 +697,9 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
             expressions_params[bufferCommitsSize + 1] = smem_after_ptrs_s + d_expsArgs->maxTemp1Size;
         } else {
             expressions_params[bufferCommitsSize + 0] = (&d_params->aux_trace[d_expsArgs->offsetTmp1 + blockIdx.x * d_expsArgs->maxTemp1Size]);
-            expressions_params[bufferCommitsSize + 1] = (&d_params->aux_trace[d_expsArgs->offsetTmp3 + blockIdx.x * d_expsArgs->maxTemp3Size]);
+            expressions_params[bufferCommitsSize + 1] = useTmp3Smem_s
+                ? smem_after_ptrs_s
+                : (&d_params->aux_trace[d_expsArgs->offsetTmp3 + blockIdx.x * d_expsArgs->maxTemp3Size]);
         }
         expressions_params[bufferCommitsSize + 2] = d_params->publicInputs;
         expressions_params[bufferCommitsSize + 3] = constraints ? d_deviceArgs->numbersConstraints : d_deviceArgs->numbers;
@@ -861,6 +870,7 @@ __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_de
     Goldilocks::Element *smem_after_ptrs = scratchpad + 32;
     uint64_t tmpTotal = d_expsArgs->maxTemp1Size + d_expsArgs->maxTemp3Size;
     bool useTmpSmem = tmpTotal > 0 && tmpTotal <= 5120;
+    bool useTmp3Smem = !useTmpSmem && d_expsArgs->maxTemp3Size > 0 && d_expsArgs->maxTemp3Size <= 5120;
 
     if (threadIdx.x == 0)
     {
@@ -869,7 +879,9 @@ __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_de
             expressions_params[bufferCommitsSize + 1] = smem_after_ptrs + d_expsArgs->maxTemp1Size;
         } else {
             expressions_params[bufferCommitsSize + 0] = (&d_params->aux_trace[d_expsArgs->offsetTmp1 + blockIdx.x * d_expsArgs->maxTemp1Size]);
-            expressions_params[bufferCommitsSize + 1] = (&d_params->aux_trace[d_expsArgs->offsetTmp3 + blockIdx.x * d_expsArgs->maxTemp3Size]);
+            expressions_params[bufferCommitsSize + 1] = useTmp3Smem
+                ? smem_after_ptrs
+                : (&d_params->aux_trace[d_expsArgs->offsetTmp3 + blockIdx.x * d_expsArgs->maxTemp3Size]);
         }
         expressions_params[bufferCommitsSize + 2] = d_params->publicInputs;
         expressions_params[bufferCommitsSize + 3] = d_deviceArgs->numbers;
