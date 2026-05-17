@@ -67,10 +67,14 @@ __global__ void computeExpression_gen_856_(StepsParams *d_params, DeviceArgument
 // expId=981 nOps=728 nTemp1=8 nTemp3=5
 __global__ void computeExpression_gen_981_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
+// expId=4152 nOps=3827 shared-temp generated kernel
+__global__ void computeExpression_shared_4152_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+
 // Host-side dispatch by expId
 inline bool dispatchGeneratedKernel(uint64_t expId, dim3 nBlocks, dim3 nThreads, size_t sharedMem, cudaStream_t stream,
     StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams) {
     switch (expId) {
+    case 4152: computeExpression_shared_4152_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 1020: computeExpression_gen_1020_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 1052: computeExpression_gen_1052_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 136: computeExpression_gen_136_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
