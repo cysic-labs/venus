@@ -31,6 +31,8 @@ pub struct NativeRecursiveRuntime {
     pub constraints: Vec<NativeRuntimeConstraint>,
     pub custom_gates: Vec<NativeRuntimeCustomGate>,
     solver_index: OnceLock<NativeRuntimeSolverIndex>,
+    solve_plan: OnceLock<NativeRuntimeSolvePlan>,
+    solve_plan_build_lock: Mutex<()>,
 }
 
 #[derive(Debug)]
@@ -38,6 +40,30 @@ struct NativeRuntimeSolverIndex {
     dependencies: Vec<NativeRuntimeDependency>,
     boolean_signals: Vec<u64>,
     inverse_protected_signals: Vec<u64>,
+}
+
+#[derive(Debug)]
+struct NativeRuntimeSolvePlan {
+    witness_len: usize,
+    initial_known_count: usize,
+    initial_known_fingerprint: u64,
+    steps: Vec<NativeRuntimeSolveStep>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeRuntimeSolveStep {
+    code: u32,
+    signal: u32,
+}
+
+#[derive(Debug, Default)]
+struct NativeRuntimeSolveStats {
+    processed_constraints: usize,
+    processed_gates: usize,
+    solved_constraints: usize,
+    solved_gates: usize,
+    cached_plan: bool,
+    plan_steps: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,9 +160,18 @@ const DEPENDENCY_GATE_FLAG: u32 = 1 << 31;
 const DEP_PART_A: u8 = 0;
 const DEP_PART_B: u8 = 1;
 const DEP_PART_C: u8 = 2;
+const STEP_GENERIC_SIGNAL: u32 = u32::MAX;
 type SignalList = SmallVec<[usize; 8]>;
 type GateSignalList = SmallVec<[usize; 256]>;
 type UnknownLcTerms<F> = SmallVec<[(usize, F); 4]>;
+
+impl NativeRuntimeSolvePlan {
+    fn is_compatible(&self, witness_len: usize, initial_known: (usize, u64)) -> bool {
+        self.witness_len == witness_len
+            && self.initial_known_count == initial_known.0
+            && self.initial_known_fingerprint == initial_known.1
+    }
+}
 
 impl NativeRuntimeSolverIndex {
     fn build(runtime: &NativeRecursiveRuntime) -> Self {
@@ -429,6 +464,8 @@ impl NativeRecursiveRuntime {
             constraints,
             custom_gates,
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         })
     }
 
@@ -748,6 +785,7 @@ impl NativeRecursiveRuntime {
         }
 
         let timing = std::env::var_os("PROOFMAN_DEBUG_NATIVE_TIMING").is_some();
+        let initial_known = known_fingerprint(known);
         let index_ready = self.solver_index.get().is_some();
         let index_start = Instant::now();
         let solver_index = self.solver_index.get_or_init(|| NativeRuntimeSolverIndex::build(self));
@@ -760,7 +798,79 @@ impl NativeRecursiveRuntime {
                 index_start.elapsed().as_millis()
             );
         }
+
         let solve_start = Instant::now();
+        let mut plan_to_set = None;
+        let mut plan_guard = None;
+        let stats = if let Some(plan) = self.compatible_solve_plan(witness.len(), initial_known) {
+            self.execute_solve_plan_with_fallback(plan, witness, known, solver_index)?
+        } else {
+            let guard = self
+                .solve_plan_build_lock
+                .lock()
+                .map_err(|_| ProofmanError::InvalidSetup("native recursive solve plan lock is poisoned".to_string()))?;
+            if let Some(plan) = self.compatible_solve_plan(witness.len(), initial_known) {
+                drop(guard);
+                self.execute_solve_plan_with_fallback(plan, witness, known, solver_index)?
+            } else if self.solve_plan.get().is_none() {
+                let (stats, steps) = self.solve_constraints_dynamic(witness, known, solver_index, true)?;
+                plan_to_set = steps.map(|steps| NativeRuntimeSolvePlan {
+                    witness_len: witness.len(),
+                    initial_known_count: initial_known.0,
+                    initial_known_fingerprint: initial_known.1,
+                    steps,
+                });
+                plan_guard = Some(guard);
+                stats
+            } else {
+                drop(guard);
+                self.solve_constraints_dynamic(witness, known, solver_index, false)?.0
+            }
+        };
+        let solve_elapsed = solve_start.elapsed();
+
+        self.log_unresolved_signals(known);
+        let (verify_gates_elapsed, verify_constraints_elapsed) = self.verify_solved_witness(witness, known)?;
+        if let Some(plan) = plan_to_set {
+            let _ = self.solve_plan.set(plan);
+        }
+        drop(plan_guard);
+
+        if timing {
+            tracing::error!(
+                "Native recursive solver timing: constraints={} gates={} processed_constraints={} processed_gates={} solved_constraints={} solved_gates={} cached_plan={} plan_steps={} queue_ms={} verify_gates_ms={} verify_constraints_ms={}",
+                self.constraints.len(),
+                self.custom_gates.len(),
+                stats.processed_constraints,
+                stats.processed_gates,
+                stats.solved_constraints,
+                stats.solved_gates,
+                stats.cached_plan,
+                stats.plan_steps,
+                solve_elapsed.as_millis(),
+                verify_gates_elapsed.as_millis(),
+                verify_constraints_elapsed.as_millis()
+            );
+        }
+
+        Ok(())
+    }
+
+    fn compatible_solve_plan(
+        &self,
+        witness_len: usize,
+        initial_known: (usize, u64),
+    ) -> Option<&NativeRuntimeSolvePlan> {
+        self.solve_plan.get().filter(|plan| plan.is_compatible(witness_len, initial_known))
+    }
+
+    fn solve_constraints_dynamic<F: PrimeField64>(
+        &self,
+        witness: &mut [F],
+        known: &mut [bool],
+        solver_index: &NativeRuntimeSolverIndex,
+        record_steps: bool,
+    ) -> ProofmanResult<(NativeRuntimeSolveStats, Option<Vec<NativeRuntimeSolveStep>>)> {
         let mut constraint_states = build_constraint_states(&self.constraints, known, solver_index)?;
         let mut gate_states = build_gate_states(&self.custom_gates, known)?;
         let mut queue = VecDeque::with_capacity(self.constraints.len() + self.custom_gates.len());
@@ -779,20 +889,27 @@ impl NativeRecursiveRuntime {
             }
         }
 
-        let mut processed_constraints = 0usize;
-        let mut processed_gates = 0usize;
-        let mut solved_constraints = 0usize;
-        let mut solved_gates = 0usize;
+        let validate_during_solve = std::env::var_os("PROOFMAN_VALIDATE_CIRCOM_WASM").is_some();
+        let mut stats = NativeRuntimeSolveStats::default();
+        let mut steps = record_steps.then(|| Vec::with_capacity(self.constraints.len() + self.custom_gates.len()));
         while let Some(code) = queue.pop_front() {
             if code & DEPENDENCY_GATE_FLAG == 0 {
                 let constraint_index = code as usize;
                 queued_constraints[constraint_index] = false;
                 let constraint = &self.constraints[constraint_index];
-                processed_constraints += 1;
+                stats.processed_constraints += 1;
                 let solved_signals =
                     self.try_solve_constraint(constraint_index, constraint, witness, known, solver_index)?;
                 if !solved_signals.is_empty() {
-                    solved_constraints += 1;
+                    stats.solved_constraints += 1;
+                    if let Some(steps) = &mut steps {
+                        let signal = if solved_signals.len() == 1 {
+                            u32::try_from(solved_signals[0]).unwrap_or(STEP_GENERIC_SIGNAL)
+                        } else {
+                            STEP_GENERIC_SIGNAL
+                        };
+                        steps.push(NativeRuntimeSolveStep { code, signal });
+                    }
                     for signal in solved_signals {
                         enqueue_dependents(
                             signal as u64,
@@ -806,7 +923,7 @@ impl NativeRecursiveRuntime {
                         )?;
                     }
                 }
-                if std::env::var_os("PROOFMAN_VALIDATE_CIRCOM_WASM").is_some() {
+                if validate_during_solve {
                     let a = eval_lc(&constraint.a, witness, known)?;
                     let b = eval_lc(&constraint.b, witness, known)?;
                     let c = eval_lc(&constraint.c, witness, known)?;
@@ -831,7 +948,7 @@ impl NativeRecursiveRuntime {
                 let gate_index = (code & !DEPENDENCY_GATE_FLAG) as usize;
                 queued_gates[gate_index] = false;
                 let gate = &self.custom_gates[gate_index];
-                processed_gates += 1;
+                stats.processed_gates += 1;
                 let unknown_before = gate
                     .signals
                     .iter()
@@ -845,7 +962,10 @@ impl NativeRecursiveRuntime {
                     })
                     .collect::<SmallVec<[u64; 256]>>();
                 if self.try_solve_custom_gate(gate, witness, known, solver_index)? {
-                    solved_gates += 1;
+                    stats.solved_gates += 1;
+                    if let Some(steps) = &mut steps {
+                        steps.push(NativeRuntimeSolveStep { code, signal: STEP_GENERIC_SIGNAL });
+                    }
                     for signal in unknown_before {
                         if usize::try_from(signal).ok().and_then(|idx| known.get(idx)).copied() != Some(true) {
                             continue;
@@ -864,8 +984,159 @@ impl NativeRecursiveRuntime {
                 }
             }
         }
-        let solve_elapsed = solve_start.elapsed();
+        if let Some(steps) = &steps {
+            stats.plan_steps = steps.len();
+        }
+        Ok((stats, steps))
+    }
 
+    fn execute_solve_plan<F: PrimeField64>(
+        &self,
+        plan: &NativeRuntimeSolvePlan,
+        witness: &mut [F],
+        known: &mut [bool],
+        solver_index: &NativeRuntimeSolverIndex,
+    ) -> ProofmanResult<NativeRuntimeSolveStats> {
+        let mut stats =
+            NativeRuntimeSolveStats { cached_plan: true, plan_steps: plan.steps.len(), ..Default::default() };
+        for &step in &plan.steps {
+            let code = step.code;
+            if code & DEPENDENCY_GATE_FLAG == 0 {
+                let constraint_index = code as usize;
+                let constraint = &self.constraints[constraint_index];
+                stats.processed_constraints += 1;
+                let solved = if step.signal == STEP_GENERIC_SIGNAL {
+                    !self.try_solve_constraint(constraint_index, constraint, witness, known, solver_index)?.is_empty()
+                } else {
+                    self.solve_planned_single_constraint(
+                        constraint_index,
+                        constraint,
+                        step.signal as usize,
+                        witness,
+                        known,
+                    )?
+                };
+                if !solved {
+                    return Err(ProofmanError::InvalidProof(format!(
+                        "native recursive cached solve plan did not solve constraint {constraint_index}"
+                    )));
+                }
+                stats.solved_constraints += 1;
+            } else {
+                let gate_index = (code & !DEPENDENCY_GATE_FLAG) as usize;
+                let gate = &self.custom_gates[gate_index];
+                stats.processed_gates += 1;
+                if !self.try_solve_custom_gate(gate, witness, known, solver_index)? {
+                    return Err(ProofmanError::InvalidProof(format!(
+                        "native recursive cached solve plan did not solve custom gate {gate_index}"
+                    )));
+                }
+                stats.solved_gates += 1;
+            }
+        }
+        Ok(stats)
+    }
+
+    fn solve_planned_single_constraint<F: PrimeField64>(
+        &self,
+        constraint_index: usize,
+        constraint: &NativeRuntimeConstraint,
+        signal: usize,
+        witness: &mut [F],
+        known: &mut [bool],
+    ) -> ProofmanResult<bool> {
+        if signal >= witness.len() {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive cached solve plan references signal {signal} outside witness size {}",
+                witness.len()
+            )));
+        }
+        if known[signal] {
+            return Ok(false);
+        }
+
+        let a = eval_lc_except_signal(&constraint.a, signal, witness, known)?;
+        let b = eval_lc_except_signal(&constraint.b, signal, witness, known)?;
+        let c = eval_lc_except_signal(&constraint.c, signal, witness, known)?;
+
+        let value = if !a.output_coeff.is_zero() {
+            if !a.others_known
+                || !b.others_known
+                || !c.others_known
+                || !b.output_coeff.is_zero()
+                || !c.output_coeff.is_zero()
+            {
+                return Ok(false);
+            }
+            let divisor = a.output_coeff * b.value;
+            if divisor.is_zero() {
+                return Ok(false);
+            }
+            (c.value - a.value * b.value) / divisor
+        } else if !b.output_coeff.is_zero() {
+            if !a.others_known
+                || !b.others_known
+                || !c.others_known
+                || !a.output_coeff.is_zero()
+                || !c.output_coeff.is_zero()
+            {
+                return Ok(false);
+            }
+            let divisor = b.output_coeff * a.value;
+            if divisor.is_zero() {
+                return Ok(false);
+            }
+            (c.value - a.value * b.value) / divisor
+        } else if !c.output_coeff.is_zero() {
+            if !a.output_coeff.is_zero() || !b.output_coeff.is_zero() {
+                return Ok(false);
+            }
+            if a.others_known && b.others_known {
+                (a.value * b.value - c.value) / c.output_coeff
+            } else if (a.others_known && a.value.is_zero()) || (b.others_known && b.value.is_zero()) {
+                -c.value / c.output_coeff
+            } else {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        };
+
+        if known[signal] {
+            if witness[signal] != value {
+                return Err(ProofmanError::InvalidProof(format!(
+                    "native recursive cached solve plan produced conflicting value for signal {signal} in constraint {constraint_index}"
+                )));
+            }
+            Ok(false)
+        } else {
+            witness[signal] = value;
+            known[signal] = true;
+            Ok(true)
+        }
+    }
+
+    fn execute_solve_plan_with_fallback<F: PrimeField64>(
+        &self,
+        plan: &NativeRuntimeSolvePlan,
+        witness: &mut [F],
+        known: &mut [bool],
+        solver_index: &NativeRuntimeSolverIndex,
+    ) -> ProofmanResult<NativeRuntimeSolveStats> {
+        let witness_backup = witness.to_vec();
+        let known_backup = known.to_vec();
+        match self.execute_solve_plan(plan, witness, known, solver_index) {
+            Ok(stats) => Ok(stats),
+            Err(err) => {
+                witness.clone_from_slice(&witness_backup);
+                known.copy_from_slice(&known_backup);
+                tracing::debug!("Falling back after native recursive solve plan replay miss: {err}");
+                self.solve_constraints_dynamic(witness, known, solver_index, false).map(|(stats, _)| stats)
+            }
+        }
+    }
+
+    fn log_unresolved_signals(&self, known: &[bool]) {
         if std::env::var_os("PROOFMAN_DEBUG_NATIVE_UNRESOLVED").is_some() {
             let unknown_count = known.iter().filter(|&&is_known| !is_known).count();
             let first_unknown = known.iter().position(|&is_known| !is_known);
@@ -901,7 +1172,13 @@ impl NativeRecursiveRuntime {
                 }
             }
         }
+    }
 
+    fn verify_solved_witness<F: PrimeField64>(
+        &self,
+        witness: &[F],
+        known: &[bool],
+    ) -> ProofmanResult<(std::time::Duration, std::time::Duration)> {
         let verify_gates_start = Instant::now();
         for gate in &self.custom_gates {
             self.verify_custom_gate(gate, witness, known)?;
@@ -926,22 +1203,7 @@ impl NativeRecursiveRuntime {
                 )));
             }
         }
-        if timing {
-            tracing::error!(
-                "Native recursive solver timing: constraints={} gates={} processed_constraints={} processed_gates={} solved_constraints={} solved_gates={} queue_ms={} verify_gates_ms={} verify_constraints_ms={}",
-                self.constraints.len(),
-                self.custom_gates.len(),
-                processed_constraints,
-                processed_gates,
-                solved_constraints,
-                solved_gates,
-                solve_elapsed.as_millis(),
-                verify_gates_elapsed.as_millis(),
-                verify_constraints_start.elapsed().as_millis()
-            );
-        }
-
-        Ok(())
+        Ok((verify_gates_elapsed, verify_constraints_start.elapsed()))
     }
 
     fn try_solve_constraint<F: PrimeField64>(
@@ -1034,6 +1296,56 @@ impl NativeRecursiveRuntime {
 struct LcEval<F: PrimeField64> {
     value: F,
     unknown: UnknownLcTerms<F>,
+}
+
+#[derive(Debug)]
+struct LcEvalExcept<F: PrimeField64> {
+    value: F,
+    output_coeff: F,
+    others_known: bool,
+}
+
+fn known_fingerprint(known: &[bool]) -> (usize, u64) {
+    const MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut count = 0usize;
+    let mut fingerprint = 0xD6E8_FD9A_8B4C_2F37u64 ^ known.len() as u64;
+    for (index, &is_known) in known.iter().enumerate() {
+        if is_known {
+            count += 1;
+            fingerprint = fingerprint.rotate_left(7) ^ ((index as u64).wrapping_mul(MIX));
+        }
+    }
+    (count, fingerprint)
+}
+
+fn eval_lc_except_signal<F: PrimeField64>(
+    terms: &[NativeRuntimeLcTerm],
+    output_signal: usize,
+    witness: &[F],
+    known: &[bool],
+) -> ProofmanResult<LcEvalExcept<F>> {
+    let mut value = F::ZERO;
+    let mut output_coeff = F::ZERO;
+    for term in terms {
+        let signal = usize::try_from(term.signal).map_err(|_| {
+            ProofmanError::InvalidSetup(format!("native recursive R1CS signal {} is too large", term.signal))
+        })?;
+        if signal >= witness.len() {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive R1CS signal {signal} is outside witness size {}",
+                witness.len()
+            )));
+        }
+        let coeff = F::from_u64(term.coeff);
+        if signal == output_signal {
+            output_coeff += coeff;
+        } else if known[signal] {
+            value += witness[signal] * coeff;
+        } else {
+            return Ok(LcEvalExcept { value, output_coeff, others_known: false });
+        }
+    }
+    Ok(LcEvalExcept { value, output_coeff, others_known: true })
 }
 
 fn eval_lc<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known: &[bool]) -> ProofmanResult<LcEval<F>> {
@@ -2624,6 +2936,8 @@ mod tests {
             constraints,
             custom_gates: Vec::new(),
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         };
 
         let witness = runtime.generate_witness::<Goldilocks>(&[10], 6)?;
@@ -2671,6 +2985,8 @@ mod tests {
                 signals: (1..=9).collect(),
             }],
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         };
         let source = a.into_iter().chain(output).map(|value| value.as_canonical_u64()).collect::<Vec<_>>();
 
@@ -2752,6 +3068,8 @@ mod tests {
                 signals: (1..=9).collect(),
             }],
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         };
         let two = Goldilocks::from_u64(2);
         let protected_b = [b[0] + two, b[1] + two, b[2] + two];
@@ -2788,6 +3106,8 @@ mod tests {
                 signals: (1..=21).collect(),
             }],
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         };
         let mut source = vec![0u64; 18];
         source[0] = 1;
@@ -2823,6 +3143,8 @@ mod tests {
                 signals: (1..=17).collect(),
             }],
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         };
         let source = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 1];
 
@@ -2854,6 +3176,8 @@ mod tests {
                 signals: (1..=22).collect(),
             }],
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         };
         let source = vec![1, 2, 3, 4, 11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34, 1, 1];
 
@@ -2886,6 +3210,8 @@ mod tests {
                 signals: (1..=24).collect(),
             }],
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         };
         let source = vec![10, 20, 30, 1, 2, 3, 40, 50, 60, 4, 5, 6];
 
@@ -2918,6 +3244,8 @@ mod tests {
                 signals: (1..=224).collect(),
             }],
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         };
         let source = (1..=16).collect::<Vec<_>>();
 
@@ -2954,6 +3282,8 @@ mod tests {
                 signals: (1..=226).collect(),
             }],
             solver_index: OnceLock::new(),
+            solve_plan: OnceLock::new(),
+            solve_plan_build_lock: Mutex::new(()),
         };
         let mut source = (1..=16).collect::<Vec<_>>();
         source.push(1);
