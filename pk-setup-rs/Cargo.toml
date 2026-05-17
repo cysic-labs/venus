@@ -32,6 +32,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 type_analysis = { path = "vendor/circom/type_analysis" }
 wat = "1.249.0"
+zisk-core = { workspace = true }
 
 [features]
 default = []

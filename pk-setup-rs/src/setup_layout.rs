@@ -12,6 +12,7 @@ use proofman_starks_lib_c::{
 use serde::Serialize;
 use tracing::info;
 
+use crate::fixed_gen;
 use crate::pil_info::binfile::{write_expressions_bin_file, write_verifier_expressions_bin_file};
 use crate::pil_info::codegen::generate_pil_code;
 use crate::pil_info::stark::{build_air_stark_draft, AirInput};
@@ -67,7 +68,7 @@ pub fn write_basic_air_layout(
 #[allow(clippy::too_many_arguments)]
 fn write_basic_air(
     proving_key_dir: &Path,
-    fixed_dir: &Path,
+    _fixed_dir: &Path,
     pilout_name: &str,
     airgroup_id: usize,
     airgroup_name: &str,
@@ -92,11 +93,9 @@ fn write_basic_air(
     fs::create_dir_all(&files_dir)
         .with_context(|| format!("failed to create {}", files_dir.display()))?;
 
-    let fixed_src = fixed_dir.join(format!("{air_name}.fixed"));
     let const_dst = files_dir.join(format!("{air_name}.const"));
-    fs::copy(&fixed_src, &const_dst).with_context(|| {
-        format!("failed to copy {} to {}", fixed_src.display(), const_dst.display())
-    })?;
+    fixed_gen::write_air_const(&const_dst, airgroup_id, air_id, air, all_symbols, all_hints)
+        .with_context(|| format!("failed to generate {}", const_dst.display()))?;
 
     let num_rows = air.num_rows.with_context(|| format!("air {air_name} is missing numRows"))?;
     let n_bits = checked_log2(num_rows)

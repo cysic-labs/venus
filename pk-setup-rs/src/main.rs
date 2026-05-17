@@ -1,5 +1,6 @@
 mod circom_assets;
 mod circom_compile;
+mod fixed_gen;
 mod pil_info;
 mod pilout_info;
 mod recursive_circom;
@@ -48,6 +49,10 @@ struct Args {
     /// Generate aggregation setup artifacts.
     #[arg(short = 'r', long, default_value_t = true)]
     recursive: bool,
+
+    /// Skip aggregation setup artifacts. This keeps the default setup behavior unchanged.
+    #[arg(long)]
+    no_recursive: bool,
 
     /// Optional manifest of native recursive R1CS layout jobs.
     #[arg(long)]
@@ -107,7 +112,7 @@ fn run() -> Result<()> {
     pilout_info::write_global_artifacts(&proving_key_dir, &global)?;
     setup_layout::write_basic_air_layout(&proving_key_dir, &fixed_dir, &pilout, &settings)?;
 
-    if args.recursive {
+    if args.recursive && !args.no_recursive {
         if let Some(manifest_path) = recursive_layout_manifest.as_ref() {
             let artifacts = recursive_setup::manifest::write_layouts_from_manifest(
                 manifest_path,

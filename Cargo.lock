@@ -3519,6 +3519,7 @@ dependencies = [
  "tracing-subscriber",
  "type_analysis",
  "wat",
+ "zisk-core",
 ]
 
 [[package]]
