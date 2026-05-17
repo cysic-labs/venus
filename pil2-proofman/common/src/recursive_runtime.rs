@@ -1123,12 +1123,10 @@ impl NativeRecursiveRuntime {
         known: &mut [bool],
         solver_index: &NativeRuntimeSolverIndex,
     ) -> ProofmanResult<NativeRuntimeSolveStats> {
-        let witness_backup = witness.to_vec();
         let known_backup = known.to_vec();
         match self.execute_solve_plan(plan, witness, known, solver_index) {
             Ok(stats) => Ok(stats),
             Err(err) => {
-                witness.clone_from_slice(&witness_backup);
                 known.copy_from_slice(&known_backup);
                 tracing::debug!("Falling back after native recursive solve plan replay miss: {err}");
                 self.solve_constraints_dynamic(witness, known, solver_index, false).map(|(stats, _)| stats)
@@ -1782,7 +1780,7 @@ fn solve_cmul_gate<F: PrimeField64>(
             gate.signals.len()
         )));
     }
-    let signals = gate_signals(&gate.signals, witness.len())?;
+    let signals = fixed_gate_signals::<9>("CMul", &gate.signals, witness.len())?;
     let a_known = signals[..3].iter().all(|&signal| known[signal]);
     let b_known = signals[3..6].iter().all(|&signal| known[signal]);
     let output_known = signals[6..9].iter().all(|&signal| known[signal]);
@@ -1824,7 +1822,7 @@ fn verify_cmul_gate<F: PrimeField64>(
             gate.signals.len()
         )));
     }
-    let signals = gate_signals(&gate.signals, witness.len())?;
+    let signals = fixed_gate_signals::<9>("CMul", &gate.signals, witness.len())?;
     if signals.iter().any(|&signal| !known[signal]) {
         return Ok(());
     }
@@ -2126,6 +2124,28 @@ fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<GateSigna
             )));
         }
         out.push(signal);
+    }
+    Ok(out)
+}
+
+fn fixed_gate_signals<const N: usize>(gate: &str, signals: &[u64], witness_len: usize) -> ProofmanResult<[usize; N]> {
+    if signals.len() != N {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "{gate} native runtime gate must have {N} signals, got {}",
+            signals.len()
+        )));
+    }
+    let mut out = [0usize; N];
+    for (idx, &signal) in signals.iter().enumerate() {
+        let signal = usize::try_from(signal).map_err(|_| {
+            ProofmanError::InvalidSetup(format!("native recursive custom gate signal {signal} is too large"))
+        })?;
+        if signal >= witness_len {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive custom gate signal {signal} is outside witness size {witness_len}"
+            )));
+        }
+        out[idx] = signal;
     }
     Ok(out)
 }
