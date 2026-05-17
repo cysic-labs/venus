@@ -351,8 +351,6 @@ struct StreamData{
 
     void reset(bool reset_status){
         cudaSetDevice(gpuId);
-        cudaEventDestroy(end_event);
-        cudaEventCreate(&end_event);
         status = reset_status ? 0 : 3;
 
         root = nullptr;
