@@ -21,6 +21,9 @@ use clap::Parser;
 use pilout_crate::pilout_proxy::PilOutProxy;
 use tracing::info;
 
+const DEFAULT_AIROUT: &str = "pil/zisk.pilout";
+const EMBEDDED_ZISK_PILOUT: &[u8] = include_bytes!("../assets/pil/zisk.pilout");
+
 #[derive(Debug, Parser)]
 #[command(version, about = "Native Rust proving-key setup generator")]
 struct Args {
@@ -32,8 +35,8 @@ struct Args {
     #[arg(short = 'b', long, default_value = "build")]
     build_dir: PathBuf,
 
-    /// Existing PILOUT file. Native PIL compilation will be added in this crate; for now this must exist.
-    #[arg(short = 'a', long, default_value = "pil/zisk.pilout")]
+    /// Existing PILOUT file. The default Venus PILOUT is embedded as a fallback.
+    #[arg(short = 'a', long, default_value = DEFAULT_AIROUT)]
     airout: PathBuf,
 
     /// Stark settings JSON, compatible with the legacy state-machines/starkstructs.json.
@@ -97,13 +100,7 @@ fn run() -> Result<()> {
     let proving_key_dir = build_dir.join("provingKey");
 
     prepare_directories(&build_dir, &fixed_dir, &proof_dir, &proving_key_dir)?;
-
-    if !pilout_path.exists() {
-        anyhow::bail!(
-            "native PIL compilation is not implemented yet and PILOUT was not found at {}",
-            pilout_path.display()
-        );
-    }
+    let pilout_path = resolve_airout(&build_dir, &pilout_path)?;
 
     let pilout = PilOutProxy::new(&pilout_path.display().to_string())
         .map_err(|err| anyhow::anyhow!("failed to load PILOUT {}: {err}", pilout_path.display()))?;
@@ -143,6 +140,30 @@ fn resolve_path(root: &Path, path: &Path) -> PathBuf {
     } else {
         root.join(path)
     }
+}
+
+fn resolve_airout(build_dir: &Path, requested: &Path) -> Result<PathBuf> {
+    if requested.exists() {
+        return Ok(requested.to_path_buf());
+    }
+
+    if requested.ends_with(Path::new(DEFAULT_AIROUT)) {
+        let embedded_path = build_dir.join("embedded").join("zisk.pilout");
+        if let Some(parent) = embedded_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(&embedded_path, EMBEDDED_ZISK_PILOUT)
+            .with_context(|| format!("failed to write {}", embedded_path.display()))?;
+        info!(
+            "PILOUT {} not found; using embedded Venus PILOUT {}",
+            requested.display(),
+            embedded_path.display()
+        );
+        return Ok(embedded_path);
+    }
+
+    anyhow::bail!("PILOUT was not found at {}", requested.display());
 }
 
 fn prepare_directories(
