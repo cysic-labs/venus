@@ -1531,11 +1531,13 @@ uint32_t selectStream(DeviceCommitBuffers* d_buffers, uint64_t airgroupId, uint6
     uint32_t countFreeStreamsGPU[d_buffers->n_gpus];
     uint32_t countUnusedStreams[d_buffers->n_gpus];
     int streamIdxGPU[d_buffers->n_gpus];
+    bool foundReusableContext[d_buffers->n_gpus];
     
     for( uint32_t i = 0; i < d_buffers->n_gpus; i++){
         countUnusedStreams[i] = 0;
         countFreeStreamsGPU[i] = 0;
         streamIdxGPU[i] = -1;
+        foundReusableContext[i] = false;
     }
 
     bool someFree = false;
@@ -1548,17 +1550,20 @@ uint32_t selectStream(DeviceCommitBuffers* d_buffers, uint64_t airgroupId, uint6
             for (uint32_t i = 0; i < d_buffers->n_total_streams; i++) {
                 if (d_buffers->streamsData[i].recursive && d_buffers->streamsData[i].mutex_stream_selection.try_lock()) {
                     if (d_buffers->streamsData[i].status==0 || d_buffers->streamsData[i].status==3 || (d_buffers->streamsData[i].status==2 &&  cudaEventQuery(d_buffers->streamsData[i].end_event) == cudaSuccess)) {
+                        uint32_t gpuLocalId = d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId];
+                        bool sameContext = d_buffers->streamsData[i].airgroupId == airgroupId && d_buffers->streamsData[i].airId == airId && d_buffers->streamsData[i].proofType == proofType;
 
-                        countFreeStreamsGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]]++;
+                        countFreeStreamsGPU[gpuLocalId]++;
+                        if (sameContext) {
+                            streamIdxGPU[gpuLocalId] = i;
+                            foundReusableContext[gpuLocalId] = true;
+                        }
                         if(d_buffers->streamsData[i].status==0){
-                            countUnusedStreams[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]]++;
-                            streamIdxGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]] = i;
+                            countUnusedStreams[gpuLocalId]++;
+                            if (!foundReusableContext[gpuLocalId]) streamIdxGPU[gpuLocalId] = i;
                         }
-                        if (d_buffers->streamsData[i].airgroupId == airgroupId && d_buffers->streamsData[i].airId == airId && d_buffers->streamsData[i].proofType == proofType && d_buffers->streamsData[i].status==0){
-                            streamIdxGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]] = i;
-                        }
-                        if( streamIdxGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]] == -1 ){
-                            streamIdxGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]] = i;
+                        if( streamIdxGPU[gpuLocalId] == -1 ){
+                            streamIdxGPU[gpuLocalId] = i;
                         }
                         someFree = true;
                         streams_locked[i] = true;
@@ -1574,16 +1579,20 @@ uint32_t selectStream(DeviceCommitBuffers* d_buffers, uint64_t airgroupId, uint6
             for (uint32_t i = 0; i < d_buffers->n_total_streams; i++) {
                 if (!d_buffers->streamsData[i].recursive && d_buffers->streamsData[i].mutex_stream_selection.try_lock()) {
                     if (d_buffers->streamsData[i].status==0 || d_buffers->streamsData[i].status==3 || (d_buffers->streamsData[i].status==2 &&  cudaEventQuery(d_buffers->streamsData[i].end_event) == cudaSuccess)) {
-                        countFreeStreamsGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]]++;
+                        uint32_t gpuLocalId = d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId];
+                        bool sameContext = d_buffers->streamsData[i].airgroupId == airgroupId && d_buffers->streamsData[i].airId == airId && d_buffers->streamsData[i].proofType == proofType;
+
+                        countFreeStreamsGPU[gpuLocalId]++;
+                        if (sameContext) {
+                            streamIdxGPU[gpuLocalId] = i;
+                            foundReusableContext[gpuLocalId] = true;
+                        }
                         if(d_buffers->streamsData[i].status==0){
-                            countUnusedStreams[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]]++;
-                            streamIdxGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]] = i;
+                            countUnusedStreams[gpuLocalId]++;
+                            if (!foundReusableContext[gpuLocalId]) streamIdxGPU[gpuLocalId] = i;
                         }
-                        if (d_buffers->streamsData[i].airgroupId == airgroupId && d_buffers->streamsData[i].airId == airId && d_buffers->streamsData[i].proofType == proofType && d_buffers->streamsData[i].status==0){
-                            streamIdxGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]] = i;
-                        }
-                        if( streamIdxGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]] == -1 ){
-                            streamIdxGPU[d_buffers->gpus_g2l[d_buffers->streamsData[i].gpuId]] = i;
+                        if( streamIdxGPU[gpuLocalId] == -1 ){
+                            streamIdxGPU[gpuLocalId] = i;
                         }
                         someFree = true;
                         streams_locked[i] = true;
