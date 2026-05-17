@@ -1212,6 +1212,12 @@ impl NativeRecursiveRuntime {
         known: &mut [bool],
         solver_index: &NativeRuntimeSolverIndex,
     ) -> ProofmanResult<SignalList> {
+        if constraint.a.is_empty() && constraint.b.is_empty() {
+            if let Some(solved) = try_solve_linear_c_constraint(constraint_index, &constraint.c, witness, known)? {
+                return Ok(solved);
+            }
+        }
+
         let a = eval_lc(&constraint.a, witness, known)?;
         let b = eval_lc(&constraint.b, witness, known)?;
         let c = eval_lc(&constraint.c, witness, known)?;
@@ -1765,6 +1771,79 @@ fn solve_single_unknown<F: PrimeField64>(
         let mut solved = SignalList::new();
         solved.push(signal);
         Ok(solved)
+    }
+}
+
+fn try_solve_linear_c_constraint<F: PrimeField64>(
+    constraint_index: usize,
+    terms: &[NativeRuntimeLcTerm],
+    witness: &mut [F],
+    known: &mut [bool],
+) -> ProofmanResult<Option<SignalList>> {
+    if terms.is_empty() {
+        return Ok(Some(SignalList::new()));
+    }
+
+    let mut value = F::ZERO;
+    let mut unknown_signal = 0usize;
+    let mut unknown_coeff = F::ZERO;
+    let mut unknown_count = 0usize;
+    for term in terms {
+        let signal = usize::try_from(term.signal).map_err(|_| {
+            ProofmanError::InvalidSetup(format!("native recursive R1CS signal {} is too large", term.signal))
+        })?;
+        if signal >= witness.len() {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "native recursive R1CS signal {signal} is outside witness size {}",
+                witness.len()
+            )));
+        }
+        let coeff = F::from_u64(term.coeff);
+        if known[signal] {
+            value += witness[signal] * coeff;
+        } else {
+            unknown_signal = signal;
+            unknown_coeff = coeff;
+            unknown_count += 1;
+            if unknown_count > 1 {
+                return Ok(None);
+            }
+        }
+    }
+
+    if unknown_count == 0 {
+        if !value.is_zero() {
+            return Err(ProofmanError::InvalidProof(format!(
+                "native recursive R1CS linear constraint {constraint_index} failed during witness solving"
+            )));
+        }
+        return Ok(Some(SignalList::new()));
+    }
+
+    if unknown_coeff.is_zero() {
+        return Ok(Some(SignalList::new()));
+    }
+    let solved_value = if unknown_coeff == F::ONE {
+        -value
+    } else if unknown_coeff == -F::ONE {
+        value
+    } else {
+        -value / unknown_coeff
+    };
+
+    if known[unknown_signal] {
+        if witness[unknown_signal] != solved_value {
+            return Err(ProofmanError::InvalidProof(format!(
+                "native recursive R1CS solved conflicting value for signal {unknown_signal}"
+            )));
+        }
+        Ok(Some(SignalList::new()))
+    } else {
+        witness[unknown_signal] = solved_value;
+        known[unknown_signal] = true;
+        let mut solved = SignalList::new();
+        solved.push(unknown_signal);
+        Ok(Some(solved))
     }
 }
 
