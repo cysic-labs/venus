@@ -4,9 +4,12 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use pilout_crate::pilout::{hint_field, operand, Air, Hint, HintField, Symbol, SymbolType};
-use sm_arith::ArithFrops;
-use sm_binary::{BinaryBasicFrops, BinaryExtensionFrops};
 use zisk_core::zisk_ops::ZiskOp;
+
+use crate::frops::{
+    generate_arith_frops_table, generate_binary_basic_frops_table,
+    generate_binary_extension_frops_table,
+};
 
 const GOLDILOCKS_PRIME: u64 = 0xFFFF_FFFF_0000_0001;
 const OPERATION_BUS_ID: u64 = 5000;
@@ -645,22 +648,12 @@ impl SourceGenerator {
             MEMORY_ALIGN_ROM_ID => Self::MemAlignRom(build_mem_align_rom()),
             ARITH_TABLE_ID => Self::ArithTable,
             ARITH_RANGE_TABLE_ID => Self::ArithRange,
-            ARITH_FROPS_TABLE_ID => {
-                let mut frops = ArithFrops::new();
-                frops.build_table();
-                Self::ArithFrops(frops.generate_table())
-            }
+            ARITH_FROPS_TABLE_ID => Self::ArithFrops(generate_arith_frops_table()),
             BINARY_TABLE_ID => Self::BinaryTable,
             BINARY_EXTENSION_TABLE_ID => Self::BinaryExtensionTable,
-            BINARY_FROPS_TABLE_ID => {
-                let mut frops = BinaryBasicFrops::new();
-                frops.build_table();
-                Self::BinaryFrops(frops.generate_table())
-            }
+            BINARY_FROPS_TABLE_ID => Self::BinaryFrops(generate_binary_basic_frops_table()),
             BINARY_EXTENSION_FROPS_TABLE_ID => {
-                let mut frops = BinaryExtensionFrops::new();
-                frops.build_table();
-                Self::BinaryExtensionFrops(frops.generate_table())
+                Self::BinaryExtensionFrops(generate_binary_extension_frops_table())
             }
             ARITH_EQ_LT_TABLE_ID => Self::ArithEqLt,
             KECCAKF_TABLE_ID => Self::KeccakfTable,

@@ -18,6 +18,7 @@ compiler = { path = "vendor/circom/compiler" }
 constraint_generation = { path = "vendor/circom/constraint_generation" }
 constraint_writers = { path = "vendor/circom/constraint_writers" }
 fields = { workspace = true }
+mpi = { workspace = true }
 parser = { path = "vendor/circom/parser" }
 pilout-crate = { package = "pilout", path = "../pil2-proofman/pilout" }
 prost = { workspace = true }
@@ -26,14 +27,11 @@ proofman-starks-lib-c = { path = "../pil2-proofman/provers/starks-lib-c" }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sm-arith = { workspace = true }
-sm-binary = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 type_analysis = { path = "vendor/circom/type_analysis" }
-wat = "1.249.0"
 zisk-core = { workspace = true }
 
 [features]
 default = []
-gpu = ["sm-arith/gpu", "sm-binary/gpu"]
+gpu = []

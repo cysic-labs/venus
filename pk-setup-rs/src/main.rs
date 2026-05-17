@@ -1,6 +1,10 @@
+// proofman-starks-lib-c uses MPI symbols; keep the native link flags explicit.
+extern crate mpi as _;
+
 mod circom_assets;
 mod circom_compile;
 mod fixed_gen;
+mod frops;
 mod pil_info;
 mod pilout_info;
 mod recursive_circom;
@@ -15,8 +19,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use pilout_crate::pilout_proxy::PilOutProxy;
-use sm_arith::ArithFrops;
-use sm_binary::{BinaryBasicFrops, BinaryExtensionFrops};
 use tracing::info;
 
 #[derive(Debug, Parser)]
@@ -95,7 +97,6 @@ fn run() -> Result<()> {
     let proving_key_dir = build_dir.join("provingKey");
 
     prepare_directories(&build_dir, &fixed_dir, &proof_dir, &proving_key_dir)?;
-    generate_frequent_op_fixed_tables(&root)?;
 
     if !pilout_path.exists() {
         anyhow::bail!(
@@ -163,37 +164,4 @@ fn prepare_directories(
     fs::create_dir_all(proving_key_dir)
         .with_context(|| format!("failed to create {}", proving_key_dir.display()))?;
     Ok(())
-}
-
-fn generate_frequent_op_fixed_tables(root: &Path) -> Result<()> {
-    let current_dir = std::env::current_dir().context("failed to get current directory")?;
-    std::env::set_current_dir(root)
-        .with_context(|| format!("failed to enter {}", root.display()))?;
-
-    let result = (|| -> Result<()> {
-        info!("generating arithmetic frequent-op fixed table");
-        ArithFrops::new()
-            .generate_file("state-machines/arith/src/arith_frops_fixed.bin")
-            .map_err(|err| anyhow::anyhow!("failed to generate arith_frops_fixed.bin: {err}"))?;
-
-        info!("generating binary basic frequent-op fixed table");
-        BinaryBasicFrops::new()
-            .generate_file("state-machines/binary/src/binary_basic_frops_fixed.bin")
-            .map_err(|err| {
-                anyhow::anyhow!("failed to generate binary_basic_frops_fixed.bin: {err}")
-            })?;
-
-        info!("generating binary extension frequent-op fixed table");
-        BinaryExtensionFrops::new()
-            .generate_file("state-machines/binary/src/binary_extension_frops_fixed.bin")
-            .map_err(|err| {
-                anyhow::anyhow!("failed to generate binary_extension_frops_fixed.bin: {err}")
-            })?;
-        Ok(())
-    })();
-
-    std::env::set_current_dir(&current_dir)
-        .with_context(|| format!("failed to restore {}", current_dir.display()))?;
-
-    result
 }

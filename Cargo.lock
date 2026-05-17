@@ -3505,6 +3505,7 @@ dependencies = [
  "constraint_generation",
  "constraint_writers",
  "fields",
+ "mpi",
  "parser",
  "pilout",
  "program_structure",
@@ -3513,12 +3514,9 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "sm-arith",
- "sm-binary",
  "tracing",
  "tracing-subscriber",
  "type_analysis",
- "wat",
  "zisk-core",
 ]
 
