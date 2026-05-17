@@ -36,9 +36,9 @@ impl<F: PrimeField64> MemModuleInstance<F> {
         // sort all instance inputs
         timer_start_debug!(MEM_SORT);
         if parallelize {
-            inputs.par_sort_by_key(|input| (input.addr, input.step));
+            inputs.par_sort_unstable_by_key(|input| (input.addr, input.step));
         } else {
-            inputs.sort_by_key(|input| (input.addr, input.step));
+            inputs.sort_unstable_by_key(|input| (input.addr, input.step));
         }
         timer_stop_and_log_debug!(MEM_SORT);
     }
