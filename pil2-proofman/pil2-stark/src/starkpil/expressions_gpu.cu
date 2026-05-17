@@ -94,7 +94,13 @@ void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, 
 {
     ExpsArguments h_expsArgs;
 
+    uint64_t qExpId = dest.params.empty() ? 0 : dest.params[0].expId;
     uint32_t nrowsPack = std::min(static_cast<uint32_t>(nRowsPack), static_cast<uint32_t>(domainSize));
+    uint32_t maxBlocks = nBlocks;
+    if (qExpId == 80875 && nrowsPack == 128 && domainSize >= 256) {
+        nrowsPack = 256;
+        maxBlocks = std::max<uint32_t>(1, nBlocks / 2);
+    }
     h_expsArgs.nRowsPack = nrowsPack;
     
     h_expsArgs.mapOffsetsExps = domainExtended ? h_deviceArgs.mapOffsetsExtended : h_deviceArgs.mapOffsets;            
@@ -171,7 +177,7 @@ void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, 
     memcpy(pinned_exps_args + countId * sizeof(ExpsArguments), &h_expsArgs, sizeof(ExpsArguments));
     CHECKCUDAERR(cudaMemcpyAsync(d_expsArgs, pinned_exps_args + countId * sizeof(ExpsArguments), sizeof(ExpsArguments), cudaMemcpyHostToDevice, stream));
 
-    uint32_t nblocks_ = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(nBlocks),(domainSize + nrowsPack - 1) / nrowsPack));
+    uint32_t nblocks_ = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(maxBlocks),(domainSize + nrowsPack - 1) / nrowsPack));
     uint32_t nthreads_ = nblocks_ == 1 ? domainSize : nrowsPack;
     dim3 nBlocks_ =  nblocks_;
     dim3 nThreads_ = nthreads_;
@@ -235,7 +241,13 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
     }
     ExpsArguments h_expsArgs;
 
+    uint64_t qExpId = dest.params[0].expId;
     uint32_t nrowsPack = std::min(static_cast<uint32_t>(nRowsPack), static_cast<uint32_t>(domainSize));
+    uint32_t maxBlocks = nBlocks;
+    if (qExpId == 80875 && nrowsPack == 128 && domainSize >= 256) {
+        nrowsPack = 256;
+        maxBlocks = std::max<uint32_t>(1, nBlocks / 2);
+    }
     h_expsArgs.nRowsPack = nrowsPack;
     
     h_expsArgs.mapOffsetsExps = domainExtended ? h_deviceArgs.mapOffsetsExtended : h_deviceArgs.mapOffsets;            
@@ -306,7 +318,7 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
     memcpy(pinned_exps_args + countId * sizeof(ExpsArguments), &h_expsArgs, sizeof(ExpsArguments));
     CHECKCUDAERR(cudaMemcpyAsync(d_expsArgs, pinned_exps_args + countId * sizeof(ExpsArguments), sizeof(ExpsArguments), cudaMemcpyHostToDevice, stream));
 
-    uint32_t nblocks_ = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(nBlocks),(domainSize + nrowsPack - 1) / nrowsPack));
+    uint32_t nblocks_ = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(maxBlocks),(domainSize + nrowsPack - 1) / nrowsPack));
     uint32_t nthreads_ = nblocks_ == 1 ? domainSize : nrowsPack;
     dim3 nBlocks_ =  nblocks_;
     dim3 nThreads_ = nthreads_;
@@ -322,8 +334,6 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
     size_t sharedMem = ptrMem + (useTmpInShared ? tmpMem : useTmp3InShared ? tmp3Mem : 0);
 
     // Dispatch to generated standalone kernel by expId, fallback to interpreter
-    uint64_t qExpId = dest.params[0].expId;
-
     TimerStartCategoryGPU(timer, EXPRESSIONS);
     if (!dispatchGeneratedKernel(qExpId, nBlocks_, nThreads_, sharedMem, stream,
             d_params, d_deviceArgs, d_expsArgs, d_destParams)) {
