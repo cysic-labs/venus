@@ -31,6 +31,7 @@ ROM_SETUP_HINTS :=
 PROVE_ARGS := -i $(INPUT)
 PROVE_PREPARE :=
 endif
+PROVE_GPU_ARGS ?= -t 1 -h 4
 
 .PHONY: all setup build install-toolchain check-key generate-key generate-key-rs generate-key-js build-guest build-guest-native \
         generate-hints rom-setup compile-key prove verify clean purge help
@@ -107,7 +108,7 @@ prove: check-key $(PROVE_PREPARE)
 		echo "guest ELF not found at $(ELF), run make setup first"; \
 		exit 1; \
 	fi
-	"$(CARGO_ZISK_BIN)" prove -e "$(ELF)" $(PROVE_ARGS) -k "$(PROVING_KEY)" -o "$(PROOF_DIR)" -a -y
+	"$(CARGO_ZISK_BIN)" prove -e "$(ELF)" $(PROVE_ARGS) -k "$(PROVING_KEY)" -o "$(PROOF_DIR)" -a -y $(PROVE_GPU_ARGS)
 
 verify: check-key
 	@if [ ! -f "$(PROOF_FILE)" ]; then \

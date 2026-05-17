@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use fields::{add, matmul_external, pow7, pow7add, prodadd, Poseidon16, Poseidon2Constants, PrimeField64};
+use smallvec::SmallVec;
 
 use crate::{ProofmanError, ProofmanResult};
 
@@ -133,6 +134,9 @@ const DEPENDENCY_GATE_FLAG: u32 = 1 << 31;
 const DEP_PART_A: u8 = 0;
 const DEP_PART_B: u8 = 1;
 const DEP_PART_C: u8 = 2;
+type SignalList = SmallVec<[usize; 8]>;
+type GateSignalList = SmallVec<[usize; 256]>;
+type UnknownLcTerms<F> = SmallVec<[(usize, F); 4]>;
 
 impl NativeRuntimeSolverIndex {
     fn build(runtime: &NativeRecursiveRuntime) -> Self {
@@ -839,7 +843,7 @@ impl NativeRecursiveRuntime {
                             .map(|is_known| !*is_known)
                             .unwrap_or(false)
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<SmallVec<[u64; 256]>>();
                 if self.try_solve_custom_gate(gate, witness, known, solver_index)? {
                     solved_gates += 1;
                     for signal in unknown_before {
@@ -947,7 +951,7 @@ impl NativeRecursiveRuntime {
         witness: &mut [F],
         known: &mut [bool],
         solver_index: &NativeRuntimeSolverIndex,
-    ) -> ProofmanResult<Vec<usize>> {
+    ) -> ProofmanResult<SignalList> {
         let a = eval_lc(&constraint.a, witness, known)?;
         let b = eval_lc(&constraint.b, witness, known)?;
         let c = eval_lc(&constraint.c, witness, known)?;
@@ -987,7 +991,7 @@ impl NativeRecursiveRuntime {
             )));
         }
 
-        Ok(Vec::new())
+        Ok(SignalList::new())
     }
 
     fn try_solve_custom_gate<F: PrimeField64>(
@@ -1029,12 +1033,12 @@ impl NativeRecursiveRuntime {
 #[derive(Debug)]
 struct LcEval<F: PrimeField64> {
     value: F,
-    unknown: Vec<(usize, F)>,
+    unknown: UnknownLcTerms<F>,
 }
 
 fn eval_lc<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known: &[bool]) -> ProofmanResult<LcEval<F>> {
     let mut value = F::ZERO;
-    let mut unknown = Vec::new();
+    let mut unknown = UnknownLcTerms::<F>::new();
     for term in terms {
         let signal = usize::try_from(term.signal).map_err(|_| {
             ProofmanError::InvalidSetup(format!("native recursive R1CS signal {} is too large", term.signal))
@@ -1104,8 +1108,8 @@ fn enqueue_dependents(
     queued_constraints: &mut [bool],
     queued_gates: &mut [bool],
 ) -> ProofmanResult<()> {
-    let mut touched_constraints = Vec::new();
-    let mut touched_gates = Vec::new();
+    let mut touched_constraints = SmallVec::<[usize; 32]>::new();
+    let mut touched_gates = SmallVec::<[usize; 32]>::new();
     for dependency_index in solver_index.dependency_range(signal) {
         let dependency = solver_index.dependencies[dependency_index];
         let code = dependency.code;
@@ -1298,8 +1302,8 @@ fn gate_state_maybe_ready(state: GateSolveState) -> bool {
         || (state.b_unknown == 0 && state.output_unknown == 0 && state.a_unknown > 0)
 }
 
-fn gate_signal_indices(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
-    let mut out = Vec::with_capacity(signals.len());
+fn gate_signal_indices(signals: &[u64], witness_len: usize) -> ProofmanResult<GateSignalList> {
+    let mut out = GateSignalList::with_capacity(signals.len());
     for &signal in signals {
         let signal = usize::try_from(signal).map_err(|_| {
             ProofmanError::InvalidSetup(format!("native recursive custom gate signal {signal} is too large"))
@@ -1342,13 +1346,13 @@ fn try_solve_bit_decomposition<F: PrimeField64>(
     witness: &mut [F],
     known: &mut [bool],
     solver_index: &NativeRuntimeSolverIndex,
-) -> ProofmanResult<Option<Vec<usize>>> {
+) -> ProofmanResult<Option<SignalList>> {
     if !constraint.a.is_empty() || !constraint.b.is_empty() || constraint.c.is_empty() {
         return Ok(None);
     }
 
     let mut known_value = F::ZERO;
-    let mut unknown = Vec::new();
+    let mut unknown = SmallVec::<[(usize, u64); 64]>::new();
     for term in &constraint.c {
         let signal = usize::try_from(term.signal).map_err(|_| {
             ProofmanError::InvalidSetup(format!("native recursive R1CS signal {} is too large", term.signal))
@@ -1371,7 +1375,7 @@ fn try_solve_bit_decomposition<F: PrimeField64>(
 
     let mut sign = None;
     let mut covered_bits = 0u64;
-    let mut unknown_with_powers = Vec::with_capacity(unknown.len());
+    let mut unknown_with_powers = SmallVec::<[(usize, u64); 64]>::with_capacity(unknown.len());
     for (signal, coeff) in unknown {
         if !solver_index.is_boolean_signal(signal as u64) {
             return Ok(None);
@@ -1394,7 +1398,7 @@ fn try_solve_bit_decomposition<F: PrimeField64>(
         return Ok(None);
     }
 
-    let mut solved = Vec::with_capacity(unknown_with_powers.len());
+    let mut solved = SignalList::with_capacity(unknown_with_powers.len());
     for (signal, power) in unknown_with_powers {
         let value = if target & power == 0 { F::ZERO } else { F::ONE };
         if known[signal] {
@@ -1429,13 +1433,13 @@ fn solve_single_unknown<F: PrimeField64>(
     desired: F,
     witness: &mut [F],
     known: &mut [bool],
-) -> ProofmanResult<Vec<usize>> {
+) -> ProofmanResult<SignalList> {
     if lc.unknown.len() != 1 {
-        return Ok(Vec::new());
+        return Ok(SignalList::new());
     }
     let (signal, coeff) = lc.unknown[0];
     if coeff.is_zero() {
-        return Ok(Vec::new());
+        return Ok(SignalList::new());
     }
     let value = (desired - lc.value) / coeff;
     if known[signal] {
@@ -1444,11 +1448,13 @@ fn solve_single_unknown<F: PrimeField64>(
                 "native recursive R1CS solved conflicting value for signal {signal}"
             )));
         }
-        Ok(Vec::new())
+        Ok(SignalList::new())
     } else {
         witness[signal] = value;
         known[signal] = true;
-        Ok(vec![signal])
+        let mut solved = SignalList::new();
+        solved.push(signal);
+        Ok(solved)
     }
 }
 
@@ -1796,8 +1802,8 @@ fn verify_poseidon16_gate<F: PrimeField64>(
     verify_gate_outputs(gate_name, &signals[output_start..output_start + 208], result, witness)
 }
 
-fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<Vec<usize>> {
-    let mut out = Vec::with_capacity(signals.len());
+fn gate_signals(signals: &[u64], witness_len: usize) -> ProofmanResult<GateSignalList> {
+    let mut out = GateSignalList::with_capacity(signals.len());
     for &signal in signals {
         let signal = usize::try_from(signal).map_err(|_| {
             ProofmanError::InvalidSetup(format!("native recursive custom gate signal {signal} is too large"))
