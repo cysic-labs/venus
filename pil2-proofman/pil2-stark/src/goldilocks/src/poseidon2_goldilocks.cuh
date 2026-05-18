@@ -589,7 +589,7 @@ __global__ void linearHashGPUTiles(uint64_t *__restrict__ output, uint64_t *__re
 }
 
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
-__global__ void hash_gpu_3(uint32_t nextN, uint32_t nextIndex, uint32_t pending, uint64_t *cursor)
+__global__ void __launch_bounds__(128, 7) hash_gpu_3(uint32_t nextN, uint32_t nextIndex, uint32_t pending, uint64_t *cursor)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nextN)
