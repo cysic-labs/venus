@@ -814,10 +814,10 @@ __device__ __forceinline__ void computeExpression_chunk_(
     gl64_t *a0, *a1, *a2, *b0, *b1, *b2;
     gl64_t *res;
 
-    uint64_t i_args = 0;
     uint64_t nOps = d_destParams[0].nOps;
     for (uint64_t kk = 0; kk < nOps; ++kk)
     {
+        uint64_t i_args = kk << 3;
         switch (ops[kk])
         {
         case 0:
@@ -826,7 +826,6 @@ __device__ __forceinline__ void computeExpression_chunk_(
             load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 5], args[i_args + 6], args[i_args + 7], i, 1, IsCyclic, b0, b1, b2);
             res = (gl64_t*)&expressions_params[bufferCommitsSize][args[i_args + 1] * blockDim.x];
             op_gpu_p2(args[i_args], res, a0, b0);
-            i_args += 8;
             break;
         }
         case 1:
@@ -835,7 +834,6 @@ __device__ __forceinline__ void computeExpression_chunk_(
             load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 5], args[i_args + 6], args[i_args + 7], i, 1, IsCyclic, b0, b1, b2);
             res = (gl64_t*)&expressions_params[bufferCommitsSize + 1][args[i_args + 1] * blockDim.x];
             op_31_gpu_p2(args[i_args], res, a0, a1, a2, b0);
-            i_args += 8;
             break;
         }
         case 2:
@@ -844,7 +842,6 @@ __device__ __forceinline__ void computeExpression_chunk_(
             load__(d_deviceArgs, d_expsArgs, d_params, expressions_params, args[i_args + 5], args[i_args + 6], args[i_args + 7], i, 3, IsCyclic, b0, b1, b2);
             res = (gl64_t*)&expressions_params[bufferCommitsSize + 1][args[i_args + 1] * blockDim.x];
             op_33_gpu_p2(args[i_args], res, a0, a1, a2, b0, b1, b2);
-            i_args += 8;
             break;
         }
         default:
@@ -852,9 +849,6 @@ __device__ __forceinline__ void computeExpression_chunk_(
             printf(" Wrong operation! %d \n", ops[kk]);
         }
         }
-    }
-    if (i_args != d_destParams[0].nArgs){
-        printf(" %lu consumed args - %lu expected args \n", i_args, d_destParams[0].nArgs);
     }
 
     storePolynomial__(d_expsArgs, (Goldilocks::Element *)res, i);
