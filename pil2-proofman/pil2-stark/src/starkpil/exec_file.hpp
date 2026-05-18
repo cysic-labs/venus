@@ -42,12 +42,13 @@ void getCommitedPols(Goldilocks::Element *circomWitness, uint64_t *exec_data, Go
         circomWitness[sizeWitness + i] = c + d;
     }
 
-    for (uint i = 0; i < N; i++) {
-        for (uint j = 0; j < nCommitedPols; j++) {
-            if (i < nSMap && p_sMap[nCommitedPols * i + j] != 0) {
-                witness[i * nCommitedPols + j] = circomWitness[p_sMap[nCommitedPols * i + j]];
-            } else {
-                witness[i * nCommitedPols + j] = Goldilocks::zero();
+    uint64_t nRows = std::min(N, nSMap);
+    for (uint64_t i = 0; i < nRows; i++) {
+        uint64_t rowOffset = nCommitedPols * i;
+        for (uint64_t j = 0; j < nCommitedPols; j++) {
+            uint64_t signal = p_sMap[rowOffset + j];
+            if (signal != 0) {
+                witness[rowOffset + j] = circomWitness[signal];
             }
         }
     } 
