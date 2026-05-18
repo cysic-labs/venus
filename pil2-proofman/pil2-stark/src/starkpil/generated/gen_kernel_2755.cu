@@ -27,7 +27,7 @@ __device__ __noinline__ static void storePolynomial__(ExpsArguments *d_expsArgs,
 
 #include "gen_eval_2755.cuh"
 
-__global__ void computeExpression_gen_2755_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)
+__global__ void __launch_bounds__(256, 2) computeExpression_gen_2755_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)
 {
     int chunk_idx = blockIdx.x;
     uint64_t nchunks = d_expsArgs->domainSize / blockDim.x;
