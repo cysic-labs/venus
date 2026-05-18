@@ -63,6 +63,9 @@ __device__ __forceinline__ void poseidon2_hash_shared(gl64_t *out, const gl64_t 
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
 __device__ void hash_one_2(gl64_t *state, gl64_t *const input, int tid);
 
+template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
+__device__ __forceinline__ void hash_one_const(gl64_t *out, const gl64_t *input);
+
 __device__ __forceinline__ void pow7_2(gl64_t &x);
 
 __device__ __forceinline__ void matmul_m4_(gl64_t *x);
@@ -595,7 +598,7 @@ __global__ void hash_gpu_3(uint32_t nextN, uint32_t nextIndex, uint32_t pending,
     gl64_t* pol_input = (gl64_t *)(&cursor[nextIndex + tid * SPONGE_WIDTH_T]);
     gl64_t* pol_output = (gl64_t *)(&cursor[nextIndex + (pending + tid) * CAPACITY_T]);
     
-    hash_one_2<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(pol_output, pol_input, threadIdx.x);
+    hash_one_const<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(pol_output, pol_input);
 }
 
 

@@ -52,6 +52,17 @@ __device__ void hash_one_2(gl64_t *out, gl64_t *const input, int tid)
     mymemcpy((uint64_t *)out, (uint64_t *)aux, CAPACITY_T);
 }
 
+template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
+__device__ __forceinline__ void hash_one_const(gl64_t *out, const gl64_t *input)
+{
+    const gl64_t *GPU_C_GL = SPONGE_WIDTH_T==4 ? (gl64_t *)GPU_C_4 : (SPONGE_WIDTH_T==8 ? (gl64_t *)GPU_C_8 : (SPONGE_WIDTH_T==12 ? (gl64_t *)GPU_C_12 : (gl64_t *)GPU_C_16));
+    const gl64_t *GPU_D_GL = SPONGE_WIDTH_T==4 ? (gl64_t *)GPU_D_4 : (SPONGE_WIDTH_T==8 ? (gl64_t *)GPU_D_8 : (SPONGE_WIDTH_T==12 ? (gl64_t *)GPU_D_12 : (gl64_t *)GPU_D_16));
+
+    gl64_t state[SPONGE_WIDTH_T];
+    hash_full_result_seq_2<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(state, input, GPU_C_GL, GPU_D_GL);
+    mymemcpy((uint64_t *)out, (uint64_t *)state, CAPACITY_T);
+}
+
 template<uint32_t SPONGE_WIDTH_T>
 void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::initPoseidon2GPUConstants(uint32_t* gpu_ids, uint32_t num_gpu_ids)
 {    
