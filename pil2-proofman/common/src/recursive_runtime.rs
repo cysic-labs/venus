@@ -38,6 +38,7 @@ pub struct NativeRecursiveRuntime {
 #[derive(Debug)]
 struct NativeRuntimeSolverIndex {
     dependencies: Vec<NativeRuntimeDependency>,
+    dependency_offsets: Option<Vec<u32>>,
     boolean_signals: Vec<u64>,
     inverse_protected_signals: Vec<u64>,
 }
@@ -211,10 +212,19 @@ impl NativeRuntimeSolverIndex {
             push_gate_dependencies(&mut dependencies, gate, code);
         }
         dependencies.sort_unstable_by_key(|dependency| (dependency.signal, dependency.code, dependency.part));
-        Self { dependencies, boolean_signals, inverse_protected_signals }
+        let dependency_offsets = build_dependency_offsets(&dependencies);
+        Self { dependencies, dependency_offsets, boolean_signals, inverse_protected_signals }
     }
 
     fn dependency_range(&self, signal: u64) -> std::ops::Range<usize> {
+        if let Some(offsets) = &self.dependency_offsets {
+            if let Ok(signal) = usize::try_from(signal) {
+                if signal + 1 < offsets.len() {
+                    return offsets[signal] as usize..offsets[signal + 1] as usize;
+                }
+            }
+            return self.dependencies.len()..self.dependencies.len();
+        }
         let start = self.dependencies.partition_point(|dependency| dependency.signal < signal);
         let end = start + self.dependencies[start..].partition_point(|dependency| dependency.signal == signal);
         start..end
@@ -227,6 +237,32 @@ impl NativeRuntimeSolverIndex {
     fn can_inverse_solve(&self, signals: &[usize]) -> bool {
         signals.iter().all(|&signal| self.inverse_protected_signals.binary_search(&(signal as u64)).is_err())
     }
+}
+
+fn build_dependency_offsets(dependencies: &[NativeRuntimeDependency]) -> Option<Vec<u32>> {
+    if dependencies.len() < 1_000_000 || dependencies.len() > u32::MAX as usize {
+        return None;
+    }
+    let max_signal = usize::try_from(dependencies.last()?.signal).ok()?;
+    let len = max_signal.checked_add(2)?;
+    if len > dependencies.len() {
+        return None;
+    }
+
+    let mut offsets = vec![0u32; len];
+    let mut current_signal = 0usize;
+    for (index, dependency) in dependencies.iter().enumerate() {
+        let signal = dependency.signal as usize;
+        while current_signal <= signal {
+            offsets[current_signal] = index as u32;
+            current_signal += 1;
+        }
+    }
+    while current_signal < offsets.len() {
+        offsets[current_signal] = dependencies.len() as u32;
+        current_signal += 1;
+    }
+    Some(offsets)
 }
 
 fn push_lc_dependencies(
@@ -2994,6 +3030,32 @@ mod tests {
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())
+    }
+
+    #[test]
+    fn dependency_offset_ranges_match_sorted_dependencies() {
+        let dependencies = vec![
+            NativeRuntimeDependency { signal: 1, code: 10, part: DEP_PART_A, bit_term: false },
+            NativeRuntimeDependency { signal: 1, code: 11, part: DEP_PART_B, bit_term: false },
+            NativeRuntimeDependency { signal: 3, code: 12, part: DEP_PART_C, bit_term: false },
+            NativeRuntimeDependency { signal: 5, code: 13, part: DEP_PART_A, bit_term: false },
+        ];
+        let indexed = NativeRuntimeSolverIndex {
+            dependencies: dependencies.clone(),
+            dependency_offsets: Some(vec![0, 0, 2, 2, 3, 3, 4]),
+            boolean_signals: Vec::new(),
+            inverse_protected_signals: Vec::new(),
+        };
+        let fallback = NativeRuntimeSolverIndex {
+            dependencies,
+            dependency_offsets: None,
+            boolean_signals: Vec::new(),
+            inverse_protected_signals: Vec::new(),
+        };
+
+        for signal in 0..=6 {
+            assert_eq!(indexed.dependency_range(signal), fallback.dependency_range(signal));
+        }
     }
 
     #[test]
