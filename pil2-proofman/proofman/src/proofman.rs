@@ -333,7 +333,8 @@ impl<F: PrimeField64> ProofMan<F> {
         self.pctx.set_witness_tx_priority(None);
         self.pctx.set_proof_tx(None);
 
-        for _ in 0..self.n_streams {
+        let recursive_stop_workers = self.handle_recursives.lock().unwrap().len();
+        for _ in 0..recursive_stop_workers {
             self.recursive_tx.send((u64::MAX - 1, "Recursive2".to_string())).unwrap();
         }
 
@@ -2000,7 +2001,13 @@ where
 
         self.pctx.set_proof_tx(Some(self.proofs_tx.clone()));
 
-        for _ in 0..self.n_streams {
+        let recursive_witness_workers = if cfg!(feature = "gpu") && my_instances_sorted.len() <= 128 {
+            self.max_num_threads.min(self.n_streams * 2).max(self.n_streams)
+        } else {
+            self.n_streams
+        };
+
+        for _ in 0..recursive_witness_workers {
             let pctx_clone = self.pctx.clone();
             let setups_clone = self.setups.clone();
             let proofs_clone = self.proofs.clone();
@@ -2427,7 +2434,7 @@ where
         get_stream_proofs_c(self.pctx.get_device_buffers_ptr());
         proofs_finished.store(true, Ordering::Relaxed);
         clear_proof_done_callback_c();
-        for _ in 0..self.n_streams {
+        for _ in 0..recursive_witness_workers {
             self.recursive_tx.send((u64::MAX - 1, "Basic".to_string())).unwrap();
         }
 
