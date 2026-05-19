@@ -1055,7 +1055,7 @@ fn build_signal_location(
         Uniform { instance_id, header, .. } => {
             let env = TemplateDB::get_instance_addresses(database, *instance_id);
             let location = env.get_variable(signal).unwrap().clone();
-            let (full_address, checks) = compute_full_address(
+            let (full_address, _checks) = compute_full_address(
                 state, 
                 location.access_instruction, 
                 dimensions,
@@ -2009,5 +2009,4 @@ pub fn translate_code(body: Statement, code_info: CodeInfo) -> CodeOutput {
         string_table : state.string_table
     }
 }
-
 
