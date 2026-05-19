@@ -2180,16 +2180,30 @@ where
             my_instances_calculated[*instance_id as usize] = true;
         }
 
-        my_instances_sorted.sort_by_key(|&id| {
-            (
-                if self.pctx.is_air_instance_stored(id) { 0 } else { 1 },
-                if self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id) {
-                    0
-                } else {
-                    1
-                },
-            )
-        });
+        if std::env::var_os("VENUS_WEIGHTED_PROOF_ORDER").is_some() {
+            my_instances_sorted.sort_by_key(|&id| {
+                (
+                    if self.pctx.is_air_instance_stored(id) { 0 } else { 1 },
+                    if self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id) {
+                        0
+                    } else {
+                        1
+                    },
+                    std::cmp::Reverse(instances[id].weight),
+                )
+            });
+        } else {
+            my_instances_sorted.sort_by_key(|&id| {
+                (
+                    if self.pctx.is_air_instance_stored(id) { 0 } else { 1 },
+                    if self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id) {
+                        0
+                    } else {
+                        1
+                    },
+                )
+            });
+        }
 
         let proofs_finished = Arc::new(AtomicBool::new(false));
         for stream_id in 0..self.n_streams {
