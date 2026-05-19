@@ -3722,7 +3722,7 @@ where
         let mut preloaded_const = Vec::new();
         if cfg!(feature = "gpu") {
             preloaded_const.push(PreLoadedConst::new(0, 0, ProofType::Basic));
-            preloaded_const.push(PreLoadedConst::new(0, 0, ProofType::Recursive1));
+            preloaded_const.push(PreLoadedConst::new(0, 14, ProofType::Recursive1));
             preloaded_const.push(PreLoadedConst::new(0, 0, ProofType::Recursive2));
         }
 
