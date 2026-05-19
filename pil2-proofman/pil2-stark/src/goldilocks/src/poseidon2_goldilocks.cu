@@ -6,6 +6,7 @@
 #include "poseidon2_goldilocks.hpp"
 #include "merklehash_goldilocks.hpp"
 #include "poseidon2_goldilocks.cuh"
+#include <cstdlib>
 
 // #ifdef GPU_TIMING
 #include "timer_gl.hpp"
@@ -61,6 +62,53 @@ __device__ __forceinline__ void hash_one_const(gl64_t *out, const gl64_t *input)
     gl64_t state[SPONGE_WIDTH_T];
     hash_full_result_seq_2<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(state, input, GPU_C_GL, GPU_D_GL);
     mymemcpy((uint64_t *)out, (uint64_t *)state, CAPACITY_T);
+}
+
+template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
+__global__ void linearHashGPURowMajorReg(uint64_t *__restrict__ output, uint64_t *__restrict__ input, uint32_t num_cols, uint32_t num_rows)
+{
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+
+    const gl64_t *GPU_C_GL = SPONGE_WIDTH_T == 8
+        ? (gl64_t *)GPU_C_8
+        : (SPONGE_WIDTH_T == 12 ? (gl64_t *)GPU_C_12 : (gl64_t *)GPU_C_16);
+    const gl64_t *GPU_D_GL = SPONGE_WIDTH_T == 8
+        ? (gl64_t *)GPU_D_8
+        : (SPONGE_WIDTH_T == 12 ? (gl64_t *)GPU_D_12 : (gl64_t *)GPU_D_16);
+
+    gl64_t state[SPONGE_WIDTH_T];
+#pragma unroll
+    for (uint32_t i = 0; i < CAPACITY_T; ++i) {
+        state[RATE_T + i] = gl64_t(uint64_t(0));
+    }
+
+    for (uint32_t col = 0;;) {
+        uint32_t delta = min(num_cols - col, RATE_T);
+#pragma unroll
+        for (uint32_t i = 0; i < RATE_T; ++i) {
+            state[i] = i < delta
+                ? gl64_t(input[getBufferOffsetRowMajor(row, col + i, num_rows, num_cols)])
+                : gl64_t(uint64_t(0));
+        }
+
+        hash_full_result_seq_2_<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(state, GPU_C_GL, GPU_D_GL);
+
+        if ((col += RATE_T) >= num_cols) {
+            break;
+        }
+
+#pragma unroll
+        for (uint32_t i = 0; i < CAPACITY_T; ++i) {
+            state[RATE_T + i] = state[i];
+        }
+    }
+
+    uint64_t out_idx = row * CAPACITY_T;
+#pragma unroll
+    for (uint32_t i = 0; i < CAPACITY_T; ++i) {
+        output[out_idx + i] = state[i];
+    }
 }
 
 template<uint32_t SPONGE_WIDTH_T>
@@ -150,7 +198,12 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::merkletreeRowMajor(uint32_t arity, 
     if (num_rows < TPB) { actual_tpb = num_rows; actual_blks = 1; }
 
     // Leaf hash from blocked-row-major layout (matches NTT output)
-    linearHashGPURowMajor<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, actual_tpb * SPONGE_WIDTH * 8, stream>>>(d_tree, d_input, num_cols, num_rows);
+    static int use_rowmajor_reg = getenv("VENUS_ROWMAJOR_REG") != nullptr;
+    if (use_rowmajor_reg) {
+        linearHashGPURowMajorReg<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_cols, num_rows);
+    } else {
+        linearHashGPURowMajor<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, actual_tpb * SPONGE_WIDTH * 8, stream>>>(d_tree, d_input, num_cols, num_rows);
+    }
     CHECKCUDAERR(cudaGetLastError());
 
     // Internal Merkle tree levels (same as merkletreeCoalescedBlocks)
