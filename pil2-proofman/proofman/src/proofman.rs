@@ -3733,7 +3733,11 @@ where
 
         let mut preloaded_const = Vec::new();
         if cfg!(feature = "gpu") {
-            preloaded_const.push(PreLoadedConst::new(0, 22, ProofType::Basic));
+            let basic_air_id = std::env::var("VENUS_BASIC_PRELOAD_AIR_ID")
+                .ok()
+                .map(|value| value.parse().expect("invalid VENUS_BASIC_PRELOAD_AIR_ID"))
+                .unwrap_or(22);
+            preloaded_const.push(PreLoadedConst::new(0, basic_air_id, ProofType::Basic));
             preloaded_const.push(PreLoadedConst::new(0, 14, ProofType::Recursive1));
             preloaded_const.push(PreLoadedConst::new(0, 0, ProofType::Recursive2));
         }

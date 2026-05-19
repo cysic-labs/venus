@@ -32,7 +32,7 @@ PROVE_ARGS := -i $(INPUT)
 PROVE_PREPARE :=
 endif
 PROVE_GPU_ARGS ?= -t 3 -h 1
-PROVE_ENV ?= VENUS_ROWMAJOR_REG=1 VENUS_WEIGHTED_PROOF_ORDER=1
+PROVE_ENV ?= VENUS_ROWMAJOR_REG=1 VENUS_WEIGHTED_PROOF_ORDER=1 VENUS_BASIC_PRELOAD_AIR_ID=14 VENUS_EXPR_MAX_BLOCKS=480
 
 .PHONY: all setup build install-toolchain check-key generate-key generate-key-rs generate-key-js build-guest build-guest-native \
         generate-hints rom-setup compile-key prove verify clean purge help

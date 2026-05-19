@@ -4,6 +4,7 @@
 #include "zklog.hpp"
 #include "exit_process.hpp"
 #include "expressions_pack.hpp"
+#include <cstdlib>
 
 StarkInfo::StarkInfo(string file, bool final_, bool recursive_, bool verify_constraints_, bool verify_, bool gpu_, bool preallocate_)
 {
@@ -674,6 +675,13 @@ void StarkInfo::setMemoryExpressions(uint64_t nTmp1, uint64_t nTmp3) {
         } else {
             nrowsPack = 256;
             maxNBlocks = 512;
+            if (const char *maxBlocksEnv = std::getenv("VENUS_EXPR_MAX_BLOCKS")) {
+                char *end = nullptr;
+                unsigned long requested = std::strtoul(maxBlocksEnv, &end, 10);
+                if (end != maxBlocksEnv && requested > 0 && requested < maxNBlocks) {
+                    maxNBlocks = requested;
+                }
+            }
 
             uint64_t tmpsUsed = nTmp1 + (nTmp3 + 2) * FIELD_EXTENSION;
             uint64_t maxTotal = recursive ? mapTotalN + (1 << 26) : mapTotalN + (1 << 25);
