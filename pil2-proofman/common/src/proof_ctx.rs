@@ -281,6 +281,7 @@ pub struct ProofCtx<F: PrimeField64> {
     pub global_info: GlobalInfo,
     pub air_instances: Vec<RwLock<AirInstance<F>>>,
     pub weights: HashMap<(usize, usize), u64>,
+    pub q_ops_order_weights: HashMap<(usize, usize), u64>,
     pub custom_commits_values: Mutex<HashMap<String, (PathBuf, Vec<u8>)>>,
     pub dctx: RwLock<DistributionCtx>,
     pub debug_info: RwLock<DebugInfo>,
@@ -317,6 +318,7 @@ impl<F: PrimeField64> ProofCtx<F> {
         let n_challenges = global_info.n_challenges.iter().sum::<usize>();
 
         let weights = HashMap::new();
+        let q_ops_order_weights = HashMap::new();
 
         let air_instances: Vec<RwLock<AirInstance<F>>> =
             (0..MAX_INSTANCES).map(|_| RwLock::new(AirInstance::<F>::default())).collect();
@@ -333,6 +335,7 @@ impl<F: PrimeField64> ProofCtx<F> {
             debug_info: RwLock::new(DebugInfo::default()),
             custom_commits_values: Mutex::new(HashMap::new()),
             weights,
+            q_ops_order_weights,
             aggregation,
             witness_tx: RwLock::new(None),
             witness_tx_priority: RwLock::new(None),
@@ -478,10 +481,15 @@ impl<F: PrimeField64> ProofCtx<F> {
                     .sum::<u64>();
                 total_cols += 3; // FRI polinomial
                 let n_openings = setup.stark_info.opening_points.len() as u64;
-                // let n_ops_quotient = setup.n_operations_quotient;
                 let weight = (total_cols + n_openings * 3) * (1 << (setup.stark_info.stark_struct.n_bits_ext));
-                // weight += (n_ops_quotient / 10) * (1 << (setup.stark_info.stark_struct.n_bits_ext));
+                let q_ops_divisor = std::env::var_os("VENUS_WEIGHT_Q_OPS")
+                    .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+                    .filter(|&divisor| divisor > 0)
+                    .unwrap_or(10);
+                let q_ops_order_weight = weight
+                    + (setup.n_operations_quotient / q_ops_divisor) * (1 << (setup.stark_info.stark_struct.n_bits_ext));
                 self.weights.insert((airgroup_id, air_id), weight);
+                self.q_ops_order_weights.insert((airgroup_id, air_id), q_ops_order_weight);
             }
         }
         Ok(())
@@ -489,6 +497,10 @@ impl<F: PrimeField64> ProofCtx<F> {
 
     pub fn get_weight(&self, airgroup_id: usize, air_id: usize) -> u64 {
         *self.weights.get(&(airgroup_id, air_id)).unwrap()
+    }
+
+    pub fn get_q_ops_order_weight(&self, airgroup_id: usize, air_id: usize) -> u64 {
+        *self.q_ops_order_weights.get(&(airgroup_id, air_id)).unwrap()
     }
 
     pub fn get_custom_commits_fixed_buffer(&self, name: &str, return_error: bool) -> ProofmanResult<PathBuf> {

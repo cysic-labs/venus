@@ -2181,7 +2181,19 @@ where
         }
 
         if std::env::var_os("VENUS_WEIGHTED_PROOF_ORDER").is_some() {
+            let q_ops_order_threshold = std::env::var_os("VENUS_WEIGHT_Q_OPS_MIN_INSTANCES")
+                .and_then(|value| value.to_string_lossy().parse::<usize>().ok())
+                .unwrap_or(128);
+            let force_q_ops_order = std::env::var_os("VENUS_WEIGHT_Q_OPS")
+                .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+                .is_some_and(|divisor| divisor > 0);
+            let use_q_ops_order = force_q_ops_order || instances.len() >= q_ops_order_threshold;
             my_instances_sorted.sort_by_key(|&id| {
+                let order_weight = if use_q_ops_order {
+                    self.pctx.get_q_ops_order_weight(instances[id].airgroup_id, instances[id].air_id)
+                } else {
+                    instances[id].weight
+                };
                 (
                     if self.pctx.is_air_instance_stored(id) { 0 } else { 1 },
                     if self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id) {
@@ -2189,7 +2201,7 @@ where
                     } else {
                         1
                     },
-                    std::cmp::Reverse(instances[id].weight),
+                    std::cmp::Reverse(order_weight),
                 )
             });
         } else {
