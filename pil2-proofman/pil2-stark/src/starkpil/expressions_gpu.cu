@@ -805,16 +805,15 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
 
 
 template<bool IsCyclic>
-__device__ __forceinline__ void computeExpression_chunk_(
+__device__ __forceinline__ gl64_t *computeExpression_ops_(
     StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs,
     DestParamsGPU *d_destParams, Goldilocks::Element **expressions_params,
     uint32_t bufferCommitsSize, uint64_t i,
-    const uint8_t * __restrict__ ops, const uint16_t * __restrict__ args)
+    uint64_t nOps, const uint8_t * __restrict__ ops, const uint16_t * __restrict__ args)
 {
     gl64_t *a0, *a1, *a2, *b0, *b1, *b2;
-    gl64_t *res;
+    gl64_t *res = nullptr;
 
-    uint64_t nOps = d_destParams[0].nOps;
     for (uint64_t kk = 0; kk < nOps; ++kk)
     {
         uint64_t i_args = kk << 3;
@@ -851,6 +850,19 @@ __device__ __forceinline__ void computeExpression_chunk_(
         }
     }
 
+    return res;
+}
+
+template<bool IsCyclic>
+__device__ __forceinline__ void computeExpression_chunk_(
+    StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs,
+    DestParamsGPU *d_destParams, Goldilocks::Element **expressions_params,
+    uint32_t bufferCommitsSize, uint64_t i,
+    const uint8_t * __restrict__ ops, const uint16_t * __restrict__ args)
+{
+    gl64_t *res = computeExpression_ops_<IsCyclic>(
+        d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i,
+        d_destParams[0].nOps, ops, args);
     storePolynomial__(d_expsArgs, (Goldilocks::Element *)res, i);
 }
 
@@ -911,7 +923,29 @@ __global__  void computeExpression_(StepsParams *d_params, DeviceArguments *d_de
     while (chunk_idx < nchunks)
     {
         uint64_t i = chunk_idx * blockDim.x;
-        if (chunk_idx < k_min_chunk || chunk_idx >= k_max_chunk) {
+        bool is_cyclic = chunk_idx < k_min_chunk || chunk_idx >= k_max_chunk;
+        if (d_expsArgs->dest_nParams == 1 && d_destParams[0].nOps > 256 && d_destParams[0].nArgs == d_destParams[0].nOps * 8) {
+            gl64_t *res = nullptr;
+            const uint64_t tileOpsMax = 128;
+            for (uint64_t base = 0; base < nOps; base += tileOpsMax) {
+                uint64_t tileOps = min(tileOpsMax, nOps - base);
+                uint64_t tileArgs = tileOps << 3;
+                for (uint32_t t = threadIdx.x; t < tileOps; t += blockDim.x) ops_staged[t] = g_ops[base + t];
+                for (uint32_t t = threadIdx.x; t < tileArgs; t += blockDim.x) args_staged[t] = g_args[(base << 3) + t];
+                __syncthreads();
+                if (is_cyclic) {
+                    res = computeExpression_ops_<true>(
+                        d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i,
+                        tileOps, ops_staged, args_staged);
+                } else {
+                    res = computeExpression_ops_<false>(
+                        d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i,
+                        tileOps, ops_staged, args_staged);
+                }
+                __syncthreads();
+            }
+            storePolynomial__(d_expsArgs, (Goldilocks::Element *)res, i);
+        } else if (is_cyclic) {
             computeExpression_chunk_<true>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i, active_ops, active_args);
         } else {
             computeExpression_chunk_<false>(d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i, active_ops, active_args);
