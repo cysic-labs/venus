@@ -2180,6 +2180,7 @@ where
             my_instances_calculated[*instance_id as usize] = true;
         }
 
+        let compressor_first_order = std::env::var_os("VENUS_COMPRESSOR_FIRST_ORDER").is_some();
         if std::env::var_os("VENUS_WEIGHTED_PROOF_ORDER").is_some() {
             let q_ops_order_threshold = std::env::var_os("VENUS_WEIGHT_Q_OPS_MIN_INSTANCES")
                 .and_then(|value| value.to_string_lossy().parse::<usize>().ok())
@@ -2194,26 +2195,33 @@ where
                 } else {
                     instances[id].weight
                 };
-                (
-                    if self.pctx.is_air_instance_stored(id) { 0 } else { 1 },
-                    if self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id) {
-                        0
-                    } else {
-                        1
-                    },
-                    std::cmp::Reverse(order_weight),
-                )
+                let is_stored = self.pctx.is_air_instance_stored(id);
+                let has_compressor =
+                    self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id);
+                if compressor_first_order {
+                    (
+                        if has_compressor { 0 } else { 1 },
+                        if is_stored { 0 } else { 1 },
+                        std::cmp::Reverse(order_weight),
+                    )
+                } else {
+                    (
+                        if is_stored { 0 } else { 1 },
+                        if has_compressor { 0 } else { 1 },
+                        std::cmp::Reverse(order_weight),
+                    )
+                }
             });
         } else {
             my_instances_sorted.sort_by_key(|&id| {
-                (
-                    if self.pctx.is_air_instance_stored(id) { 0 } else { 1 },
-                    if self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id) {
-                        0
-                    } else {
-                        1
-                    },
-                )
+                let is_stored = self.pctx.is_air_instance_stored(id);
+                let has_compressor =
+                    self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id);
+                if compressor_first_order {
+                    (if has_compressor { 0 } else { 1 }, if is_stored { 0 } else { 1 })
+                } else {
+                    (if is_stored { 0 } else { 1 }, if has_compressor { 0 } else { 1 })
+                }
             });
         }
 
