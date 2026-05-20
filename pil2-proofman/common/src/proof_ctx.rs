@@ -485,7 +485,7 @@ impl<F: PrimeField64> ProofCtx<F> {
                 let q_ops_divisor = std::env::var_os("VENUS_WEIGHT_Q_OPS")
                     .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
                     .filter(|&divisor| divisor > 0)
-                    .unwrap_or(1);
+                    .unwrap_or(10);
                 let q_ops_order_weight = weight
                     + (setup.n_operations_quotient / q_ops_divisor) * (1 << (setup.stark_info.stark_struct.n_bits_ext));
                 self.weights.insert((airgroup_id, air_id), weight);
