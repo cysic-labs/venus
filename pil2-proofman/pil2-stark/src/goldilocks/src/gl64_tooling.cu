@@ -147,7 +147,7 @@ void load_and_copy_to_device_in_chunks(
     ){
 
     uint32_t gpuId = d_buffers->streamsData[streamId].gpuId;
-    
+
     cudaSetDevice(gpuId);
 
     uint32_t gpuLocalId = d_buffers->gpus_g2l[gpuId];
