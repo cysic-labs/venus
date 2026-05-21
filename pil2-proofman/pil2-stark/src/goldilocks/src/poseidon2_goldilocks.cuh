@@ -165,6 +165,18 @@ __device__ __forceinline__ void prodadd_(gl64_t *x, const gl64_t D[SPONGE_WIDTH_
     }
 }
 
+template<uint32_t SPONGE_WIDTH_T>
+__device__ __forceinline__ gl64_t sum_state_(const gl64_t *state)
+{
+    gl64_t sum = state[0];
+#pragma unroll
+    for (int i = 1; i < SPONGE_WIDTH_T; ++i)
+    {
+        sum = sum + state[i];
+    }
+    return sum;
+}
+
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
 __device__ __forceinline__ void hash_full_result_seq_2(gl64_t *state, const gl64_t *input, const gl64_t *GPU_C_GL, const gl64_t *GPU_D_GL)
 {
@@ -182,9 +194,7 @@ __device__ __forceinline__ void hash_full_result_seq_2(gl64_t *state, const gl64
     {
         state[0] = state[0] + GPU_C_GL[(N_FULL_ROUNDS_TOTAL_T>>1) * SPONGE_WIDTH_T + r];
         pow7_2(state[0]);
-        gl64_t sum_;
-        sum_ = gl64_t(uint64_t(0));
-        add_2<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(&sum_, state);
+        gl64_t sum_ = sum_state_<SPONGE_WIDTH_T>(state);
         prodadd_<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(state, GPU_D_GL, sum_);
     }
 
@@ -212,9 +222,7 @@ __device__ __forceinline__ void hash_full_result_seq_2_(gl64_t *state, const gl6
     {
         state[0] = state[0] + GPU_C_GL[(N_FULL_ROUNDS_TOTAL_T>>1) * SPONGE_WIDTH_T + r];
         pow7_2(state[0]);
-        gl64_t sum_;
-        sum_ = gl64_t(uint64_t(0));
-        add_2<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(&sum_, state);
+        gl64_t sum_ = sum_state_<SPONGE_WIDTH_T>(state);
         prodadd_<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(state, GPU_D_GL, sum_);
     }
 
