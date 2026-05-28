@@ -78,6 +78,43 @@ __device__ __forceinline__ void pow7_2(gl64_t &x)
     x = x3 * x4;
 }
 
+struct gl64_linear_accum_t {
+    uint64_t lo;
+    uint32_t hi;
+};
+
+__device__ __forceinline__ gl64_linear_accum_t gl64_linear_accum(const gl64_t &x)
+{
+    return {x[0], 0};
+}
+
+__device__ __forceinline__ gl64_linear_accum_t gl64_linear_add(gl64_linear_accum_t a, const gl64_linear_accum_t &b)
+{
+    uint32_t carry;
+    asm("add.cc.u64 %0, %0, %2; addc.u32 %1, 0, 0;"
+        : "+l"(a.lo), "=r"(carry)
+        : "l"(b.lo));
+    a.hi += b.hi + carry;
+    return a;
+}
+
+__device__ __forceinline__ gl64_t gl64_linear_fold(gl64_linear_accum_t a)
+{
+    uint64_t folded = (uint64_t(a.hi) << 32) - uint64_t(a.hi);
+    uint32_t carry;
+    asm("add.cc.u64 %0, %0, %2; addc.u32 %1, 0, 0;"
+        : "+l"(a.lo), "=r"(carry)
+        : "l"(folded));
+    if (carry) {
+        asm("add.u64 %0, %0, %1;"
+            : "+l"(a.lo)
+            : "l"(uint64_t(0xffffffffULL)));
+    }
+    gl64_t out;
+    out[0] = a.lo;
+    return out;
+}
+
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
 __device__ __forceinline__ void add_2(gl64_t *x, const gl64_t C[SPONGE_WIDTH_T])
 {
@@ -138,21 +175,26 @@ __device__ __forceinline__ void matmul_external_(gl64_t *x)
 
 __device__ __forceinline__ void matmul_m4_(gl64_t *x)
 {
-    gl64_t t0 = x[0] + x[1];
-    gl64_t t1 = x[2] + x[3];
-    gl64_t t2 = x[1] + x[1] + t1;
-    gl64_t t3 = x[3] + x[3] + t0;
-    gl64_t t1_2 = t1 + t1;
-    gl64_t t0_2 = t0 + t0;
-    gl64_t t4 = t1_2 + t1_2 + t3;
-    gl64_t t5 = t0_2 + t0_2 + t2;
-    gl64_t t6 = t3 + t5;
-    gl64_t t7 = t2 + t4;
+    gl64_linear_accum_t x0 = gl64_linear_accum(x[0]);
+    gl64_linear_accum_t x1 = gl64_linear_accum(x[1]);
+    gl64_linear_accum_t x2 = gl64_linear_accum(x[2]);
+    gl64_linear_accum_t x3 = gl64_linear_accum(x[3]);
 
-    x[0] = t6;
-    x[1] = t5;
-    x[2] = t7;
-    x[3] = t4;
+    gl64_linear_accum_t t0 = gl64_linear_add(x0, x1);
+    gl64_linear_accum_t t1 = gl64_linear_add(x2, x3);
+    gl64_linear_accum_t t2 = gl64_linear_add(gl64_linear_add(x1, x1), t1);
+    gl64_linear_accum_t t3 = gl64_linear_add(gl64_linear_add(x3, x3), t0);
+    gl64_linear_accum_t t1_2 = gl64_linear_add(t1, t1);
+    gl64_linear_accum_t t0_2 = gl64_linear_add(t0, t0);
+    gl64_linear_accum_t t4 = gl64_linear_add(gl64_linear_add(t1_2, t1_2), t3);
+    gl64_linear_accum_t t5 = gl64_linear_add(gl64_linear_add(t0_2, t0_2), t2);
+    gl64_linear_accum_t t6 = gl64_linear_add(t3, t5);
+    gl64_linear_accum_t t7 = gl64_linear_add(t2, t4);
+
+    x[0] = gl64_linear_fold(t6);
+    x[1] = gl64_linear_fold(t5);
+    x[2] = gl64_linear_fold(t7);
+    x[3] = gl64_linear_fold(t4);
 }
 
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
@@ -168,13 +210,13 @@ __device__ __forceinline__ void prodadd_(gl64_t *x, const gl64_t D[SPONGE_WIDTH_
 template<uint32_t SPONGE_WIDTH_T>
 __device__ __forceinline__ gl64_t sum_state_(const gl64_t *state)
 {
-    gl64_t sum = state[0];
+    gl64_linear_accum_t sum = gl64_linear_accum(state[0]);
 #pragma unroll
     for (int i = 1; i < SPONGE_WIDTH_T; ++i)
     {
-        sum = sum + state[i];
+        sum = gl64_linear_add(sum, gl64_linear_accum(state[i]));
     }
-    return sum;
+    return gl64_linear_fold(sum);
 }
 
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
@@ -236,9 +278,11 @@ __device__ __forceinline__ void hash_full_result_seq_2_(gl64_t *state, const gl6
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
 __device__ __forceinline__ void add_state_2(gl64_t *x)
 {
+    gl64_linear_accum_t sum = gl64_linear_accum(x[0]);
 #pragma unroll
     for (uint32_t i = 0; i < SPONGE_WIDTH_T; i++)
-       x[0]= x[0] + scratchpad[i * blockDim.x + threadIdx.x];
+       sum = gl64_linear_add(sum, gl64_linear_accum(scratchpad[i * blockDim.x + threadIdx.x]));
+    x[0] = gl64_linear_fold(sum);
 }
 
 __device__ __forceinline__ void matmul_m4_state_(uint32_t offset)
