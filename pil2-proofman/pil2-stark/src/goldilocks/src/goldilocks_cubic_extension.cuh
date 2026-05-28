@@ -31,6 +31,83 @@ __device__ __forceinline__ gl64_t neg_element(gl64_t x)
     return z - x;
 }
 
+struct gl64_accum96_t {
+    uint64_t lo;
+    uint32_t hi;
+};
+
+__device__ __forceinline__ void gl64_accum_add_raw(gl64_accum96_t &acc, const gl64_t &x)
+{
+    uint32_t carry;
+    asm("add.cc.u64 %0, %0, %2; addc.u32 %1, 0, 0;"
+        : "+l"(acc.lo), "=r"(carry)
+        : "l"(x[0]));
+    acc.hi += carry;
+}
+
+__device__ __forceinline__ void gl64_accum_sub_raw(gl64_accum96_t &acc, const gl64_t &x)
+{
+    uint32_t borrow;
+    asm("sub.cc.u64 %0, %0, %2; subc.u32 %1, 0, 0;"
+        : "+l"(acc.lo), "=r"(borrow)
+        : "l"(x[0]));
+    acc.hi -= borrow != 0;
+}
+
+__device__ __forceinline__ gl64_accum96_t gl64_accum_with_modulus_bias()
+{
+    // Bias by 4*p so the signed linear combinations stay nonnegative before folding.
+    return {uint64_t(0xfffffffc00000004ULL), 3};
+}
+
+__device__ __forceinline__ gl64_t gl64_accum_fold(gl64_accum96_t acc)
+{
+    uint64_t folded = (uint64_t(acc.hi) << 32) - uint64_t(acc.hi);
+    uint32_t carry;
+    asm("add.cc.u64 %0, %0, %2; addc.u32 %1, 0, 0;"
+        : "+l"(acc.lo), "=r"(carry)
+        : "l"(folded));
+    if (carry) {
+        asm("add.u64 %0, %0, %1;"
+            : "+l"(acc.lo)
+            : "l"(uint64_t(0xffffffffULL)));
+    }
+    gl64_t out;
+    out[0] = acc.lo;
+    return out;
+}
+
+__device__ __forceinline__ gl64_t gl64_linear_2add_2sub(const gl64_t &a, const gl64_t &b, const gl64_t &c, const gl64_t &d)
+{
+    gl64_accum96_t acc = gl64_accum_with_modulus_bias();
+    gl64_accum_add_raw(acc, a);
+    gl64_accum_add_raw(acc, b);
+    gl64_accum_sub_raw(acc, c);
+    gl64_accum_sub_raw(acc, d);
+    return gl64_accum_fold(acc);
+}
+
+__device__ __forceinline__ gl64_t gl64_linear_2add_3sub(const gl64_t &a, const gl64_t &b, const gl64_t &c, const gl64_t &d, const gl64_t &e)
+{
+    gl64_accum96_t acc = gl64_accum_with_modulus_bias();
+    gl64_accum_add_raw(acc, a);
+    gl64_accum_add_raw(acc, b);
+    gl64_accum_sub_raw(acc, c);
+    gl64_accum_sub_raw(acc, d);
+    gl64_accum_sub_raw(acc, e);
+    return gl64_accum_fold(acc);
+}
+
+__device__ __forceinline__ void goldilocks3_mul_outputs(gl64_t &r0, gl64_t &r1, gl64_t &r2,
+                                                        const gl64_t &A, const gl64_t &B, const gl64_t &C,
+                                                        const gl64_t &D, const gl64_t &E, const gl64_t &F)
+{
+    r0 = gl64_linear_2add_2sub(C, D, E, F);
+    r1 = gl64_linear_2add_3sub(A, C, E, E, D);
+    // Preserve the original exact partially reduced representation for this lane.
+    r2 = B - (D - E);
+}
+
 class Goldilocks3GPU
 {
 public:
@@ -180,11 +257,8 @@ public:
         gl64_t D = a[0] * b[0];
         gl64_t E = a[1] * b[1];
         gl64_t F = a[2] * b[2];
-        gl64_t G = D - E;
 
-        result[0] = (C + G) - F;
-        result[1] = ((((A + C) - E) - E) - D);
-        result[2] = B - G;
+        goldilocks3_mul_outputs(result[0], result[1], result[2], A, B, C, D, E, F);
     };
     static __device__ __forceinline__ void mul(Element &result, Element &a, gl64_t &b)
     {
@@ -329,7 +403,7 @@ public:
     static __device__ __forceinline__ void mul_gpu(gl64_t *c_, const gl64_t *a_, bool const_a, const gl64_t *b_, bool const_b)
     {
 
-        gl64_t A, B, C, D, E, F, G;
+        gl64_t A, B, C, D, E, F;
 
         if (const_a && const_b)
         {
@@ -368,10 +442,7 @@ public:
             F = a_[2 * blockDim.x + threadIdx.x] * b_[2 * blockDim.x + threadIdx.x];
         }
 
-        G = D - E;
-        c_[threadIdx.x] = (C + G) - F;
-        c_[blockDim.x + threadIdx.x] = ((((A + C) - E) - E) - D);
-        c_[2 * blockDim.x + threadIdx.x] = B - G;
+        goldilocks3_mul_outputs(c_[threadIdx.x], c_[blockDim.x + threadIdx.x], c_[2 * blockDim.x + threadIdx.x], A, B, C, D, E, F);
     }
     
     static __device__ __forceinline__ void add_31_gpu_no_const(gl64_t *c, const gl64_t *a, const gl64_t *b) {
@@ -419,10 +490,7 @@ public:
         gl64_t F = a[2 * blockDim.x + threadIdx.x] * b[2];
         
 
-        gl64_t G = D - E;
-        c[threadIdx.x] = (C + G) - F;
-        c[blockDim.x + threadIdx.x] = ((((A + C) - E) - E) - D);
-        c[2 * blockDim.x + threadIdx.x] = B - G;
+        goldilocks3_mul_outputs(c[threadIdx.x], c[blockDim.x + threadIdx.x], c[2 * blockDim.x + threadIdx.x], A, B, C, D, E, F);
     }
 
     static __device__ __forceinline__ void mul_gpu_no_const(gl64_t *c, const gl64_t *a, const gl64_t *b) {
@@ -434,10 +502,7 @@ public:
         gl64_t F = a[2 * blockDim.x + threadIdx.x] * b[2 * blockDim.x + threadIdx.x];
         
 
-        gl64_t G = D - E;
-        c[threadIdx.x] = (C + G) - F;
-        c[blockDim.x + threadIdx.x] = ((((A + C) - E) - E) - D);
-        c[2 * blockDim.x + threadIdx.x] = B - G;
+        goldilocks3_mul_outputs(c[threadIdx.x], c[blockDim.x + threadIdx.x], c[2 * blockDim.x + threadIdx.x], A, B, C, D, E, F);
     }
     
     static __device__ __forceinline__ void op_31_gpu(uint64_t op, gl64_t *c, const gl64_t *a, bool const_a, const gl64_t *b, bool const_b)
