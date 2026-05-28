@@ -158,17 +158,22 @@ __device__ __forceinline__ void matmul_external_(gl64_t *x)
         matmul_m4_(&x[i]);
 
     if( SPONGE_WIDTH_T > 4 ){
-        gl64_t stored[4]={gl64_t(uint64_t(0)), gl64_t(uint64_t(0)), gl64_t(uint64_t(0)), gl64_t(uint64_t(0))};
+        gl64_linear_accum_t stored[4]={
+            {uint64_t(0), 0},
+            {uint64_t(0), 0},
+            {uint64_t(0), 0},
+            {uint64_t(0), 0}
+        };
         for(int i=0; i<SPONGE_WIDTH_T; i+=4){
-            stored[0] = stored[0] + x[i + 0];
-            stored[1] = stored[1] + x[i + 1];
-            stored[2] = stored[2] + x[i + 2];
-            stored[3] = stored[3] + x[i + 3];
+            stored[0] = gl64_linear_add(stored[0], gl64_linear_accum(x[i + 0]));
+            stored[1] = gl64_linear_add(stored[1], gl64_linear_accum(x[i + 1]));
+            stored[2] = gl64_linear_add(stored[2], gl64_linear_accum(x[i + 2]));
+            stored[3] = gl64_linear_add(stored[3], gl64_linear_accum(x[i + 3]));
         }
     #pragma unroll
         for (int i = 0; i < SPONGE_WIDTH_T; ++i)
         {
-            x[i] = x[i] + stored[i & 3];
+            x[i] = gl64_linear_fold(gl64_linear_add(gl64_linear_accum(x[i]), stored[i & 3]));
         }
     }
 }
