@@ -27,7 +27,7 @@ static inline uint32_t getRowMajorTPB()
 
     char *end = nullptr;
     unsigned long value = strtoul(env, &end, 10);
-    if (end == env || *end != '\0' || value == 0 || value > TPB) return TPB;
+    if (end == env || *end != '\0' || value == 0 || value > 256) return TPB;
 
     return static_cast<uint32_t>(value);
 }

@@ -153,6 +153,19 @@ def find_chunk_boundaries(dump, target_chunk_size=1500):
     TMP1_TYPE = base
     TMP3_TYPE = base + 1
 
+    def src_temp_keys(op_type, src_idx):
+        st = args[src_idx]
+        sa = args[src_idx + 1]
+        is_src0 = (src_idx % 8) == 2
+        dim = 1 if (op_type == 0 or (not is_src0 and op_type == 1)) else 3
+        if st == TMP1_TYPE:
+            return [(st, sa)]
+        if st == TMP3_TYPE:
+            if dim == 1:
+                return [(st, sa)]
+            return [(st, sa), (st, sa + 1), (st, sa + 2)]
+        return []
+
     # Compute per-boundary liveness using interval tracking.
     # For each temp slot, track (last_def, last_use) intervals.
     # A temp is live at boundary b if it was defined at d <= b and used at u > b.
@@ -172,11 +185,8 @@ def find_chunk_boundaries(dump, target_chunk_size=1500):
         dest_idx = args[b + 1]
 
         # Record reads
-        for s in range(2):
-            st = args[b + 2 + s * 3]
-            sa = args[b + 3 + s * 3]
-            if st == TMP1_TYPE or st == TMP3_TYPE:
-                key = (st, sa)
+        for src_idx in (b + 2, b + 5):
+            for key in src_temp_keys(op_type, src_idx):
                 if key not in temp_uses:
                     temp_uses[key] = []
                 temp_uses[key].append(i)
@@ -255,6 +265,19 @@ def collect_live_temps_at_boundary(dump, boundary_op):
     TMP1_TYPE = base
     TMP3_TYPE = base + 1
 
+    def src_temp_keys(op_type, src_idx):
+        st = args[src_idx]
+        sa = args[src_idx + 1]
+        is_src0 = (src_idx % 8) == 2
+        dim = 1 if (op_type == 0 or (not is_src0 and op_type == 1)) else 3
+        if st == TMP1_TYPE:
+            return [(st, sa)]
+        if st == TMP3_TYPE:
+            if dim == 1:
+                return [(st, sa)]
+            return [(st, sa), (st, sa + 1), (st, sa + 2)]
+        return []
+
     # Find the LAST definition of each temp slot before boundary
     last_def_before = {}  # (type, idx) -> op index
     for i in range(boundary_op):
@@ -274,10 +297,9 @@ def collect_live_temps_at_boundary(dump, boundary_op):
         for i in range(boundary_op, nOps):
             b = i * 8
             # Check if this op uses the temp
-            for s in range(2):
-                st = args[b + 2 + s * 3]
-                sa = args[b + 3 + s * 3]
-                if (st, sa) == key:
+            op_type = ops[i]
+            for src_idx in (b + 2, b + 5):
+                if key in src_temp_keys(op_type, src_idx):
                     live.add(key)
                     break
             if key in live:
@@ -492,9 +514,10 @@ def generate_chunked_evaluator(dump, out_path):
     args = dump['args']
     strides = dump['strides']
 
-    # Find chunk boundaries - use larger chunks to reduce compilation time
-    # Max live regs is typically 4, so even 7000-op chunks have trivial register pressure
-    target_size = min(7000, nOps)
+    # Keep chunks small enough for nvcc/cicc to compile large generated
+    # expressions predictably. Device-call overhead is paid once per row tile,
+    # while very large straight-line chunks can spend minutes in the compiler.
+    target_size = min(int(os.environ.get('VENUS_GEN_EXPR_CHUNK_SIZE', '1800')), nOps)
     boundaries = find_chunk_boundaries(dump, target_chunk_size=target_size)
     nChunks = len(boundaries)
 
@@ -537,6 +560,17 @@ def generate_chunked_evaluator(dump, out_path):
                 all_live_tmp1.add(idx)
             elif typ == TMP3_TYPE:
                 all_live_tmp3.add(idx)
+
+    # The final result is consumed by the wrapper after the last chunk, so it
+    # must be threaded as state even when there is only one chunk and no
+    # cross-boundary liveness.
+    last_op_type = ops[nOps - 1]
+    last_dest_idx = args[(nOps - 1) * 8 + 1]
+    if last_op_type == 0:
+        all_live_tmp1.add(last_dest_idx)
+    else:
+        all_live_tmp3.update((last_dest_idx, last_dest_idx + 1, last_dest_idx + 2))
+
     all_live_tmp1 = sorted(all_live_tmp1)
     all_live_tmp3 = sorted(all_live_tmp3)
     print(f"  Total cross-boundary state: {len(all_live_tmp1)} tmp1 + {len(all_live_tmp3)} tmp3 slots")
@@ -572,14 +606,21 @@ def generate_chunked_evaluator(dump, out_path):
 
         # Find tmp1 indices used in this chunk
         chunk_tmp1_used = set()
+        chunk_tmp3_used = set()
         for i in range(chunk_start, chunk_end):
             b = i * 8
             if ops[i] == 0:
                 chunk_tmp1_used.add(args[b + 1])
+            else:
+                chunk_tmp3_used.update((args[b + 1], args[b + 1] + 1, args[b + 1] + 2))
             if args[b + 2] == base:
                 chunk_tmp1_used.add(args[b + 3])
             if args[b + 5] == base:
                 chunk_tmp1_used.add(args[b + 6])
+            if args[b + 2] == base + 1:
+                chunk_tmp3_used.update((args[b + 3], args[b + 3] + 1, args[b + 3] + 2))
+            if args[b + 5] == base + 1:
+                chunk_tmp3_used.update((args[b + 6], args[b + 6] + 1, args[b + 6] + 2))
 
         L.append(f'// Chunk {chunk_idx}: ops [{chunk_start}, {chunk_end}) = {chunk_ops_count} ops')
         L.append(f'__device__ __noinline__ static void chunk_{fp}_{chunk_idx}(')
@@ -614,6 +655,9 @@ def generate_chunked_evaluator(dump, out_path):
         local_tmp1 = sorted(chunk_tmp1_used - set(all_live_tmp1))
         for t in local_tmp1:
             L.append(f'    gl64_t tmp1_{t} = gl64_t(uint64_t(0));')
+        local_tmp3 = sorted(chunk_tmp3_used - set(all_live_tmp3))
+        for t in local_tmp3:
+            L.append(f'    gl64_t tmp3_{t} = gl64_t(uint64_t(0));')
         L.append('')
 
         # Generate ops for this chunk
@@ -726,7 +770,10 @@ def generate_chunked_evaluator(dump, out_path):
     state_args = ', '.join([f'tmp1_{t}' for t in all_live_tmp1] +
                            [f'tmp3_{t}' for t in all_live_tmp3])
     for chunk_idx in range(nChunks):
-        L.append(f'    chunk_{fp}_{chunk_idx}(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, ctx, {state_args});')
+        if state_args:
+            L.append(f'    chunk_{fp}_{chunk_idx}(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, ctx, {state_args});')
+        else:
+            L.append(f'    chunk_{fp}_{chunk_idx}(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, ctx);')
 
     # Determine the last dest from the final op
     last_op_idx = nOps - 1

@@ -736,7 +736,8 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
 #pragma unroll 1
         for (uint64_t k = 0; k < d_expsArgs->dest_nParams; ++k)
         {
-            if(caseNoOperations__(d_params, d_deviceArgs, d_expsArgs, d_destParams, destVals, k, i)){
+            uint64_t nOps = d_destParams[k].nOps;
+            if(nOps == 0 && caseNoOperations__(d_params, d_deviceArgs, d_expsArgs, d_destParams, destVals, k, i)){
                 continue;
             }
             uint8_t *ops = constraints ? &d_deviceArgs->opsConstraints[d_destParams[k].opsOffset] : &d_deviceArgs->ops[d_destParams[k].opsOffset];
@@ -744,7 +745,6 @@ __global__  void computeExpressions_(StepsParams *d_params, DeviceArguments *d_d
             gl64_t *a0, *a1, *a2, *b0, *b1, *b2;
 
             uint64_t i_args = 0;
-            uint64_t nOps = d_destParams[k].nOps;
             for (uint64_t kk = 0; kk < nOps; ++kk)
 
             {
