@@ -1,5 +1,37 @@
 #include "gl64_tooling.cuh"
 #include "data_layout.cuh"
+#include <cstdlib>
+
+static bool venus_direct_registered_h2d_enabled()
+{
+    static int enabled = []() {
+        const char *value = std::getenv("VENUS_DIRECT_REGISTERED_H2D");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled != 0;
+}
+
+static bool copy_direct_registered_h2d_if_enabled(const void *src, void *dst, uint64_t total_size, cudaStream_t stream)
+{
+    if (!venus_direct_registered_h2d_enabled() || total_size < 16 * 1024 * 1024) return false;
+
+    cudaPointerAttributes attrs;
+    cudaError_t attrErr = cudaPointerGetAttributes(&attrs, src);
+    if (attrErr != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+
+#if CUDART_VERSION >= 10000
+    if (attrs.type != cudaMemoryTypeHost) return false;
+#else
+    if (attrs.memoryType != cudaMemoryTypeHost) return false;
+#endif
+
+    CHECKCUDAERR(cudaMemcpyAsync(dst, src, total_size, cudaMemcpyHostToDevice, stream));
+    CHECKCUDAERR(cudaStreamSynchronize(stream));
+    return true;
+}
 
 // Kernel to convert row-major layout to tiled layout
 // Uses blockIdx.x for rows (which can be very large) and blockIdx.y for cols
@@ -32,11 +64,12 @@ void copy_to_device_in_chunks(
     cudaSetDevice(gpuId);
 
     uint32_t gpuLocalId = d_buffers->gpus_g2l[gpuId];
+    cudaStream_t stream = d_buffers->streamsData[streamId].stream;
     std::lock_guard<std::mutex> lock(d_buffers->mutex_pinned[gpuLocalId]);
 
+    if (copy_direct_registered_h2d_if_enabled(src, dst, total_size, stream)) return;
+
     uint64_t block_size = d_buffers->pinned_size;
-    
-    cudaStream_t stream = d_buffers->streamsData[streamId].stream;
     Goldilocks::Element *pinned_buffer = d_buffers->pinned_buffer[gpuLocalId];
     Goldilocks::Element *pinned_buffer_extra = d_buffers->pinned_buffer_extra[gpuLocalId];
 
@@ -90,6 +123,7 @@ void copy_to_device_in_chunks(
     uint64_t pinnedBufferSize,
     cudaStream_t stream
 ){
+    if (copy_direct_registered_h2d_if_enabled(src, dst, total_size_bytes, stream)) return;
 
      uint64_t block_size = pinnedBufferSize/2;
     

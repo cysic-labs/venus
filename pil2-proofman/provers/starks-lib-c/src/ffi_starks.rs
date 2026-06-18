@@ -139,6 +139,18 @@ pub fn get_proof_pinned_size_c(p_stark_info: *mut c_void) -> u64 {
 }
 
 #[cfg(not(feature = "no_lib_link"))]
+pub fn register_host_memory_c(ptr: *mut c_void, size: u64) -> bool {
+    unsafe { register_host_memory(ptr, size) != 0 }
+}
+
+#[cfg(not(feature = "no_lib_link"))]
+pub fn unregister_host_memory_c(ptr: *mut c_void) {
+    unsafe {
+        unregister_host_memory(ptr);
+    }
+}
+
+#[cfg(not(feature = "no_lib_link"))]
 pub fn set_memory_expressions_c(p_stark_info: *mut c_void, n_tmp1: u64, n_tmp3: u64) {
     unsafe {
         set_memory_expressions(p_stark_info, n_tmp1, n_tmp3);
@@ -1632,6 +1644,17 @@ pub fn get_proof_size_c(_p_stark_info: *mut c_void) -> u64 {
 pub fn get_proof_pinned_size_c(_p_stark_info: *mut c_void) -> u64 {
     trace!("··· {}", "get_pinned_proof_size: This is a mock call because there is no linked library");
     100000000
+}
+
+#[cfg(feature = "no_lib_link")]
+pub fn register_host_memory_c(_ptr: *mut c_void, _size: u64) -> bool {
+    trace!("··· {}", "register_host_memory: This is a mock call because there is no linked library");
+    false
+}
+
+#[cfg(feature = "no_lib_link")]
+pub fn unregister_host_memory_c(_ptr: *mut c_void) {
+    trace!("··· {}", "unregister_host_memory: This is a mock call because there is no linked library");
 }
 
 #[cfg(feature = "no_lib_link")]

@@ -1,5 +1,8 @@
 use crossbeam_channel::{bounded, Sender, Receiver};
+use proofman_starks_lib_c::{register_host_memory_c, unregister_host_memory_c};
 use proofman_util::create_buffer_fast;
+use std::ffi::c_void;
+use std::mem;
 use std::sync::Arc;
 use crossbeam_queue::SegQueue;
 use crate::ProofCtx;
@@ -13,14 +16,35 @@ pub struct MemoryHandler<F: PrimeField64 + Send + Sync + 'static> {
     receiver: Receiver<Vec<F>>,
     n_buffers: usize,
     buffer_size: usize,
+    registered_buffers: Vec<usize>,
 }
 
 impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
     pub fn new(pctx: Arc<ProofCtx<F>>, n_buffers: usize, buffer_size: usize) -> Self {
         let (tx_buffer_pool, rx_buffer_pool) = bounded(n_buffers);
         let instance_ids_to_be_released = Arc::new(SegQueue::new());
+        let register_buffers = registered_witness_h2d_enabled();
+        let mut registered_buffers = Vec::new();
+        let mut registered_bytes = 0usize;
         for _ in 0..n_buffers {
-            tx_buffer_pool.send(create_buffer_fast(buffer_size)).unwrap();
+            let mut buffer = create_buffer_fast(buffer_size);
+            if register_buffers {
+                let bytes = buffer_size.saturating_mul(mem::size_of::<F>());
+                if let Some((base, size)) = aligned_host_range(buffer.as_mut_ptr() as usize, bytes) {
+                    if register_host_memory_c(base as *mut c_void, size as u64) {
+                        registered_buffers.push(base);
+                        registered_bytes = registered_bytes.saturating_add(size);
+                    }
+                }
+            }
+            tx_buffer_pool.send(buffer).unwrap();
+        }
+        if register_buffers {
+            tracing::info!(
+                "MemoryHandler::registered {} witness buffers ({:.2} GB) for direct H2D",
+                registered_buffers.len(),
+                registered_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
         }
 
         Self {
@@ -30,6 +54,7 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
             instance_ids_to_be_released,
             n_buffers,
             buffer_size,
+            registered_buffers,
         }
     }
 
@@ -111,6 +136,39 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
         while !self.instance_ids_to_be_released.is_empty() {
             self.instance_ids_to_be_released.pop();
         }
+    }
+}
+
+impl<F: PrimeField64 + Send + Sync + 'static> Drop for MemoryHandler<F> {
+    fn drop(&mut self) {
+        for ptr in &self.registered_buffers {
+            unregister_host_memory_c(*ptr as *mut c_void);
+        }
+    }
+}
+
+fn registered_witness_h2d_enabled() -> bool {
+    std::env::var("VENUS_REGISTER_WITNESS_H2D")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false)
+}
+
+fn aligned_host_range(ptr: usize, bytes: usize) -> Option<(usize, usize)> {
+    if ptr == 0 || bytes == 0 {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let page_size = if page_size > 0 { page_size as usize } else { 4096 };
+        let base = ptr & !(page_size - 1);
+        let offset = ptr - base;
+        let size = (bytes + offset + page_size - 1) & !(page_size - 1);
+        Some((base, size))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some((ptr, bytes))
     }
 }
 

@@ -34,6 +34,23 @@ void closeStreamTimer(TimerGPU &timer, uint64_t instanceId, uint64_t airgroupId,
 void get_proof(DeviceCommitBuffers *d_buffers, uint64_t streamId);
 void get_commit_root(DeviceCommitBuffers *d_buffers, uint64_t streamId);
 
+uint32_t register_host_memory(void *ptr, uint64_t size) {
+    if (ptr == nullptr || size == 0) return 0;
+    cudaError_t err = cudaHostRegister(ptr, size, cudaHostRegisterPortable);
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+        return 0;
+    }
+    return 1;
+}
+
+void unregister_host_memory(void *ptr) {
+    if (ptr == nullptr) return;
+    cudaError_t err = cudaHostUnregister(ptr);
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+    }
+}
 
 void get_instances_ready(void *d_buffers_, int64_t* instances_ready) {
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
