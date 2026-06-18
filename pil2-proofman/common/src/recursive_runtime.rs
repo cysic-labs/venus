@@ -162,9 +162,27 @@ const DEP_PART_A: u8 = 0;
 const DEP_PART_B: u8 = 1;
 const DEP_PART_C: u8 = 2;
 const STEP_GENERIC_SIGNAL: u32 = u32::MAX;
+type KnownValue = u8;
+const UNKNOWN_VALUE: KnownValue = 0;
+const KNOWN_VALUE: KnownValue = 1;
 type SignalList = SmallVec<[usize; 8]>;
 type GateSignalList = SmallVec<[usize; 256]>;
 type UnknownLcTerms<F> = SmallVec<[(usize, F); 4]>;
+
+#[inline(always)]
+fn known_value(value: KnownValue) -> bool {
+    value != UNKNOWN_VALUE
+}
+
+#[inline(always)]
+fn is_known(known: &[KnownValue], signal: usize) -> bool {
+    known_value(known[signal])
+}
+
+#[inline(always)]
+fn set_known(known: &mut [KnownValue], signal: usize) {
+    known[signal] = KNOWN_VALUE;
+}
 
 impl NativeRuntimeSolvePlan {
     fn is_compatible(&self, witness_len: usize, initial_known: (usize, u64)) -> bool {
@@ -522,10 +540,10 @@ impl NativeRecursiveRuntime {
         }
 
         let mut witness = vec![F::ZERO; total_witness_words as usize];
-        let mut known = vec![false; total_witness_words as usize];
+        let mut known = vec![UNKNOWN_VALUE; total_witness_words as usize];
         if !witness.is_empty() {
             witness[0] = F::ONE;
-            known[0] = true;
+            known[0] = KNOWN_VALUE;
         }
 
         let prefix_words = self
@@ -534,7 +552,7 @@ impl NativeRecursiveRuntime {
             .min(source_words.len() as u64);
         for offset in 0..prefix_words {
             witness[(1 + offset) as usize] = F::from_u64(source_words[offset as usize]);
-            known[(1 + offset) as usize] = true;
+            known[(1 + offset) as usize] = KNOWN_VALUE;
         }
 
         if self.copy_indices.is_empty() {
@@ -545,7 +563,7 @@ impl NativeRecursiveRuntime {
             for offset in 0..copy_words {
                 let dst = self.public_input_offset_words + offset;
                 witness[dst as usize] = F::from_u64(source_words[offset as usize]);
-                known[dst as usize] = true;
+                known[dst as usize] = KNOWN_VALUE;
             }
         } else {
             for (offset, source_index) in self.copy_indices.iter().enumerate() {
@@ -558,7 +576,7 @@ impl NativeRecursiveRuntime {
                 }
                 if let Some(value) = source_words.get(*source_index as usize) {
                     witness[dst as usize] = F::from_u64(*value);
-                    known[dst as usize] = true;
+                    known[dst as usize] = KNOWN_VALUE;
                 }
             }
         }
@@ -593,7 +611,7 @@ impl NativeRecursiveRuntime {
             for offset in 0..copy_op.word_len {
                 witness[(copy_op.witness_offset_words + offset) as usize] =
                     F::from_u64(source_words[(source_start + offset) as usize]);
-                known[(copy_op.witness_offset_words + offset) as usize] = true;
+                known[(copy_op.witness_offset_words + offset) as usize] = KNOWN_VALUE;
             }
         }
 
@@ -614,7 +632,7 @@ impl NativeRecursiveRuntime {
         }
         if std::env::var_os("PROOFMAN_DEBUG_CHALLENGE").is_some() && self.n_publics > 0 {
             let public_end = (1 + self.n_publics as usize).min(witness.len());
-            let unknown_publics = known[1..public_end].iter().filter(|&&is_known| !is_known).count();
+            let unknown_publics = known[1..public_end].iter().filter(|&&value| !known_value(value)).count();
             let prefix_end = (1 + 16usize).min(public_end);
             let prefix = witness[1..prefix_end].iter().map(|value| value.as_canonical_u64()).collect::<Vec<_>>();
             tracing::error!(
@@ -809,13 +827,13 @@ impl NativeRecursiveRuntime {
             witness[index as usize] = F::from_u64((high << 32) | low);
         }
         if std::env::var_os("PROOFMAN_VALIDATE_CIRCOM_WASM").is_some() {
-            let mut known = vec![true; witness.len()];
+            let mut known = vec![KNOWN_VALUE; witness.len()];
             self.solve_constraints(&mut witness, &mut known)?;
         }
         Ok(witness)
     }
 
-    fn solve_constraints<F: PrimeField64>(&self, witness: &mut [F], known: &mut [bool]) -> ProofmanResult<()> {
+    fn solve_constraints<F: PrimeField64>(&self, witness: &mut [F], known: &mut [KnownValue]) -> ProofmanResult<()> {
         if self.constraints.is_empty() && self.custom_gates.is_empty() {
             return Ok(());
         }
@@ -903,7 +921,7 @@ impl NativeRecursiveRuntime {
     fn solve_constraints_dynamic<F: PrimeField64>(
         &self,
         witness: &mut [F],
-        known: &mut [bool],
+        known: &mut [KnownValue],
         solver_index: &NativeRuntimeSolverIndex,
         record_steps: bool,
     ) -> ProofmanResult<(NativeRuntimeSolveStats, Option<Vec<NativeRuntimeSolveStep>>)> {
@@ -993,7 +1011,7 @@ impl NativeRecursiveRuntime {
                         usize::try_from(signal)
                             .ok()
                             .and_then(|idx| known.get(idx))
-                            .map(|is_known| !*is_known)
+                            .map(|&value| !known_value(value))
                             .unwrap_or(false)
                     })
                     .collect::<SmallVec<[u64; 256]>>();
@@ -1003,7 +1021,9 @@ impl NativeRecursiveRuntime {
                         steps.push(NativeRuntimeSolveStep { code, signal: STEP_GENERIC_SIGNAL });
                     }
                     for signal in unknown_before {
-                        if usize::try_from(signal).ok().and_then(|idx| known.get(idx)).copied() != Some(true) {
+                        if usize::try_from(signal).ok().and_then(|idx| known.get(idx)).copied().map(known_value)
+                            != Some(true)
+                        {
                             continue;
                         }
                         enqueue_dependents(
@@ -1030,7 +1050,7 @@ impl NativeRecursiveRuntime {
         &self,
         plan: &NativeRuntimeSolvePlan,
         witness: &mut [F],
-        known: &mut [bool],
+        known: &mut [KnownValue],
         solver_index: &NativeRuntimeSolverIndex,
     ) -> ProofmanResult<NativeRuntimeSolveStats> {
         let mut stats =
@@ -1085,7 +1105,7 @@ impl NativeRecursiveRuntime {
         constraint: &NativeRuntimeConstraint,
         signal: usize,
         witness: &mut [F],
-        known: &mut [bool],
+        known: &mut [KnownValue],
     ) -> ProofmanResult<bool> {
         if signal >= witness.len() {
             return Err(ProofmanError::InvalidSetup(format!(
@@ -1093,7 +1113,7 @@ impl NativeRecursiveRuntime {
                 witness.len()
             )));
         }
-        if known[signal] {
+        if is_known(known, signal) {
             return Ok(false);
         }
 
@@ -1144,7 +1164,7 @@ impl NativeRecursiveRuntime {
             return Ok(false);
         };
 
-        if known[signal] {
+        if is_known(known, signal) {
             if witness[signal] != value {
                 return Err(ProofmanError::InvalidProof(format!(
                     "native recursive cached solve plan produced conflicting value for signal {signal} in constraint {constraint_index}"
@@ -1153,7 +1173,7 @@ impl NativeRecursiveRuntime {
             Ok(false)
         } else {
             witness[signal] = value;
-            known[signal] = true;
+            set_known(known, signal);
             Ok(true)
         }
     }
@@ -1162,7 +1182,7 @@ impl NativeRecursiveRuntime {
         &self,
         plan: &NativeRuntimeSolvePlan,
         witness: &mut [F],
-        known: &mut [bool],
+        known: &mut [KnownValue],
         solver_index: &NativeRuntimeSolverIndex,
     ) -> ProofmanResult<NativeRuntimeSolveStats> {
         let known_backup = known.to_vec();
@@ -1176,10 +1196,10 @@ impl NativeRecursiveRuntime {
         }
     }
 
-    fn log_unresolved_signals(&self, known: &[bool]) {
+    fn log_unresolved_signals(&self, known: &[KnownValue]) {
         if std::env::var_os("PROOFMAN_DEBUG_NATIVE_UNRESOLVED").is_some() {
-            let unknown_count = known.iter().filter(|&&is_known| !is_known).count();
-            let first_unknown = known.iter().position(|&is_known| !is_known);
+            let unknown_count = known.iter().filter(|&&value| !known_value(value)).count();
+            let first_unknown = known.iter().position(|&value| !known_value(value));
             tracing::error!(
                 "Native recursive unresolved witness signals: unknown_count={} first_unknown={:?} witness_len={}",
                 unknown_count,
@@ -1195,7 +1215,7 @@ impl NativeRecursiveRuntime {
                         usize::try_from(signal)
                             .ok()
                             .and_then(|idx| known.get(idx))
-                            .map(|is_known| !*is_known)
+                            .map(|&value| !known_value(value))
                             .unwrap_or(true)
                     })
                     .take(16)
@@ -1217,7 +1237,7 @@ impl NativeRecursiveRuntime {
     fn verify_solved_witness<F: PrimeField64>(
         &self,
         witness: &[F],
-        known: &[bool],
+        known: &[KnownValue],
     ) -> ProofmanResult<(std::time::Duration, std::time::Duration)> {
         let verify_gates_start = Instant::now();
         for gate in &self.custom_gates {
@@ -1251,7 +1271,7 @@ impl NativeRecursiveRuntime {
         constraint_index: usize,
         constraint: &NativeRuntimeConstraint,
         witness: &mut [F],
-        known: &mut [bool],
+        known: &mut [KnownValue],
         solver_index: &NativeRuntimeSolverIndex,
     ) -> ProofmanResult<SignalList> {
         if constraint.a.is_empty() && constraint.b.is_empty() {
@@ -1306,7 +1326,7 @@ impl NativeRecursiveRuntime {
         &self,
         gate: &NativeRuntimeCustomGate,
         witness: &mut [F],
-        known: &mut [bool],
+        known: &mut [KnownValue],
         solver_index: &NativeRuntimeSolverIndex,
     ) -> ProofmanResult<bool> {
         match gate.kind {
@@ -1324,7 +1344,7 @@ impl NativeRecursiveRuntime {
         &self,
         gate: &NativeRuntimeCustomGate,
         witness: &[F],
-        known: &[bool],
+        known: &[KnownValue],
     ) -> ProofmanResult<()> {
         match gate.kind {
             NativeRuntimeCustomGateKind::CMul => verify_cmul_gate(gate, witness, known),
@@ -1341,10 +1361,10 @@ impl NativeRecursiveRuntime {
         &self,
         gate: &NativeRuntimeCustomGate,
         witness: &[F],
-        known: &[bool],
+        known: &[KnownValue],
     ) -> ProofmanResult<bool> {
         let signals = gate_signals(&gate.signals, witness.len())?;
-        if signals.iter().any(|&signal| !known[signal]) {
+        if signals.iter().any(|&signal| !is_known(known, signal)) {
             return Ok(false);
         }
         self.verify_custom_gate(gate, witness, known)?;
@@ -1365,12 +1385,12 @@ struct LcEvalExcept<F: PrimeField64> {
     others_known: bool,
 }
 
-fn known_fingerprint(known: &[bool]) -> (usize, u64) {
+fn known_fingerprint(known: &[KnownValue]) -> (usize, u64) {
     const MIX: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut count = 0usize;
     let mut fingerprint = 0xD6E8_FD9A_8B4C_2F37u64 ^ known.len() as u64;
-    for (index, &is_known) in known.iter().enumerate() {
-        if is_known {
+    for (index, &value) in known.iter().enumerate() {
+        if known_value(value) {
             count += 1;
             fingerprint = fingerprint.rotate_left(7) ^ ((index as u64).wrapping_mul(MIX));
         }
@@ -1382,7 +1402,7 @@ fn eval_lc_except_signal<F: PrimeField64>(
     terms: &[NativeRuntimeLcTerm],
     output_signal: usize,
     witness: &[F],
-    known: &[bool],
+    known: &[KnownValue],
 ) -> ProofmanResult<LcEvalExcept<F>> {
     let mut value = F::ZERO;
     let mut output_coeff = F::ZERO;
@@ -1399,7 +1419,7 @@ fn eval_lc_except_signal<F: PrimeField64>(
         let coeff = F::from_u64(term.coeff);
         if signal == output_signal {
             output_coeff += coeff;
-        } else if known[signal] {
+        } else if is_known(known, signal) {
             value += witness[signal] * coeff;
         } else {
             return Ok(LcEvalExcept { value, output_coeff, others_known: false });
@@ -1408,7 +1428,11 @@ fn eval_lc_except_signal<F: PrimeField64>(
     Ok(LcEvalExcept { value, output_coeff, others_known: true })
 }
 
-fn eval_lc<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known: &[bool]) -> ProofmanResult<LcEval<F>> {
+fn eval_lc<F: PrimeField64>(
+    terms: &[NativeRuntimeLcTerm],
+    witness: &[F],
+    known: &[KnownValue],
+) -> ProofmanResult<LcEval<F>> {
     let mut value = F::ZERO;
     let mut unknown = UnknownLcTerms::<F>::new();
     for term in terms {
@@ -1422,7 +1446,7 @@ fn eval_lc<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known:
             )));
         }
         let coeff = F::from_u64(term.coeff);
-        if known[signal] {
+        if is_known(known, signal) {
             value += witness[signal] * coeff;
         } else {
             unknown.push((signal, coeff));
@@ -1435,7 +1459,7 @@ fn constraint_fully_known_and_satisfied<F: PrimeField64>(
     constraint_index: usize,
     constraint: &NativeRuntimeConstraint,
     witness: &[F],
-    known: &[bool],
+    known: &[KnownValue],
 ) -> ProofmanResult<bool> {
     let a = eval_lc(&constraint.a, witness, known)?;
     let b = eval_lc(&constraint.b, witness, known)?;
@@ -1466,7 +1490,7 @@ fn format_constraint_failure<F: PrimeField64>(
     b: &LcEval<F>,
     c: &LcEval<F>,
     witness: &[F],
-    known: &[bool],
+    known: &[KnownValue],
 ) -> String {
     format!(
         "{reason} {constraint_index}: a={} b={} c={} a*b={} A=[{}] B=[{}] C=[{}]",
@@ -1480,14 +1504,22 @@ fn format_constraint_failure<F: PrimeField64>(
     )
 }
 
-fn format_lc_terms<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known: &[bool]) -> String {
+fn format_lc_terms<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known: &[KnownValue]) -> String {
     const MAX_TERMS: usize = 8;
     let mut parts = Vec::with_capacity(terms.len().min(MAX_TERMS) + 1);
     for term in terms.iter().take(MAX_TERMS) {
         let value = usize::try_from(term.signal)
             .ok()
             .and_then(|signal| witness.get(signal).zip(known.get(signal)).map(|(value, known)| (value, known)))
-            .map(|(value, known)| if *known { value.as_canonical_u64().to_string() } else { "unknown".to_string() })
+            .map(
+                |(value, known)| {
+                    if known_value(*known) {
+                        value.as_canonical_u64().to_string()
+                    } else {
+                        "unknown".to_string()
+                    }
+                },
+            )
             .unwrap_or_else(|| "out-of-bounds".to_string());
         parts.push(format!("{}*w{}({})", term.coeff, term.signal, value));
     }
@@ -1592,7 +1624,7 @@ fn constraint_state_maybe_ready(constraint: &NativeRuntimeConstraint, state: Con
 
 fn build_constraint_states(
     constraints: &[NativeRuntimeConstraint],
-    known: &[bool],
+    known: &[KnownValue],
     solver_index: &NativeRuntimeSolverIndex,
 ) -> ProofmanResult<Vec<ConstraintSolveState>> {
     let mut states = Vec::with_capacity(constraints.len());
@@ -1609,7 +1641,7 @@ fn build_constraint_states(
 
 fn count_lc_unknown_non_bit(
     terms: &[NativeRuntimeLcTerm],
-    known: &[bool],
+    known: &[KnownValue],
     solver_index: &NativeRuntimeSolverIndex,
 ) -> ProofmanResult<usize> {
     let mut unknown_non_bit = 0usize;
@@ -1623,7 +1655,7 @@ fn count_lc_unknown_non_bit(
                 known.len()
             )));
         };
-        if !is_known {
+        if !known_value(is_known) {
             let is_bit_term =
                 solver_index.is_boolean_signal(signal as u64) && coefficient_power_of_two(term.coeff).is_some();
             if !is_bit_term {
@@ -1634,7 +1666,10 @@ fn count_lc_unknown_non_bit(
     Ok(unknown_non_bit)
 }
 
-fn build_gate_states(custom_gates: &[NativeRuntimeCustomGate], known: &[bool]) -> ProofmanResult<Vec<GateSolveState>> {
+fn build_gate_states(
+    custom_gates: &[NativeRuntimeCustomGate],
+    known: &[KnownValue],
+) -> ProofmanResult<Vec<GateSolveState>> {
     let mut states = Vec::with_capacity(custom_gates.len());
     for gate in custom_gates {
         states.push(gate_solve_state(gate, known)?);
@@ -1642,7 +1677,7 @@ fn build_gate_states(custom_gates: &[NativeRuntimeCustomGate], known: &[bool]) -
     Ok(states)
 }
 
-fn gate_solve_state(gate: &NativeRuntimeCustomGate, known: &[bool]) -> ProofmanResult<GateSolveState> {
+fn gate_solve_state(gate: &NativeRuntimeCustomGate, known: &[KnownValue]) -> ProofmanResult<GateSolveState> {
     let signals = gate_signal_indices(&gate.signals, known.len())?;
     match gate.kind {
         NativeRuntimeCustomGateKind::CMul => {
@@ -1673,7 +1708,7 @@ fn gate_solve_state(gate: &NativeRuntimeCustomGate, known: &[bool]) -> ProofmanR
 fn gate_forward_state(
     gate: &str,
     signals: &[usize],
-    known: &[bool],
+    known: &[KnownValue],
     expected_len: usize,
     input_len: usize,
     output_end: usize,
@@ -1717,11 +1752,11 @@ fn gate_signal_indices(signals: &[u64], witness_len: usize) -> ProofmanResult<Ga
     Ok(out)
 }
 
-fn count_unknown_signals(signals: &[usize], known: &[bool]) -> usize {
-    signals.iter().filter(|&&signal| !known[signal]).count()
+fn count_unknown_signals(signals: &[usize], known: &[KnownValue]) -> usize {
+    signals.iter().filter(|&&signal| !is_known(known, signal)).count()
 }
 
-fn count_lc_unknown(terms: &[NativeRuntimeLcTerm], known: &[bool]) -> ProofmanResult<usize> {
+fn count_lc_unknown(terms: &[NativeRuntimeLcTerm], known: &[KnownValue]) -> ProofmanResult<usize> {
     let mut unknown = 0usize;
     for term in terms {
         let signal = usize::try_from(term.signal).map_err(|_| {
@@ -1733,7 +1768,7 @@ fn count_lc_unknown(terms: &[NativeRuntimeLcTerm], known: &[bool]) -> ProofmanRe
                 known.len()
             )));
         };
-        if !is_known {
+        if !known_value(is_known) {
             unknown += 1;
         }
     }
@@ -1743,7 +1778,7 @@ fn count_lc_unknown(terms: &[NativeRuntimeLcTerm], known: &[bool]) -> ProofmanRe
 fn try_solve_bit_decomposition<F: PrimeField64>(
     constraint: &NativeRuntimeConstraint,
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
     solver_index: &NativeRuntimeSolverIndex,
 ) -> ProofmanResult<Option<SignalList>> {
     if !constraint.a.is_empty() || !constraint.b.is_empty() || constraint.c.is_empty() {
@@ -1762,7 +1797,7 @@ fn try_solve_bit_decomposition<F: PrimeField64>(
                 witness.len()
             )));
         }
-        if known[signal] {
+        if is_known(known, signal) {
             known_value += witness[signal] * F::from_u64(term.coeff);
         } else {
             unknown.push((signal, term.coeff));
@@ -1800,7 +1835,7 @@ fn try_solve_bit_decomposition<F: PrimeField64>(
     let mut solved = SignalList::with_capacity(unknown_with_powers.len());
     for (signal, power) in unknown_with_powers {
         let value = if target & power == 0 { F::ZERO } else { F::ONE };
-        if known[signal] {
+        if is_known(known, signal) {
             if witness[signal] != value {
                 return Err(ProofmanError::InvalidProof(format!(
                     "native recursive bit decomposition solved conflicting value for signal {signal}"
@@ -1808,7 +1843,7 @@ fn try_solve_bit_decomposition<F: PrimeField64>(
             }
         } else {
             witness[signal] = value;
-            known[signal] = true;
+            set_known(known, signal);
             solved.push(signal);
         }
     }
@@ -1831,7 +1866,7 @@ fn solve_single_unknown<F: PrimeField64>(
     lc: &LcEval<F>,
     desired: F,
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
 ) -> ProofmanResult<SignalList> {
     if lc.unknown.len() != 1 {
         return Ok(SignalList::new());
@@ -1841,7 +1876,7 @@ fn solve_single_unknown<F: PrimeField64>(
         return Ok(SignalList::new());
     }
     let value = (desired - lc.value) / coeff;
-    if known[signal] {
+    if is_known(known, signal) {
         if witness[signal] != value {
             return Err(ProofmanError::InvalidProof(format!(
                 "native recursive R1CS solved conflicting value for signal {signal}"
@@ -1850,7 +1885,7 @@ fn solve_single_unknown<F: PrimeField64>(
         Ok(SignalList::new())
     } else {
         witness[signal] = value;
-        known[signal] = true;
+        set_known(known, signal);
         let mut solved = SignalList::new();
         solved.push(signal);
         Ok(solved)
@@ -1861,7 +1896,7 @@ fn try_solve_linear_c_constraint<F: PrimeField64>(
     constraint_index: usize,
     terms: &[NativeRuntimeLcTerm],
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
 ) -> ProofmanResult<Option<SignalList>> {
     if terms.is_empty() {
         return Ok(Some(SignalList::new()));
@@ -1882,7 +1917,7 @@ fn try_solve_linear_c_constraint<F: PrimeField64>(
             )));
         }
         let coeff = F::from_u64(term.coeff);
-        if known[signal] {
+        if is_known(known, signal) {
             value += witness[signal] * coeff;
         } else {
             unknown_signal = signal;
@@ -1914,7 +1949,7 @@ fn try_solve_linear_c_constraint<F: PrimeField64>(
         -value / unknown_coeff
     };
 
-    if known[unknown_signal] {
+    if is_known(known, unknown_signal) {
         if witness[unknown_signal] != solved_value {
             return Err(ProofmanError::InvalidProof(format!(
                 "native recursive R1CS solved conflicting value for signal {unknown_signal}"
@@ -1923,7 +1958,7 @@ fn try_solve_linear_c_constraint<F: PrimeField64>(
         Ok(Some(SignalList::new()))
     } else {
         witness[unknown_signal] = solved_value;
-        known[unknown_signal] = true;
+        set_known(known, unknown_signal);
         let mut solved = SignalList::new();
         solved.push(unknown_signal);
         Ok(Some(solved))
@@ -1933,7 +1968,7 @@ fn try_solve_linear_c_constraint<F: PrimeField64>(
 fn solve_cmul_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
     solver_index: &NativeRuntimeSolverIndex,
 ) -> ProofmanResult<bool> {
     if gate.signals.len() != 9 {
@@ -1943,9 +1978,9 @@ fn solve_cmul_gate<F: PrimeField64>(
         )));
     }
     let signals = fixed_gate_signals::<9>("CMul", &gate.signals, witness.len())?;
-    let a_known = signals[..3].iter().all(|&signal| known[signal]);
-    let b_known = signals[3..6].iter().all(|&signal| known[signal]);
-    let output_known = signals[6..9].iter().all(|&signal| known[signal]);
+    let a_known = signals[..3].iter().all(|&signal| is_known(known, signal));
+    let b_known = signals[3..6].iter().all(|&signal| is_known(known, signal));
+    let output_known = signals[6..9].iter().all(|&signal| is_known(known, signal));
 
     if a_known && b_known {
         let a = [witness[signals[0]], witness[signals[1]], witness[signals[2]]];
@@ -1976,7 +2011,7 @@ fn solve_cmul_gate<F: PrimeField64>(
 fn verify_cmul_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &[F],
-    known: &[bool],
+    known: &[KnownValue],
 ) -> ProofmanResult<()> {
     if gate.signals.len() != 9 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -1985,7 +2020,7 @@ fn verify_cmul_gate<F: PrimeField64>(
         )));
     }
     let signals = fixed_gate_signals::<9>("CMul", &gate.signals, witness.len())?;
-    if signals.iter().any(|&signal| !known[signal]) {
+    if signals.iter().any(|&signal| !is_known(known, signal)) {
         return Ok(());
     }
     let a = [witness[signals[0]], witness[signals[1]], witness[signals[2]]];
@@ -2005,7 +2040,7 @@ fn verify_cmul_gate<F: PrimeField64>(
 fn solve_evpol4_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
 ) -> ProofmanResult<bool> {
     if gate.signals.len() != 21 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -2014,7 +2049,7 @@ fn solve_evpol4_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals[..18].iter().any(|&signal| !known[signal]) {
+    if signals[..18].iter().any(|&signal| !is_known(known, signal)) {
         return Ok(false);
     }
 
@@ -2022,7 +2057,7 @@ fn solve_evpol4_gate<F: PrimeField64>(
     let mut changed = false;
     for idx in 0..3 {
         let signal = signals[18 + idx];
-        if known[signal] {
+        if is_known(known, signal) {
             if witness[signal] != result[idx] {
                 return Err(ProofmanError::InvalidProof(format!(
                     "native recursive EvPol4 gate output mismatch at signal {signal}"
@@ -2030,7 +2065,7 @@ fn solve_evpol4_gate<F: PrimeField64>(
             }
         } else {
             witness[signal] = result[idx];
-            known[signal] = true;
+            set_known(known, signal);
             changed = true;
         }
     }
@@ -2040,7 +2075,7 @@ fn solve_evpol4_gate<F: PrimeField64>(
 fn verify_evpol4_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &[F],
-    known: &[bool],
+    known: &[KnownValue],
 ) -> ProofmanResult<()> {
     if gate.signals.len() != 21 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -2049,7 +2084,7 @@ fn verify_evpol4_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals.iter().any(|&signal| !known[signal]) {
+    if signals.iter().any(|&signal| !is_known(known, signal)) {
         return Ok(());
     }
     let result = evpol4(&signals, witness);
@@ -2067,7 +2102,7 @@ fn verify_evpol4_gate<F: PrimeField64>(
 fn solve_tree_selector4_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
 ) -> ProofmanResult<bool> {
     if gate.signals.len() != 17 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -2076,7 +2111,7 @@ fn solve_tree_selector4_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals[..14].iter().any(|&signal| !known[signal]) {
+    if signals[..14].iter().any(|&signal| !is_known(known, signal)) {
         return Ok(false);
     }
 
@@ -2094,7 +2129,7 @@ fn solve_tree_selector4_gate<F: PrimeField64>(
 fn verify_tree_selector4_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &[F],
-    known: &[bool],
+    known: &[KnownValue],
 ) -> ProofmanResult<()> {
     if gate.signals.len() != 17 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -2103,7 +2138,7 @@ fn verify_tree_selector4_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals.iter().any(|&signal| !known[signal]) {
+    if signals.iter().any(|&signal| !is_known(known, signal)) {
         return Ok(());
     }
     let index = selector_index(witness[signals[12]], witness[signals[13]], "TreeSelector4")?;
@@ -2119,7 +2154,7 @@ fn verify_tree_selector4_gate<F: PrimeField64>(
 fn solve_select_value1_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
 ) -> ProofmanResult<bool> {
     if gate.signals.len() != 22 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -2128,7 +2163,7 @@ fn solve_select_value1_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals[..18].iter().any(|&signal| !known[signal]) {
+    if signals[..18].iter().any(|&signal| !is_known(known, signal)) {
         return Ok(false);
     }
 
@@ -2151,7 +2186,7 @@ fn solve_select_value1_gate<F: PrimeField64>(
 fn verify_select_value1_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &[F],
-    known: &[bool],
+    known: &[KnownValue],
 ) -> ProofmanResult<()> {
     if gate.signals.len() != 22 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -2160,7 +2195,7 @@ fn verify_select_value1_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals.iter().any(|&signal| !known[signal]) {
+    if signals.iter().any(|&signal| !is_known(known, signal)) {
         return Ok(());
     }
     let index = selector_index(witness[signals[16]], witness[signals[17]], "SelectValue1")?;
@@ -2181,7 +2216,7 @@ fn verify_select_value1_gate<F: PrimeField64>(
 fn solve_fft4_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
 ) -> ProofmanResult<bool> {
     if gate.signals.len() != 24 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -2190,7 +2225,7 @@ fn solve_fft4_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals[..12].iter().any(|&signal| !known[signal]) {
+    if signals[..12].iter().any(|&signal| !is_known(known, signal)) {
         return Ok(false);
     }
 
@@ -2201,7 +2236,7 @@ fn solve_fft4_gate<F: PrimeField64>(
 fn verify_fft4_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &[F],
-    known: &[bool],
+    known: &[KnownValue],
 ) -> ProofmanResult<()> {
     if gate.signals.len() != 24 {
         return Err(ProofmanError::InvalidSetup(format!(
@@ -2210,7 +2245,7 @@ fn verify_fft4_gate<F: PrimeField64>(
         )));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals.iter().any(|&signal| !known[signal]) {
+    if signals.iter().any(|&signal| !is_known(known, signal)) {
         return Ok(());
     }
     let result = fft4(&gate.parameters, &signals, witness)?;
@@ -2220,7 +2255,7 @@ fn verify_fft4_gate<F: PrimeField64>(
 fn solve_poseidon16_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
     custom: bool,
 ) -> ProofmanResult<bool> {
     let gate_name = if custom { "CustPoseidon16" } else { "Poseidon16" };
@@ -2237,7 +2272,7 @@ fn solve_poseidon16_gate<F: PrimeField64>(
     let signals = gate_signals(&gate.signals, witness.len())?;
     let input_end = if custom { 18 } else { 16 };
     let output_start = input_end;
-    if signals[..input_end].iter().any(|&signal| !known[signal]) {
+    if signals[..input_end].iter().any(|&signal| !is_known(known, signal)) {
         return Ok(false);
     }
 
@@ -2249,7 +2284,7 @@ fn solve_poseidon16_gate<F: PrimeField64>(
 fn verify_poseidon16_gate<F: PrimeField64>(
     gate: &NativeRuntimeCustomGate,
     witness: &[F],
-    known: &[bool],
+    known: &[KnownValue],
     custom: bool,
 ) -> ProofmanResult<()> {
     let gate_name = if custom { "CustPoseidon16" } else { "Poseidon16" };
@@ -2264,7 +2299,7 @@ fn verify_poseidon16_gate<F: PrimeField64>(
         return Err(ProofmanError::InvalidSetup(format!("{gate_name} native runtime gate must not have parameters")));
     }
     let signals = gate_signals(&gate.signals, witness.len())?;
-    if signals.iter().any(|&signal| !known[signal]) {
+    if signals.iter().any(|&signal| !is_known(known, signal)) {
         return Ok(());
     }
 
@@ -2333,11 +2368,11 @@ fn assign_gate_outputs<F: PrimeField64, const N: usize>(
     output_signals: &[usize],
     expected: [F; N],
     witness: &mut [F],
-    known: &mut [bool],
+    known: &mut [KnownValue],
 ) -> ProofmanResult<bool> {
     let mut changed = false;
     for (idx, &signal) in output_signals.iter().enumerate() {
-        if known[signal] {
+        if is_known(known, signal) {
             if witness[signal] != expected[idx] {
                 return Err(ProofmanError::InvalidProof(format!(
                     "native recursive {gate} gate output mismatch at signal {signal}: expected {} got {}",
@@ -2347,7 +2382,7 @@ fn assign_gate_outputs<F: PrimeField64, const N: usize>(
             }
         } else {
             witness[signal] = expected[idx];
-            known[signal] = true;
+            set_known(known, signal);
             changed = true;
         }
     }
