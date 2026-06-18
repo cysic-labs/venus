@@ -16,7 +16,9 @@ use proofman_common::{
 
 use std::os::raw::{c_void, c_char};
 
-use proofman_util::{timer_start_info, timer_stop_and_log_info, timer_start_debug, timer_stop_and_log_debug};
+use proofman_util::{
+    create_buffer_fast, timer_start_debug, timer_start_info, timer_stop_and_log_debug, timer_stop_and_log_info,
+};
 
 use crate::{add_publics_circom, add_publics_aggregation};
 
@@ -315,7 +317,8 @@ pub fn generate_recursive_proof<F: PrimeField64>(
 
     let setup = setups.get_setup(airgroup_id, air_id, &witness.proof_type)?;
 
-    let trace: Vec<F> = vec![F::ZERO; setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize];
+    let trace: Vec<F> =
+        create_buffer_fast(setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize);
 
     let p_setup: *mut c_void = (&setup.p_setup).into();
 
@@ -715,7 +718,8 @@ pub fn generate_recursivef_proof<F: PrimeField64>(
         timer_stop_and_log_debug!(LOAD_FIXED_POLS_RECURSIVEF);
     });
 
-    let trace: Vec<F> = vec![F::ZERO; setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize];
+    let trace: Vec<F> =
+        create_buffer_fast(setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize);
 
     let proof = &vadcop_proof[1..];
     let mut updated_proof: Vec<u64> = vec![0; proof.len() + 4];

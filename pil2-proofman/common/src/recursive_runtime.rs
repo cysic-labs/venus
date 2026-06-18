@@ -1053,21 +1053,27 @@ impl NativeRecursiveRuntime {
                     )?
                 };
                 if !solved {
-                    return Err(ProofmanError::InvalidProof(format!(
-                        "native recursive cached solve plan did not solve constraint {constraint_index}"
-                    )));
+                    if !constraint_fully_known_and_satisfied(constraint_index, constraint, witness, known)? {
+                        return Err(ProofmanError::InvalidProof(format!(
+                            "native recursive cached solve plan did not solve constraint {constraint_index}"
+                        )));
+                    }
+                } else {
+                    stats.solved_constraints += 1;
                 }
-                stats.solved_constraints += 1;
             } else {
                 let gate_index = (code & !DEPENDENCY_GATE_FLAG) as usize;
                 let gate = &self.custom_gates[gate_index];
                 stats.processed_gates += 1;
                 if !self.try_solve_custom_gate(gate, witness, known, solver_index)? {
-                    return Err(ProofmanError::InvalidProof(format!(
-                        "native recursive cached solve plan did not solve custom gate {gate_index}"
-                    )));
+                    if !self.custom_gate_fully_known_and_satisfied(gate, witness, known)? {
+                        return Err(ProofmanError::InvalidProof(format!(
+                            "native recursive cached solve plan did not solve custom gate {gate_index}"
+                        )));
+                    }
+                } else {
+                    stats.solved_gates += 1;
                 }
-                stats.solved_gates += 1;
             }
         }
         Ok(stats)
@@ -1330,6 +1336,20 @@ impl NativeRecursiveRuntime {
             NativeRuntimeCustomGateKind::CustPoseidon16 => verify_poseidon16_gate(gate, witness, known, true),
         }
     }
+
+    fn custom_gate_fully_known_and_satisfied<F: PrimeField64>(
+        &self,
+        gate: &NativeRuntimeCustomGate,
+        witness: &[F],
+        known: &[bool],
+    ) -> ProofmanResult<bool> {
+        let signals = gate_signals(&gate.signals, witness.len())?;
+        if signals.iter().any(|&signal| !known[signal]) {
+            return Ok(false);
+        }
+        self.verify_custom_gate(gate, witness, known)?;
+        Ok(true)
+    }
 }
 
 #[derive(Debug)]
@@ -1409,6 +1429,33 @@ fn eval_lc<F: PrimeField64>(terms: &[NativeRuntimeLcTerm], witness: &[F], known:
         }
     }
     Ok(LcEval { value, unknown })
+}
+
+fn constraint_fully_known_and_satisfied<F: PrimeField64>(
+    constraint_index: usize,
+    constraint: &NativeRuntimeConstraint,
+    witness: &[F],
+    known: &[bool],
+) -> ProofmanResult<bool> {
+    let a = eval_lc(&constraint.a, witness, known)?;
+    let b = eval_lc(&constraint.b, witness, known)?;
+    let c = eval_lc(&constraint.c, witness, known)?;
+    if !a.unknown.is_empty() || !b.unknown.is_empty() || !c.unknown.is_empty() {
+        return Ok(false);
+    }
+    if a.value * b.value != c.value {
+        return Err(ProofmanError::InvalidProof(format_constraint_failure(
+            "native recursive cached solve plan found an already-known invalid constraint",
+            constraint_index,
+            constraint,
+            &a,
+            &b,
+            &c,
+            witness,
+            known,
+        )));
+    }
+    Ok(true)
 }
 
 fn format_constraint_failure<F: PrimeField64>(
