@@ -5,6 +5,7 @@
 #include "omp.h"
 #include "starks_api.hpp"
 #include "starks_api_internal.hpp"
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -33,6 +34,15 @@ void reserveStream(DeviceCommitBuffers* d_buffers, uint32_t streamId);
 void closeStreamTimer(TimerGPU &timer, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, bool isProve);
 void get_proof(DeviceCommitBuffers *d_buffers, uint64_t streamId);
 void get_commit_root(DeviceCommitBuffers *d_buffers, uint64_t streamId);
+
+static bool venus_reuse_custom_fixed_enabled()
+{
+    static int enabled = []() {
+        const char *value = std::getenv("VENUS_REUSE_CUSTOM_FIXED");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled != 0;
+}
 
 uint32_t register_host_memory(void *ptr, uint64_t size) {
     if (ptr == nullptr || size == 0) return 0;
@@ -577,7 +587,9 @@ uint64_t gen_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64
     uint64_t sizeConstTree = get_const_tree_size((void *)&setupCtx->starkInfo) * sizeof(Goldilocks::Element);
     AirInstanceInfo *air_instance_info = d_buffers->air_instances[key][proofType][gpuLocalId];
 
-    bool reuse_constants = !air_instance_info->stored_tree && d_buffers->streamsData[streamId].airgroupId == airgroupId && d_buffers->streamsData[streamId].airId == airId && d_buffers->streamsData[streamId].proofType == string("basic");
+    bool same_context = d_buffers->streamsData[streamId].airgroupId == airgroupId && d_buffers->streamsData[streamId].airId == airId && d_buffers->streamsData[streamId].proofType == string("basic");
+    bool reuse_constants = !air_instance_info->stored_tree && same_context;
+    bool reuse_custom_fixed = venus_reuse_custom_fixed_enabled() && same_context;
 
     d_buffers->streamsData[streamId].pSetupCtx = pSetupCtx_;
     d_buffers->streamsData[streamId].proofBuffer = proofBuffer;
@@ -591,7 +603,7 @@ uint64_t gen_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64
     uint64_t offsetStage1Extended = setupCtx->starkInfo.mapOffsets[std::make_pair("cm1", true)];
     uint64_t offsetPublicInputs = setupCtx->starkInfo.mapOffsets[std::make_pair("publics", false)];
 
-    if (setupCtx->starkInfo.mapTotalNCustomCommitsFixed > 0) {
+    if (setupCtx->starkInfo.mapTotalNCustomCommitsFixed > 0 && !reuse_custom_fixed) {
         Goldilocks::Element *pCustomCommitsFixed = (Goldilocks::Element *)d_aux_trace + setupCtx->starkInfo.mapOffsets[std::make_pair("custom_fixed", false)];
         copy_to_device_in_chunks(d_buffers, params->pCustomCommitsFixed, pCustomCommitsFixed, setupCtx->starkInfo.mapTotalNCustomCommitsFixed * sizeof(Goldilocks::Element), streamId, timer);
     }
@@ -672,7 +684,9 @@ uint64_t initialize_instance(void *pSetupCtx_, uint64_t airgroupId, uint64_t air
     uint64_t nCols = setupCtx->starkInfo.mapSectionsN["cm1"];
     uint64_t sizeTrace = N * (setupCtx->starkInfo.mapSectionsN["cm1"]) * sizeof(Goldilocks::Element);
    
-    bool reuse_constants = d_buffers->streamsData[streamId].airgroupId == airgroupId && d_buffers->streamsData[streamId].airId == airId && d_buffers->streamsData[streamId].proofType == string("basic");
+    bool same_context = d_buffers->streamsData[streamId].airgroupId == airgroupId && d_buffers->streamsData[streamId].airId == airId && d_buffers->streamsData[streamId].proofType == string("basic");
+    bool reuse_constants = same_context;
+    bool reuse_custom_fixed = venus_reuse_custom_fixed_enabled() && same_context;
 
     d_buffers->streamsData[streamId].pSetupCtx = pSetupCtx_;
     d_buffers->streamsData[streamId].airgroupId = airgroupId;
@@ -683,7 +697,7 @@ uint64_t initialize_instance(void *pSetupCtx_, uint64_t airgroupId, uint64_t air
     uint64_t offsetStage1 = setupCtx->starkInfo.mapOffsets[std::make_pair("cm1", false)];
     uint64_t offsetPublicInputs = setupCtx->starkInfo.mapOffsets[std::make_pair("publics", false)];
 
-    if (setupCtx->starkInfo.mapTotalNCustomCommitsFixed > 0) {
+    if (setupCtx->starkInfo.mapTotalNCustomCommitsFixed > 0 && !reuse_custom_fixed) {
         Goldilocks::Element *pCustomCommitsFixed = (Goldilocks::Element *)d_aux_trace + setupCtx->starkInfo.mapOffsets[std::make_pair("custom_fixed", false)];
         copy_to_device_in_chunks(d_buffers, params->pCustomCommitsFixed, pCustomCommitsFixed, setupCtx->starkInfo.mapTotalNCustomCommitsFixed * sizeof(Goldilocks::Element), streamId, timer);
     }
@@ -1142,6 +1156,7 @@ uint64_t commit_witness(void *pSetupCtx_, void *params_, uint64_t instanceId, ui
     uint32_t streamId = selectStream(d_buffers, airgroupId, airId, "basic");
     uint32_t gpuId = d_buffers->streamsData[streamId].gpuId;
     uint32_t gpuLocalId = d_buffers->gpus_g2l[gpuId];
+    bool reuse_custom_fixed = venus_reuse_custom_fixed_enabled() && d_buffers->streamsData[streamId].airgroupId == airgroupId && d_buffers->streamsData[streamId].airId == airId && d_buffers->streamsData[streamId].proofType == string("basic");
 
     d_buffers->streamsData[streamId].root = root;
     d_buffers->streamsData[streamId].instanceId = instanceId;
@@ -1204,9 +1219,11 @@ uint64_t commit_witness(void *pSetupCtx_, void *params_, uint64_t instanceId, ui
         CHECKCUDAERR(cudaGetLastError());
 
         Goldilocks::Element *pCustomCommitsFixed = nullptr;
-        if (setupCtx->starkInfo.mapTotalNCustomCommitsFixed > 0) {
+        if (setupCtx->starkInfo.mapTotalNCustomCommitsFixed > 0 && !reuse_custom_fixed) {
             pCustomCommitsFixed = (Goldilocks::Element *)d_aux_trace + setupCtx->starkInfo.mapOffsets[std::make_pair("custom_fixed", false)];
             copy_to_device_in_chunks(d_buffers, params->pCustomCommitsFixed, pCustomCommitsFixed, setupCtx->starkInfo.mapTotalNCustomCommitsFixed * sizeof(Goldilocks::Element), streamId, timer);
+        } else if (setupCtx->starkInfo.mapTotalNCustomCommitsFixed > 0) {
+            pCustomCommitsFixed = (Goldilocks::Element *)d_aux_trace + setupCtx->starkInfo.mapOffsets[std::make_pair("custom_fixed", false)];
         }
 
         size_t totalCopySize = 0;
