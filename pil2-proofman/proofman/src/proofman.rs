@@ -2001,7 +2001,12 @@ where
 
         self.pctx.set_proof_tx(Some(self.proofs_tx.clone()));
 
-        let recursive_witness_workers = if cfg!(feature = "gpu") && my_instances_sorted.len() <= 128 {
+        let recursive_witness_workers = if let Some(workers) = std::env::var_os("VENUS_RECURSIVE_WITNESS_WORKERS")
+            .and_then(|value| value.to_string_lossy().parse::<usize>().ok())
+            .filter(|&workers| workers > 0)
+        {
+            workers
+        } else if cfg!(feature = "gpu") && my_instances_sorted.len() <= 128 {
             self.max_num_threads.min(self.n_streams * 2).max(self.n_streams)
         } else {
             self.n_streams
