@@ -1389,10 +1389,25 @@ fn known_fingerprint(known: &[KnownValue]) -> (usize, u64) {
     const MIX: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut count = 0usize;
     let mut fingerprint = 0xD6E8_FD9A_8B4C_2F37u64 ^ known.len() as u64;
-    for (index, &value) in known.iter().enumerate() {
+    let mut chunks = known.chunks_exact(8);
+    for (chunk_index, chunk) in chunks.by_ref().enumerate() {
+        let word = u64::from_ne_bytes(chunk.try_into().unwrap());
+        if word == 0 {
+            continue;
+        }
+        let base = chunk_index * 8;
+        for (offset, &value) in chunk.iter().enumerate() {
+            if known_value(value) {
+                count += 1;
+                fingerprint = fingerprint.rotate_left(7) ^ (((base + offset) as u64).wrapping_mul(MIX));
+            }
+        }
+    }
+    let base = known.len() - chunks.remainder().len();
+    for (offset, &value) in chunks.remainder().iter().enumerate() {
         if known_value(value) {
             count += 1;
-            fingerprint = fingerprint.rotate_left(7) ^ ((index as u64).wrapping_mul(MIX));
+            fingerprint = fingerprint.rotate_left(7) ^ (((base + offset) as u64).wrapping_mul(MIX));
         }
     }
     (count, fingerprint)
