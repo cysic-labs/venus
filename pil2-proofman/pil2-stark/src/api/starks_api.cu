@@ -46,7 +46,7 @@ static bool venus_reuse_custom_fixed_enabled()
 
 uint32_t register_host_memory(void *ptr, uint64_t size) {
     if (ptr == nullptr || size == 0) return 0;
-    cudaError_t err = cudaHostRegister(ptr, size, cudaHostRegisterPortable);
+    cudaError_t err = cudaHostRegister(ptr, size, cudaHostRegisterDefault);
     if (err != cudaSuccess) {
         cudaGetLastError();
         return 0;
