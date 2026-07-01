@@ -265,7 +265,7 @@ pub fn gen_recursive_proof_size<F: PrimeField64>(
         new_proof_size += 1 + setup.stark_info.n_publics;
     }
 
-    let new_proof = vec![0; new_proof_size as usize];
+    let new_proof = create_buffer_fast(new_proof_size as usize);
     Ok(Proof::new(witness.proof_type.clone(), witness.airgroup_id, witness.air_id, witness.global_idx, new_proof))
 }
 
