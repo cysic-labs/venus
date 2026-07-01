@@ -45,28 +45,6 @@ impl<F: PrimeField64> InstanceRegistry<F> {
         self.sm_bundle.build_instance(ictx)
     }
 
-    /// Creates a secondary instance by looking up the plan in execution state.
-    ///
-    /// # Arguments
-    /// * `state` - The execution state containing the plans.
-    /// * `global_id` - The global ID to look up.
-    pub fn create_secn_instance_from_state(
-        &self,
-        state: &ExecutionState<F>,
-        global_id: usize,
-    ) -> Box<dyn Instance<F>> {
-        let mut secn_planning_guard = state.secn_planning.write().unwrap();
-
-        // Find and remove in single operation using swap_remove for O(1) removal
-        let plan = secn_planning_guard
-            .iter()
-            .position(|plan| plan.global_id == Some(global_id))
-            .map(|idx| secn_planning_guard.swap_remove(idx))
-            .unwrap_or_else(|| panic!("Secondary instance not found for global_id: {}", global_id));
-
-        self.create_secn_instance(plan, global_id)
-    }
-
     /// Populates main instances in the execution state.
     ///
     /// # Arguments
@@ -92,17 +70,15 @@ impl<F: PrimeField64> InstanceRegistry<F> {
         Ok(())
     }
 
-    /// Populates secondary instances in the execution state.
-    ///
-    /// # Arguments
-    /// * `state` - The execution state to populate.
-    /// * `global_ids` - Vector of global IDs for instances to create.
-    pub fn populate_secn_instances(&self, state: &ExecutionState<F>, global_ids: &[usize]) {
+    pub fn populate_secn_instances_from_plans(&self, state: &ExecutionState<F>, plans: Vec<Plan>) {
         let mut secn_instances = state.secn_instances.write().unwrap();
-        for &global_id in global_ids {
-            secn_instances
-                .entry(global_id)
-                .or_insert_with(|| self.create_secn_instance_from_state(state, global_id));
+        for plan in plans {
+            let global_id = plan.global_id.expect("Secondary plan has no global_id");
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                secn_instances.entry(global_id)
+            {
+                entry.insert(self.create_secn_instance(plan, global_id));
+            }
         }
     }
 

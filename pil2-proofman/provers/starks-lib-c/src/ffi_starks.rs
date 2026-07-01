@@ -1002,6 +1002,12 @@ pub fn get_stream_id_proof_c(d_buffers: *mut c_void, stream_id: u64) {
 
 #[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
+pub fn direct_registered_h2d_done_c(d_buffers: *mut c_void, stream_id: u64) -> bool {
+    unsafe { direct_registered_h2d_done(d_buffers, stream_id) != 0 }
+}
+
+#[cfg(not(feature = "no_lib_link"))]
+#[allow(clippy::too_many_arguments)]
 pub fn gen_recursive_proof_c(
     p_setup_ctx: *mut c_void,
     p_witness: *mut u8,
@@ -2181,6 +2187,12 @@ pub fn get_stream_proofs_non_blocking_c(_d_buffers: *mut c_void) {
 #[allow(clippy::too_many_arguments)]
 pub fn get_stream_id_proof_c(_d_buffers: *mut c_void, _stream_id: u64) {
     trace!("{}: ··· {}", "ffi     ", "get_stream_id_proof: This is a mock call because there is no linked library");
+}
+
+#[cfg(feature = "no_lib_link")]
+#[allow(clippy::too_many_arguments)]
+pub fn direct_registered_h2d_done_c(_d_buffers: *mut c_void, _stream_id: u64) -> bool {
+    true
 }
 
 #[cfg(feature = "no_lib_link")]

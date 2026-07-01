@@ -137,21 +137,24 @@ impl<F: PrimeField64> WitnessManager<F> {
         buffer_pool: &dyn BufferPool<F>,
     ) -> ProofmanResult<()> {
         for (idx, component) in self.components.read().unwrap().iter().enumerate() {
-            let mut instance_ids_filtered = Vec::new();
-            let mut seen = HashSet::new();
-            let component_instance_ids = self.components_instance_ids[idx].read().unwrap();
+            let instance_ids_filtered = {
+                let mut instance_ids_filtered = Vec::new();
+                let mut seen = HashSet::new();
+                let component_instance_ids = self.components_instance_ids[idx].read().unwrap();
 
-            for &id in instance_ids {
-                if !seen.insert(id) {
-                    continue;
+                for &id in instance_ids {
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    if component_instance_ids.contains(&id)
+                        && (self.pctx.dctx_is_my_process_instance(id)? || self.pctx.dctx_is_table(id))
+                        && !self.pctx.dctx_is_instance_calculated(id)
+                    {
+                        instance_ids_filtered.push(id);
+                    }
                 }
-                if component_instance_ids.contains(&id)
-                    && (self.pctx.dctx_is_my_process_instance(id)? || self.pctx.dctx_is_table(id))
-                    && !self.pctx.dctx_is_instance_calculated(id)
-                {
-                    instance_ids_filtered.push(id);
-                }
-            }
+                instance_ids_filtered
+            };
 
             if !instance_ids_filtered.is_empty() {
                 component.pre_calculate_witness(
@@ -188,21 +191,24 @@ impl<F: PrimeField64> WitnessManager<F> {
         buffer_pool: &dyn BufferPool<F>,
     ) -> ProofmanResult<()> {
         for (idx, component) in self.components.read().unwrap().iter().enumerate() {
-            let mut instance_ids_filtered = Vec::new();
-            let mut seen = HashSet::new();
-            let component_instance_ids = self.components_instance_ids[idx].read().unwrap();
+            let instance_ids_filtered = {
+                let mut instance_ids_filtered = Vec::new();
+                let mut seen = HashSet::new();
+                let component_instance_ids = self.components_instance_ids[idx].read().unwrap();
 
-            for &id in instance_ids {
-                if !seen.insert(id) {
-                    continue;
+                for &id in instance_ids {
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    if component_instance_ids.contains(&id)
+                        && (self.pctx.dctx_is_my_process_instance(id)? || self.pctx.dctx_is_table(id))
+                        && !self.pctx.dctx_is_instance_calculated(id)
+                    {
+                        instance_ids_filtered.push(id);
+                    }
                 }
-                if component_instance_ids.contains(&id)
-                    && (self.pctx.dctx_is_my_process_instance(id)? || self.pctx.dctx_is_table(id))
-                    && !self.pctx.dctx_is_instance_calculated(id)
-                {
-                    instance_ids_filtered.push(id);
-                }
-            }
+                instance_ids_filtered
+            };
 
             if !instance_ids_filtered.is_empty() {
                 for id in &instance_ids_filtered {

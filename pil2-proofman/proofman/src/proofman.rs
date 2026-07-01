@@ -55,8 +55,9 @@ use crate::{
 use crate::{verify_constraints_proof, verify_basic_proof, verify_global_constraints_proof};
 use crate::{print_summary_info, get_recursive_buffer_sizes, n_publics_aggregation};
 use crate::{
-    get_accumulated_challenge, gen_witness_recursive, gen_witness_aggregation, generate_recursive_proof,
-    generate_vadcop_final_proof, generate_vadcop_final_compressed_proof, initialize_witness_circom,
+    get_accumulated_challenge, get_accumulated_challenge_slice, gen_witness_recursive, gen_witness_aggregation,
+    generate_recursive_proof, generate_vadcop_final_proof, generate_vadcop_final_compressed_proof,
+    initialize_witness_circom,
 };
 use crate::total_recursive_proofs;
 use crate::check_tree_paths;
@@ -220,6 +221,8 @@ pub struct ProofMan<F: PrimeField64> {
     proofs: Arc<Vec<RwLock<Option<Proof<F>>>>>,
     compressor_proofs: Arc<Vec<RwLock<Option<Proof<F>>>>>,
     recursive1_proofs: Arc<Vec<RwLock<Option<Proof<F>>>>>,
+    compressor_proof_ids: Arc<Mutex<Vec<usize>>>,
+    recursive1_proof_ids: Arc<Mutex<Vec<usize>>>,
     recursive2_proofs: Arc<Vec<RwLock<Vec<Proof<F>>>>>,
     recursive2_proofs_ongoing: Arc<RwLock<Vec<Option<Proof<F>>>>>,
     roots_contributions: Arc<Vec<[F; 4]>>,
@@ -305,18 +308,19 @@ impl<F: PrimeField64> ProofMan<F> {
     pub fn reset(&self) -> ProofmanResult<()> {
         self.wcm.reset();
 
-        for proof_lock in self.proofs.iter() {
-            let mut proof = proof_lock.write().unwrap();
+        let process_instances = self.pctx.dctx_get_process_instances();
+        for instance_id in &process_instances {
+            let mut proof = self.proofs[*instance_id].write().unwrap();
             *proof = None;
         }
 
-        for proof_lock in self.compressor_proofs.iter() {
-            let mut proof = proof_lock.write().unwrap();
+        for proof_id in self.compressor_proof_ids.lock().unwrap().drain(..) {
+            let mut proof = self.compressor_proofs[proof_id].write().unwrap();
             *proof = None;
         }
 
-        for proof_lock in self.recursive1_proofs.iter() {
-            let mut proof = proof_lock.write().unwrap();
+        for proof_id in self.recursive1_proof_ids.lock().unwrap().drain(..) {
+            let mut proof = self.recursive1_proofs[proof_id].write().unwrap();
             *proof = None;
         }
 
@@ -385,8 +389,13 @@ impl<F: PrimeField64> ProofMan<F> {
 
         self.total_outer_agg_proofs.reset();
 
-        for instance_id in 0..MAX_INSTANCES as usize {
-            self.pctx.free_instance(instance_id);
+        self.memory_handler.release_queue_to_pool()?;
+        let n_instances = self.pctx.dctx_get_instances().len();
+        for instance_id in 0..n_instances {
+            let (is_shared_buffer, witness_buffer) = self.pctx.free_instance(instance_id);
+            if is_shared_buffer {
+                self.memory_handler.release_buffer(witness_buffer)?;
+            }
         }
 
         self.memory_handler.reset()?;
@@ -600,7 +609,7 @@ where
         self.reset()?;
         self.pctx.dctx_reset();
 
-        let _ = self.exec()?;
+        let _ = self.exec(true)?;
 
         let mut air_info: HashMap<&String, CsvInfo> = HashMap::new();
 
@@ -877,7 +886,7 @@ where
         let (witness_handler, witness_handles) =
             self.calc_witness_handler(witness_done.clone(), memory_handler.clone(), options.minimal_memory, None, true);
 
-        let _ = self.exec()?;
+        let _ = self.exec(true)?;
 
         let mut my_instances_sorted = self.pctx.dctx_get_process_instances();
         deterministic_shuffle(&mut my_instances_sorted, self.mpi_ctx.rank as u64);
@@ -975,7 +984,7 @@ where
         self.reset()?;
         self.pctx.dctx_reset();
 
-        self.exec()?;
+        self.exec(true)?;
 
         let mut transcript: Transcript<F, Poseidon16, 16> = Transcript::new();
         let dummy_element = [F::ZERO, F::ONE, F::TWO, F::NEG_ONE];
@@ -1105,7 +1114,7 @@ where
         self.reset()?;
         self.pctx.dctx_reset();
 
-        let _ = self.exec()?;
+        let _ = self.exec(true)?;
 
         let mut transcript: Transcript<F, Poseidon16, 16> = Transcript::new();
         let dummy_element = [F::ZERO, F::ONE, F::TWO, F::NEG_ONE];
@@ -1140,7 +1149,7 @@ where
                 if cancellation_info_clone.read().unwrap().token.is_cancelled() {
                     break;
                 }
-                match contributions_rx_clone.try_recv() {
+                match contributions_rx_clone.recv_timeout(std::time::Duration::from_micros(100)) {
                     Ok(instance_id) => {
                         if instance_id == usize::MAX {
                             break;
@@ -1160,11 +1169,8 @@ where
                             break;
                         }
                     }
-                    Err(crossbeam_channel::TryRecvError::Empty) => {
-                        std::thread::sleep(std::time::Duration::from_micros(100));
-                        continue;
-                    }
-                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                         break;
                     }
                 }
@@ -1539,6 +1545,8 @@ where
             Arc::new((0..MAX_INSTANCES).map(|_| RwLock::new(None)).collect());
         let recursive1_proofs: Arc<Vec<RwLock<Option<Proof<F>>>>> =
             Arc::new((0..MAX_INSTANCES).map(|_| RwLock::new(None)).collect());
+        let compressor_proof_ids: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+        let recursive1_proof_ids: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
         let recursive2_proofs: Arc<Vec<RwLock<Vec<Proof<F>>>>> =
             Arc::new((0..n_airgroups).map(|_| RwLock::new(Vec::new())).collect());
         let recursive2_proofs_ongoing: Arc<RwLock<Vec<Option<Proof<F>>>>> = Arc::new(RwLock::new(Vec::new()));
@@ -1638,6 +1646,8 @@ where
             proofs,
             compressor_proofs,
             recursive1_proofs,
+            compressor_proof_ids,
+            recursive1_proof_ids,
             recursive2_proofs,
             recursive2_proofs_ongoing,
             aux_trace,
@@ -1732,7 +1742,12 @@ where
 
             self.pctx.set_proof_tx(Some(self.contributions_tx.clone()));
 
-            for _ in 0..self.n_streams {
+            let contribution_workers = std::env::var_os("VENUS_CONTRIBUTION_WORKERS")
+                .and_then(|value| value.to_string_lossy().parse::<usize>().ok())
+                .filter(|&workers| workers > 0)
+                .unwrap_or(self.n_streams);
+
+            for _ in 0..contribution_workers {
                 let pctx_clone = self.pctx.clone();
                 let sctx_clone = self.sctx.clone();
                 let values_contributions_clone = self.values_contributions.clone();
@@ -1746,7 +1761,7 @@ where
                     if cancellation_info_clone.read().unwrap().token.is_cancelled() {
                         break;
                     }
-                    match contributions_rx_clone.try_recv() {
+                    match contributions_rx_clone.recv_timeout(std::time::Duration::from_micros(100)) {
                         Ok(instance_id) => {
                             if instance_id == usize::MAX {
                                 break;
@@ -1770,11 +1785,8 @@ where
                                 memory_handler_clone.to_be_released_buffer(instance_id, false);
                             }
                         }
-                        Err(crossbeam_channel::TryRecvError::Empty) => {
-                            std::thread::sleep(std::time::Duration::from_micros(100));
-                            continue;
-                        }
-                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                             break;
                         }
                     }
@@ -1790,7 +1802,7 @@ where
                 false,
             );
 
-            let summary_info = self.exec()?;
+            let summary_info = self.exec(phase == ProvePhase::Contributions)?;
 
             if !options.test_mode {
                 Self::set_publics_custom_commits(&self.sctx, &self.pctx)?;
@@ -1807,7 +1819,24 @@ where
             let my_instances_tables = self.pctx.dctx_get_my_tables();
 
             let mut my_instances_sorted = self.pctx.dctx_get_process_instances();
-            deterministic_shuffle(&mut my_instances_sorted, self.mpi_ctx.rank as u64);
+            if std::env::var_os("VENUS_WEIGHTED_CONTRIB_ORDER").is_some() {
+                let instances = self.pctx.dctx_get_instances();
+                let force_q_ops_order = std::env::var_os("VENUS_WEIGHT_Q_OPS")
+                    .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+                    .is_some_and(|divisor| divisor > 0);
+                my_instances_sorted.sort_by_key(|&id| {
+                    let has_compressor =
+                        self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id);
+                    let order_weight = if force_q_ops_order {
+                        self.pctx.get_q_ops_order_weight(instances[id].airgroup_id, instances[id].air_id)
+                    } else {
+                        instances[id].weight
+                    };
+                    (if has_compressor { 0 } else { 1 }, std::cmp::Reverse(order_weight), id)
+                });
+            } else {
+                deterministic_shuffle(&mut my_instances_sorted, self.mpi_ctx.rank as u64);
+            }
 
             timer_stop_and_log_debug!(PREPARING_CONTRIBUTIONS);
 
@@ -1859,7 +1888,7 @@ where
 
             self.pctx.set_proof_tx(None);
 
-            for _ in 0..self.n_streams {
+            for _ in 0..contribution_workers {
                 self.contributions_tx.send(usize::MAX).ok();
             }
 
@@ -2157,7 +2186,7 @@ where
                 return;
             }
             proofs_pending.increment();
-            if let Err(e) = Self::gen_proof(
+            match Self::gen_proof(
                 &self.proofs,
                 &self.pctx,
                 &self.sctx,
@@ -2169,12 +2198,15 @@ where
                 Some(stream_id),
                 options.save_proofs,
             ) {
-                self.cancellation_info.write().unwrap().cancel(Some(e));
-            }
-
-            let (is_shared_buffer, witness_buffer) = self.pctx.free_instance(*instance_id as usize);
-            if is_shared_buffer {
-                if let Err(e) = self.memory_handler.release_buffer(witness_buffer) {
+                Ok(used_stream_id) => {
+                    let is_shared_buffer = self.pctx.is_shared_buffer(*instance_id as usize);
+                    if is_shared_buffer {
+                        self.memory_handler.to_be_released_instance_after_h2d(*instance_id as usize, used_stream_id);
+                    } else {
+                        self.pctx.free_instance(*instance_id as usize);
+                    }
+                }
+                Err(e) => {
                     self.cancellation_info.write().unwrap().cancel(Some(e));
                 }
             }
@@ -2204,17 +2236,9 @@ where
                 let has_compressor =
                     self.pctx.global_info.get_air_has_compressor(instances[id].airgroup_id, instances[id].air_id);
                 if compressor_first_order {
-                    (
-                        if has_compressor { 0 } else { 1 },
-                        if is_stored { 0 } else { 1 },
-                        std::cmp::Reverse(order_weight),
-                    )
+                    (if has_compressor { 0 } else { 1 }, if is_stored { 0 } else { 1 }, std::cmp::Reverse(order_weight))
                 } else {
-                    (
-                        if is_stored { 0 } else { 1 },
-                        if has_compressor { 0 } else { 1 },
-                        std::cmp::Reverse(order_weight),
-                    )
+                    (if is_stored { 0 } else { 1 }, if has_compressor { 0 } else { 1 }, std::cmp::Reverse(order_weight))
                 }
             });
         } else {
@@ -2243,6 +2267,8 @@ where
             let proofs_clone = self.proofs.clone();
             let compressor_proofs_clone = self.compressor_proofs.clone();
             let recursive1_proofs_clone = self.recursive1_proofs.clone();
+            let compressor_proof_ids_clone = self.compressor_proof_ids.clone();
+            let recursive1_proof_ids_clone = self.recursive1_proof_ids.clone();
             let recursive2_proofs_ongoing_clone = self.recursive2_proofs_ongoing.clone();
             let proofs_rx = self.proofs_rx.clone();
             let compressor_rx = self.compressor_witness_rx.clone();
@@ -2267,7 +2293,7 @@ where
                             }
                             continue;
                         } else {
-                            if let Err(e) = Self::gen_proof(
+                            match Self::gen_proof(
                                 &proofs_clone,
                                 &pctx_clone,
                                 &sctx_clone,
@@ -2279,14 +2305,18 @@ where
                                 None,
                                 options.save_proofs,
                             ) {
-                                cancellation_info_clone.write().unwrap().cancel(Some(e));
-                                break;
-                            }
-                            let (is_shared_buffer, witness_buffer) = pctx_clone.free_instance(instance_id);
-                            if is_shared_buffer {
-                                if let Err(e) = memory_handler_clone.release_buffer(witness_buffer) {
+                                Ok(used_stream_id) => {
+                                    let is_shared_buffer = pctx_clone.is_shared_buffer(instance_id);
+                                    if is_shared_buffer {
+                                        memory_handler_clone
+                                            .to_be_released_instance_after_h2d(instance_id, used_stream_id);
+                                    } else {
+                                        pctx_clone.free_instance(instance_id);
+                                    }
+                                }
+                                Err(e) => {
                                     cancellation_info_clone.write().unwrap().cancel(Some(e));
-                                    return;
+                                    break;
                                 }
                             }
                             continue;
@@ -2343,8 +2373,10 @@ where
                     recursive2_proofs_ongoing_clone.write().unwrap()[id] = Some(new_proof);
                 } else if *new_proof_type == ProofType::Compressor {
                     *compressor_proofs_clone[id].write().unwrap() = Some(new_proof);
+                    compressor_proof_ids_clone.lock().unwrap().push(id);
                 } else if *new_proof_type == ProofType::Recursive1 {
                     *recursive1_proofs_clone[id].write().unwrap() = Some(new_proof);
+                    recursive1_proof_ids_clone.lock().unwrap().push(id);
                 }
 
                 if *new_proof_type == ProofType::Recursive2 {
@@ -2572,44 +2604,86 @@ where
                         }
                     }
                 }
-                for proof in &agg_proofs {
-                    let agg_proof =
-                        Proof::new(ProofType::Recursive2, proof.airgroup_id as usize, 0, None, proof.proof.clone());
-
-                    let worker_index = self.pctx.get_worker_index()? as u32;
-                    let proof_acc_challenge = get_accumulated_challenge(&self.pctx, &proof.proof);
-                    let mut worker_contributions = self.worker_contributions.write().unwrap();
-                    if let Some(contrib) = worker_contributions.iter_mut().find(|contrib| {
-                        contrib.worker_index == worker_index && contrib.airgroup_id == proof.airgroup_id as usize
-                    }) {
-                        if contrib.aggregated {
-                            self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::InvalidProof(
-                                "Proof contribution was already aggregated".into(),
-                            )));
-                        }
-                        contrib.aggregated = true;
-                        for (c, value) in contrib.challenge.iter().enumerate() {
-                            if *value != proof_acc_challenge[c] {
-                                self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::InvalidProof(
-                                    "Proof contribution challenge does not match expected accumulated challenge previously committed".into(),
-                                )));
-                                break;
-                            }
-                        }
-                    } else {
-                        self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::ProofmanError(format!(
-                            "Missing contribution from worker {} and airgroup id {}",
-                            worker_index, proof.airgroup_id
-                        ))));
-                        break;
-                    }
-
-                    self.recursive2_proofs[proof.airgroup_id as usize].write().unwrap().push(agg_proof);
-                    self.received_agg_proofs.write().unwrap()[proof.airgroup_id as usize].push(worker_index as usize);
-                }
                 if phase == ProvePhase::Internal {
+                    let worker_index = self.pctx.get_worker_index()? as u32;
+                    let mut worker_contributions = self.worker_contributions.write().unwrap();
+                    let mut received_agg_proofs = self.received_agg_proofs.write().unwrap();
+                    for proof in &agg_proofs {
+                        let airgroup_id = proof.airgroup_id as usize;
+                        let proof_acc_challenge = get_accumulated_challenge_slice(&self.pctx, &proof.proof);
+                        if let Some(contrib) = worker_contributions
+                            .iter_mut()
+                            .find(|contrib| contrib.worker_index == worker_index && contrib.airgroup_id == airgroup_id)
+                        {
+                            if contrib.aggregated {
+                                self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::InvalidProof(
+                                    "Proof contribution was already aggregated".into(),
+                                )));
+                            }
+                            contrib.aggregated = true;
+                            for (c, value) in contrib.challenge.iter().enumerate() {
+                                if *value != proof_acc_challenge[c] {
+                                    self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::InvalidProof(
+                                        "Proof contribution challenge does not match expected accumulated challenge previously committed".into(),
+                                    )));
+                                    break;
+                                }
+                            }
+                        } else {
+                            self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::ProofmanError(
+                                format!(
+                                    "Missing contribution from worker {} and airgroup id {}",
+                                    worker_index, proof.airgroup_id
+                                ),
+                            )));
+                            break;
+                        }
+
+                        let agg_proof = Proof::new(ProofType::Recursive2, airgroup_id, 0, None, proof.proof.clone());
+                        self.recursive2_proofs[airgroup_id].write().unwrap().push(agg_proof);
+                        received_agg_proofs[airgroup_id].push(worker_index as usize);
+                    }
                     timer_stop_and_log_info!(GENERATING_PROOFS);
                     return Ok(ProvePhaseResult::Internal(agg_proofs));
+                } else {
+                    let worker_index = self.pctx.get_worker_index()? as u32;
+                    let mut worker_contributions = self.worker_contributions.write().unwrap();
+                    let mut received_agg_proofs = self.received_agg_proofs.write().unwrap();
+                    for proof in agg_proofs {
+                        let airgroup_id = proof.airgroup_id as usize;
+                        let proof_acc_challenge = get_accumulated_challenge_slice(&self.pctx, &proof.proof);
+                        if let Some(contrib) = worker_contributions
+                            .iter_mut()
+                            .find(|contrib| contrib.worker_index == worker_index && contrib.airgroup_id == airgroup_id)
+                        {
+                            if contrib.aggregated {
+                                self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::InvalidProof(
+                                    "Proof contribution was already aggregated".into(),
+                                )));
+                            }
+                            contrib.aggregated = true;
+                            for (c, value) in contrib.challenge.iter().enumerate() {
+                                if *value != proof_acc_challenge[c] {
+                                    self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::InvalidProof(
+                                        "Proof contribution challenge does not match expected accumulated challenge previously committed".into(),
+                                    )));
+                                    break;
+                                }
+                            }
+                        } else {
+                            self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::ProofmanError(
+                                format!(
+                                    "Missing contribution from worker {} and airgroup id {}",
+                                    worker_index, proof.airgroup_id
+                                ),
+                            )));
+                            break;
+                        }
+
+                        let agg_proof = Proof::new(ProofType::Recursive2, airgroup_id, 0, None, proof.proof);
+                        self.recursive2_proofs[airgroup_id].write().unwrap().push(agg_proof);
+                        received_agg_proofs[airgroup_id].push(worker_index as usize);
+                    }
                 }
             }
 
@@ -3129,7 +3203,7 @@ where
         }
     }
 
-    fn exec(&self) -> ProofmanResult<String> {
+    fn exec(&self, collect_summary: bool) -> ProofmanResult<String> {
         timer_start_info!(EXECUTE);
 
         if !self.wcm.is_init_witness() {
@@ -3156,8 +3230,11 @@ where
 
         self.check_cancel(true)?;
 
-        let global_summary =
-            print_summary_info(&self.pctx, &self.sctx, &self.mpi_ctx, &self.packed_info, self.verbose_mode)?;
+        let global_summary = if collect_summary {
+            print_summary_info(&self.pctx, &self.sctx, &self.mpi_ctx, &self.packed_info, self.verbose_mode)?
+        } else {
+            String::new()
+        };
 
         timer_stop_and_log_info!(EXECUTE);
         Ok(global_summary)
@@ -3664,7 +3741,7 @@ where
         const_tree: &[F],
         stream_id_: Option<usize>,
         save_proof: bool,
-    ) -> ProofmanResult<()> {
+    ) -> ProofmanResult<u64> {
         let (airgroup_id, air_id) = pctx.dctx_get_instance_info(instance_id)?;
         timer_start_debug!(GEN_PROOF, "GEN_PROOF_{} [{}:{}]", instance_id, airgroup_id, air_id);
         Self::initialize_air_instance(pctx, sctx, instance_id, false, false)?;
@@ -3705,7 +3782,7 @@ where
         *proofs[instance_id].write().unwrap() =
             Some(Proof::new(ProofType::Basic, airgroup_id, air_id, Some(instance_id), proof));
 
-        gen_proof_c(
+        let used_stream_id = gen_proof_c(
             p_setup,
             p_steps_params,
             pctx.get_global_challenge_ptr(),
@@ -3726,7 +3803,7 @@ where
         }
 
         timer_stop_and_log_debug!(GEN_PROOF, "GEN_PROOF_{} [{}:{}]", instance_id, airgroup_id, air_id);
-        Ok(())
+        Ok(used_stream_id)
     }
 
     #[allow(clippy::type_complexity)]

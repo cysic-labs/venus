@@ -20,6 +20,18 @@ typedef uint64_t u64;
 // CUDA Threads per Block
 #define TPB 128
 
+static inline uint32_t getRowMajorTPB()
+{
+    const char *env = getenv("VENUS_ROWMAJOR_TPB");
+    if (env == nullptr || *env == '\0') return TPB;
+
+    char *end = nullptr;
+    unsigned long value = strtoul(env, &end, 10);
+    if (end == env || *end != '\0' || value == 0 || value > TPB) return TPB;
+
+    return static_cast<uint32_t>(value);
+}
+
 __device__ __constant__ uint64_t GPU_C_4[53]; 
 __device__ __constant__ uint64_t GPU_D_4[4];
 __device__ __constant__ uint64_t GPU_C_8[86]; 
@@ -83,13 +95,25 @@ __global__ void linearHashGPURowMajorReg(uint64_t *__restrict__ output, uint64_t
         state[RATE_T + i] = gl64_t(uint64_t(0));
     }
 
+    const bool full_col_tiles = (num_cols & (TILE_WIDTH - 1)) == 0;
+    const uint64_t row4 = static_cast<uint64_t>(row) << 2;
+
     for (uint32_t col = 0;;) {
         uint32_t delta = min(num_cols - col, RATE_T);
+        if (full_col_tiles) {
 #pragma unroll
-        for (uint32_t i = 0; i < RATE_T; ++i) {
-            state[i] = i < delta
-                ? gl64_t(input[getBufferOffsetRowMajor(row, col + i, num_rows, num_cols)])
-                : gl64_t(uint64_t(0));
+            for (uint32_t i = 0; i < RATE_T; ++i) {
+                const uint32_t src_col = col + i;
+                const uint64_t offset = (static_cast<uint64_t>(src_col & ~uint32_t(3)) * num_rows) + row4 + (src_col & 3);
+                state[i] = i < delta ? gl64_t(input[offset]) : gl64_t(uint64_t(0));
+            }
+        } else {
+#pragma unroll
+            for (uint32_t i = 0; i < RATE_T; ++i) {
+                state[i] = i < delta
+                    ? gl64_t(input[getBufferOffsetRowMajor(row, col + i, num_rows, num_cols)])
+                    : gl64_t(uint64_t(0));
+            }
         }
 
         hash_full_result_seq_2_<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(state, GPU_C_GL, GPU_D_GL);
@@ -101,6 +125,61 @@ __global__ void linearHashGPURowMajorReg(uint64_t *__restrict__ output, uint64_t
 #pragma unroll
         for (uint32_t i = 0; i < CAPACITY_T; ++i) {
             state[RATE_T + i] = state[i];
+        }
+    }
+
+    uint64_t out_idx = row * CAPACITY_T;
+#pragma unroll
+    for (uint32_t i = 0; i < CAPACITY_T; ++i) {
+        output[out_idx + i] = state[i];
+    }
+}
+
+template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T, uint32_t NUM_COLS_T>
+__global__ void linearHashGPURowMajorRegFixedCols(uint64_t *__restrict__ output, uint64_t *__restrict__ input, uint32_t num_rows)
+{
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+
+    const gl64_t *GPU_C_GL = SPONGE_WIDTH_T == 8
+        ? (gl64_t *)GPU_C_8
+        : (SPONGE_WIDTH_T == 12 ? (gl64_t *)GPU_C_12 : (gl64_t *)GPU_C_16);
+    const gl64_t *GPU_D_GL = SPONGE_WIDTH_T == 8
+        ? (gl64_t *)GPU_D_8
+        : (SPONGE_WIDTH_T == 12 ? (gl64_t *)GPU_D_12 : (gl64_t *)GPU_D_16);
+
+    gl64_t state[SPONGE_WIDTH_T];
+#pragma unroll
+    for (uint32_t i = 0; i < CAPACITY_T; ++i) {
+        state[RATE_T + i] = gl64_t(uint64_t(0));
+    }
+
+#pragma unroll
+    for (uint32_t col = 0; col < NUM_COLS_T; col += RATE_T) {
+        const uint32_t delta = min(uint32_t(NUM_COLS_T - col), RATE_T);
+#pragma unroll
+        for (uint32_t i = 0; i < RATE_T; ++i) {
+            if (i < delta) {
+                const uint32_t src_col = col + i;
+                const uint32_t tile_col = src_col & ~uint32_t(TILE_WIDTH - 1);
+                const uint32_t rem = NUM_COLS_T - tile_col;
+                const uint32_t nColsBlock = rem < TILE_WIDTH ? rem : uint32_t(TILE_WIDTH);
+                const uint64_t offset = (static_cast<uint64_t>(tile_col) * num_rows)
+                    + (static_cast<uint64_t>(row) * nColsBlock)
+                    + (src_col & (TILE_WIDTH - 1));
+                state[i] = gl64_t(input[offset]);
+            } else {
+                state[i] = gl64_t(uint64_t(0));
+            }
+        }
+
+        hash_full_result_seq_2_<RATE_T, CAPACITY_T, SPONGE_WIDTH_T, N_FULL_ROUNDS_TOTAL_T, N_PARTIAL_ROUNDS_T>(state, GPU_C_GL, GPU_D_GL);
+
+        if (col + RATE_T < NUM_COLS_T) {
+#pragma unroll
+            for (uint32_t i = 0; i < CAPACITY_T; ++i) {
+                state[RATE_T + i] = state[i];
+            }
         }
     }
 
@@ -193,14 +272,34 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::merkletreeRowMajor(uint32_t arity, 
 {
     if (num_rows == 0) return;
 
-    u32 actual_tpb = TPB;
-    u32 actual_blks = (num_rows + TPB - 1) / TPB;
+    static int log_rowmajor_args = getenv("VENUS_LOG_ROWMAJOR_ARGS") != nullptr;
+    if (log_rowmajor_args) {
+        fprintf(stderr, "[VENUS_ROWMAJOR] width=%u arity=%u cols=%lu rows=%lu\n",
+                SPONGE_WIDTH_T, arity, num_cols, num_rows);
+    }
+
+    static uint32_t rowmajor_tpb = getRowMajorTPB();
+    u32 actual_tpb = rowmajor_tpb;
+    u32 actual_blks = (num_rows + rowmajor_tpb - 1) / rowmajor_tpb;
     if (num_rows < TPB) { actual_tpb = num_rows; actual_blks = 1; }
 
     // Leaf hash from blocked-row-major layout (matches NTT output)
     static int use_rowmajor_reg = getenv("VENUS_ROWMAJOR_REG") != nullptr;
     if (use_rowmajor_reg) {
-        linearHashGPURowMajorReg<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_cols, num_rows);
+        switch (num_cols) {
+        case 6:
+            linearHashGPURowMajorRegFixedCols<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS, 6><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_rows);
+            break;
+        case 12:
+            linearHashGPURowMajorRegFixedCols<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS, 12><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_rows);
+            break;
+        case 38:
+            linearHashGPURowMajorRegFixedCols<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS, 38><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_rows);
+            break;
+        default:
+            linearHashGPURowMajorReg<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_cols, num_rows);
+            break;
+        }
     } else {
         linearHashGPURowMajor<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, actual_tpb * SPONGE_WIDTH * 8, stream>>>(d_tree, d_input, num_cols, num_rows);
     }

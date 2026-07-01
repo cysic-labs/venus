@@ -281,6 +281,8 @@ struct StreamData{
     //runtime data
     uint32_t status; //0: unused, 1: loading, 2: full
     cudaEvent_t end_event;
+    cudaEvent_t direct_h2d_event;
+    bool direct_h2d_event_pending;
     TimerGPU timer;
 
     TranscriptGL_GPU *transcript;
@@ -314,6 +316,8 @@ struct StreamData{
         localStreamId = localStreamId_;
         recursive = recursive_;
         cudaEventCreate(&end_event);
+        cudaEventCreateWithFlags(&direct_h2d_event, cudaEventDisableTiming);
+        direct_h2d_event_pending = false;
         instanceId = -1;
         status = 0;
         CHECKCUDAERR(cudaMallocHost((void **)&pinned_buffer_proof, max_size_proof * sizeof(Goldilocks::Element)));
@@ -362,6 +366,7 @@ struct StreamData{
         cudaSetDevice(gpuId);
         cudaStreamDestroy(stream);
         cudaEventDestroy(end_event);
+        cudaEventDestroy(direct_h2d_event);
         cudaFreeHost(pinned_buffer_proof);
         cudaFreeHost(pinned_buffer_exps_params);
         cudaFreeHost(pinned_buffer_exps_args);
@@ -437,7 +442,7 @@ struct DeviceCommitBuffers
     uint64_t max_size_proof;
 
     uint64_t constPolsSize;
-    uint64_t pinned_size = 128 * 1024 * 1024; //256MB
+    uint64_t pinned_size = 128 * 1024 * 1024;
 
     uint32_t  n_gpus;
     uint32_t* my_gpu_ids;
@@ -475,6 +480,8 @@ void load_and_copy_to_device_in_chunks(
     uint64_t total_size,
     uint64_t streamId
     );
+
+void wait_direct_registered_h2d(DeviceCommitBuffers* d_buffers, uint64_t streamId);
 
 __global__ void fromRowMajorToTiled(
     const uint64_t nRows,

@@ -1,5 +1,5 @@
 use crossbeam_channel::{bounded, Sender, Receiver};
-use proofman_starks_lib_c::{register_host_memory_c, unregister_host_memory_c};
+use proofman_starks_lib_c::{direct_registered_h2d_done_c, register_host_memory_c, unregister_host_memory_c};
 use proofman_util::create_buffer_fast;
 use std::ffi::c_void;
 use std::mem;
@@ -11,12 +11,20 @@ use crate::{ProofmanError, ProofmanResult};
 
 pub struct MemoryHandler<F: PrimeField64 + Send + Sync + 'static> {
     pctx: Arc<ProofCtx<F>>,
-    instance_ids_to_be_released: Arc<SegQueue<(usize, bool)>>,
+    instance_ids_to_be_released: Arc<SegQueue<ReleaseEntry>>,
     sender: Sender<Vec<F>>,
     receiver: Receiver<Vec<F>>,
     n_buffers: usize,
     buffer_size: usize,
     registered_buffers: Vec<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct ReleaseEntry {
+    instance_id: usize,
+    remove_from_calculated: bool,
+    full_reset: bool,
+    h2d_stream_id: Option<u64>,
 }
 
 impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
@@ -59,12 +67,11 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
     }
 
     pub fn reset(&self) -> ProofmanResult<()> {
-        self.empty_queue_to_be_released();
-
         let mut current_buffers = Vec::new();
         while let Ok(buffer) = self.receiver.try_recv() {
             current_buffers.push(buffer);
         }
+        self.drain_queue_to_be_released(&mut current_buffers);
 
         let mut valid_buffers: Vec<Vec<F>> = Vec::with_capacity(self.n_buffers);
         for buf in current_buffers.into_iter() {
@@ -99,13 +106,15 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
             if let Ok(buffer) = self.receiver.try_recv() {
                 return buffer;
             }
-            if let Some((stored_instance_id, remove_from_calculated)) = self.instance_ids_to_be_released.pop() {
-                if remove_from_calculated {
-                    self.pctx.dctx_reset_instance_calculated(stored_instance_id);
-                }
-                let (is_shared_buffer, witness_buffer) = self.pctx.free_instance_traces(stored_instance_id);
-                if is_shared_buffer {
-                    return witness_buffer;
+            if let Some(release) = self.instance_ids_to_be_released.pop() {
+                match self.release_instance_entry(release, false) {
+                    Some(Some(witness_buffer)) => return witness_buffer,
+                    Some(None) => {}
+                    None => {
+                        self.instance_ids_to_be_released.push(release);
+                        std::thread::sleep(std::time::Duration::from_micros(10));
+                        continue;
+                    }
                 }
             }
             std::thread::sleep(std::time::Duration::from_micros(10));
@@ -125,7 +134,21 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
     }
 
     pub fn to_be_released_buffer(&self, instance_id: usize, remove_from_calculated: bool) {
-        self.instance_ids_to_be_released.push((instance_id, remove_from_calculated));
+        self.instance_ids_to_be_released.push(ReleaseEntry {
+            instance_id,
+            remove_from_calculated,
+            full_reset: false,
+            h2d_stream_id: None,
+        });
+    }
+
+    pub fn to_be_released_instance_after_h2d(&self, instance_id: usize, stream_id: u64) {
+        self.instance_ids_to_be_released.push(ReleaseEntry {
+            instance_id,
+            remove_from_calculated: false,
+            full_reset: true,
+            h2d_stream_id: Some(stream_id),
+        });
     }
 
     pub fn get_n_buffers(&self) -> usize {
@@ -136,6 +159,46 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
         while !self.instance_ids_to_be_released.is_empty() {
             self.instance_ids_to_be_released.pop();
         }
+    }
+
+    pub fn release_queue_to_pool(&self) -> ProofmanResult<()> {
+        let mut buffers = Vec::new();
+        self.drain_queue_to_be_released(&mut buffers);
+        for buffer in buffers {
+            self.release_buffer(buffer)?;
+        }
+        Ok(())
+    }
+
+    fn drain_queue_to_be_released(&self, buffers: &mut Vec<Vec<F>>) {
+        while let Some(release) = self.instance_ids_to_be_released.pop() {
+            if let Some(Some(witness_buffer)) = self.release_instance_entry(release, true) {
+                buffers.push(witness_buffer);
+            }
+        }
+    }
+
+    fn release_instance_entry(&self, release: ReleaseEntry, wait_for_h2d: bool) -> Option<Option<Vec<F>>> {
+        if let Some(stream_id) = release.h2d_stream_id {
+            loop {
+                if direct_registered_h2d_done_c(self.pctx.get_device_buffers_ptr(), stream_id) {
+                    break;
+                }
+                if !wait_for_h2d {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(10));
+            }
+        }
+        if release.remove_from_calculated {
+            self.pctx.dctx_reset_instance_calculated(release.instance_id);
+        }
+        let (is_shared_buffer, witness_buffer) = if release.full_reset {
+            self.pctx.free_instance(release.instance_id)
+        } else {
+            self.pctx.free_instance_traces(release.instance_id)
+        };
+        Some(is_shared_buffer.then_some(witness_buffer))
     }
 }
 
@@ -148,9 +211,7 @@ impl<F: PrimeField64 + Send + Sync + 'static> Drop for MemoryHandler<F> {
 }
 
 fn registered_witness_h2d_enabled() -> bool {
-    std::env::var("VENUS_REGISTER_WITNESS_H2D")
-        .map(|value| !value.is_empty() && value != "0")
-        .unwrap_or(false)
+    std::env::var("VENUS_REGISTER_WITNESS_H2D").map(|value| !value.is_empty() && value != "0").unwrap_or(false)
 }
 
 fn aligned_host_range(ptr: usize, bytes: usize) -> Option<(usize, usize)> {

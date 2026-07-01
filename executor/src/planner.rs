@@ -130,27 +130,33 @@ impl InstancePlanner {
         global_ids: &RwLock<Vec<usize>>,
         plans: &mut [Plan],
     ) {
+        let mut assigned_global_ids = Vec::with_capacity(plans.len());
+        let mut dctx = pctx.dctx.write().unwrap();
         for plan in plans.iter_mut() {
+            let weight = pctx.get_weight(plan.airgroup_id, plan.air_id);
             // ROM instances need special first partition assignment
             let global_id = if AirClassifier::is_rom_instance(plan.airgroup_id, plan.air_id) {
-                pctx.add_instance_assign_first_process(plan.airgroup_id, plan.air_id)
+                dctx.add_instance_first_process(plan.airgroup_id, plan.air_id, weight)
                     .expect("Failed to add ROM instance")
             } else if AirClassifier::is_keccakf_instance(plan.airgroup_id, plan.air_id) {
-                pctx.add_instance_assign(plan.airgroup_id, plan.air_id)
+                dctx.add_instance(plan.airgroup_id, plan.air_id, weight)
                     .expect("Failed to add KeccakF instance")
             } else {
                 match plan.instance_type {
-                    InstanceType::Instance => pctx
-                        .add_instance(plan.airgroup_id, plan.air_id)
+                    InstanceType::Instance => dctx
+                        .add_instance_no_assign(plan.airgroup_id, plan.air_id, weight)
                         .expect("Failed to add instance"),
-                    InstanceType::Table => {
-                        pctx.add_table(plan.airgroup_id, plan.air_id).expect("Failed to add table")
-                    }
+                    InstanceType::Table => dctx
+                        .add_table(plan.airgroup_id, plan.air_id, weight)
+                        .expect("Failed to add table"),
                 }
             };
 
-            global_ids.write().unwrap().push(global_id);
+            assigned_global_ids.push(global_id);
             plan.set_global_id(global_id);
         }
+        drop(dctx);
+
+        global_ids.write().unwrap().extend(assigned_global_ids);
     }
 }

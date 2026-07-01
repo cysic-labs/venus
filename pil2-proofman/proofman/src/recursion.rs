@@ -231,12 +231,16 @@ pub fn n_publics_aggregation<F: PrimeField64>(pctx: &ProofCtx<F>, airgroup_id: u
     publics_aggregation
 }
 
-pub fn get_accumulated_challenge<F: PrimeField64>(pctx: &ProofCtx<F>, proof: &[u64]) -> Vec<u64> {
+pub fn get_accumulated_challenge_slice<'a, F: PrimeField64>(pctx: &ProofCtx<F>, proof: &'a [u64]) -> &'a [u64] {
     if pctx.global_info.curve != CurveType::None {
-        proof[6..16].to_vec()
+        &proof[6..16]
     } else {
-        proof[6..6 + pctx.global_info.lattice_size.unwrap()].to_vec()
+        &proof[6..6 + pctx.global_info.lattice_size.unwrap()]
     }
+}
+
+pub fn get_accumulated_challenge<F: PrimeField64>(pctx: &ProofCtx<F>, proof: &[u64]) -> Vec<u64> {
+    get_accumulated_challenge_slice(pctx, proof).to_vec()
 }
 
 pub fn gen_recursive_proof_size<F: PrimeField64>(
@@ -574,10 +578,10 @@ pub fn generate_vadcop_final_proof<F: PrimeField64>(
         updated_proof_size += setup.proof_size as usize + publics_aggregation;
     }
 
-    let mut updated_proof = vec![0; updated_proof_size];
+    let mut updated_proof = vec![0; publics_circom_size];
+    updated_proof.reserve_exact(updated_proof_size - publics_circom_size);
     add_publics_circom(&mut updated_proof, 0, pctx, None);
 
-    let mut offset = publics_circom_size;
     for airgroup_id in 0..n_airgroups {
         let setup = setups.get_setup(airgroup_id, 0, &ProofType::Recursive2)?;
         let publics_aggregation = n_publics_aggregation(pctx, airgroup_id);
@@ -591,12 +595,10 @@ pub fn generate_vadcop_final_proof<F: PrimeField64>(
                     ap.proof.len()
                 )));
             }
-            updated_proof[offset..offset + proof_size].copy_from_slice(&ap.proof);
+            updated_proof.extend_from_slice(&ap.proof);
         } else {
-            let null_proof = vec![0; proof_size];
-            updated_proof[offset..offset + proof_size].copy_from_slice(&null_proof);
+            updated_proof.resize(updated_proof.len() + proof_size, 0);
         }
-        offset += proof_size;
     }
 
     let setup = setups.setup_vadcop_final.as_ref().unwrap();

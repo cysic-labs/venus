@@ -448,6 +448,8 @@ extern "C" {
     
     pub fn get_stream_id_proof(d_buffers_: *mut ::std::os::raw::c_void, streamId: u64);
 
+    pub fn direct_registered_h2d_done(d_buffers_: *mut ::std::os::raw::c_void, streamId: u64) -> u32;
+
     // Aggregation
     // ========================================================================================
     pub fn add_publics_aggregation(

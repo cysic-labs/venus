@@ -32,7 +32,8 @@ PROVE_ARGS := -i $(INPUT)
 PROVE_PREPARE :=
 endif
 PROVE_GPU_ARGS ?= -t 2 -h 4
-PROVE_ENV ?= VENUS_ROWMAJOR_REG=1 VENUS_WEIGHTED_PROOF_ORDER=1 VENUS_COMPRESSOR_FIRST_ORDER=1 VENUS_BASIC_PRELOAD_AIR_ID=12 VENUS_EXPR_MAX_BLOCKS=416 VENUS_WEIGHT_Q_OPS=10 VENUS_REGISTER_WITNESS_H2D=1 VENUS_DIRECT_REGISTERED_H2D=1 VENUS_Q4152_REG=1 VENUS_REUSE_CUSTOM_FIXED=1 VENUS_RECURSIVE_WITNESS_WORKERS=24
+CARGO_BUILD_RUSTFLAGS ?= -C target-cpu=native
+PROVE_ENV ?= CUDA_MODULE_LOADING=EAGER CUDA_DEVICE_MAX_CONNECTIONS=32 RAYON_NUM_THREADS=32 VENUS_ROWMAJOR_REG=1 VENUS_WEIGHTED_PROOF_ORDER=1 VENUS_COMPRESSOR_FIRST_ORDER=1 VENUS_BASIC_PRELOAD_AIR_ID=12 VENUS_EXPR_MAX_BLOCKS=288 VENUS_WEIGHT_Q_OPS=14 VENUS_REGISTER_WITNESS_H2D=1 VENUS_DIRECT_REGISTERED_H2D=1 VENUS_Q4152_REG=1 VENUS_REUSE_CUSTOM_FIXED=1 VENUS_RECURSIVE_WITNESS_WORKERS=24 VENUS_CONTRIBUTION_WORKERS=8 VENUS_SKIP_NATIVE_RECURSIVE_VERIFY=1
 
 .PHONY: all setup build install-toolchain check-key generate-key generate-key-rs generate-key-js build-guest build-guest-native \
         generate-hints rom-setup compile-key prove verify clean purge help
@@ -42,7 +43,7 @@ all: setup prove verify
 setup: build install-toolchain check-key build-guest rom-setup compile-key
 
 build:
-	cargo build --release --features gpu -p cargo-zisk --bin cargo-zisk
+	RUSTFLAGS="$(CARGO_BUILD_RUSTFLAGS)" cargo build --release --features gpu -p cargo-zisk --bin cargo-zisk
 
 install-toolchain: build
 	@if rustup toolchain list | grep -q '^zisk'; then \

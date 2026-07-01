@@ -243,11 +243,8 @@ impl<F: PrimeField64> WitnessComponent<F> for ZiskExecutor<F> {
         }
         drop(publics);
 
-        // Store secondary planning in execution state
-        *self.state.secn_planning.write().unwrap() = secn_planning;
-
         // Create secondary instances
-        self.registry.populate_secn_instances(&self.state, &secn_global_ids);
+        self.registry.populate_secn_instances_from_plans(&self.state, secn_planning);
 
         // Configure instance checkpoints using registry method
         self.registry.configure_checkpoints(&pctx, &self.state, &secn_global_ids);

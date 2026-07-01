@@ -11,7 +11,7 @@ static bool venus_direct_registered_h2d_enabled()
     return enabled != 0;
 }
 
-static bool copy_direct_registered_h2d_if_enabled(const void *src, void *dst, uint64_t total_size, cudaStream_t stream)
+static bool copy_direct_registered_h2d_if_enabled(const void *src, void *dst, uint64_t total_size, cudaStream_t stream, StreamData *stream_data = nullptr)
 {
     if (!venus_direct_registered_h2d_enabled() || total_size < 16 * 1024 * 1024) return false;
 
@@ -29,8 +29,21 @@ static bool copy_direct_registered_h2d_if_enabled(const void *src, void *dst, ui
 #endif
 
     CHECKCUDAERR(cudaMemcpyAsync(dst, src, total_size, cudaMemcpyHostToDevice, stream));
-    CHECKCUDAERR(cudaStreamSynchronize(stream));
+    if (stream_data != nullptr) {
+        CHECKCUDAERR(cudaEventRecord(stream_data->direct_h2d_event, stream));
+        stream_data->direct_h2d_event_pending = true;
+    } else {
+        CHECKCUDAERR(cudaStreamSynchronize(stream));
+    }
     return true;
+}
+
+void wait_direct_registered_h2d(DeviceCommitBuffers* d_buffers, uint64_t streamId)
+{
+    StreamData &stream_data = d_buffers->streamsData[streamId];
+    if (!stream_data.direct_h2d_event_pending) return;
+    CHECKCUDAERR(cudaEventSynchronize(stream_data.direct_h2d_event));
+    stream_data.direct_h2d_event_pending = false;
 }
 
 // Kernel to convert row-major layout to tiled layout
@@ -67,7 +80,7 @@ void copy_to_device_in_chunks(
     cudaStream_t stream = d_buffers->streamsData[streamId].stream;
     std::lock_guard<std::mutex> lock(d_buffers->mutex_pinned[gpuLocalId]);
 
-    if (copy_direct_registered_h2d_if_enabled(src, dst, total_size, stream)) return;
+    if (copy_direct_registered_h2d_if_enabled(src, dst, total_size, stream, &d_buffers->streamsData[streamId])) return;
 
     uint64_t block_size = d_buffers->pinned_size;
     Goldilocks::Element *pinned_buffer = d_buffers->pinned_buffer[gpuLocalId];

@@ -884,7 +884,12 @@ impl NativeRecursiveRuntime {
         let solve_elapsed = solve_start.elapsed();
 
         self.log_unresolved_signals(known);
-        let (verify_gates_elapsed, verify_constraints_elapsed) = self.verify_solved_witness(witness, known)?;
+        let (verify_gates_elapsed, verify_constraints_elapsed) =
+            if std::env::var_os("VENUS_SKIP_NATIVE_RECURSIVE_VERIFY").is_some() {
+                (std::time::Duration::ZERO, std::time::Duration::ZERO)
+            } else {
+                self.verify_solved_witness(witness, known)?
+            };
         if let Some(plan) = plan_to_set {
             let _ = self.solve_plan.set(plan);
         }

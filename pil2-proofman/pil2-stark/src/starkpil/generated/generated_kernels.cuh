@@ -87,8 +87,8 @@ inline bool dispatchGeneratedKernel(uint64_t expId, dim3 nBlocks, dim3 nThreads,
             computeExpression_gen_4152_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams);
         } else {
             computeExpression_shared_4152_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams);
-        }
-        return true;
+    }
+    return true;
     case 4297: computeExpression_gen_4297_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 1020: computeExpression_gen_1020_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 1052: computeExpression_gen_1052_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;

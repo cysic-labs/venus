@@ -575,6 +575,49 @@ impl DistributionCtx {
         //assign instances
         self.validate_static_config().expect("Static configuration invalid or incomplete");
 
+        if self.n_partitions == 1 && self.n_processes == 1 && self.partition_mask[0] {
+            for gid in 0..self.instance_partition.len() {
+                if self.instance_partition[gid] != -1 {
+                    continue;
+                }
+
+                let weight = self.instances[gid].weight;
+                self.instance_partition[gid] = 0;
+                self.partition_count[0] += 1;
+                self.partition_weight[0] += weight;
+
+                self.worker_instances.push(gid);
+                let local_idx = self.process_count[0];
+                self.instance_process[gid] = (0, local_idx);
+                self.process_count[0] += 1;
+                self.process_weight[0] += weight;
+                self.process_instances.push(gid);
+            }
+
+            self.n_tables = 0;
+            for (table_idx, table) in self.aux_tables.iter().enumerate() {
+                let gid = self.instances.len();
+                self.instances.push(*table);
+                self.instances_calculated.push(AtomicBool::new(false));
+                self.instances_chunks.push(InstanceChunks { chunks: vec![], slow: false });
+                self.n_instances += 1;
+                self.n_tables += 1;
+                self.instance_partition.push(-2);
+                self.worker_instances.push(gid);
+
+                let local_idx = self.process_count[0];
+                self.process_count[0] += 1;
+                self.process_weight[0] += table.weight;
+                self.process_instances.push(gid);
+                self.aux_table_map[table_idx] = gid as i32;
+                self.instance_process.push((0, local_idx));
+            }
+
+            self.aux_tables.clear();
+            self.assignation_done = true;
+            return Ok(());
+        }
+
         // Sort the unassigned instances by proof weight
         let mut unassigned_instances = Vec::new();
         for (gid, &partition_id) in self.instance_partition.iter().enumerate() {

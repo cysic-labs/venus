@@ -7,6 +7,9 @@
 #include "goldilocks_cubic_extension.hpp"
 #include "goldilocks_cubic_extension.cuh"
 #include "proof2zkinStark.hpp"
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
 
 Goldilocks::Element omegas_inv_[33] = {
     0x1,
@@ -1119,7 +1122,172 @@ void setProof(SetupCtx &setupCtx, Goldilocks::Element *h_aux_trace, Goldilocks::
     initialOffset += 1;
 }
 
-void writeProof(SetupCtx &setupCtx, Goldilocks::Element *proof_buffer_pinned, uint64_t *proof_buffer, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, std::string proofFile) {
+static inline void appendProofWords(uint64_t *&out, const Goldilocks::Element *src, uint64_t count) {
+    for (uint64_t i = 0; i < count; ++i) {
+        *out++ = Goldilocks::toU64(src[i]);
+    }
+}
+
+static inline void appendZeroProofWords(uint64_t *&out, uint64_t count) {
+    for (uint64_t i = 0; i < count; ++i) {
+        *out++ = 0;
+    }
+}
+
+static void writeProofFast(SetupCtx &setupCtx, Goldilocks::Element *proof_buffer_pinned, uint64_t *proof_buffer) {
+    StarkInfo &starkInfo = setupCtx.starkInfo;
+    const uint64_t nStages = starkInfo.nStages + 1;
+    const uint64_t nFriSteps = starkInfo.starkStruct.steps.size() - 1;
+    const uint64_t nQueries = starkInfo.starkStruct.nQueries;
+    const uint64_t nFieldElements = HASH_SIZE;
+    const uint64_t arity = starkInfo.starkStruct.merkleTreeArity;
+    const uint64_t lastLevelVerification = starkInfo.starkStruct.lastLevelVerification;
+    const uint64_t numNodesLevel =
+        lastLevelVerification == 0 ? 0 : static_cast<uint64_t>(std::pow(arity, lastLevelVerification));
+    const uint64_t lastLevelWords = numNodesLevel * nFieldElements;
+
+    const uint64_t treeHeaderStride = nFieldElements + (lastLevelVerification > 0 ? lastLevelWords : 0);
+    Goldilocks::Element *rootsBase = proof_buffer_pinned;
+    Goldilocks::Element *constLastLevel =
+        lastLevelVerification > 0 ? rootsBase + nStages * treeHeaderStride : nullptr;
+    Goldilocks::Element *customLastBase =
+        rootsBase + nStages * treeHeaderStride + (lastLevelVerification > 0 ? lastLevelWords : 0);
+    uint64_t customLastLevelCount = 0;
+    if (lastLevelVerification > 0) {
+        for (uint64_t i = 0; i < starkInfo.customCommits.size(); ++i) {
+            customLastLevelCount += starkInfo.customCommits[i].stageWidths[0] != 0 ? 1 : 0;
+        }
+    }
+    Goldilocks::Element *friHeadersBase = customLastBase + customLastLevelCount * lastLevelWords;
+
+    const uint64_t nTrees = starkInfo.nStages + starkInfo.customCommits.size() + 2;
+    const uint64_t queriesProofSize = (nTrees + nFriSteps) * starkInfo.maxProofBuffSize * nQueries;
+    Goldilocks::Element *queries = friHeadersBase + nFriSteps * treeHeaderStride;
+    Goldilocks::Element *evals = queries + queriesProofSize;
+    Goldilocks::Element *airgroupValues = evals + starkInfo.evMap.size() * FIELD_EXTENSION;
+    Goldilocks::Element *airValues = airgroupValues + starkInfo.airgroupValuesSize;
+    const uint64_t finalPolDegree = 1 << starkInfo.starkStruct.steps.back().nBits;
+    Goldilocks::Element *finalPol = airValues + starkInfo.airValuesSize;
+    Goldilocks::Element *nonce = finalPol + finalPolDegree * FIELD_EXTENSION;
+
+    uint64_t *out = proof_buffer;
+    Goldilocks::Element *valuesCursor = airgroupValues;
+    for (uint64_t i = 0; i < starkInfo.airgroupValuesMap.size(); ++i) {
+        if (starkInfo.airgroupValuesMap[i].stage == 1) {
+            appendProofWords(out, valuesCursor, 1);
+            appendZeroProofWords(out, FIELD_EXTENSION - 1);
+            valuesCursor += 1;
+        } else {
+            appendProofWords(out, valuesCursor, FIELD_EXTENSION);
+            valuesCursor += FIELD_EXTENSION;
+        }
+    }
+
+    valuesCursor = airValues;
+    for (uint64_t i = 0; i < starkInfo.airValuesMap.size(); ++i) {
+        if (starkInfo.airValuesMap[i].stage == 1) {
+            appendProofWords(out, valuesCursor, 1);
+            appendZeroProofWords(out, FIELD_EXTENSION - 1);
+            valuesCursor += 1;
+        } else {
+            appendProofWords(out, valuesCursor, FIELD_EXTENSION);
+            valuesCursor += FIELD_EXTENSION;
+        }
+    }
+
+    for (uint64_t i = 0; i < nStages; ++i) {
+        appendProofWords(out, rootsBase + i * treeHeaderStride, nFieldElements);
+    }
+
+    appendProofWords(out, evals, starkInfo.evMap.size() * FIELD_EXTENSION);
+
+    const double arityLog2 = std::log2(arity);
+    const uint64_t nSiblings =
+        static_cast<uint64_t>(std::ceil(starkInfo.starkStruct.steps[0].nBits / arityLog2)) - lastLevelVerification;
+    const uint64_t nSiblingsPerLevel = (arity - 1) * nFieldElements;
+    const uint64_t siblingWords = nSiblings * nSiblingsPerLevel;
+    auto queryBase = [&](uint64_t treeIndex, uint64_t queryIndex) {
+        return queries + treeIndex * nQueries * starkInfo.maxProofBuffSize + queryIndex * starkInfo.maxProofBuffSize;
+    };
+
+    const uint64_t constantsTree = starkInfo.nStages + 1;
+    for (uint64_t i = 0; i < nQueries; ++i) {
+        appendProofWords(out, queryBase(constantsTree, i), starkInfo.nConstants);
+    }
+    for (uint64_t i = 0; i < nQueries; ++i) {
+        appendProofWords(out, queryBase(constantsTree, i) + starkInfo.maxTreeWidth, siblingWords);
+    }
+    if (lastLevelVerification != 0) {
+        appendProofWords(out, constLastLevel, lastLevelWords);
+    }
+
+    for (uint64_t c = 0; c < starkInfo.customCommits.size(); ++c) {
+        const uint64_t treeIndex = starkInfo.nStages + 2 + c;
+        const uint64_t width = starkInfo.mapSectionsN[starkInfo.customCommits[c].name + "0"];
+        for (uint64_t i = 0; i < nQueries; ++i) {
+            appendProofWords(out, queryBase(treeIndex, i), width);
+        }
+        for (uint64_t i = 0; i < nQueries; ++i) {
+            appendProofWords(out, queryBase(treeIndex, i) + starkInfo.maxTreeWidth, siblingWords);
+        }
+        if (lastLevelVerification != 0) {
+            uint64_t customLastIndex = 0;
+            for (uint64_t i = 0; i < c; ++i) {
+                customLastIndex += starkInfo.customCommits[i].stageWidths[0] != 0 ? 1 : 0;
+            }
+            appendProofWords(out, customLastBase + customLastIndex * lastLevelWords, lastLevelWords);
+        }
+    }
+
+    for (uint64_t s = 0; s < nStages; ++s) {
+        const uint64_t width = starkInfo.mapSectionsN["cm" + to_string(s + 1)];
+        for (uint64_t i = 0; i < nQueries; ++i) {
+            appendProofWords(out, queryBase(s, i), width);
+        }
+        for (uint64_t i = 0; i < nQueries; ++i) {
+            appendProofWords(out, queryBase(s, i) + starkInfo.maxTreeWidth, siblingWords);
+        }
+        if (lastLevelVerification != 0) {
+            appendProofWords(out, rootsBase + s * treeHeaderStride + nFieldElements, lastLevelWords);
+        }
+    }
+
+    for (uint64_t step = 0; step < nFriSteps; ++step) {
+        appendProofWords(out, friHeadersBase + step * treeHeaderStride, nFieldElements);
+    }
+
+    for (uint64_t step = 1; step < starkInfo.starkStruct.steps.size(); ++step) {
+        const uint64_t stepIndex = step - 1;
+        const uint64_t width =
+            (1ULL << (starkInfo.starkStruct.steps[step - 1].nBits - starkInfo.starkStruct.steps[step].nBits)) *
+            FIELD_EXTENSION;
+        const uint64_t stepSiblings =
+            static_cast<uint64_t>(std::ceil(starkInfo.starkStruct.steps[step].nBits / arityLog2)) -
+            lastLevelVerification;
+        const uint64_t stepSiblingWords = stepSiblings * nSiblingsPerLevel;
+        const uint64_t stepBuffSize = width + stepSiblingWords;
+        Goldilocks::Element *queriesFRI = queries + (nTrees + stepIndex) * nQueries * starkInfo.maxProofBuffSize;
+
+        for (uint64_t i = 0; i < nQueries; ++i) {
+            appendProofWords(out, queriesFRI + i * stepBuffSize, width);
+        }
+        for (uint64_t i = 0; i < nQueries; ++i) {
+            appendProofWords(out, queriesFRI + i * stepBuffSize + width, stepSiblingWords);
+        }
+        if (lastLevelVerification != 0) {
+            appendProofWords(out, friHeadersBase + stepIndex * treeHeaderStride + nFieldElements, lastLevelWords);
+        }
+    }
+
+    appendProofWords(out, finalPol, finalPolDegree * FIELD_EXTENSION);
+    appendProofWords(out, nonce, 1);
+
+    if (static_cast<uint64_t>(out - proof_buffer) != starkInfo.proofSize) {
+        throw std::runtime_error("fast proof serialization size mismatch");
+    }
+}
+
+static void writeProofSlow(SetupCtx &setupCtx, Goldilocks::Element *proof_buffer_pinned, uint64_t *proof_buffer, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, std::string proofFile) {
     uint64_t initialOffset = 0;
 
     FRIProof<Goldilocks::Element> proof(setupCtx.starkInfo, airgroupId, airId, instanceId);
@@ -1242,6 +1410,27 @@ void writeProof(SetupCtx &setupCtx, Goldilocks::Element *proof_buffer_pinned, ui
     proof.proof.setNonce(nonce.fe);
 
     proof.proof.proof2pointer(proof_buffer);
+
+    if(!proofFile.empty()) {
+        json2file(pointer2json(proof_buffer, setupCtx.starkInfo), proofFile);
+    }
+}
+
+void writeProof(SetupCtx &setupCtx, Goldilocks::Element *proof_buffer_pinned, uint64_t *proof_buffer, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, std::string proofFile) {
+    if (std::getenv("VENUS_DISABLE_FAST_WRITE_PROOF") != nullptr) {
+        writeProofSlow(setupCtx, proof_buffer_pinned, proof_buffer, airgroupId, airId, instanceId, proofFile);
+        return;
+    }
+
+    writeProofFast(setupCtx, proof_buffer_pinned, proof_buffer);
+
+    if (std::getenv("VENUS_VALIDATE_FAST_WRITE_PROOF") != nullptr) {
+        std::vector<uint64_t> slow(setupCtx.starkInfo.proofSize);
+        writeProofSlow(setupCtx, proof_buffer_pinned, slow.data(), airgroupId, airId, instanceId, "");
+        if (std::memcmp(proof_buffer, slow.data(), setupCtx.starkInfo.proofSize * sizeof(uint64_t)) != 0) {
+            throw std::runtime_error("fast proof serialization mismatch");
+        }
+    }
 
     if(!proofFile.empty()) {
         json2file(pointer2json(proof_buffer, setupCtx.starkInfo), proofFile);

@@ -252,6 +252,13 @@ void *gen_device_buffers(uint32_t node_rank, uint32_t node_size, const int32_t* 
 
     // Create and initialize DeviceCommitBuffers structure
     DeviceCommitBuffers *d_buffers = new DeviceCommitBuffers();
+    if (const char *chunkMbEnv = std::getenv("VENUS_PINNED_CHUNK_MB")) {
+        char *end = nullptr;
+        unsigned long long chunkMb = std::strtoull(chunkMbEnv, &end, 10);
+        if (end != chunkMbEnv && *end == '\0' && chunkMb >= 16 && chunkMb <= 1024) {
+            d_buffers->pinned_size = chunkMb * 1024ULL * 1024ULL;
+        }
+    }
     d_buffers->n_gpus = n_gpus;
     d_buffers->gpus_g2l = (uint32_t *)malloc(deviceCount * sizeof(uint32_t));
     d_buffers->my_gpu_ids = (uint32_t *)malloc(d_buffers->n_gpus * sizeof(uint32_t));
@@ -295,7 +302,7 @@ void alloc_device_large_buffers(void *d_buffers_, uint64_t auxTraceArea, uint64_
     uint64_t totalGpuMemoryPerGpu = constPolsAggregationSize + 
                                      totalAuxTraceSize + totalAuxTraceRecursiveSize;
     
-    uint64_t totalPinnedMemoryPerGpu = 2 * d_buffers->pinned_size * sizeof(Goldilocks::Element);
+    uint64_t totalPinnedMemoryPerGpu = 2 * d_buffers->pinned_size;
 
     zklog.info("Memory allocation per GPU:");
     zklog.info("  - Constant polynomials (separate): " + std::to_string(constPolsSize / (1024.0 * 1024.0 * 1024.0)) + " GB");
@@ -359,8 +366,8 @@ void alloc_device_large_buffers(void *d_buffers_, uint64_t auxTraceArea, uint64_
         offset += totalConstPolsAggregation;
         
         // Allocate pinned host buffers separately (one block per buffer type)
-        CHECKCUDAERR(cudaMallocHost(&d_buffers->pinned_buffer[i], d_buffers->pinned_size * sizeof(Goldilocks::Element)));
-        CHECKCUDAERR(cudaMallocHost(&d_buffers->pinned_buffer_extra[i], d_buffers->pinned_size * sizeof(Goldilocks::Element)));
+        CHECKCUDAERR(cudaMallocHost(&d_buffers->pinned_buffer[i], d_buffers->pinned_size));
+        CHECKCUDAERR(cudaMallocHost(&d_buffers->pinned_buffer_extra[i], d_buffers->pinned_size));
         
         // Verify we used exactly the amount we calculated
         if (offset != totalGpuMemoryPerGpu / sizeof(Goldilocks::Element)) {
@@ -869,6 +876,25 @@ void get_stream_id_proof(void *d_buffers_, uint64_t streamId) {
     d_buffers->streamsData[streamId].reset(false); 
 }
 
+uint32_t direct_registered_h2d_done(void *d_buffers_, uint64_t streamId) {
+    DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
+    if (d_buffers == nullptr || streamId >= d_buffers->n_total_streams) return 1;
+    StreamData &streamData = d_buffers->streamsData[streamId];
+    if (!streamData.direct_h2d_event_pending) return 1;
+
+    cudaSetDevice(streamData.gpuId);
+    cudaError_t err = cudaEventQuery(streamData.direct_h2d_event);
+    if (err == cudaSuccess) {
+        streamData.direct_h2d_event_pending = false;
+        return 1;
+    }
+    if (err == cudaErrorNotReady) {
+        return 0;
+    }
+    CHECKCUDAERR(err);
+    return 0;
+}
+
 uint64_t gen_recursive_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *trace, void *aux_trace, void *pConstPols, void *pConstTree, void *pPublicInputs, uint64_t* proofBuffer, char *proof_file, bool vadcop, void *d_buffers_, char *constPolsPath, char *constTreePath, char *proofType, bool force_recursive_stream)
 {
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
@@ -926,6 +952,7 @@ uint64_t gen_recursive_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t air
     }
 
     genProof_gpu(*setupCtx, d_aux_trace, d_const_pols, d_const_tree, constTreePath, streamId, instanceId, d_buffers, air_instance_info, false, timer, stream, true, reuse_constants);
+    wait_direct_registered_h2d(d_buffers, streamId);
     cudaEventRecord(d_buffers->streamsData[streamId].end_event, stream);
     d_buffers->streamsData[streamId].status = 2;
     return streamId;
@@ -1281,6 +1308,7 @@ uint64_t commit_witness(void *pSetupCtx_, void *params_, uint64_t instanceId, ui
 
     ntt.LDE_MerkleTree_GPU(pNodes, d_aux_trace, offset_dst, d_aux_trace, offset_src, nBits, nBitsExt, nCols, arity, timer, stream);
     CHECKCUDAERR(cudaMemcpyAsync(d_buffers->streamsData[streamId].pinned_buffer_proof, &pNodes[tree_size - HASH_SIZE], HASH_SIZE * sizeof(uint64_t), cudaMemcpyDeviceToHost, stream));
+    wait_direct_registered_h2d(d_buffers, streamId);
     cudaEventRecord(d_buffers->streamsData[streamId].end_event, stream);
     d_buffers->streamsData[streamId].status = 2;
     return streamId;
