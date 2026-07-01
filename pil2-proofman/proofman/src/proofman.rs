@@ -2763,9 +2763,8 @@ where
 
             let mut publics_extended = vec![0; setup.stark_info.n_publics as usize];
             publics_extended[0..publics.len()].copy_from_slice(publics);
-            let verkey_path = setup.setup_path.display().to_string() + ".verkey.json";
 
-            add_publics_circom(&mut publics_extended, publics_aggregation, &self.pctx, &verkey_path, true);
+            add_publics_circom(&mut publics_extended, publics_aggregation, &self.pctx, Some(&setup.verkey));
 
             let mut recursive2_proof = vec![0; 1 + publics_extended.len() + rec_proof.len()];
             recursive2_proof[0] = publics_extended.len() as u64;
