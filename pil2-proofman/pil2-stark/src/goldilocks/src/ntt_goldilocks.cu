@@ -18,6 +18,7 @@
 #define TPB_NTT_x 32
 #define TPB_NTT_y 16
 #define SHIFT 7
+#define REV_PERM_ROWS 256
 
 
 // #ifdef GPU_TIMING
@@ -1376,23 +1377,21 @@ __global__ void reverse_permutation_new(gl64_t *data, uint32_t log_domain_size, 
 
 __global__ void reverse_permutation_blocks(gl64_t *data, uint32_t log2_domain_size_in, uint64_t domain_size_out, uint32_t nCols)
 {
-    uint64_t row = blockIdx.x;
+    uint64_t r = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t col = threadIdx.y;
     uint64_t ncols_block = (nCols - BATCH_WIDTH*blockIdx.y) < BATCH_WIDTH ? nCols - blockIdx.y * BATCH_WIDTH : BATCH_WIDTH;
     uint64_t domain_size_in = 1 << log2_domain_size_in;
     uint64_t offset = blockIdx.y * BATCH_WIDTH * domain_size_out;
     gl64_t *data_block = data + offset;
 
-    if (threadIdx.x >= ncols_block) return;
+    if (r >= domain_size_in || col >= ncols_block) return;
 
-    for (uint64_t r = row; r < domain_size_in; r += gridDim.x)
+    uint64_t rowr = (__brev(r) >> (32 - log2_domain_size_in));
+    if (rowr > r)
     {
-        uint64_t rowr = (__brev(r) >> (32 - log2_domain_size_in));
-        if (rowr > r) 
-        {
-            gl64_t tmp = data_block[r * ncols_block + threadIdx.x];
-            data_block[r * ncols_block + threadIdx.x] = data_block[rowr * ncols_block + threadIdx.x];
-            data_block[rowr * ncols_block + threadIdx.x] = tmp;   
-        }
+        gl64_t tmp = data_block[r * ncols_block + col];
+        data_block[r * ncols_block + col] = data_block[rowr * ncols_block + col];
+        data_block[rowr * ncols_block + col] = tmp;
     }
 }
 
@@ -1567,8 +1566,8 @@ void ntt_cuda_blocks_par( gl64_t *data, gl64_t **d_r_, gl64_t **d_fwd_twiddle_fa
 
     dim3 blockDim;
     dim3 gridDim;
-    blockDim = dim3(BATCH_WIDTH);
-    gridDim = dim3(4096,(nCols + BATCH_WIDTH - 1) / BATCH_WIDTH);
+    blockDim = dim3(REV_PERM_ROWS, BATCH_WIDTH);
+    gridDim = dim3((domain_size_in + REV_PERM_ROWS - 1) / REV_PERM_ROWS, (nCols + BATCH_WIDTH - 1) / BATCH_WIDTH);
     reverse_permutation_blocks<<<gridDim, blockDim, 0, stream>>>(data, log_domain_size_in, domain_size_out, nCols);
     CHECKCUDAERR(cudaGetLastError());
 
@@ -1639,8 +1638,8 @@ void ntt_cuda_blocks_par_dif( gl64_t *data, gl64_t **d_r_, gl64_t **d_fwd_twiddl
 
     dim3 blockDim;
     dim3 gridDim;
-    blockDim = dim3(BATCH_WIDTH);
-    gridDim = dim3(4096,(nCols + BATCH_WIDTH - 1) / BATCH_WIDTH);
+    blockDim = dim3(REV_PERM_ROWS, BATCH_WIDTH);
+    gridDim = dim3((domain_size_in + REV_PERM_ROWS - 1) / REV_PERM_ROWS, (nCols + BATCH_WIDTH - 1) / BATCH_WIDTH);
     reverse_permutation_blocks<<<gridDim, blockDim, 0, stream>>>(data, log_domain_size_in, domain_size_out, nCols);
     CHECKCUDAERR(cudaGetLastError());
 
