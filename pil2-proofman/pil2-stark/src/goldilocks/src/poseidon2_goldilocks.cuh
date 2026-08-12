@@ -113,6 +113,68 @@ __device__ __forceinline__ gl64_t gl64_linear_fold(gl64_linear_accum_t a)
     return out;
 }
 
+__device__ __forceinline__ gl64_t gl64_mul_add(const gl64_t &a, const gl64_t &b, const gl64_t &c)
+{
+    const uint64_t av = a[0];
+    const uint64_t bv = b[0];
+    const uint64_t cv = c[0];
+    const uint32_t a0 = uint32_t(av);
+    const uint32_t a1 = uint32_t(av >> 32);
+    const uint32_t b0 = uint32_t(bv);
+    const uint32_t b1 = uint32_t(bv >> 32);
+    const uint32_t c0 = uint32_t(cv);
+    const uint32_t c1 = uint32_t(cv >> 32);
+    uint32_t temp[4];
+
+    asm("mul.lo.u32 %0, %2, %3; mul.hi.u32 %1, %2, %3;"
+        : "=r"(temp[0]), "=r"(temp[1])
+        : "r"(a0), "r"(b0));
+    asm("mul.lo.u32 %0, %2, %3; mul.hi.u32 %1, %2, %3;"
+        : "=r"(temp[2]), "=r"(temp[3])
+        : "r"(a1), "r"(b1));
+
+    uint32_t carry;
+    asm("mad.lo.cc.u32 %0, %3, %4, %0; madc.hi.cc.u32 %1, %3, %4, %1; addc.u32 %2, 0, 0;"
+        : "+r"(temp[1]), "+r"(temp[2]), "=r"(carry)
+        : "r"(a0), "r"(b1));
+    asm("mad.lo.cc.u32 %0, %3, %4, %0; madc.hi.cc.u32 %1, %3, %4, %1; addc.u32 %2, %2, %5;"
+        : "+r"(temp[1]), "+r"(temp[2]), "+r"(temp[3])
+        : "r"(a1), "r"(b0), "r"(carry));
+
+    asm("add.cc.u32 %0, %0, %4; addc.cc.u32 %1, %1, %5; addc.cc.u32 %2, %2, 0; addc.u32 %3, %3, 0;"
+        : "+r"(temp[0]), "+r"(temp[1]), "+r"(temp[2]), "+r"(temp[3])
+        : "r"(c0), "r"(c1));
+
+#if __CUDA_ARCH__ >= 700
+    asm("mad.lo.cc.u32 %0, %2, %3, %0; madc.hi.cc.u32 %1, %2, %3, %1; addc.u32 %2, 0, 0;"
+        : "+r"(temp[0]), "+r"(temp[1]), "+r"(temp[2])
+        : "r"(gl64_device::W));
+#else
+    uint32_t r0, r1;
+
+    asm("sub.cc.u32 %0, 0, %2; subc.u32 %1, %2, 0;"
+        : "=r"(r0), "=r"(r1)
+        : "r"(temp[2]));
+    asm("add.cc.u32 %0, %0, %3; addc.cc.u32 %1, %1, %4; addc.u32 %2, 0, 0;"
+        : "+r"(temp[0]), "+r"(temp[1]), "=r"(temp[2])
+        : "r"(r0), "r"(r1));
+#endif
+    asm("sub.cc.u32 %0, %0, %3; subc.cc.u32 %1, %1, 0; subc.u32 %2, %2, 0;"
+        : "+r"(temp[0]), "+r"(temp[1]), "+r"(temp[2])
+        : "r"(temp[3]));
+
+    asm("sub.cc.u32 %0, %0, %2; subc.u32 %1, %1, %3;"
+        : "+r"(temp[0]), "+r"(temp[1])
+        : "r"(temp[2]), "r"(-(int)temp[2] >> 1));
+
+    gl64_t out;
+    uint64_t val;
+    asm("mov.b64 %0, {%1, %2};" : "=l"(val) : "r"(temp[0]), "r"(temp[1]));
+    out[0] = val;
+    out.to();
+    return out;
+}
+
 template<uint32_t RATE_T, uint32_t CAPACITY_T, uint32_t SPONGE_WIDTH_T, uint32_t N_FULL_ROUNDS_TOTAL_T, uint32_t N_PARTIAL_ROUNDS_T>
 __device__ __forceinline__ void add_2(gl64_t *x, const gl64_t C[SPONGE_WIDTH_T])
 {
@@ -206,7 +268,7 @@ __device__ __forceinline__ void prodadd_(gl64_t *x, const gl64_t D[SPONGE_WIDTH_
 #pragma unroll
     for (int i = 0; i < SPONGE_WIDTH_T; ++i)
     {
-        x[i] = x[i] * D[i] + sum;
+        x[i] = gl64_mul_add(x[i], D[i], sum);
     }
 }
 
