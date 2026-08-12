@@ -90,11 +90,9 @@ __device__ __forceinline__ gl64_linear_accum_t gl64_linear_accum(const gl64_t &x
 
 __device__ __forceinline__ gl64_linear_accum_t gl64_linear_add(gl64_linear_accum_t a, const gl64_linear_accum_t &b)
 {
-    uint32_t carry;
-    asm("add.cc.u64 %0, %0, %2; addc.u32 %1, 0, 0;"
-        : "+l"(a.lo), "=r"(carry)
-        : "l"(b.lo));
-    a.hi += b.hi + carry;
+    asm("add.cc.u64 %0, %0, %2; addc.u32 %1, %1, %3;"
+        : "+l"(a.lo), "+r"(a.hi)
+        : "l"(b.lo), "r"(b.hi));
     return a;
 }
 
