@@ -25,6 +25,24 @@ __device__ __noinline__ static void storePolynomial__(ExpsArguments *d_expsArgs,
     }
 }
 
+__device__ __noinline__ static void storePolynomial3__(ExpsArguments *d_expsArgs, gl64_t v0, gl64_t v1, gl64_t v2, uint64_t row)
+{
+    const uint64_t out_row = row + threadIdx.x;
+    if (!d_expsArgs->dest_expr) {
+        const uint64_t col = d_expsArgs->dest_stagePos;
+        const uint64_t nRows = d_expsArgs->dest_domainSize;
+        const uint64_t nCols = d_expsArgs->dest_stageCols;
+        *(gl64_t*)&d_expsArgs->dest_gpu[getBufferOffset(out_row, col + 0, nRows, nCols)] = v0;
+        *(gl64_t*)&d_expsArgs->dest_gpu[getBufferOffset(out_row, col + 1, nRows, nCols)] = v1;
+        *(gl64_t*)&d_expsArgs->dest_gpu[getBufferOffset(out_row, col + 2, nRows, nCols)] = v2;
+    } else {
+        const uint64_t base = out_row * d_expsArgs->dest_dim;
+        *(gl64_t*)&d_expsArgs->dest_gpu[base + 0] = v0;
+        *(gl64_t*)&d_expsArgs->dest_gpu[base + 1] = v1;
+        *(gl64_t*)&d_expsArgs->dest_gpu[base + 2] = v2;
+    }
+}
+
 #include "gen_eval_4152.cuh"
 
 __global__ void __launch_bounds__(256, 1) computeExpression_gen_4152_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)

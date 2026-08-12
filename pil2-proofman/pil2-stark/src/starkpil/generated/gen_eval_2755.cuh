@@ -13475,9 +13475,5 @@ __device__ __forceinline__ void eval_expr_e45c5827(
     gl64_t s1_2016 = *(gl64_t*)&dParams->aux_trace[dArgs->zi_offset + (1 - 1) * domainSize + row + threadIdx.x];
     tmp3_0 = tmp3_0 * s1_2016; tmp3_1 = tmp3_1 * s1_2016; tmp3_2 = tmp3_2 * s1_2016;
 
-    // Write final result to shared memory and store to output
-    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][0 * blockDim.x + threadIdx.x] = tmp3_0;
-    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][1 * blockDim.x + threadIdx.x] = tmp3_1;
-    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][2 * blockDim.x + threadIdx.x] = tmp3_2;
-    storePolynomial__((ExpsArguments*)dExpsArgs, (Goldilocks::Element*)&expressions_params[bufferCommitsSize + 1][0 * blockDim.x], row);
+    storePolynomial3__((ExpsArguments*)dExpsArgs, tmp3_0, tmp3_1, tmp3_2, row);
 }
