@@ -3822,11 +3822,24 @@ where
 
         let mut preloaded_const = Vec::new();
         if cfg!(feature = "gpu") {
-            let basic_air_id = std::env::var("VENUS_BASIC_PRELOAD_AIR_ID")
+            let basic_air_ids = std::env::var("VENUS_BASIC_PRELOAD_AIR_IDS")
                 .ok()
-                .map(|value| value.parse().expect("invalid VENUS_BASIC_PRELOAD_AIR_ID"))
-                .unwrap_or(22);
-            preloaded_const.push(PreLoadedConst::new(0, basic_air_id, ProofType::Basic));
+                .map(|value| {
+                    value
+                        .split(',')
+                        .filter(|air_id| !air_id.trim().is_empty())
+                        .map(|air_id| air_id.trim().parse().expect("invalid VENUS_BASIC_PRELOAD_AIR_IDS"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| {
+                    vec![std::env::var("VENUS_BASIC_PRELOAD_AIR_ID")
+                        .ok()
+                        .map(|value| value.parse().expect("invalid VENUS_BASIC_PRELOAD_AIR_ID"))
+                        .unwrap_or(22)]
+                });
+            for basic_air_id in basic_air_ids {
+                preloaded_const.push(PreLoadedConst::new(0, basic_air_id, ProofType::Basic));
+            }
             let compressor_air_ids = std::env::var("VENUS_COMPRESSOR_PRELOAD_AIR_IDS")
                 .ok()
                 .or_else(|| std::env::var("VENUS_COMPRESSOR_PRELOAD_AIR_ID").ok());
