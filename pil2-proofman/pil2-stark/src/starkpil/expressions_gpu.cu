@@ -1018,7 +1018,7 @@ __device__ __forceinline__ bool q80875_match_common_const_prefix_(
     return true;
 }
 
-template<bool IsCyclic, bool FuseConstTmpAdds = false>
+template<bool IsCyclic, bool FuseConstTmpAdds = false, bool FuseMulAcc = false>
 __device__ __forceinline__ gl64_t *computeExpression_ops_(
     StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs,
     DestParamsGPU *d_destParams, Goldilocks::Element **expressions_params,
@@ -1026,7 +1026,7 @@ __device__ __forceinline__ gl64_t *computeExpression_ops_(
     uint64_t nOps, const uint8_t * __restrict__ ops, const uint16_t * __restrict__ args,
     gl64_t q80875_sum_common23, gl64_t q80875_sum_common21, gl64_t q80875_sum_common22)
 {
-    gl64_t *a0, *a1, *a2, *b0, *b1, *b2;
+    gl64_t *a0, *a1, *a2, *b0, *b1, *b2, *c0, *c1, *c2;
     gl64_t *res = nullptr;
 
     for (uint64_t kk = 0; kk < nOps; ++kk)
@@ -1113,6 +1113,54 @@ __device__ __forceinline__ gl64_t *computeExpression_ops_(
             res = (gl64_t*)&expressions_params[bufferCommitsSize][args[i_args + 1] * blockDim.x];
             res[threadIdx.x] = lhs + rhs[threadIdx.x];
             continue;
+        }
+
+        if (FuseMulAcc && kk + 1 < nOps
+            && ops[kk] == 0 && args[i_args] == 2 && ops[kk + 1] == 0) {
+            const uint64_t next_args = i_args + 8;
+            const uint64_t next_op = args[next_args];
+            if (next_op == 0 || next_op == 1 || next_op == 3) {
+                const uint16_t product_idx = args[i_args + 1];
+                const bool product_src0 = args[next_args + 2] == bufferCommitsSize
+                    && args[next_args + 3] == product_idx;
+                const bool product_src1 = args[next_args + 5] == bufferCommitsSize
+                    && args[next_args + 6] == product_idx;
+                if (product_src0 || product_src1) {
+                    load__(d_deviceArgs, d_expsArgs, d_params, expressions_params,
+                           args[i_args + 2], args[i_args + 3], args[i_args + 4],
+                           i, 1, IsCyclic, a0, a1, a2);
+                    load__(d_deviceArgs, d_expsArgs, d_params, expressions_params,
+                           args[i_args + 5], args[i_args + 6], args[i_args + 7],
+                           i, 1, IsCyclic, b0, b1, b2);
+                    const gl64_t product = (*a0) * (*b0);
+
+                    gl64_t lhs = product;
+                    gl64_t rhs = product;
+                    if (!product_src0) {
+                        load__(d_deviceArgs, d_expsArgs, d_params, expressions_params,
+                               args[next_args + 2], args[next_args + 3], args[next_args + 4],
+                               i, 1, IsCyclic, c0, c1, c2);
+                        lhs = *c0;
+                    }
+                    if (!product_src1) {
+                        load__(d_deviceArgs, d_expsArgs, d_params, expressions_params,
+                               args[next_args + 5], args[next_args + 6], args[next_args + 7],
+                               i, 1, IsCyclic, c0, c1, c2);
+                        rhs = *c0;
+                    }
+
+                    res = (gl64_t*)&expressions_params[bufferCommitsSize][args[next_args + 1] * blockDim.x];
+                    if (next_op == 0) {
+                        res[threadIdx.x] = lhs + rhs;
+                    } else if (next_op == 1) {
+                        res[threadIdx.x] = lhs - rhs;
+                    } else {
+                        res[threadIdx.x] = rhs - lhs;
+                    }
+                    ++kk;
+                    continue;
+                }
+            }
         }
 
         switch (ops[kk])
@@ -1255,24 +1303,34 @@ __global__ void computeExpression_(StepsParams *d_params, DeviceArguments *d_dev
                 __syncthreads();
                 if (is_cyclic) {
                     if (d_destParams[0].expId == 80875) {
-                        res = computeExpression_ops_<true, true>(
+                        res = computeExpression_ops_<true, true, true>(
+                            d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i,
+                            tileOps, ops_staged, args_staged,
+                            q80875_sum_common23, q80875_sum_common21, q80875_sum_common22);
+                    } else if (d_destParams[0].expId == 27920) {
+                        res = computeExpression_ops_<true, false, true>(
                             d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i,
                             tileOps, ops_staged, args_staged,
                             q80875_sum_common23, q80875_sum_common21, q80875_sum_common22);
                     } else {
-                        res = computeExpression_ops_<true, false>(
+                        res = computeExpression_ops_<true, false, false>(
                             d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i,
                             tileOps, ops_staged, args_staged,
                             q80875_sum_common23, q80875_sum_common21, q80875_sum_common22);
                     }
                 } else {
                     if (d_destParams[0].expId == 80875) {
-                        res = computeExpression_ops_<false, true>(
+                        res = computeExpression_ops_<false, true, true>(
+                            d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i,
+                            tileOps, ops_staged, args_staged,
+                            q80875_sum_common23, q80875_sum_common21, q80875_sum_common22);
+                    } else if (d_destParams[0].expId == 27920) {
+                        res = computeExpression_ops_<false, false, true>(
                             d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i,
                             tileOps, ops_staged, args_staged,
                             q80875_sum_common23, q80875_sum_common21, q80875_sum_common22);
                     } else {
-                        res = computeExpression_ops_<false, false>(
+                        res = computeExpression_ops_<false, false, false>(
                             d_params, d_deviceArgs, d_expsArgs, d_destParams, expressions_params, bufferCommitsSize, i,
                             tileOps, ops_staged, args_staged,
                             q80875_sum_common23, q80875_sum_common21, q80875_sum_common22);
