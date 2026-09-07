@@ -6,6 +6,7 @@ use std::time::UNIX_EPOCH;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=CUDA_ARCHS");
+    println!("cargo:rerun-if-env-changed=CUDA_GRAPH");
 
     // **Check if the `no_lib_link` feature is enabled**
     if env::var("CARGO_FEATURE_NO_LIB_LINK").is_ok() {
@@ -72,7 +73,16 @@ fn main() {
     // Detect if CUDA_ARCHS changed since last build.
     // Stamp stores "auto" for host-detected builds, or the gencode flags string for explicit builds.
     let archs_stamp_path = library_folder.join(".cuda_archs_stamp");
-    let stamp_content = gencode_flags.as_deref().unwrap_or("auto");
+    let cuda_graph = if cfg!(feature = "gpu") {
+        env::var("CUDA_GRAPH").unwrap_or_else(|_| "0".to_string())
+    } else {
+        "n/a".to_string()
+    };
+    let stamp_content = if cfg!(feature = "gpu") {
+        format!("{}\nCUDA_GRAPH={}", gencode_flags.as_deref().unwrap_or("auto"), cuda_graph)
+    } else {
+        gencode_flags.as_deref().unwrap_or("auto").to_string()
+    };
     let archs_changed = if cfg!(feature = "gpu") {
         fs::read_to_string(&archs_stamp_path).map(|s| s.trim() != stamp_content).unwrap_or(true)
     } else {
@@ -102,7 +112,7 @@ fn main() {
                     }
                     None => run_command("make", &["-j", "starks_lib_gpu"], &pil2_stark_path),
                 }
-                if let Err(e) = fs::write(&archs_stamp_path, stamp_content) {
+                if let Err(e) = fs::write(&archs_stamp_path, &stamp_content) {
                     eprintln!(
                         "Warning: failed to write CUDA arch stamp {:?}: {e} — next build will recompile",
                         archs_stamp_path
@@ -132,7 +142,7 @@ fn main() {
     // Ensure Rust triggers a rebuild if the C++ source code changes
     // Skip this if no_cpp_compilation is enabled
     if !cfg!(feature = "no_cpp_compilation") {
-        track_file_changes(&pil2_stark_path, gencode_flags.as_deref(), &archs_stamp_path);
+        track_file_changes(&pil2_stark_path, gencode_flags.as_deref(), &archs_stamp_path, &stamp_content);
     }
 
     // Add platform-specific library search paths
@@ -256,7 +266,7 @@ fn run_command(cmd: &str, args: &[&str], dir: &Path) {
 }
 
 /// Tracks changes in the `pil2-stark` directory to trigger recompilation only when needed
-fn track_file_changes(pil2_stark_path: &Path, gencode_flags: Option<&str>, stamp_path: &Path) {
+fn track_file_changes(pil2_stark_path: &Path, gencode_flags: Option<&str>, stamp_path: &Path, stamp_content: &str) {
     let source_files = find_source_files(pil2_stark_path);
     let lib_file: PathBuf = if cfg!(feature = "gpu") {
         pil2_stark_path.join("lib-gpu/libstarksgpu.a")
@@ -280,7 +290,7 @@ fn track_file_changes(pil2_stark_path: &Path, gencode_flags: Option<&str>, stamp
                 }
                 None => run_command("make", &["-j", "starks_lib_gpu"], pil2_stark_path),
             }
-            if let Err(e) = fs::write(stamp_path, gencode_flags.unwrap_or("auto")) {
+            if let Err(e) = fs::write(stamp_path, stamp_content) {
                 eprintln!("Warning: failed to write CUDA arch stamp {:?}: {e} — next build will recompile", stamp_path);
             }
         } else {
