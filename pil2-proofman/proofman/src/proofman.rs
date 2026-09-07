@@ -3827,6 +3827,10 @@ where
                 .map(|value| value.parse().expect("invalid VENUS_BASIC_PRELOAD_AIR_ID"))
                 .unwrap_or(22);
             preloaded_const.push(PreLoadedConst::new(0, basic_air_id, ProofType::Basic));
+            if let Ok(value) = std::env::var("VENUS_COMPRESSOR_PRELOAD_AIR_ID") {
+                let compressor_air_id = value.parse().expect("invalid VENUS_COMPRESSOR_PRELOAD_AIR_ID");
+                preloaded_const.push(PreLoadedConst::new(0, compressor_air_id, ProofType::Compressor));
+            }
             preloaded_const.push(PreLoadedConst::new(0, 14, ProofType::Recursive1));
             preloaded_const.push(PreLoadedConst::new(0, 0, ProofType::Recursive2));
         }

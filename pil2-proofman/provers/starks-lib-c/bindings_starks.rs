@@ -35,6 +35,10 @@ extern "C" {
     pub fn register_host_memory(ptr: *mut ::std::os::raw::c_void, size: u64) -> u32;
 
     pub fn unregister_host_memory(ptr: *mut ::std::os::raw::c_void);
+
+    pub fn malloc_host_memory(size: u64) -> *mut ::std::os::raw::c_void;
+
+    pub fn free_host_memory(ptr: *mut ::std::os::raw::c_void);
     
     pub fn set_memory_expressions(pStarkInfo: *mut ::std::os::raw::c_void, nTmp1: u64, nTmp3: u64);
     

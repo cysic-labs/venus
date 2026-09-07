@@ -8,6 +8,10 @@ use proofman_starks_lib_c::*;
 use std::path::Path;
 use std::fs::File;
 use std::io::Write;
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::mem;
+use std::sync::{Mutex, OnceLock};
 
 use proofman_common::{
     CurveType, MpiCtx, Proof, ProofCtx, ProofType, ProofmanResult, ProofmanError, Setup, SetupsVadcop,
@@ -29,6 +33,50 @@ pub type GetWitnessFinalFunc =
     unsafe extern "C" fn(zkin: *mut c_void, dat_file: *const c_char, witness: *mut c_void, n_mutexes: u64) -> i64;
 
 pub const N_RECURSIVE_PROOFS_PER_AGGREGATION: usize = 3;
+
+static RECURSIVE_TRACE_PINNED_POOL: OnceLock<Mutex<RecursiveTracePinnedPool>> = OnceLock::new();
+
+#[derive(Default)]
+struct RecursiveTracePinnedPool {
+    buffers: HashMap<usize, Vec<usize>>,
+    retained: usize,
+}
+
+struct PinnedTraceBuffer<F> {
+    ptr: usize,
+    bytes: usize,
+    _marker: PhantomData<F>,
+}
+
+enum RecursiveTraceStorage<F> {
+    Pinned(PinnedTraceBuffer<F>),
+    Vec(Vec<F>),
+}
+
+impl<F> RecursiveTraceStorage<F> {
+    fn new(len: usize) -> Self {
+        take_pinned_recursive_trace(len).map_or_else(|| Self::Vec(create_buffer_fast(len)), Self::Pinned)
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut F {
+        match self {
+            Self::Pinned(buffer) => buffer.as_mut_ptr(),
+            Self::Vec(buffer) => buffer.as_mut_ptr(),
+        }
+    }
+}
+
+impl<F> PinnedTraceBuffer<F> {
+    fn as_mut_ptr(&mut self) -> *mut F {
+        self.ptr as *mut F
+    }
+}
+
+impl<F> Drop for PinnedTraceBuffer<F> {
+    fn drop(&mut self) {
+        return_pinned_recursive_trace(self.ptr, self.bytes);
+    }
+}
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 pub struct AggProofsRegister {
@@ -314,8 +362,8 @@ pub fn generate_recursive_proof<F: PrimeField64>(
 
     let setup = setups.get_setup(airgroup_id, air_id, &witness.proof_type)?;
 
-    let trace: Vec<F> =
-        create_buffer_fast(setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize);
+    let trace_len = setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize;
+    let mut trace = RecursiveTraceStorage::<F>::new(trace_len);
 
     let p_setup: *mut c_void = (&setup.p_setup).into();
 
@@ -326,7 +374,7 @@ pub fn generate_recursive_proof<F: PrimeField64>(
     get_committed_pols_c(
         witness.circom_witness.as_ptr() as *mut u8,
         exec_data_ptr,
-        trace.as_ptr() as *mut u8,
+        trace.as_mut_ptr() as *mut u8,
         publics.as_mut_ptr() as *mut u8,
         setup.size_witness.read().unwrap().unwrap(),
         1 << (setup.stark_info.stark_struct.n_bits),
@@ -360,7 +408,7 @@ pub fn generate_recursive_proof<F: PrimeField64>(
 
     let stream_id = gen_recursive_proof_c(
         p_setup,
-        trace.as_ptr() as *mut u8,
+        trace.as_mut_ptr() as *mut u8,
         prover_buffer.as_ptr() as *mut u8,
         const_pols_ptr,
         const_tree_ptr,
@@ -386,6 +434,61 @@ pub fn generate_recursive_proof<F: PrimeField64>(
         witness.air_id
     );
     Ok(stream_id)
+}
+
+fn pinned_recursive_trace_pool_enabled() -> bool {
+    std::env::var("VENUS_RECURSIVE_TRACE_PINNED_POOL")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false)
+}
+
+fn pinned_recursive_trace_pool_limit() -> usize {
+    std::env::var("VENUS_RECURSIVE_TRACE_PINNED_POOL_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(32)
+}
+
+fn take_pinned_recursive_trace<F>(len: usize) -> Option<PinnedTraceBuffer<F>> {
+    if !pinned_recursive_trace_pool_enabled() {
+        return None;
+    }
+
+    let bytes = len.checked_mul(mem::size_of::<F>())?;
+    let pool = RECURSIVE_TRACE_PINNED_POOL.get_or_init(|| Mutex::new(RecursiveTracePinnedPool::default()));
+    if let Ok(mut guard) = pool.lock() {
+        if let Some(ptr) = guard.buffers.get_mut(&bytes).and_then(|buffers| buffers.pop()) {
+            guard.retained = guard.retained.saturating_sub(1);
+            return Some(PinnedTraceBuffer { ptr, bytes, _marker: PhantomData });
+        }
+    }
+
+    let ptr = malloc_host_memory_c(bytes as u64) as usize;
+    if ptr == 0 {
+        None
+    } else {
+        Some(PinnedTraceBuffer { ptr, bytes, _marker: PhantomData })
+    }
+}
+
+fn return_pinned_recursive_trace(ptr: usize, bytes: usize) {
+    if ptr == 0 {
+        return;
+    }
+
+    if pinned_recursive_trace_pool_enabled() {
+        let pool = RECURSIVE_TRACE_PINNED_POOL.get_or_init(|| Mutex::new(RecursiveTracePinnedPool::default()));
+        if let Ok(mut guard) = pool.lock() {
+            if guard.retained < pinned_recursive_trace_pool_limit() {
+                guard.buffers.entry(bytes).or_default().push(ptr);
+                guard.retained += 1;
+                return;
+            }
+        }
+    }
+
+    free_host_memory_c(ptr as *mut c_void);
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -29,6 +29,8 @@ extern "C" {
     uint64_t get_proof_pinned_size(void *pStarkInfo);
     uint32_t register_host_memory(void *ptr, uint64_t size);
     void unregister_host_memory(void *ptr);
+    void *malloc_host_memory(uint64_t size);
+    void free_host_memory(void *ptr);
     void set_memory_expressions(void *pStarkInfo, uint64_t nTmp1, uint64_t nTmp3);
     uint64_t get_map_total_n(void *pStarkInfo);
     uint64_t get_map_total_n_custom_commits_fixed(void *pStarkInfo);

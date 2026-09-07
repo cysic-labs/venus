@@ -62,6 +62,18 @@ void unregister_host_memory(void *ptr) {
     }
 }
 
+void *malloc_host_memory(uint64_t size) {
+    void *ptr = nullptr;
+    CHECKCUDAERR(cudaMallocHost(&ptr, size));
+    return ptr;
+}
+
+void free_host_memory(void *ptr) {
+    if (ptr != nullptr) {
+        CHECKCUDAERR(cudaFreeHost(ptr));
+    }
+}
+
 void get_instances_ready(void *d_buffers_, int64_t* instances_ready) {
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     for (uint32_t i = 0; i < d_buffers->n_total_streams; i++) {

@@ -151,6 +151,18 @@ pub fn unregister_host_memory_c(ptr: *mut c_void) {
 }
 
 #[cfg(not(feature = "no_lib_link"))]
+pub fn malloc_host_memory_c(size: u64) -> *mut c_void {
+    unsafe { malloc_host_memory(size) }
+}
+
+#[cfg(not(feature = "no_lib_link"))]
+pub fn free_host_memory_c(ptr: *mut c_void) {
+    unsafe {
+        free_host_memory(ptr);
+    }
+}
+
+#[cfg(not(feature = "no_lib_link"))]
 pub fn set_memory_expressions_c(p_stark_info: *mut c_void, n_tmp1: u64, n_tmp3: u64) {
     unsafe {
         set_memory_expressions(p_stark_info, n_tmp1, n_tmp3);
@@ -1661,6 +1673,17 @@ pub fn register_host_memory_c(_ptr: *mut c_void, _size: u64) -> bool {
 #[cfg(feature = "no_lib_link")]
 pub fn unregister_host_memory_c(_ptr: *mut c_void) {
     trace!("··· {}", "unregister_host_memory: This is a mock call because there is no linked library");
+}
+
+#[cfg(feature = "no_lib_link")]
+pub fn malloc_host_memory_c(_size: u64) -> *mut c_void {
+    trace!("··· {}", "malloc_host_memory: This is a mock call because there is no linked library");
+    std::ptr::null_mut()
+}
+
+#[cfg(feature = "no_lib_link")]
+pub fn free_host_memory_c(_ptr: *mut c_void) {
+    trace!("··· {}", "free_host_memory: This is a mock call because there is no linked library");
 }
 
 #[cfg(feature = "no_lib_link")]
