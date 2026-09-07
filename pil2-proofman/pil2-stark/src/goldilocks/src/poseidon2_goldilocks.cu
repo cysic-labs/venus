@@ -293,8 +293,14 @@ void Poseidon2GoldilocksGPU<SPONGE_WIDTH_T>::merkletreeRowMajor(uint32_t arity, 
         case 12:
             linearHashGPURowMajorRegFixedCols<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS, 12><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_rows);
             break;
+        case 21:
+            linearHashGPURowMajorRegFixedCols<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS, 21><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_rows);
+            break;
         case 38:
             linearHashGPURowMajorRegFixedCols<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS, 38><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_rows);
+            break;
+        case 59:
+            linearHashGPURowMajorRegFixedCols<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS, 59><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_rows);
             break;
         default:
             linearHashGPURowMajorReg<RATE, CAPACITY, SPONGE_WIDTH, N_FULL_ROUNDS_TOTAL, N_PARTIAL_ROUNDS><<<actual_blks, actual_tpb, 0, stream>>>(d_tree, d_input, num_cols, num_rows);
