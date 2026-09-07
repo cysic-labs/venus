@@ -44,6 +44,19 @@ static bool venus_reuse_custom_fixed_enabled()
     return enabled != 0;
 }
 
+static uint32_t venus_reuse_stream_wait_us()
+{
+    static uint32_t value = []() {
+        const char *env = std::getenv("VENUS_REUSE_STREAM_WAIT_US");
+        if (env == nullptr || env[0] == '\0') return 0u;
+        char *end = nullptr;
+        unsigned long parsed = std::strtoul(env, &end, 10);
+        if (end == env || *end != '\0') return 0u;
+        return static_cast<uint32_t>(std::min(parsed, 1000000ul));
+    }();
+    return value;
+}
+
 uint32_t register_host_memory(void *ptr, uint64_t size) {
     if (ptr == nullptr || size == 0) return 0;
     cudaError_t err = cudaHostRegister(ptr, size, cudaHostRegisterDefault);
@@ -72,6 +85,10 @@ void free_host_memory(void *ptr) {
     if (ptr != nullptr) {
         CHECKCUDAERR(cudaFreeHost(ptr));
     }
+}
+
+uint32_t prewarm_const_tree_host_cache(char *constTreeFilename, uint64_t constTreeSize) {
+    return prewarm_const_tree_host_cache_path(constTreeFilename, constTreeSize);
 }
 
 void get_instances_ready(void *d_buffers_, int64_t* instances_ready) {
@@ -1606,6 +1623,9 @@ uint32_t selectStream(DeviceCommitBuffers* d_buffers, uint64_t airgroupId, uint6
     uint32_t countUnusedStreams[d_buffers->n_gpus];
     int streamIdxGPU[d_buffers->n_gpus];
     bool foundReusableContext[d_buffers->n_gpus];
+    const uint32_t reuseWaitUs = venus_reuse_stream_wait_us();
+    uint32_t waitedReuseUs = 0;
+    const uint32_t reuseWaitStepUs = 300;
     
     for( uint32_t i = 0; i < d_buffers->n_gpus; i++){
         countUnusedStreams[i] = 0;
@@ -1620,6 +1640,14 @@ uint32_t selectStream(DeviceCommitBuffers* d_buffers, uint64_t airgroupId, uint6
     std::vector<bool> streams_locked(d_buffers->n_total_streams, false);
     
     while (!someFree){
+        for (uint32_t i = 0; i < d_buffers->n_gpus; i++) {
+            countUnusedStreams[i] = 0;
+            countFreeStreamsGPU[i] = 0;
+            streamIdxGPU[i] = -1;
+            foundReusableContext[i] = false;
+        }
+        std::fill(streams_locked.begin(), streams_locked.end(), false);
+
         if (recursive) {
             for (uint32_t i = 0; i < d_buffers->n_total_streams; i++) {
                 if (d_buffers->streamsData[i].recursive && d_buffers->streamsData[i].mutex_stream_selection.try_lock()) {
@@ -1673,6 +1701,42 @@ uint32_t selectStream(DeviceCommitBuffers* d_buffers, uint64_t airgroupId, uint6
                     } else {
                         d_buffers->streamsData[i].mutex_stream_selection.unlock();
                     }
+                }
+            }
+        }
+
+        if (someFree && reuseWaitUs > waitedReuseUs) {
+            bool foundReusable = false;
+            for (uint32_t i = 0; i < d_buffers->n_gpus; i++) {
+                foundReusable = foundReusable || foundReusableContext[i];
+            }
+            if (!foundReusable) {
+                bool sameContextBusy = false;
+                for (uint32_t i = 0; i < d_buffers->n_total_streams && !sameContextBusy; i++) {
+                    if (d_buffers->streamsData[i].recursive != recursive && (recursive || force_recursive)) continue;
+                    if (d_buffers->streamsData[i].mutex_stream_selection.try_lock()) {
+                        bool sameContext = d_buffers->streamsData[i].airgroupId == airgroupId &&
+                                           d_buffers->streamsData[i].airId == airId &&
+                                           d_buffers->streamsData[i].proofType == proofType;
+                        bool available = d_buffers->streamsData[i].status == 0 ||
+                                         d_buffers->streamsData[i].status == 3 ||
+                                         (d_buffers->streamsData[i].status == 2 &&
+                                          cudaEventQuery(d_buffers->streamsData[i].end_event) == cudaSuccess);
+                        sameContextBusy = sameContext && !available;
+                        d_buffers->streamsData[i].mutex_stream_selection.unlock();
+                    }
+                }
+                if (sameContextBusy) {
+                    for (uint32_t i = 0; i < d_buffers->n_total_streams; i++) {
+                        if (streams_locked[i]) {
+                            d_buffers->streamsData[i].mutex_stream_selection.unlock();
+                        }
+                    }
+                    someFree = false;
+                    uint32_t sleepUs = std::min(reuseWaitStepUs, reuseWaitUs - waitedReuseUs);
+                    std::this_thread::sleep_for(std::chrono::microseconds(sleepUs));
+                    waitedReuseUs += sleepUs;
+                    continue;
                 }
             }
         }

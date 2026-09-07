@@ -1443,6 +1443,167 @@ void calculateHash(TranscriptGL_GPU *d_transcript, Goldilocks::Element* hash, Se
     d_transcript->getState(hash, stream);
 };
 
+static bool venus_main_fri_static_enabled()
+{
+    static int enabled = []() {
+        const char *value = std::getenv("VENUS_MAIN_FRI_STATIC");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled != 0;
+}
+
+__device__ __forceinline__ void venus_ext_mul_const(
+    const gl64_t &a0, const gl64_t &a1, const gl64_t &a2,
+    const gl64_t *b,
+    gl64_t &c0, gl64_t &c1, gl64_t &c2)
+{
+    gl64_t A = (a0 + a1) * (b[0] + b[1]);
+    gl64_t B = (a0 + a2) * (b[0] + b[2]);
+    gl64_t C = (a1 + a2) * (b[1] + b[2]);
+    gl64_t D = a0 * b[0];
+    gl64_t E = a1 * b[1];
+    gl64_t F = a2 * b[2];
+    goldilocks3_mul_outputs(c0, c1, c2, A, B, C, D, E, F);
+}
+
+__device__ __forceinline__ void venus_ext_mul(
+    const gl64_t &a0, const gl64_t &a1, const gl64_t &a2,
+    const gl64_t &b0, const gl64_t &b1, const gl64_t &b2,
+    gl64_t &c0, gl64_t &c1, gl64_t &c2)
+{
+    gl64_t A = (a0 + a1) * (b0 + b1);
+    gl64_t B = (a0 + a2) * (b0 + b2);
+    gl64_t C = (a1 + a2) * (b1 + b2);
+    gl64_t D = a0 * b0;
+    gl64_t E = a1 * b1;
+    gl64_t F = a2 * b2;
+    goldilocks3_mul_outputs(c0, c1, c2, A, B, C, D, E, F);
+}
+
+__device__ __forceinline__ void venus_fri_set_dim1(
+    gl64_t &a0, gl64_t &a1, gl64_t &a2,
+    gl64_t *pol, uint64_t offset, uint64_t row, uint64_t col, uint64_t domainSize, uint64_t nCols,
+    const gl64_t *eval)
+{
+    gl64_t v = pol[offset + getBufferOffset(row, col, domainSize, nCols)];
+    a0 = v - eval[0];
+    a1 = -eval[1];
+    a2 = -eval[2];
+}
+
+__device__ __forceinline__ void venus_fri_next_dim1(
+    gl64_t &a0, gl64_t &a1, gl64_t &a2,
+    gl64_t *pol, uint64_t offset, uint64_t row, uint64_t col, uint64_t domainSize, uint64_t nCols,
+    const gl64_t *eval, const gl64_t *vf2)
+{
+    gl64_t o0, o1, o2;
+    venus_fri_set_dim1(o0, o1, o2, pol, offset, row, col, domainSize, nCols, eval);
+    gl64_t m0, m1, m2;
+    venus_ext_mul_const(a0, a1, a2, vf2, m0, m1, m2);
+    a0 = m0 + o0;
+    a1 = m1 + o1;
+    a2 = m2 + o2;
+}
+
+__device__ __forceinline__ void venus_fri_next_dim3(
+    gl64_t &a0, gl64_t &a1, gl64_t &a2,
+    gl64_t *pol, uint64_t offset, uint64_t row, uint64_t col, uint64_t domainSize, uint64_t nCols,
+    const gl64_t *eval, const gl64_t *vf2)
+{
+    gl64_t o0 = pol[offset + getBufferOffset(row, col + 0, domainSize, nCols)] - eval[0];
+    gl64_t o1 = pol[offset + getBufferOffset(row, col + 1, domainSize, nCols)] - eval[1];
+    gl64_t o2 = pol[offset + getBufferOffset(row, col + 2, domainSize, nCols)] - eval[2];
+    gl64_t m0, m1, m2;
+    venus_ext_mul_const(a0, a1, a2, vf2, m0, m1, m2);
+    a0 = m0 + o0;
+    a1 = m1 + o1;
+    a2 = m2 + o2;
+}
+
+__device__ __forceinline__ void venus_fri_divide_by_xsub(
+    gl64_t &a0, gl64_t &a1, gl64_t &a2,
+    uint64_t row, uint64_t opening, gl64_t *d_x, gl64_t *d_xDivXSub)
+{
+    Goldilocks3GPU::Element inv;
+    inv[0] = d_x[row] - d_xDivXSub[opening * FIELD_EXTENSION + 0];
+    inv[1] = -d_xDivXSub[opening * FIELD_EXTENSION + 1];
+    inv[2] = -d_xDivXSub[opening * FIELD_EXTENSION + 2];
+    Goldilocks3GPU::inv(inv, inv);
+    gl64_t m0, m1, m2;
+    venus_ext_mul(a0, a1, a2, inv[0], inv[1], inv[2], m0, m1, m2);
+    a0 = m0;
+    a1 = m1;
+    a2 = m2;
+}
+
+__global__ void computeFRIExpressionMainStatic(
+    uint64_t domainSize,
+    gl64_t *d_fri,
+    gl64_t *d_evals,
+    gl64_t *vf1,
+    gl64_t *vf2,
+    gl64_t *d_cmPols,
+    gl64_t *d_xDivXSub,
+    gl64_t *d_x,
+    gl64_t *d_fixedPols,
+    uint64_t cm1Offset,
+    uint64_t cm2Offset,
+    uint64_t cm3Offset,
+    uint64_t constOffset)
+{
+    uint64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t stride = blockDim.x * gridDim.x;
+    while (row < domainSize) {
+        gl64_t a0, a1, a2;
+        gl64_t fri0, fri1, fri2;
+
+        venus_fri_set_dim1(a0, a1, a2, d_cmPols, cm1Offset, row, 4, domainSize, 38, d_evals + 0 * FIELD_EXTENSION);
+        venus_fri_next_dim1(a0, a1, a2, d_cmPols, cm1Offset, row, 5, domainSize, 38, d_evals + 1 * FIELD_EXTENSION, vf2);
+        venus_fri_next_dim1(a0, a1, a2, d_cmPols, cm1Offset, row, 6, domainSize, 38, d_evals + 2 * FIELD_EXTENSION, vf2);
+        venus_fri_next_dim1(a0, a1, a2, d_cmPols, cm1Offset, row, 7, domainSize, 38, d_evals + 3 * FIELD_EXTENSION, vf2);
+        venus_fri_next_dim1(a0, a1, a2, d_cmPols, cm1Offset, row, 25, domainSize, 38, d_evals + 4 * FIELD_EXTENSION, vf2);
+        venus_fri_next_dim1(a0, a1, a2, d_cmPols, cm1Offset, row, 26, domainSize, 38, d_evals + 5 * FIELD_EXTENSION, vf2);
+        venus_fri_next_dim1(a0, a1, a2, d_cmPols, cm1Offset, row, 27, domainSize, 38, d_evals + 6 * FIELD_EXTENSION, vf2);
+        venus_fri_next_dim3(a0, a1, a2, d_cmPols, cm2Offset, row, 0, domainSize, 24, d_evals + 7 * FIELD_EXTENSION, vf2);
+        venus_fri_divide_by_xsub(a0, a1, a2, row, 0, d_x, d_xDivXSub);
+        fri0 = a0;
+        fri1 = a1;
+        fri2 = a2;
+
+        venus_fri_set_dim1(a0, a1, a2, d_fixedPols, constOffset, row, 0, domainSize, 3, d_evals + 8 * FIELD_EXTENSION);
+        venus_fri_next_dim1(a0, a1, a2, d_fixedPols, constOffset, row, 1, domainSize, 3, d_evals + 9 * FIELD_EXTENSION, vf2);
+        venus_fri_next_dim1(a0, a1, a2, d_fixedPols, constOffset, row, 2, domainSize, 3, d_evals + 10 * FIELD_EXTENSION, vf2);
+#pragma unroll
+        for (uint64_t col = 0; col < 38; ++col) {
+            venus_fri_next_dim1(a0, a1, a2, d_cmPols, cm1Offset, row, col, domainSize, 38, d_evals + (11 + col) * FIELD_EXTENSION, vf2);
+        }
+#pragma unroll
+        for (uint64_t k = 0; k < 8; ++k) {
+            venus_fri_next_dim3(a0, a1, a2, d_cmPols, cm2Offset, row, 3 * k, domainSize, 24, d_evals + (49 + k) * FIELD_EXTENSION, vf2);
+        }
+#pragma unroll
+        for (uint64_t k = 0; k < 2; ++k) {
+            venus_fri_next_dim3(a0, a1, a2, d_cmPols, cm3Offset, row, 3 * k, domainSize, 6, d_evals + (57 + k) * FIELD_EXTENSION, vf2);
+        }
+        venus_fri_divide_by_xsub(a0, a1, a2, row, 1, d_x, d_xDivXSub);
+        gl64_t m0, m1, m2;
+        venus_ext_mul_const(fri0, fri1, fri2, vf1, m0, m1, m2);
+        fri0 = m0 + a0;
+        fri1 = m1 + a1;
+        fri2 = m2 + a2;
+
+        venus_fri_set_dim1(a0, a1, a2, d_fixedPols, constOffset, row, 0, domainSize, 3, d_evals + 59 * FIELD_EXTENSION);
+        venus_fri_next_dim1(a0, a1, a2, d_fixedPols, constOffset, row, 2, domainSize, 3, d_evals + 60 * FIELD_EXTENSION, vf2);
+        venus_fri_divide_by_xsub(a0, a1, a2, row, 2, d_x, d_xDivXSub);
+        venus_ext_mul_const(fri0, fri1, fri2, vf1, m0, m1, m2);
+
+        d_fri[row * FIELD_EXTENSION + 0] = m0 + a0;
+        d_fri[row * FIELD_EXTENSION + 1] = m1 + a1;
+        d_fri[row * FIELD_EXTENSION + 2] = m2 + a2;
+        row += stride;
+    }
+}
+
 __global__  void computeFRIExpression(uint64_t domainSize, uint64_t nOpeningPoints, gl64_t *d_fri, uint64_t* d_countsPerOpeningPos, EvalInfo **d_evalInfoPerOpening, gl64_t *d_evals, gl64_t *vf1, gl64_t *vf2, gl64_t *d_cmPols, gl64_t *d_xDivXSub, gl64_t *d_x, gl64_t *d_fixedPols, gl64_t *d_customComits, bool debug)
 {
     int chunk_idx = blockIdx.x;
@@ -1532,6 +1693,34 @@ void calculateFRIExpression(SetupCtx& setupCtx, StepsParams &h_params, AirInstan
     size_t sharedMem = nthreads_ * 3 * FIELD_EXTENSION * sizeof(Goldilocks::Element);
     dim3 nThreads(nthreads_);    
     dim3 nBlocks(nblocks_);
+    if (venus_main_fri_static_enabled()
+        && air_instance_info->airgroupId == 0
+        && air_instance_info->airId == 12
+        && setupCtx.starkInfo.starkStruct.nBitsExt == 23
+        && setupCtx.starkInfo.openingPoints.size() == 3
+        && setupCtx.starkInfo.evMap.size() == 61
+        && setupCtx.starkInfo.mapSectionsN["cm1"] == 38
+        && setupCtx.starkInfo.mapSectionsN["cm2"] == 24
+        && setupCtx.starkInfo.mapSectionsN["cm3"] == 6
+        && setupCtx.starkInfo.mapSectionsN["const"] == 3) {
+        computeFRIExpressionMainStatic<<<nBlocks, nThreads, 0, stream>>>(
+            domainSize,
+            (gl64_t*)h_params.aux_trace + setupCtx.starkInfo.mapOffsets[std::make_pair("f", true)],
+            (gl64_t*)h_params.evals,
+            (gl64_t*)h_params.challenges + 4 * FIELD_EXTENSION,
+            (gl64_t*)h_params.challenges + 5 * FIELD_EXTENSION,
+            (gl64_t*)h_params.aux_trace,
+            (gl64_t*)h_params.xDivXSub,
+            (gl64_t*)h_params.aux_trace + setupCtx.starkInfo.mapOffsets[std::make_pair("x", true)],
+            (gl64_t *)h_params.pConstPolsExtendedTreeAddress,
+            setupCtx.starkInfo.mapOffsets[std::make_pair("cm1", true)],
+            setupCtx.starkInfo.mapOffsets[std::make_pair("cm2", true)],
+            setupCtx.starkInfo.mapOffsets[std::make_pair("cm3", true)],
+            setupCtx.starkInfo.mapOffsets[std::make_pair("const", true)]
+        );
+        CHECKCUDAERR(cudaGetLastError());
+        return;
+    }
     computeFRIExpression<<<nBlocks, nThreads, sharedMem, stream>>>(
         domainSize, 
         setupCtx.starkInfo.openingPoints.size(), 

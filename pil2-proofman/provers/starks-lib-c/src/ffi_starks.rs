@@ -1556,6 +1556,14 @@ pub fn load_device_const_pols_c(
     }
 }
 
+#[cfg(not(feature = "no_lib_link"))]
+pub fn prewarm_const_tree_host_cache_c(const_tree_filename: &str, const_tree_size: u64) -> bool {
+    let const_tree_filename_name = CString::new(const_tree_filename).unwrap();
+    let const_tree_filename_ptr = const_tree_filename_name.as_ptr() as *mut std::os::raw::c_char;
+
+    unsafe { prewarm_const_tree_host_cache(const_tree_filename_ptr, const_tree_size) != 0 }
+}
+
 // ------------------------
 // MOCK METHODS FOR TESTING
 // ------------------------
@@ -2563,4 +2571,14 @@ pub fn load_device_const_pols_c(
     _only_first_gpu: bool,
 ) {
     trace!("{}: ··· {}", "ffi     ", "load_device_const_pols: This is a mock call because there is no linked library");
+}
+
+#[cfg(feature = "no_lib_link")]
+pub fn prewarm_const_tree_host_cache_c(_const_tree_filename: &str, _const_tree_size: u64) -> bool {
+    trace!(
+        "{}: ··· {}",
+        "ffi     ",
+        "prewarm_const_tree_host_cache: This is a mock call because there is no linked library"
+    );
+    false
 }

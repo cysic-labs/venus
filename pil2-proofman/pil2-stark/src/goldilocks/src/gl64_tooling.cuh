@@ -7,6 +7,7 @@
 #include "goldilocks_base_field.hpp"
 #ifndef __GOLDILOCKS_ENV__
 #include "gpu_timer.cuh"
+#include <memory>
 #include <mutex>
 #include "cuda_utils.cuh"
 #include "transcriptGL.cuh"
@@ -283,6 +284,7 @@ struct StreamData{
     cudaEvent_t end_event;
     cudaEvent_t direct_h2d_event;
     bool direct_h2d_event_pending;
+    std::vector<std::shared_ptr<uint8_t>> const_tree_h2d_keepalives;
     TimerGPU timer;
 
     TranscriptGL_GPU *transcript;
@@ -360,6 +362,7 @@ struct StreamData{
         root = nullptr;
         pSetupCtx = nullptr;
         proofBuffer = nullptr;
+        const_tree_h2d_keepalives.clear();
     }
 
     void free(){
@@ -480,6 +483,8 @@ void load_and_copy_to_device_in_chunks(
     uint64_t total_size,
     uint64_t streamId
     );
+
+uint32_t prewarm_const_tree_host_cache_path(const char *bufferPath, uint64_t total_size);
 
 void wait_direct_registered_h2d(DeviceCommitBuffers* d_buffers, uint64_t streamId);
 

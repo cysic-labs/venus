@@ -578,6 +578,8 @@ extern "C" {
         onlyFirstGPU: bool,
     );
     
+    pub fn prewarm_const_tree_host_cache(constTreeFilename: *mut ::std::os::raw::c_char, constTreeSize: u64) -> u32;
+
     pub fn load_device_setup(
         airgroupId: u64,
         airId: u64,
