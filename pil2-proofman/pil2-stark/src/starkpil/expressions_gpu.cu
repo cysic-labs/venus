@@ -832,6 +832,40 @@ __device__ __forceinline__ gl64_t q80875_load_const0_(
 }
 
 template<bool IsCyclic>
+__device__ __forceinline__ gl64_t qexpr_load_stage01_dim1_(
+    StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs,
+    uint64_t i, uint16_t type, uint16_t arg_idx, uint16_t arg_offset)
+{
+    const uint64_t domainSize = d_expsArgs->domainSize;
+    const uint64_t r = i + threadIdx.x;
+    const int64_t stride = d_expsArgs->nextStridesExps[arg_offset];
+    const uint64_t logicalRow = IsCyclic ? (r + stride) % domainSize : (r + stride);
+    const bool usePack256 = !IsCyclic && stride == 0 && blockDim.x == TILE_HEIGHT;
+
+    if (type == 0) {
+        const Goldilocks::Element *basePtr = d_expsArgs->domainExtended
+            ? d_params->pConstPolsExtendedTreeAddress
+            : d_params->pConstPolsAddress;
+        const uint64_t nCols = d_deviceArgs->mapSectionsN[0];
+        const uint64_t pos = usePack256
+            ? getBufferOffset_pack256(i, arg_idx, domainSize, nCols)
+            : getBufferOffset(logicalRow, arg_idx, domainSize, nCols);
+        return *(gl64_t*)&basePtr[pos];
+    }
+
+    const uint64_t nCols = d_deviceArgs->mapSectionsN[1];
+    const uint64_t pos = usePack256
+        ? getBufferOffset_pack256(i, arg_idx, domainSize, nCols)
+        : getBufferOffset(logicalRow, arg_idx, domainSize, nCols);
+    if (!d_expsArgs->domainExtended) {
+        return *(gl64_t*)&d_params->trace[pos];
+    }
+
+    const uint64_t offset = d_expsArgs->mapOffsetsExps[1];
+    return *(gl64_t*)&d_params->aux_trace[offset + pos];
+}
+
+template<bool IsCyclic>
 __device__ __forceinline__ gl64_t q80875_const_sum_common23_(
     StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs,
     uint64_t i)
@@ -1065,6 +1099,19 @@ __device__ __forceinline__ gl64_t *computeExpression_ops_(
             res = tmp;
             tmp[threadIdx.x] = acc;
             --kk;
+            continue;
+        }
+
+        if (ops[kk] == 0
+            && args[i_args] == 0
+            && (args[i_args + 2] == 0 || args[i_args + 2] == 1)
+            && args[i_args + 5] == bufferCommitsSize) {
+            gl64_t lhs = qexpr_load_stage01_dim1_<IsCyclic>(
+                d_params, d_deviceArgs, d_expsArgs, i,
+                args[i_args + 2], args[i_args + 3], args[i_args + 4]);
+            gl64_t *rhs = (gl64_t*)&expressions_params[bufferCommitsSize][args[i_args + 6] * blockDim.x];
+            res = (gl64_t*)&expressions_params[bufferCommitsSize][args[i_args + 1] * blockDim.x];
+            res[threadIdx.x] = lhs + rhs[threadIdx.x];
             continue;
         }
 

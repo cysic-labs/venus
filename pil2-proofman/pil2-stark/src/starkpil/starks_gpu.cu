@@ -1520,7 +1520,15 @@ void calculateFRIExpression(SetupCtx& setupCtx, StepsParams &h_params, AirInstan
 
     uint64_t domainSize = (1 << setupCtx.starkInfo.starkStruct.nBitsExt);
     uint32_t nthreads_ = std::max<uint32_t>(setupCtx.starkInfo.nrowsPack, 256);
-    uint32_t nblocks_ = std::min((uint32_t)setupCtx.starkInfo.maxNBlocks, (uint32_t)((domainSize + nthreads_-1)/ nthreads_));
+    uint32_t maxBlocks = setupCtx.starkInfo.maxNBlocks;
+    if (const char *env = std::getenv("VENUS_FRI_MAX_BLOCKS")) {
+        char *end = nullptr;
+        unsigned long parsed = std::strtoul(env, &end, 10);
+        if (end != env && *end == '\0' && parsed > 0) {
+            maxBlocks = static_cast<uint32_t>(std::min<unsigned long>(parsed, UINT32_MAX));
+        }
+    }
+    uint32_t nblocks_ = std::min(maxBlocks, (uint32_t)((domainSize + nthreads_-1)/ nthreads_));
     size_t sharedMem = nthreads_ * 3 * FIELD_EXTENSION * sizeof(Goldilocks::Element);
     dim3 nThreads(nthreads_);    
     dim3 nBlocks(nblocks_);
