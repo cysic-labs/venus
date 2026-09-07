@@ -1173,16 +1173,31 @@ __global__ void br_ntt_batch_steps_blocks_par_dif_noBR_compact( gl64_t *data, gl
 
             // DIF: t1 = a + b           -> stored at index1
             //      t2 = (a - b) * W^k   -> stored at index2
-            for (int j = 0; j < ncols_block; j++) {
-                gl64_t a = tile[j * BATCH_HEIGHT + index1];
-                gl64_t b = tile[j * BATCH_HEIGHT + index2];
+            if (ncols_block == BATCH_WIDTH) {
+                #pragma unroll
+                for (int j = 0; j < BATCH_WIDTH; j++) {
+                    gl64_t a = tile[j * BATCH_HEIGHT + index1];
+                    gl64_t b = tile[j * BATCH_HEIGHT + index2];
 
-                gl64_t t1 = a + b;
-                gl64_t t2 = a - b;
-                t2 = t2 * factor;
+                    gl64_t t1 = a + b;
+                    gl64_t t2 = a - b;
+                    t2 = t2 * factor;
 
-                tile[j * BATCH_HEIGHT + index1] = t1;
-                tile[j * BATCH_HEIGHT + index2] = t2;
+                    tile[j * BATCH_HEIGHT + index1] = t1;
+                    tile[j * BATCH_HEIGHT + index2] = t2;
+                }
+            } else {
+                for (int j = 0; j < ncols_block; j++) {
+                    gl64_t a = tile[j * BATCH_HEIGHT + index1];
+                    gl64_t b = tile[j * BATCH_HEIGHT + index2];
+
+                    gl64_t t1 = a + b;
+                    gl64_t t2 = a - b;
+                    t2 = t2 * factor;
+
+                    tile[j * BATCH_HEIGHT + index1] = t1;
+                    tile[j * BATCH_HEIGHT + index2] = t2;
+                }
             }
             
         }
