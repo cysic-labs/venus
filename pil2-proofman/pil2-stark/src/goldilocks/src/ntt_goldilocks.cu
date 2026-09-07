@@ -52,6 +52,59 @@ void ntt_cuda_blocks_par1_noBR( gl64_t *data, gl64_t **d_r_, gl64_t **d_fwd_twid
 void ntt_cuda_blocks_par1_noBR_compact( gl64_t *data, gl64_t **d_r_, gl64_t **d_fwd_twiddle_factors, gl64_t **d_inv_twiddle_factors, uint32_t log_domain_size_in, uint32_t log_domain_size_out, uint32_t nCols, bool inverse, bool extend, cudaStream_t stream, uint64_t maxLogDomainSize);
 void ntt_cuda_blocks_par2_noBR( gl64_t *data, gl64_t **d_r_, gl64_t **d_fwd_twiddle_factors, gl64_t **d_inv_twiddle_factors, uint32_t log_domain_size_in, uint32_t log_domain_size_out, uint32_t nCols, bool inverse, bool extend, cudaStream_t stream, uint64_t maxLogDomainSize);
 
+__device__ __forceinline__ void gl64_add_sub_pair_ntt(const gl64_t &a, const gl64_t &b, gl64_t &sum, gl64_t &diff)
+{
+    const uint64_t mod = uint64_t(0xffffffff00000001ULL);
+    const uint64_t neg_mod = uint64_t(0xffffffffULL);
+    const uint64_t bv = b[0];
+    uint64_t tmp;
+    uint32_t carry;
+
+    uint64_t sum_v = a[0];
+    asm("add.cc.u64 %0, %2, %3; addc.u32 %1, 0, 0;"
+        : "=l"(tmp), "=r"(carry)
+        : "l"(sum_v), "l"(neg_mod));
+    asm("{ .reg.pred %top;");
+    asm("setp.ne.u32 %top, %0, 0;" :: "r"(carry));
+    asm("@%top mov.b64 %0, %1;" : "+l"(sum_v) : "l"(tmp));
+    asm("}");
+
+    asm("add.cc.u64 %0, %0, %2; addc.u32 %1, 0, 0;"
+        : "+l"(sum_v), "=r"(carry)
+        : "l"(bv));
+    asm("sub.u64 %0, %1, %2;"
+        : "=l"(tmp)
+        : "l"(sum_v), "l"(mod));
+    asm("{ .reg.pred %top;");
+    asm("setp.ne.u32 %top, %0, 0;" :: "r"(carry));
+    asm("@%top mov.b64 %0, %1;" : "+l"(sum_v) : "l"(tmp));
+    asm("}");
+
+    uint64_t diff_v = a[0];
+    asm("add.cc.u64 %0, %2, %3; addc.u32 %1, 0, 0;"
+        : "=l"(tmp), "=r"(carry)
+        : "l"(diff_v), "l"(mod));
+    asm("{ .reg.pred %top;");
+    asm("setp.eq.u32 %top, %0, 0;" :: "r"(carry));
+    asm("@%top mov.b64 %0, %1;" : "+l"(diff_v) : "l"(tmp));
+    asm("}");
+
+    uint32_t borrow;
+    asm("sub.cc.u64 %0, %0, %2; subc.u32 %1, 0, 0;"
+        : "+l"(diff_v), "=r"(borrow)
+        : "l"(bv));
+    asm("add.u64 %0, %1, %2;"
+        : "=l"(tmp)
+        : "l"(diff_v), "l"(mod));
+    asm("{ .reg.pred %top;");
+    asm("setp.ne.u32 %top, %0, 0;" :: "r"(borrow));
+    asm("@%top mov.b64 %0, %1;" : "+l"(diff_v) : "l"(tmp));
+    asm("}");
+
+    sum[0] = sum_v;
+    diff[0] = diff_v;
+}
+
 __global__ void applyS(gl64_t *d_cmQ, gl64_t *d_q, gl64_t *d_S, Goldilocks::Element shiftIn, uint64_t N, uint64_t NExtended, uint64_t extendBits, uint64_t qDeg, uint64_t qDim)
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -830,8 +883,10 @@ __global__ void br_ntt_batch_steps_blocks_par(gl64_t *data, gl64_t *twiddles, gl
                     uint32_t off2 = j * BATCH_HEIGHT + index2;
                     gl64_t a = tile[off1];
                     gl64_t odd_sub = tile[off2] * factor;
-                    tile[off2] = a - odd_sub;
-                    tile[off1] = a + odd_sub;
+                    gl64_t sum, diff;
+                    gl64_add_sub_pair_ntt(a, odd_sub, sum, diff);
+                    tile[off2] = diff;
+                    tile[off1] = sum;
                 }
             } else {
                 for(int j=0; j<ncols_block; j++){
@@ -839,8 +894,10 @@ __global__ void br_ntt_batch_steps_blocks_par(gl64_t *data, gl64_t *twiddles, gl
                     uint32_t off2 = j * BATCH_HEIGHT + index2;
                     gl64_t a = tile[off1];
                     gl64_t odd_sub = tile[off2] * factor;
-                    tile[off2] = a - odd_sub;
-                    tile[off1] = a + odd_sub;
+                    gl64_t sum, diff;
+                    gl64_add_sub_pair_ntt(a, odd_sub, sum, diff);
+                    tile[off2] = diff;
+                    tile[off1] = sum;
                 }
             }
         }
@@ -1138,8 +1195,15 @@ __global__ void br_ntt_batch_steps_blocks_par_dif_noBR_compact( gl64_t *data, gl
     uint32_t row_comp = blockX * BATCH_HEIGHT + row_block;
 
     // Copy data to tile
-    for (int i = 0; i < ncols_block; i++){
-        tile[BATCH_HEIGHT * i + threadIdx.x] = data_block[row_comp * ncols_block + i];
+    if (ncols_block == BATCH_WIDTH) {
+#pragma unroll
+        for (int i = 0; i < BATCH_WIDTH; i++){
+            tile[BATCH_HEIGHT * i + threadIdx.x] = data_block[row_comp * BATCH_WIDTH + i];
+        }
+    } else {
+        for (int i = 0; i < ncols_block; i++){
+            tile[BATCH_HEIGHT * i + threadIdx.x] = data_block[row_comp * ncols_block + i];
+        }
     }
     __syncthreads();
 
@@ -1210,15 +1274,32 @@ __global__ void br_ntt_batch_steps_blocks_par_dif_noBR_compact( gl64_t *data, gl
         uint64_t row_r = (__brev(row) >> (32 - log_domain_size_in));
         if (extend) inv_factor = inv_factor * d_r[row_r];
         uint32_t rowbf = row * blowupFactor;
-        for (int i = 0; i < ncols_block; i++){
-            data_block[rowbf * ncols_block + i] = tile[i * BATCH_HEIGHT + threadIdx.x] * inv_factor;
-            for(uint32_t b=1; b<blowupFactor; b++){
-                data_block[(rowbf + b) * ncols_block + i] = gl64_t(uint64_t(0));
+        if (ncols_block == BATCH_WIDTH) {
+#pragma unroll
+            for (int i = 0; i < BATCH_WIDTH; i++){
+                data_block[rowbf * BATCH_WIDTH + i] = tile[i * BATCH_HEIGHT + threadIdx.x] * inv_factor;
+                for(uint32_t b=1; b<blowupFactor; b++){
+                    data_block[(rowbf + b) * BATCH_WIDTH + i] = gl64_t(uint64_t(0));
+                }
+            }
+        } else {
+            for (int i = 0; i < ncols_block; i++){
+                data_block[rowbf * ncols_block + i] = tile[i * BATCH_HEIGHT + threadIdx.x] * inv_factor;
+                for(uint32_t b=1; b<blowupFactor; b++){
+                    data_block[(rowbf + b) * ncols_block + i] = gl64_t(uint64_t(0));
+                }
             }
         }
     } else {
-        for (int i = 0; i < ncols_block; i++){
-            data_block[row_comp * ncols_block + i] = tile[i * BATCH_HEIGHT + threadIdx.x];
+        if (ncols_block == BATCH_WIDTH) {
+#pragma unroll
+            for (int i = 0; i < BATCH_WIDTH; i++){
+                data_block[row_comp * BATCH_WIDTH + i] = tile[i * BATCH_HEIGHT + threadIdx.x];
+            }
+        } else {
+            for (int i = 0; i < ncols_block; i++){
+                data_block[row_comp * ncols_block + i] = tile[i * BATCH_HEIGHT + threadIdx.x];
+            }
         }
     }
 }
