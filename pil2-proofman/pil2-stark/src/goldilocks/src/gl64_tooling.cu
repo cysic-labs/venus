@@ -1,6 +1,11 @@
 #include "gl64_tooling.cuh"
 #include "data_layout.cuh"
+#include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <memory>
+#include <string>
+#include <unordered_map>
 
 static bool venus_direct_registered_h2d_enabled()
 {
@@ -34,6 +39,251 @@ static bool copy_direct_registered_h2d_if_enabled(const void *src, void *dst, ui
         stream_data->direct_h2d_event_pending = true;
     } else {
         CHECKCUDAERR(cudaStreamSynchronize(stream));
+    }
+    return true;
+}
+
+struct VenusConstTreeHostCacheEntry {
+    std::shared_ptr<uint8_t> data;
+    uint64_t size = 0;
+    uint64_t last_use = 0;
+};
+
+struct VenusConstTreeHostCacheStats {
+    uint64_t calls = 0;
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+    uint64_t skipped_filter = 0;
+    uint64_t skipped_min_uses = 0;
+    uint64_t evictions = 0;
+    uint64_t alloc_failures = 0;
+    uint64_t load_failures = 0;
+    uint64_t bytes_read = 0;
+    uint64_t bytes_uploaded = 0;
+};
+
+static bool venus_const_tree_host_cache_stats_enabled()
+{
+    static int enabled = []() {
+        const char *value = std::getenv("VENUS_CONST_TREE_HOST_CACHE_STATS");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled != 0;
+}
+
+static uint64_t venus_const_tree_host_cache_capacity()
+{
+    static uint64_t capacity = []() -> uint64_t {
+        const char *value = std::getenv("VENUS_CONST_TREE_HOST_CACHE_MB");
+        if (value == nullptr || value[0] == '\0') return 0ULL;
+        char *end = nullptr;
+        unsigned long long mb = std::strtoull(value, &end, 10);
+        if (end == value || *end != '\0') return 0ULL;
+        return static_cast<uint64_t>(mb) * 1024ULL * 1024ULL;
+    }();
+    return capacity;
+}
+
+static uint64_t venus_const_tree_host_cache_min_uses()
+{
+    static uint64_t min_uses = []() -> uint64_t {
+        const char *value = std::getenv("VENUS_CONST_TREE_HOST_CACHE_MIN_USES");
+        if (value == nullptr || value[0] == '\0') return 1ULL;
+        char *end = nullptr;
+        unsigned long long parsed = std::strtoull(value, &end, 10);
+        if (end == value || *end != '\0' || parsed == 0) return 1ULL;
+        return static_cast<uint64_t>(parsed);
+    }();
+    return min_uses;
+}
+
+static bool venus_const_tree_host_cache_enabled_for_size(uint64_t total_size)
+{
+    return venus_const_tree_host_cache_capacity() >= total_size && total_size >= 128ULL * 1024ULL * 1024ULL;
+}
+
+static bool venus_const_tree_host_cache_path_allowed(const char *bufferPath)
+{
+    const char *filters = std::getenv("VENUS_CONST_TREE_HOST_CACHE_FILTER");
+    if (filters == nullptr || filters[0] == '\0') return true;
+
+    std::string path(bufferPath);
+    const char *token = filters;
+    while (*token != '\0') {
+        const char *next = token;
+        while (*next != '\0' && *next != ',') ++next;
+        if (next > token && path.find(std::string(token, static_cast<size_t>(next - token))) != std::string::npos) {
+            return true;
+        }
+        token = (*next == ',') ? next + 1 : next;
+    }
+    return false;
+}
+
+static std::mutex &venus_const_tree_host_cache_mutex()
+{
+    static auto *mutex = new std::mutex();
+    return *mutex;
+}
+
+static std::unordered_map<std::string, VenusConstTreeHostCacheEntry> &venus_const_tree_host_cache()
+{
+    static auto *cache = new std::unordered_map<std::string, VenusConstTreeHostCacheEntry>();
+    return *cache;
+}
+
+static std::unordered_map<std::string, uint64_t> &venus_const_tree_host_cache_seen()
+{
+    static auto *seen = new std::unordered_map<std::string, uint64_t>();
+    return *seen;
+}
+
+static uint64_t &venus_const_tree_host_cache_bytes()
+{
+    static auto *bytes = new uint64_t(0);
+    return *bytes;
+}
+
+static uint64_t &venus_const_tree_host_cache_clock()
+{
+    static auto *clock = new uint64_t(0);
+    return *clock;
+}
+
+static VenusConstTreeHostCacheStats &venus_const_tree_host_cache_stats()
+{
+    static auto *stats = new VenusConstTreeHostCacheStats();
+    return *stats;
+}
+
+static void venus_const_tree_host_cache_print_stats()
+{
+    std::lock_guard<std::mutex> lock(venus_const_tree_host_cache_mutex());
+    const VenusConstTreeHostCacheStats &stats = venus_const_tree_host_cache_stats();
+    std::fprintf(stderr,
+        "[VENUS_CONST_TREE_HOST_CACHE] calls=%lu hits=%lu misses=%lu skipped_filter=%lu skipped_min_uses=%lu "
+        "evictions=%lu alloc_failures=%lu load_failures=%lu read_mib=%.1f uploaded_mib=%.1f resident_mib=%.1f capacity_mib=%.1f entries=%zu min_uses=%lu\n",
+        stats.calls,
+        stats.hits,
+        stats.misses,
+        stats.skipped_filter,
+        stats.skipped_min_uses,
+        stats.evictions,
+        stats.alloc_failures,
+        stats.load_failures,
+        stats.bytes_read / 1048576.0,
+        stats.bytes_uploaded / 1048576.0,
+        venus_const_tree_host_cache_bytes() / 1048576.0,
+        venus_const_tree_host_cache_capacity() / 1048576.0,
+        venus_const_tree_host_cache().size(),
+        venus_const_tree_host_cache_min_uses());
+}
+
+static void venus_const_tree_host_cache_register_stats_printer()
+{
+    static bool registered = []() {
+        if (venus_const_tree_host_cache_stats_enabled()) {
+            std::atexit(venus_const_tree_host_cache_print_stats);
+        }
+        return true;
+    }();
+    (void)registered;
+}
+
+static bool copy_const_tree_from_host_cache_if_enabled(
+    DeviceCommitBuffers* d_buffers,
+    const char* bufferPath,
+    void* dst,
+    uint64_t total_size,
+    uint64_t streamId)
+{
+    if (!venus_const_tree_host_cache_enabled_for_size(total_size) || bufferPath == nullptr) return false;
+
+    venus_const_tree_host_cache_register_stats_printer();
+
+    uint32_t gpuId = d_buffers->streamsData[streamId].gpuId;
+    cudaStream_t stream = d_buffers->streamsData[streamId].stream;
+    std::string key = std::string(bufferPath) + "#" + std::to_string(total_size);
+    std::shared_ptr<uint8_t> data;
+    const bool collect_stats = venus_const_tree_host_cache_stats_enabled();
+
+    {
+        std::lock_guard<std::mutex> lock(venus_const_tree_host_cache_mutex());
+        VenusConstTreeHostCacheStats *stats = collect_stats ? &venus_const_tree_host_cache_stats() : nullptr;
+        if (stats != nullptr) stats->calls++;
+
+        if (!venus_const_tree_host_cache_path_allowed(bufferPath)) {
+            if (stats != nullptr) stats->skipped_filter++;
+            return false;
+        }
+
+        auto &seen = venus_const_tree_host_cache_seen();
+        uint64_t seen_count = ++seen[key];
+        if (seen_count < venus_const_tree_host_cache_min_uses()) {
+            if (stats != nullptr) stats->skipped_min_uses++;
+            return false;
+        }
+
+        auto &cache = venus_const_tree_host_cache();
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+            uint64_t capacity = venus_const_tree_host_cache_capacity();
+            while (venus_const_tree_host_cache_bytes() + total_size > capacity && !cache.empty()) {
+                auto evict_it = cache.begin();
+                uint64_t oldest = std::numeric_limits<uint64_t>::max();
+                for (auto entry_it = cache.begin(); entry_it != cache.end(); ++entry_it) {
+                    if (entry_it->second.last_use < oldest) {
+                        oldest = entry_it->second.last_use;
+                        evict_it = entry_it;
+                    }
+                }
+                venus_const_tree_host_cache_bytes() -= evict_it->second.size;
+                cache.erase(evict_it);
+                if (stats != nullptr) stats->evictions++;
+            }
+
+            uint8_t *raw_data = nullptr;
+            cudaError_t err = cudaHostAlloc(&raw_data, total_size, cudaHostAllocPortable);
+            if (err != cudaSuccess) {
+                cudaGetLastError();
+                if (stats != nullptr) stats->alloc_failures++;
+                return false;
+            }
+
+            if (!loadFileParallel(raw_data, bufferPath, total_size, false, 0)) {
+                CHECKCUDAERR(cudaFreeHost(raw_data));
+                if (stats != nullptr) stats->load_failures++;
+                return false;
+            }
+
+            data = std::shared_ptr<uint8_t>(raw_data, [](uint8_t *ptr) {
+                if (ptr != nullptr) CHECKCUDAERR(cudaFreeHost(ptr));
+            });
+
+            VenusConstTreeHostCacheEntry entry;
+            entry.data = data;
+            entry.size = total_size;
+            entry.last_use = ++venus_const_tree_host_cache_clock();
+            it = cache.emplace(key, entry).first;
+            venus_const_tree_host_cache_bytes() += total_size;
+            if (stats != nullptr) {
+                stats->bytes_read += total_size;
+                stats->misses++;
+            }
+        } else {
+            it->second.last_use = ++venus_const_tree_host_cache_clock();
+            data = it->second.data;
+            if (stats != nullptr) stats->hits++;
+        }
+    }
+
+    cudaSetDevice(gpuId);
+    CHECKCUDAERR(cudaMemcpyAsync(dst, data.get(), total_size, cudaMemcpyHostToDevice, stream));
+    CHECKCUDAERR(cudaStreamSynchronize(stream));
+
+    if (collect_stats) {
+        std::lock_guard<std::mutex> lock(venus_const_tree_host_cache_mutex());
+        venus_const_tree_host_cache_stats().bytes_uploaded += total_size;
     }
     return true;
 }
@@ -198,6 +448,8 @@ void load_and_copy_to_device_in_chunks(
     cudaSetDevice(gpuId);
 
     uint32_t gpuLocalId = d_buffers->gpus_g2l[gpuId];
+    if (copy_const_tree_from_host_cache_if_enabled(d_buffers, bufferPath, dst, total_size, streamId)) return;
+
     std::lock_guard<std::mutex> lock(d_buffers->mutex_pinned[gpuLocalId]);
     
     uint64_t block_size = d_buffers->pinned_size;
