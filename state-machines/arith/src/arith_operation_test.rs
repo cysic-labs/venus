@@ -287,6 +287,134 @@ impl ArithOperationTest {
     }
 }
 
+fn chunk_equations_can_be_satisfied(aop: &ArithOperation) -> bool {
+    let chunks = aop.calculate_chunks();
+    let mut carry = [0i64; 7];
+
+    for i in 0..7 {
+        let carry_in = if i > 0 { carry[i - 1] } else { 0 };
+        let chunk_value = chunks[i] + carry_in;
+        if chunk_value % 0x10000 != 0 {
+            return false;
+        }
+        carry[i] = chunk_value / 0x10000;
+    }
+
+    chunks[7] + carry[6] == 0
+}
+
+fn signed_remainder_sign_guard_holds(aop: &ArithOperation) -> bool {
+    let zero_remainder_candidate = aop.div && aop.np && !aop.nr;
+    let sum_all_ds = aop.d.iter().sum::<u64>();
+
+    !zero_remainder_candidate || sum_all_ds == 0
+}
+
+#[test]
+fn forged_signed_rem_positive_remainder_needs_zero_remainder_guard() {
+    let mut aop = ArithOperation::new();
+    aop.calculate(ZiskOp::Rem.code(), (-7i64) as u64, 3);
+
+    assert!(aop.np);
+    assert!(aop.nr);
+    assert!(signed_remainder_sign_guard_holds(&aop));
+
+    aop.d = [1, 0, 0, 0];
+    aop.nr = false;
+    aop.range_cd = 7;
+
+    let row = ArithTableHelpers::direct_get_row(
+        aop.op,
+        aop.na,
+        aop.nb,
+        aop.np,
+        aop.nr,
+        aop.sext,
+        aop.div_by_zero,
+        aop.div_overflow,
+    );
+    assert!(row < arith_table_data::ROWS);
+    assert!(chunk_equations_can_be_satisfied(&aop));
+    assert!(!signed_remainder_sign_guard_holds(&aop));
+}
+
+#[test]
+fn forged_signed_remw_positive_remainder_needs_zero_remainder_guard() {
+    let mut aop = ArithOperation::new();
+    aop.calculate(ZiskOp::RemW.code(), 0xFFFF_FFF9, 3);
+
+    assert!(aop.np);
+    assert!(aop.nr);
+    assert!(aop.sext);
+    assert!(signed_remainder_sign_guard_holds(&aop));
+
+    aop.d = [1, 0, 0, 0];
+    aop.nr = false;
+    aop.sext = false;
+    aop.range_cd = 15;
+
+    let row = ArithTableHelpers::direct_get_row(
+        aop.op,
+        aop.na,
+        aop.nb,
+        aop.np,
+        aop.nr,
+        aop.sext,
+        aop.div_by_zero,
+        aop.div_overflow,
+    );
+    assert!(row < arith_table_data::ROWS);
+    assert!(chunk_equations_can_be_satisfied(&aop));
+    assert!(!signed_remainder_sign_guard_holds(&aop));
+}
+
+#[test]
+fn signed_rem_negative_dividend_zero_remainder_still_allowed() {
+    let mut aop = ArithOperation::new();
+    aop.calculate(ZiskOp::Rem.code(), (-6i64) as u64, 3);
+
+    assert!(aop.np);
+    assert!(!aop.nr);
+    assert_eq!(aop.d, [0, 0, 0, 0]);
+    assert!(signed_remainder_sign_guard_holds(&aop));
+
+    let row = ArithTableHelpers::direct_get_row(
+        aop.op,
+        aop.na,
+        aop.nb,
+        aop.np,
+        aop.nr,
+        aop.sext,
+        aop.div_by_zero,
+        aop.div_overflow,
+    );
+    assert!(row < arith_table_data::ROWS);
+}
+
+#[test]
+fn signed_remw_negative_dividend_zero_remainder_still_allowed() {
+    let mut aop = ArithOperation::new();
+    aop.calculate(ZiskOp::RemW.code(), 0xFFFF_FFFA, 3);
+
+    assert!(aop.np);
+    assert!(!aop.nr);
+    assert!(!aop.sext);
+    assert_eq!(aop.d, [0, 0, 0, 0]);
+    assert!(signed_remainder_sign_guard_holds(&aop));
+
+    let row = ArithTableHelpers::direct_get_row(
+        aop.op,
+        aop.na,
+        aop.nb,
+        aop.np,
+        aop.nr,
+        aop.sext,
+        aop.div_by_zero,
+        aop.div_overflow,
+    );
+    assert!(row < arith_table_data::ROWS);
+}
+
 #[test]
 fn test() {
     let mut test = ArithOperationTest::new();

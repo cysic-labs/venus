@@ -101,6 +101,15 @@ airtemplate Arith(const int N = 2**18) {
     div_overflow * div_by_zero === 0;
     div_by_zero * div_overflow === 0;
 
+    expr sum_all_ds = 0;
+    for (int i = 0; i < length(d); ++i) {
+        sum_all_ds = sum_all_ds + d[i];
+    }
+
+    // In normal signed division, a negative dividend can have a non-negative
+    // remainder only when the remainder is exactly zero.
+    div * np * (1 - nr) * sum_all_ds === 0;
+
     const expr eq[CHUNKS_OP];
 
     // NOTE: Equations with m32 for multiplication not exists, because mul m32 it's an unsigned operation.

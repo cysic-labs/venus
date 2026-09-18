@@ -48,6 +48,15 @@ airtemplate ArithMul64(const int N = 2**18, const int dual_result = 0) {
         sum_all_bs = sum_all_bs + b[i];                 // all b are values of 16 bits (verified by range_check)
     }
 
+    expr sum_all_ds = 0;
+    for (int i = 0; i < length(d); ++i) {
+        sum_all_ds = sum_all_ds + d[i];
+    }
+
+    // In normal signed division, a negative dividend can have a non-negative
+    // remainder only when the remainder is exactly zero.
+    div * np * (1 - nr) * sum_all_ds === 0;
+
     // b != 0 <==> sum_all_bs != 0
     col witness bits(1) inv_sum_all_bs;
 
