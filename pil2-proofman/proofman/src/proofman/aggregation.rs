@@ -17,6 +17,7 @@ use proofman_util::{timer_start_debug, timer_stop_and_log_debug, VadcopFinalProo
 use proofman_verifier::verify_recursive2;
 
 use crate::challenge_accumulation::{aggregate_contributions, calculate_global_challenge};
+use crate::runtime_reset::RECURSIVE_WORKER_STOP_ID;
 use crate::{
     add_publics_circom, gen_recursive_proof_size, gen_witness_aggregation, generate_recursive_proof,
     generate_vadcop_final_compressed_proof, generate_vadcop_final_proof, get_accumulated_challenge,
@@ -213,7 +214,7 @@ where
                 self.outer_agg_proofs_finished.store(true, Ordering::SeqCst);
                 clear_proof_done_callback_c();
                 for _ in 0..self.n_streams {
-                    self.recursive_tx.send((u64::MAX - 1, "Recursive2".to_string())).unwrap();
+                    self.recursive_tx.send((RECURSIVE_WORKER_STOP_ID, String::new())).unwrap();
                 }
 
                 let handles = self.handle_recursives.lock().unwrap().drain(..).collect::<Vec<_>>();
@@ -332,7 +333,7 @@ where
             let output_dir_path = output_dir_path.to_path_buf();
             let handle_recursive = std::thread::spawn(move || {
                 while let Ok((id, _)) = recursive_rx_clone.recv() {
-                    if id == u64::MAX - 1 {
+                    if id == RECURSIVE_WORKER_STOP_ID {
                         return;
                     }
 
@@ -564,7 +565,7 @@ where
             let handle_recursive = std::thread::spawn(move || {
                 while let Ok((id, _)) = recursive_rx_clone.recv() {
                     recursive2_done_clone.increment();
-                    if id == u64::MAX - 1 {
+                    if id == RECURSIVE_WORKER_STOP_ID {
                         return;
                     }
 

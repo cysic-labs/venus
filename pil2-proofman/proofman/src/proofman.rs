@@ -62,6 +62,10 @@ use crate::check_tree_paths;
 use crate::Counter;
 use crate::AggProofs;
 use crate::aggregate_worker_proofs;
+use crate::runtime_reset::{
+    cleanup_mutex_lock, cleanup_write_lock, drain_receiver, reset_owned_runtime, restore_thread_permits,
+    OwnedWorkerHandles, CONTRIBUTION_WORKER_STOP_ID, RECURSIVE_WORKER_STOP_ID,
+};
 use crate::const_tree_prewarm::{
     collect_setup_const_tree_host_cache_prewarm_candidates, dump_dynamic_const_tree_host_cache_prewarm_candidates,
     start_setup_const_tree_host_cache_prewarm,
@@ -277,6 +281,14 @@ pub enum ProvePhase {
     Full,
 }
 
+impl ProvePhase {
+    /// Phases that compute contributions start a new run; `Internal` continues the run whose
+    /// contributions were computed before.
+    fn starts_new_run(&self) -> bool {
+        matches!(self, ProvePhase::Contributions | ProvePhase::Full)
+    }
+}
+
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 pub struct ContributionsInfo {
     pub challenge: Vec<u64>,
@@ -309,101 +321,107 @@ impl<F: PrimeField64> Drop for ProofMan<F> {
 }
 
 impl<F: PrimeField64> ProofMan<F> {
+    /// Tears down the runtime of the current run and leaves the cancellation token cancelled.
     pub fn reset(&self) -> ProofmanResult<()> {
-        self.wcm.reset();
+        let workers = OwnedWorkerHandles {
+            recursive: cleanup_mutex_lock(&self.handle_recursives).drain(..).collect(),
+            contributions: cleanup_mutex_lock(&self.handle_contributions).drain(..).collect(),
+            outer: cleanup_mutex_lock(&self.outer_aggregations_handle).take(),
+        };
 
-        let process_instances = self.pctx.dctx_get_process_instances();
-        for instance_id in &process_instances {
-            let mut proof = self.proofs[*instance_id].write().unwrap();
-            *proof = None;
-        }
+        reset_owned_runtime(
+            &self.cancellation_info,
+            &self.recursive_tx,
+            &self.contributions_tx,
+            &self.outer_agg_proofs_finished,
+            workers,
+            clear_proof_done_callback_c,
+            || {
+                self.pctx.set_witness_tx(None);
+                self.pctx.set_witness_tx_priority(None);
+                self.pctx.set_proof_tx(None);
+            },
+            || get_stream_proofs_c(self.pctx.get_device_buffers_ptr()),
+            || {
+                drain_receiver(&self.rx_threads);
+                drain_receiver(&self.witness_rx);
+                drain_receiver(&self.witness_rx_priority);
+                drain_receiver(&self.contributions_rx);
+                drain_receiver(&self.recursive_rx);
+                drain_receiver(&self.proofs_rx);
+                drain_receiver(&self.compressor_witness_rx);
+                drain_receiver(&self.rec1_witness_rx);
+                drain_receiver(&self.rec2_witness_rx);
+            },
+            || {
+                self.wcm.reset();
 
-        for proof_id in self.compressor_proof_ids.lock().unwrap().drain(..) {
-            let mut proof = self.compressor_proofs[proof_id].write().unwrap();
-            *proof = None;
-        }
+                let process_instances = self.pctx.dctx_get_process_instances();
+                for instance_id in &process_instances {
+                    *cleanup_write_lock(&self.proofs[*instance_id]) = None;
+                }
 
-        for proof_id in self.recursive1_proof_ids.lock().unwrap().drain(..) {
-            let mut proof = self.recursive1_proofs[proof_id].write().unwrap();
-            *proof = None;
-        }
+                let compressor_proof_ids = cleanup_mutex_lock(&self.compressor_proof_ids).drain(..).collect::<Vec<_>>();
+                for proof_id in compressor_proof_ids {
+                    *cleanup_write_lock(&self.compressor_proofs[proof_id]) = None;
+                }
 
-        for proof_lock in self.recursive2_proofs.iter() {
-            let mut proofs = proof_lock.write().unwrap();
-            proofs.clear();
-        }
+                let recursive1_proof_ids = cleanup_mutex_lock(&self.recursive1_proof_ids).drain(..).collect::<Vec<_>>();
+                for proof_id in recursive1_proof_ids {
+                    *cleanup_write_lock(&self.recursive1_proofs[proof_id]) = None;
+                }
 
-        let mut ongoing_proofs = self.recursive2_proofs_ongoing.write().unwrap();
-        ongoing_proofs.clear();
+                for proof_lock in self.recursive2_proofs.iter() {
+                    cleanup_write_lock(proof_lock).clear();
+                }
+                cleanup_write_lock(&self.recursive2_proofs_ongoing).clear();
 
-        clear_proof_done_callback_c();
-        self.pctx.set_witness_tx(None);
-        self.pctx.set_witness_tx_priority(None);
-        self.pctx.set_proof_tx(None);
+                cleanup_write_lock(&self.worker_contributions).clear();
+                for inner_vec in cleanup_write_lock(&self.received_agg_proofs).iter_mut() {
+                    inner_vec.clear();
+                }
 
-        let recursive_stop_workers = self.handle_recursives.lock().unwrap().len();
-        for _ in 0..recursive_stop_workers {
-            self.recursive_tx.send((u64::MAX - 1, "Recursive2".to_string())).unwrap();
-        }
+                self.total_outer_agg_proofs.reset();
+                reset_device_streams_c(self.pctx.get_device_buffers_ptr());
 
-        let handles = self.handle_recursives.lock().unwrap().drain(..).collect::<Vec<_>>();
-        for handle in handles {
-            handle.join().unwrap();
-        }
+                let mut state_cleanup_errors = Vec::new();
 
-        for _ in 0..self.n_streams {
-            self.contributions_tx.send(usize::MAX).ok();
-        }
+                if let Err(error) = restore_thread_permits(&self.tx_threads, self.max_num_threads) {
+                    state_cleanup_errors.push(error.to_string());
+                }
 
-        let handles = self.handle_contributions.lock().unwrap().drain(..).collect::<Vec<_>>();
-        for handle in handles {
-            handle.join().unwrap();
-        }
+                if let Err(error) = self.memory_handler.release_queue_to_pool() {
+                    state_cleanup_errors.push(format!("failed to release memory queue to pool: {error}"));
+                }
 
-        if self.outer_aggregations_handle.lock().unwrap().is_some() {
-            self.outer_agg_proofs_finished.store(true, Ordering::SeqCst);
+                let n_instances = self.pctx.dctx_get_instances().len();
+                for instance_id in 0..n_instances {
+                    let (is_shared_buffer, witness_buffer) = self.pctx.free_instance(instance_id);
+                    if is_shared_buffer {
+                        if let Err(error) = self.memory_handler.release_buffer(witness_buffer) {
+                            state_cleanup_errors
+                                .push(format!("failed to release witness buffer for instance {instance_id}: {error}"));
+                        }
+                    }
+                }
 
-            let mut outer_aggregations_handle = self.outer_aggregations_handle.lock().unwrap();
-            if let Some(handle) = outer_aggregations_handle.take() {
-                handle.join().unwrap();
-            }
-        }
+                if let Err(error) = self.memory_handler.reset() {
+                    state_cleanup_errors.push(format!("failed to reset memory handler: {error}"));
+                }
 
-        // Drain all relevant channels to ensure they are empty
-        while self.rx_threads.try_recv().is_ok() {}
-        while self.witness_rx.try_recv().is_ok() {}
-        while self.witness_rx_priority.try_recv().is_ok() {}
-        while self.contributions_rx.try_recv().is_ok() {}
-        while self.recursive_rx.try_recv().is_ok() {}
-        while self.proofs_rx.try_recv().is_ok() {}
-        while self.compressor_witness_rx.try_recv().is_ok() {}
-        while self.rec1_witness_rx.try_recv().is_ok() {}
-        while self.rec2_witness_rx.try_recv().is_ok() {}
+                if state_cleanup_errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(ProofmanError::ProofmanError(state_cleanup_errors.join("; ")))
+                }
+            },
+        )
+    }
 
-        self.worker_contributions.write().unwrap().clear();
-        reset_device_streams_c(self.pctx.get_device_buffers_ptr());
-
-        for inner_vec in self.received_agg_proofs.write().unwrap().iter_mut() {
-            inner_vec.clear();
-        }
-
-        for _ in 0..self.max_num_threads {
-            self.tx_threads.send(()).unwrap();
-        }
-
-        self.total_outer_agg_proofs.reset();
-
-        self.memory_handler.release_queue_to_pool()?;
-        let n_instances = self.pctx.dctx_get_instances().len();
-        for instance_id in 0..n_instances {
-            let (is_shared_buffer, witness_buffer) = self.pctx.free_instance(instance_id);
-            if is_shared_buffer {
-                self.memory_handler.release_buffer(witness_buffer)?;
-            }
-        }
-
-        self.memory_handler.reset()?;
-
+    /// Tears down any previous run and re-arms cancellation for a new one.
+    fn prepare_new_run(&self) -> ProofmanResult<()> {
+        self.reset()?;
+        cleanup_write_lock(&self.cancellation_info).reset();
         Ok(())
     }
 }
@@ -609,8 +627,7 @@ where
     pub fn execute_(&self, output_path: Option<PathBuf>) -> ProofmanResult<PlanningInfo> {
         self.set_partition(1, vec![0], 0)?;
 
-        self.cancellation_info.write().unwrap().reset();
-        self.reset()?;
+        self.prepare_new_run()?;
         self.pctx.dctx_reset();
 
         let _ = self.exec(true)?;
@@ -870,8 +887,7 @@ where
     pub fn compute_witness_(&self, options: ProofOptions) -> ProofmanResult<()> {
         self.set_partition(1, vec![0], 0)?;
 
-        self.cancellation_info.write().unwrap().reset();
-        self.reset()?;
+        self.prepare_new_run()?;
         self.pctx.dctx_reset();
 
         let memory_handler = Arc::new(MemoryHandler::new(
@@ -984,8 +1000,7 @@ where
         self.set_partition(1, vec![0], 0)?;
 
         self.pctx.set_debug_info(debug_info);
-        self.cancellation_info.write().unwrap().reset();
-        self.reset()?;
+        self.prepare_new_run()?;
         self.pctx.dctx_reset();
 
         self.exec(true)?;
@@ -1114,8 +1129,7 @@ where
         self.set_partition(1, vec![0], 0)?;
 
         self.pctx.set_debug_info(debug_info);
-        self.cancellation_info.write().unwrap().reset();
-        self.reset()?;
+        self.prepare_new_run()?;
         self.pctx.dctx_reset();
 
         let _ = self.exec(true)?;
@@ -1155,7 +1169,7 @@ where
                 }
                 match contributions_rx_clone.recv_timeout(std::time::Duration::from_micros(100)) {
                     Ok(instance_id) => {
-                        if instance_id == usize::MAX {
+                        if instance_id == CONTRIBUTION_WORKER_STOP_ID {
                             break;
                         }
 
@@ -1236,7 +1250,7 @@ where
         self.pctx.set_proof_tx(None);
 
         for _ in 0..self.n_streams {
-            self.contributions_tx.send(usize::MAX).ok();
+            self.contributions_tx.send(CONTRIBUTION_WORKER_STOP_ID).ok();
         }
 
         let handles = self.handle_contributions.lock().unwrap().drain(..).collect::<Vec<_>>();
@@ -1723,19 +1737,21 @@ where
             fs::create_dir_all(&output_dir_path)?;
         }
 
-        let _cancellation_thread = CancellationThread::new(self.cancellation_info.clone(), self.mpi_ctx.clone());
-
-        let all_partial_contributions_u64 = if phase == ProvePhase::Contributions || phase == ProvePhase::Full {
+        let starts_new_run = phase.starts_new_run();
+        if starts_new_run {
             if !self.pctx.is_setup_partition_init() {
                 return Err(ProofmanError::InvalidParameters(
                     "Setup partition must be initialized before generating contributions".into(),
                 ));
             }
 
-            self.cancellation_info.write().unwrap().reset();
-            self.reset()?;
+            self.prepare_new_run()?;
             self.pctx.dctx_reset();
+        }
 
+        let _cancellation_thread = CancellationThread::new(self.cancellation_info.clone(), self.mpi_ctx.clone());
+
+        let all_partial_contributions_u64 = if starts_new_run {
             if !options.minimal_memory && cfg!(feature = "gpu") {
                 self.pctx.set_witness_tx(Some(self.witness_tx.clone()));
                 self.pctx.set_witness_tx_priority(Some(self.witness_tx_priority.clone()));
@@ -1767,7 +1783,7 @@ where
                     }
                     match contributions_rx_clone.recv_timeout(std::time::Duration::from_micros(100)) {
                         Ok(instance_id) => {
-                            if instance_id == usize::MAX {
+                            if instance_id == CONTRIBUTION_WORKER_STOP_ID {
                                 break;
                             }
 
@@ -1921,7 +1937,7 @@ where
             self.pctx.set_proof_tx(None);
 
             for _ in 0..contribution_workers {
-                self.contributions_tx.send(usize::MAX).ok();
+                self.contributions_tx.send(CONTRIBUTION_WORKER_STOP_ID).ok();
             }
 
             let handles = self.handle_contributions.lock().unwrap().drain(..).collect::<Vec<_>>();
@@ -2090,7 +2106,7 @@ where
             let output_dir_path = output_dir_path.clone();
             let handle_recursive = std::thread::spawn(move || {
                 while let Ok((id, proof_type)) = recursive_rx_clone.recv() {
-                    if id == u64::MAX - 1 {
+                    if id == RECURSIVE_WORKER_STOP_ID {
                         return;
                     }
                     if cancellation_info_clone.read().unwrap().token.is_cancelled() {
@@ -2538,7 +2554,7 @@ where
         proofs_finished.store(true, Ordering::Relaxed);
         clear_proof_done_callback_c();
         for _ in 0..recursive_witness_workers {
-            self.recursive_tx.send((u64::MAX - 1, "Basic".to_string())).unwrap();
+            self.recursive_tx.send((RECURSIVE_WORKER_STOP_ID, String::new())).unwrap();
         }
 
         let handles = self.handle_recursives.lock().unwrap().drain(..).collect::<Vec<_>>();
