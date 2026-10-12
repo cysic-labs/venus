@@ -506,10 +506,23 @@ void alloc_device_large_buffers(void *d_buffers_, uint64_t auxTraceArea, uint64_
 uint64_t gen_device_streams(void *d_buffers_, uint64_t n_streams, uint64_t n_recursive_streams, uint64_t maxSizeProverBuffer, uint64_t maxSizeProverBufferAggregation, uint64_t maxProofSize, uint64_t transcriptArity) {
     
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
-    d_buffers->n_streams = n_streams;
-    d_buffers->n_recursive_streams = n_recursive_streams;
-    d_buffers->n_total_streams = d_buffers->n_gpus * (d_buffers->n_streams + d_buffers->n_recursive_streams);
-    
+    if (d_buffers == nullptr) {
+        throw std::runtime_error("gen_device_streams: null device buffers");
+    }
+    // Stream ids are 32-bit. Bounding the per-GPU stream count by 2^32 also keeps its product with
+    // the 32-bit GPU count inside 64 bits.
+    constexpr uint64_t maxStreams = std::numeric_limits<uint32_t>::max();
+    if (n_streams == 0 || n_streams > maxStreams || n_recursive_streams > maxStreams - n_streams) {
+        throw std::runtime_error("gen_device_streams: unsupported stream count");
+    }
+    uint64_t totalStreams = static_cast<uint64_t>(d_buffers->n_gpus) * (n_streams + n_recursive_streams);
+    if (totalStreams == 0 || totalStreams > maxStreams) {
+        throw std::runtime_error("gen_device_streams: unsupported total stream count");
+    }
+    d_buffers->n_streams = static_cast<uint32_t>(n_streams);
+    d_buffers->n_recursive_streams = static_cast<uint32_t>(n_recursive_streams);
+    d_buffers->n_total_streams = static_cast<uint32_t>(totalStreams);
+
     // Allocate d_aux_trace arrays now that we know stream counts
     for (uint32_t i = 0; i < d_buffers->n_gpus; i++) {
         d_buffers->d_aux_trace[i] = (gl64_t **)malloc(n_streams * sizeof(gl64_t*));
