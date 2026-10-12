@@ -959,15 +959,18 @@ void get_stream_proofs_non_blocking(void *d_buffers_){
 
 void get_stream_id_proof(void *d_buffers_, uint64_t streamId) {
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
-    cudaSetDevice(d_buffers->streamsData[streamId].gpuId);
-    CHECKCUDAERR(cudaStreamSynchronize(d_buffers->streamsData[streamId].stream));
-    if(d_buffers->streamsData[streamId].root != nullptr) {
-            get_commit_root(d_buffers, streamId);
-        } else if (d_buffers->streamsData[streamId].proofBuffer != nullptr) {
-            get_proof(d_buffers, streamId);
-        }
+    if (d_buffers == nullptr || streamId >= d_buffers->n_total_streams) return;
+    StreamData &streamData = d_buffers->streamsData[streamId];
+    std::lock_guard<std::mutex> lock(streamData.mutex_stream_selection);
+    cudaSetDevice(streamData.gpuId);
+    CHECKCUDAERR(cudaStreamSynchronize(streamData.stream));
+    if (streamData.root != nullptr) {
+        get_commit_root(d_buffers, streamId);
+    } else if (streamData.proofBuffer != nullptr) {
+        get_proof(d_buffers, streamId);
+    }
 
-    d_buffers->streamsData[streamId].reset(false); 
+    streamData.reset(false);
 }
 
 uint32_t direct_registered_h2d_done(void *d_buffers_, uint64_t streamId) {
