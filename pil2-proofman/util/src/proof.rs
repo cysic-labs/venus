@@ -90,7 +90,14 @@ impl VadcopFinalProof {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        load_bincode_proof(path.as_ref(), "proof")
+        let proof: Self = load_bincode_proof(path.as_ref(), "proof")?;
+        // get_publics and get_proof read both byte vectors as u64 words.
+        for (label, bytes) in [("public values", &proof.public_values), ("proof", &proof.proof)] {
+            if bytes.len() % std::mem::size_of::<u64>() != 0 {
+                return Err(format!("{label} length is not a multiple of 8 bytes: {}", bytes.len()).into());
+            }
+        }
+        Ok(proof)
     }
 
     pub fn proof_with_publics(&self) -> Vec<u8> {
@@ -127,5 +134,20 @@ impl VadcopFinalProof {
 
     pub fn get_proof_bytes(&self) -> &[u8] {
         &self.proof
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_rejects_partial_proof_words() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("vadcop-final-proof-{}-{nonce}.bin", std::process::id()));
+        VadcopFinalProof::new(vec![0u8; 7], vec![0u8; 8], false).save(&path).unwrap();
+        let err = VadcopFinalProof::load(&path).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.to_string().contains("proof length is not a multiple of 8 bytes"), "{err}");
     }
 }

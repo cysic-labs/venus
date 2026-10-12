@@ -4,11 +4,12 @@
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Serialize};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use zisk_core::MAX_INPUT_SIZE;
 
+use super::read_padded_blob;
 use crate::{io::ZiskIO, read_file_limited};
 
 /// A file-based implementation of ZiskStdin that reads from a file.
@@ -37,45 +38,31 @@ impl ZiskFileStdin {
 
     fn read_raw_data(&self) -> std::io::Result<Vec<u8>> {
         let mut reader = self.reader.lock().unwrap();
-
-        let mut len_bytes = [0u8; 8];
-        reader.read_exact(&mut len_bytes)?;
-        let len = usize::from_le_bytes(len_bytes);
-
-        let mut data = vec![0u8; len];
-        reader.read_exact(&mut data)?;
-
-        let total_len = 8 + len;
-        let padding = (8 - (total_len % 8)) % 8;
-        if padding > 0 {
-            let mut padding_bytes = vec![0u8; padding];
-            reader.read_exact(&mut padding_bytes)?;
-        }
-
-        Ok(data)
+        let available =
+            reader.get_ref().metadata()?.len().saturating_sub(reader.stream_position()?);
+        read_padded_blob(&mut *reader, available)
     }
 }
 
 impl ZiskIO for ZiskFileStdin {
-    fn read_raw_bytes(&self) -> Vec<u8> {
+    fn read_raw_bytes(&self) -> Result<Vec<u8>> {
         // Raw inputs are loaded into the input memory region, so a larger file can never be used.
-        read_file_limited(&self.path, MAX_INPUT_SIZE).expect("Could not read inputs file")
+        read_file_limited(&self.path, MAX_INPUT_SIZE)
+            .map_err(|e| anyhow::anyhow!("Could not read inputs file: {}", e))
     }
 
-    fn read_bytes(&self) -> Vec<u8> {
-        self.read_raw_data().expect("Failed to read into buffer")
+    fn read_bytes(&self) -> Result<Vec<u8>> {
+        self.read_raw_data().map_err(|e| anyhow::anyhow!("Failed to read into buffer: {}", e))
     }
 
-    fn read_slice(&self, slice: &mut [u8]) {
-        let data = self.read_raw_data().expect("Failed to read slice");
-        assert_eq!(
-            slice.len(),
-            data.len(),
-            "Slice length mismatch: expected {}, got {}",
-            data.len(),
-            slice.len()
-        );
+    fn read_slice(&self, slice: &mut [u8]) -> Result<()> {
+        let data =
+            self.read_raw_data().map_err(|e| anyhow::anyhow!("Failed to read slice: {}", e))?;
+        if slice.len() != data.len() {
+            anyhow::bail!("Slice length mismatch: expected {}, got {}", data.len(), slice.len());
+        }
         slice.copy_from_slice(&data);
+        Ok(())
     }
 
     fn read<T: DeserializeOwned>(&self) -> Result<T> {

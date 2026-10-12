@@ -5,13 +5,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 pub trait ZiskIO: Send + Sync {
-    fn read_raw_bytes(&self) -> Vec<u8>;
+    fn read_raw_bytes(&self) -> Result<Vec<u8>>;
 
     /// Read a value from the buffer.
-    fn read_bytes(&self) -> Vec<u8>;
+    fn read_bytes(&self) -> Result<Vec<u8>>;
 
     /// Read a slice of bytes from the buffer.
-    fn read_slice(&self, slice: &mut [u8]);
+    fn read_slice(&self, slice: &mut [u8]) -> Result<()>;
 
     /// Read and deserialize a value from the buffer.
     fn read<T: DeserializeOwned>(&self) -> Result<T>;
@@ -35,7 +35,7 @@ pub enum ZiskIOVariant {
 }
 
 impl ZiskIO for ZiskIOVariant {
-    fn read_raw_bytes(&self) -> Vec<u8> {
+    fn read_raw_bytes(&self) -> Result<Vec<u8>> {
         match self {
             ZiskIOVariant::File(file_stdin) => file_stdin.read_raw_bytes(),
             ZiskIOVariant::Null(null_stdin) => null_stdin.read_raw_bytes(),
@@ -43,7 +43,7 @@ impl ZiskIO for ZiskIOVariant {
         }
     }
 
-    fn read_bytes(&self) -> Vec<u8> {
+    fn read_bytes(&self) -> Result<Vec<u8>> {
         match self {
             ZiskIOVariant::File(file_stdin) => file_stdin.read_bytes(),
             ZiskIOVariant::Null(null_stdin) => null_stdin.read_bytes(),
@@ -51,7 +51,7 @@ impl ZiskIO for ZiskIOVariant {
         }
     }
 
-    fn read_slice(&self, slice: &mut [u8]) {
+    fn read_slice(&self, slice: &mut [u8]) -> Result<()> {
         match self {
             ZiskIOVariant::File(file_stdin) => file_stdin.read_slice(slice),
             ZiskIOVariant::Null(null_stdin) => null_stdin.read_slice(slice),
@@ -106,15 +106,15 @@ pub struct ZiskStdin {
 }
 
 impl ZiskIO for ZiskStdin {
-    fn read_raw_bytes(&self) -> Vec<u8> {
+    fn read_raw_bytes(&self) -> Result<Vec<u8>> {
         self.io.read_raw_bytes()
     }
 
-    fn read_bytes(&self) -> Vec<u8> {
+    fn read_bytes(&self) -> Result<Vec<u8>> {
         self.io.read_bytes()
     }
 
-    fn read_slice(&self, slice: &mut [u8]) {
+    fn read_slice(&self, slice: &mut [u8]) -> Result<()> {
         self.io.read_slice(slice)
     }
 
@@ -196,17 +196,17 @@ impl ZiskStdin {
     // This allows using these methods without importing the trait
 
     /// Read raw bytes
-    pub fn read_raw_bytes(&self) -> Vec<u8> {
+    pub fn read_raw_bytes(&self) -> Result<Vec<u8>> {
         ZiskIO::read_raw_bytes(self)
     }
 
     /// Read a value from the buffer.
-    pub fn read_bytes(&self) -> Vec<u8> {
+    pub fn read_bytes(&self) -> Result<Vec<u8>> {
         ZiskIO::read_bytes(self)
     }
 
     /// Read a slice of bytes from the buffer.
-    pub fn read_slice(&self, slice: &mut [u8]) {
+    pub fn read_slice(&self, slice: &mut [u8]) -> Result<()> {
         ZiskIO::read_slice(self, slice)
     }
 

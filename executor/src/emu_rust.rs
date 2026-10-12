@@ -56,7 +56,7 @@ impl EmulatorRust {
         stdin: &Mutex<ZiskStdin>,
         sm_bundle: &StaticSMBundle<F>,
     ) -> Result<EmulatorResult> {
-        let min_traces = self.run_emulator(zisk_rom, Self::NUM_THREADS, &stdin.lock().unwrap());
+        let min_traces = self.run_emulator(zisk_rom, Self::NUM_THREADS, &stdin.lock().unwrap())?;
 
         // Store execute steps
         let steps = min_traces.iter().map(|trace| trace.steps).sum::<u64>();
@@ -73,9 +73,9 @@ impl EmulatorRust {
         zisk_rom: &ZiskRom,
         num_threads: usize,
         stdin: &ZiskStdin,
-    ) -> Vec<EmuTrace> {
+    ) -> Result<Vec<EmuTrace>> {
         // Call emulate with these options
-        let input_data = stdin.read_raw_bytes();
+        let input_data = stdin.read_raw_bytes()?;
 
         // Settings for the emulator
         let emu_options = EmuOptions {
@@ -85,7 +85,7 @@ impl EmulatorRust {
         };
 
         ZiskEmulator::compute_minimal_traces(zisk_rom, &input_data, &emu_options, num_threads)
-            .expect("Error during emulator execution")
+            .map_err(|e| anyhow::anyhow!("Error during emulator execution: {e:?}"))
     }
 
     /// Counts metrics for secondary state machines based on minimal traces.

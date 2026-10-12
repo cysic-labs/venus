@@ -8,15 +8,17 @@ use std::path::Path;
 pub struct ZiskNullStdin;
 
 impl ZiskIO for ZiskNullStdin {
-    fn read_raw_bytes(&self) -> Vec<u8> {
-        Vec::new()
+    fn read_raw_bytes(&self) -> Result<Vec<u8>> {
+        Ok(Vec::new())
     }
 
-    fn read_bytes(&self) -> Vec<u8> {
-        Vec::new()
+    fn read_bytes(&self) -> Result<Vec<u8>> {
+        Ok(Vec::new())
     }
 
-    fn read_slice(&self, _slice: &mut [u8]) {}
+    fn read_slice(&self, _slice: &mut [u8]) -> Result<()> {
+        Ok(())
+    }
 
     fn read<T: DeserializeOwned>(&self) -> Result<T> {
         Err(anyhow::anyhow!("NullStdin does not support reading"))

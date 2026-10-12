@@ -831,13 +831,16 @@ impl<F: PrimeField64> Setup<F> {
             )));
         }
 
-        load_const_tree_c(
+        let valid_root = load_const_tree_c(
             self.p_setup.p_stark_info,
             self.const_pols_tree.as_ptr() as *mut u8,
             self.const_pols_tree_path.as_str(),
             (const_pols_tree_size * 8) as u64,
             &(self.setup_path.display().to_string() + ".verkey.json"),
         );
+        if !valid_root {
+            return Err(invalid_setup(format!("failed to load const tree {}", self.const_pols_tree_path)));
+        }
         Ok(())
     }
 

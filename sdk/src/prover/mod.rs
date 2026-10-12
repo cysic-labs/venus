@@ -216,17 +216,34 @@ pub struct ZiskProgramVK {
 }
 
 impl ZiskProgramVK {
-    pub fn new_from_publics(publics: &[u8]) -> Self {
-        assert!(
-            publics.len() >= 32,
-            "Not enough bytes to extract program VK (expected at least 32 bytes)"
-        );
+    pub fn try_new_from_publics(publics: &[u8]) -> Result<Self> {
+        let vk = publics.get(..ZISK_PROGRAM_VK_BYTES).ok_or_else(|| {
+            anyhow::anyhow!(
+                "not enough bytes to extract program VK: got {}, expected at least {}",
+                publics.len(),
+                ZISK_PROGRAM_VK_BYTES
+            )
+        })?;
+        Ok(Self { vk: vk.to_vec() })
+    }
 
-        Self { vk: publics[0..32].to_vec() }
+    pub fn new_from_publics(publics: &[u8]) -> Self {
+        Self::try_new_from_publics(publics).expect("invalid ZisK program VK publics")
     }
 
     pub fn new_empty() -> Self {
-        Self { vk: vec![0u8; 32] }
+        Self { vk: vec![0u8; ZISK_PROGRAM_VK_BYTES] }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.vk.len() != ZISK_PROGRAM_VK_BYTES {
+            anyhow::bail!(
+                "invalid program VK length: got {}, expected {}",
+                self.vk.len(),
+                ZISK_PROGRAM_VK_BYTES
+            );
+        }
+        Ok(())
     }
 }
 
@@ -418,6 +435,9 @@ impl ZiskProof {
 }
 
 pub const ZISK_PUBLICS: usize = 64;
+const ZISK_PROGRAM_VK_BYTES: usize = 32;
+const ZISK_PUBLIC_DATA_BYTES: usize = ZISK_PUBLICS * 4;
+const ZISK_PUBLIC_INPUT_BYTES: usize = ZISK_PROGRAM_VK_BYTES + ZISK_PUBLICS * 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZiskPublics {
@@ -426,23 +446,49 @@ pub struct ZiskPublics {
 }
 
 impl ZiskPublics {
-    pub fn new(publics_bytes: &[u8]) -> Self {
-        assert!(
-            publics_bytes.len() == ZISK_PUBLICS * 8 + 32,
-            "Not enough bytes to fill ZiskPublics"
-        );
+    pub fn try_new(publics_bytes: &[u8]) -> Result<Self> {
+        if publics_bytes.len() != ZISK_PUBLIC_INPUT_BYTES {
+            anyhow::bail!(
+                "invalid ZisK publics length: got {}, expected {}",
+                publics_bytes.len(),
+                ZISK_PUBLIC_INPUT_BYTES
+            );
+        }
 
-        let mut data = [0u8; ZISK_PUBLICS * 4];
-        for (i, chunk) in publics_bytes[32..].chunks_exact(8).enumerate() {
+        let mut data = [0u8; ZISK_PUBLIC_DATA_BYTES];
+        for (i, chunk) in publics_bytes[ZISK_PROGRAM_VK_BYTES..].chunks_exact(8).enumerate() {
             let v32 = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
             data[i * 4..(i + 1) * 4].copy_from_slice(&v32.to_le_bytes());
         }
 
-        Self { data: data.to_vec(), ptr: Cell::new(0) }
+        Ok(Self { data: data.to_vec(), ptr: Cell::new(0) })
+    }
+
+    pub fn new(publics_bytes: &[u8]) -> Self {
+        Self::try_new(publics_bytes).expect("invalid ZisK publics")
     }
 
     pub fn new_empty() -> Self {
-        Self { data: [0u8; ZISK_PUBLICS * 4].to_vec(), ptr: Cell::new(0) }
+        Self { data: [0u8; ZISK_PUBLIC_DATA_BYTES].to_vec(), ptr: Cell::new(0) }
+    }
+
+    /// Checks the fields of publics that were deserialized rather than built by a constructor.
+    fn validate(&self) -> Result<()> {
+        if self.data.len() != ZISK_PUBLIC_DATA_BYTES {
+            anyhow::bail!(
+                "invalid ZisK publics length: got {}, expected {}",
+                self.data.len(),
+                ZISK_PUBLIC_DATA_BYTES
+            );
+        }
+        if self.ptr.get() > self.data.len() {
+            anyhow::bail!(
+                "invalid ZisK publics read pointer: got {}, length {}",
+                self.ptr.get(),
+                self.data.len()
+            );
+        }
+        Ok(())
     }
 
     /// Create ZiskPublics from a serializable value.
@@ -531,13 +577,17 @@ impl ZiskPublics {
         bytes.to_vec()
     }
 
-    pub fn hash_solidity(&self, program_vk: &ZiskProgramVK, vadcop_verkey: &[u8]) -> Vec<u8> {
-        let bytes = self.bytes_solidity(program_vk, vadcop_verkey);
+    pub fn hash_solidity(
+        &self,
+        program_vk: &ZiskProgramVK,
+        vadcop_verkey: &[u8],
+    ) -> Result<Vec<u8>> {
+        let bytes = self.bytes_solidity(program_vk, vadcop_verkey)?;
 
         // SHA-256
         let hash = Sha256::digest(&bytes);
 
-        hash.to_vec()
+        Ok(hash.to_vec())
     }
 }
 
@@ -551,8 +601,22 @@ impl ZiskPublics {
         bytes
     }
 
-    pub fn bytes_solidity(&self, program_vk: &ZiskProgramVK, vadcop_verkey: &[u8]) -> Vec<u8> {
-        let mut prefix = [0u8; 32];
+    pub fn bytes_solidity(
+        &self,
+        program_vk: &ZiskProgramVK,
+        vadcop_verkey: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.validate()?;
+        program_vk.validate()?;
+        if vadcop_verkey.len() != ZISK_PROGRAM_VK_BYTES {
+            anyhow::bail!(
+                "invalid VADCoP verifier key length: got {}, expected {}",
+                vadcop_verkey.len(),
+                ZISK_PROGRAM_VK_BYTES
+            );
+        }
+
+        let mut prefix = [0u8; ZISK_PROGRAM_VK_BYTES];
         for (i, chunk) in program_vk.vk.chunks_exact(8).enumerate() {
             let val = u64::from_le_bytes(chunk.try_into().unwrap());
             prefix[i * 8..(i + 1) * 8].copy_from_slice(&val.to_be_bytes());
@@ -560,13 +624,13 @@ impl ZiskPublics {
 
         let mut bytes = prefix.to_vec();
         bytes.extend(self.public_bytes_solidity());
-        let mut suffix = [0u8; 32];
+        let mut suffix = [0u8; ZISK_PROGRAM_VK_BYTES];
         for (i, chunk) in vadcop_verkey.chunks_exact(8).enumerate() {
             let val = u64::from_le_bytes(chunk.try_into().unwrap());
             suffix[i * 8..(i + 1) * 8].copy_from_slice(&val.to_be_bytes());
         }
         bytes.extend(&suffix);
-        bytes
+        Ok(bytes)
     }
 }
 
@@ -593,10 +657,32 @@ impl ZiskProofWithPublicValues {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        load_proof_file(path.as_ref(), "proof")
+        let path = path.as_ref();
+        let proof: Self = load_proof_file(path, "proof")?;
+        proof.validate().with_context(|| format!("invalid proof file {}", path.display()))?;
+        Ok(proof)
+    }
+
+    /// Checks the parts that are read as fixed-size values: the publics, the program VK and the
+    /// VADCoP proof words.
+    fn validate(&self) -> Result<()> {
+        self.publics.validate().context("invalid public values")?;
+        self.program_vk.validate().context("invalid program VK")?;
+        if let ZiskProof::VadcopFinal(proof_bytes) | ZiskProof::VadcopFinalCompressed(proof_bytes) =
+            &self.proof
+        {
+            if proof_bytes.len() % 8 != 0 {
+                anyhow::bail!(
+                    "VADCoP proof length is not a multiple of 8 bytes: {}",
+                    proof_bytes.len()
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn get_vadcop_final_proof(&self) -> Result<VadcopFinalProof> {
+        self.validate()?;
         match &self.proof {
             ZiskProof::VadcopFinal(proof_bytes) | ZiskProof::VadcopFinalCompressed(proof_bytes) => {
                 let compressed = matches!(self.proof, ZiskProof::VadcopFinalCompressed(_));
@@ -646,8 +732,8 @@ impl ZiskProofWithPublicValues {
 
         Ok(Self {
             proof: zisk_proof,
-            publics: ZiskPublics::new(&vadcop_proof.public_values),
-            program_vk: ZiskProgramVK::new_from_publics(&vadcop_proof.public_values),
+            publics: ZiskPublics::try_new(&vadcop_proof.public_values)?,
+            program_vk: ZiskProgramVK::try_new_from_publics(&vadcop_proof.public_values)?,
         })
     }
 }
@@ -1118,5 +1204,63 @@ impl<'a, C: ZiskBackend> ProveBuilder<'a, C> {
     /// Execute the proof generation with the configured options.
     pub fn run(self) -> Result<ZiskProveResult> {
         self.prover.prove(self.pk, self.stdin, self.mode, self.proof_options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_error(label: &str, proof: ZiskProofWithPublicValues) -> String {
+        let nonce =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir()
+            .join(format!("zisk-proof-{label}-{}-{nonce}.bin", std::process::id()));
+        proof.save(&path).unwrap();
+        let err = ZiskProofWithPublicValues::load(&path).unwrap_err();
+        let _ = std::fs::remove_file(path);
+        format!("{err:#}")
+    }
+
+    #[test]
+    fn load_rejects_short_publics() {
+        let err = load_error(
+            "short-publics",
+            ZiskProofWithPublicValues {
+                proof: ZiskProof::VadcopFinal(vec![0u8; 8]),
+                publics: ZiskPublics {
+                    data: vec![0u8; ZISK_PUBLIC_DATA_BYTES - 1],
+                    ptr: Cell::new(0),
+                },
+                program_vk: ZiskProgramVK::new_empty(),
+            },
+        );
+        assert!(err.contains("invalid public values"), "{err}");
+    }
+
+    #[test]
+    fn load_rejects_short_program_vk() {
+        let err = load_error(
+            "short-vk",
+            ZiskProofWithPublicValues {
+                proof: ZiskProof::VadcopFinal(vec![0u8; 8]),
+                publics: ZiskPublics::new_empty(),
+                program_vk: ZiskProgramVK { vk: vec![0u8; ZISK_PROGRAM_VK_BYTES - 1] },
+            },
+        );
+        assert!(err.contains("invalid program VK"), "{err}");
+    }
+
+    #[test]
+    fn load_rejects_partial_proof_words() {
+        let err = load_error(
+            "partial-words",
+            ZiskProofWithPublicValues {
+                proof: ZiskProof::VadcopFinal(vec![0u8; 7]),
+                publics: ZiskPublics::new_empty(),
+                program_vk: ZiskProgramVK::new_empty(),
+            },
+        );
+        assert!(err.contains("not a multiple of 8 bytes"), "{err}");
     }
 }

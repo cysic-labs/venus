@@ -1,9 +1,10 @@
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Serialize};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::Mutex;
 
+use super::read_padded_blob;
 use crate::io::ZiskIO;
 
 /// A memory-based implementation of ZiskStdin that reads from in-memory data.
@@ -33,44 +34,30 @@ impl ZiskMemoryStdin {
 impl ZiskMemoryStdin {
     fn read_raw_data(&self) -> std::io::Result<Vec<u8>> {
         let mut cursor = self.cursor.lock().unwrap();
-
-        let mut len_bytes = [0u8; 8];
-        cursor.read_exact(&mut len_bytes)?;
-        let len = usize::from_le_bytes(len_bytes);
-
-        let mut data = vec![0u8; len];
-        cursor.read_exact(&mut data)?;
-
-        let total_len = 8 + len;
-        let padding = (8 - (total_len % 8)) % 8;
-        if padding > 0 {
-            let mut padding_bytes = vec![0u8; padding];
-            cursor.read_exact(&mut padding_bytes)?;
-        }
-
-        Ok(data)
+        let available = (cursor.get_ref().len() as u64).saturating_sub(cursor.position());
+        read_padded_blob(&mut *cursor, available)
     }
 }
 
 impl ZiskIO for ZiskMemoryStdin {
-    fn read_raw_bytes(&self) -> Vec<u8> {
-        self.data.lock().unwrap().clone()
+    fn read_raw_bytes(&self) -> Result<Vec<u8>> {
+        Ok(self.data.lock().unwrap().clone())
     }
 
-    fn read_bytes(&self) -> Vec<u8> {
-        self.read_raw_data().expect("Failed to read into buffer from memory")
+    fn read_bytes(&self) -> Result<Vec<u8>> {
+        self.read_raw_data()
+            .map_err(|e| anyhow::anyhow!("Failed to read into buffer from memory: {}", e))
     }
 
-    fn read_slice(&self, slice: &mut [u8]) {
-        let data = self.read_raw_data().expect("Failed to read slice from memory");
-        assert_eq!(
-            slice.len(),
-            data.len(),
-            "Slice length mismatch: expected {}, got {}",
-            data.len(),
-            slice.len()
-        );
+    fn read_slice(&self, slice: &mut [u8]) -> Result<()> {
+        let data = self
+            .read_raw_data()
+            .map_err(|e| anyhow::anyhow!("Failed to read slice from memory: {}", e))?;
+        if slice.len() != data.len() {
+            anyhow::bail!("Slice length mismatch: expected {}, got {}", data.len(), slice.len());
+        }
         slice.copy_from_slice(&data);
+        Ok(())
     }
 
     fn read<T: DeserializeOwned>(&self) -> Result<T> {

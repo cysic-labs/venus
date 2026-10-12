@@ -65,7 +65,7 @@ pub fn verify_zisk_snark_proof_with_proving_key(
 
             let verkey = get_vadcop_final_proof_vkey(&proving_key, false)?;
 
-            let pubs = publics.bytes_solidity(program_vk, &verkey);
+            let pubs = publics.bytes_solidity(program_vk, &verkey)?;
             let hash = Sha256::digest(&pubs).to_vec();
 
             let snark_proof = SnarkProof {
