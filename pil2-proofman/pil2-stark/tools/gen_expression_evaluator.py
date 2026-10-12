@@ -70,6 +70,17 @@ def expression_fingerprint(dump):
     return h
 
 
+# Constraint polynomial of the shared recursive1/recursive2 AIR, evaluated once per recursive proof.
+# As one register-allocated kernel that stores its extension result directly it runs about twice
+# as fast as the chunked form, so it is exempt from chunking. (expId, nOps, nArgs, fingerprint)
+RECURSION_Q_IDENTITY = (4995, 4996, 39968, 0xc02cb99ca39e4f9e)
+
+
+def is_recursion_q_expression(dump):
+    identity = (dump['expId'], dump['nOps'], dump['nArgs'], expression_fingerprint(dump))
+    return identity == RECURSION_Q_IDENTITY
+
+
 def stride_fingerprint(dump):
     """FNV-1a over the opening-point strides; must match venusGeneratedStrideFingerprint."""
     h = 1469598103934665603
@@ -463,7 +474,7 @@ def collect_live_temps_at_boundary(dump, boundary_op):
     return live
 
 
-def generate_evaluator(dump, out_path):
+def generate_evaluator(dump, out_path, direct_store=False):
     nOps = dump['nOps']
     nTemp1 = dump['nTemp1']
     nTemp3 = dump['nTemp3']
@@ -627,15 +638,21 @@ def generate_evaluator(dump, out_path):
             elif arith_op == 3:
                 L.append(f'    {d0} = {b0} - {a0}; {d1} = {b1} - {a1}; {d2} = {b2} - {a2};')
 
-    # Write result to shared memory and call storePolynomial__ directly
     L.append('')
-    L.append('    // Write final result to shared memory and store to output')
-    if last_dest_type == 'tmp3':
+    if direct_store and last_dest_type == 'tmp3':
+        L.append('    // Direct-store the final extension value.')
+        L.append(
+            f'    storePolynomial3__((ExpsArguments*)dExpsArgs, tmp3_{last_dest_idx}, '
+            f'tmp3_{last_dest_idx + 1}, tmp3_{last_dest_idx + 2}, row);'
+        )
+    elif last_dest_type == 'tmp3':
+        L.append('    // Write final result to shared memory and store to output')
         L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx} * blockDim.x + threadIdx.x] = tmp3_{last_dest_idx};')
         L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx + 1} * blockDim.x + threadIdx.x] = tmp3_{last_dest_idx + 1};')
         L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx + 2} * blockDim.x + threadIdx.x] = tmp3_{last_dest_idx + 2};')
         L.append(f'    storePolynomial__((ExpsArguments*)dExpsArgs, (Goldilocks::Element*)&expressions_params[bufferCommitsSize + 1][{last_dest_idx} * blockDim.x], row);')
     elif last_dest_type == 'tmp1':
+        L.append('    // Write final result to shared memory and store to output')
         L.append(f'    *(gl64_t*)&expressions_params[bufferCommitsSize][{last_dest_idx} * blockDim.x + threadIdx.x] = tmp1_{last_dest_idx};')
         L.append(f'    storePolynomial__((ExpsArguments*)dExpsArgs, (Goldilocks::Element*)&expressions_params[bufferCommitsSize][{last_dest_idx} * blockDim.x], row);')
     L.append('}')
@@ -946,8 +963,12 @@ def generate_chunked_evaluator(dump, out_path):
     return True
 
 
-def generate_standalone_kernel(expId, func_name, out_path):
-    """Generate a standalone __global__ kernel .cu file for an expression."""
+def generate_standalone_kernel(expId, func_name, out_path, direct_store=False):
+    """Generate a standalone __global__ kernel .cu file for an expression.
+
+    With direct_store the evaluator stores its extension result from registers, and the kernel
+    is compiled for the 256-thread blocks the GPU prover uses for constraint polynomials.
+    """
     lines = []
     lines.append(f'// Standalone generated kernel for expression {expId}')
     lines.append('// Compiled in its own CU for optimal register allocation')
@@ -959,26 +980,46 @@ def generate_standalone_kernel(expId, func_name, out_path):
     lines.append('')
     lines.append('extern __shared__ Goldilocks::Element scratchpad[];')
     lines.append('')
-    lines.append('// Local storePolynomial__')
-    lines.append('__device__ __noinline__ static void storePolynomial__(ExpsArguments *d_expsArgs, Goldilocks::Element *destVals, uint64_t row)')
-    lines.append('{')
-    lines.append('    #pragma unroll')
-    lines.append('    for (uint32_t i = 0; i < d_expsArgs->dest_dim; i++) {')
-    lines.append('        if (!d_expsArgs->dest_expr) {')
-    lines.append('            uint64_t col = d_expsArgs->dest_stagePos + i;')
-    lines.append('            uint64_t nRows = d_expsArgs->dest_domainSize;')
-    lines.append('            uint64_t nCols = d_expsArgs->dest_stageCols;')
-    lines.append('            uint64_t idx = getBufferOffset(row + threadIdx.x, col, nRows, nCols);')
-    lines.append('            d_expsArgs->dest_gpu[idx] = destVals[i * blockDim.x + threadIdx.x];')
-    lines.append('        } else {')
-    lines.append('            d_expsArgs->dest_gpu[(row + threadIdx.x) * d_expsArgs->dest_dim + i] = destVals[i * blockDim.x + threadIdx.x];')
-    lines.append('        }')
-    lines.append('    }')
-    lines.append('}')
+    if direct_store:
+        lines.append('__device__ __noinline__ static void storePolynomial3__(ExpsArguments *d_expsArgs, gl64_t v0, gl64_t v1, gl64_t v2, uint64_t row)')
+        lines.append('{')
+        lines.append('    const uint64_t out_row = row + threadIdx.x;')
+        lines.append('    if (!d_expsArgs->dest_expr) {')
+        lines.append('        const uint64_t col = d_expsArgs->dest_stagePos;')
+        lines.append('        const uint64_t nRows = d_expsArgs->dest_domainSize;')
+        lines.append('        const uint64_t nCols = d_expsArgs->dest_stageCols;')
+        lines.append('        *(gl64_t*)&d_expsArgs->dest_gpu[getBufferOffset(out_row, col + 0, nRows, nCols)] = v0;')
+        lines.append('        *(gl64_t*)&d_expsArgs->dest_gpu[getBufferOffset(out_row, col + 1, nRows, nCols)] = v1;')
+        lines.append('        *(gl64_t*)&d_expsArgs->dest_gpu[getBufferOffset(out_row, col + 2, nRows, nCols)] = v2;')
+        lines.append('    } else {')
+        lines.append('        const uint64_t base = out_row * d_expsArgs->dest_dim;')
+        lines.append('        *(gl64_t*)&d_expsArgs->dest_gpu[base + 0] = v0;')
+        lines.append('        *(gl64_t*)&d_expsArgs->dest_gpu[base + 1] = v1;')
+        lines.append('        *(gl64_t*)&d_expsArgs->dest_gpu[base + 2] = v2;')
+        lines.append('    }')
+        lines.append('}')
+    else:
+        lines.append('// Local storePolynomial__')
+        lines.append('__device__ __noinline__ static void storePolynomial__(ExpsArguments *d_expsArgs, Goldilocks::Element *destVals, uint64_t row)')
+        lines.append('{')
+        lines.append('    #pragma unroll')
+        lines.append('    for (uint32_t i = 0; i < d_expsArgs->dest_dim; i++) {')
+        lines.append('        if (!d_expsArgs->dest_expr) {')
+        lines.append('            uint64_t col = d_expsArgs->dest_stagePos + i;')
+        lines.append('            uint64_t nRows = d_expsArgs->dest_domainSize;')
+        lines.append('            uint64_t nCols = d_expsArgs->dest_stageCols;')
+        lines.append('            uint64_t idx = getBufferOffset(row + threadIdx.x, col, nRows, nCols);')
+        lines.append('            d_expsArgs->dest_gpu[idx] = destVals[i * blockDim.x + threadIdx.x];')
+        lines.append('        } else {')
+        lines.append('            d_expsArgs->dest_gpu[(row + threadIdx.x) * d_expsArgs->dest_dim + i] = destVals[i * blockDim.x + threadIdx.x];')
+        lines.append('        }')
+        lines.append('    }')
+        lines.append('}')
     lines.append('')
     lines.append(f'#include "gen_eval_{expId}.cuh"')
     lines.append('')
-    lines.append(f'__global__ void computeExpression_gen_{expId}_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)')
+    launch_bounds = ' __launch_bounds__(256, 1)' if direct_store else ''
+    lines.append(f'__global__ void{launch_bounds} computeExpression_gen_{expId}_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)')
     lines.append('{')
     lines.append('    int chunk_idx = blockIdx.x;')
     lines.append('    uint64_t nchunks = d_expsArgs->domainSize / blockDim.x;')
@@ -1032,11 +1073,13 @@ def generate_all(dump_dir, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     entries = []  # (fingerprint, nOps, nTemp1, nTemp3, destDim, filename)
     guards = {}  # expId -> venusGeneratedExprMatches arguments after the runtime ones
+    direct_store_ids = set()
 
     for path in dump_files:
         dump = read_dump(path)
+        direct_store = is_recursion_q_expression(dump)
         # Large expressions use chunked generation
-        if dump['nOps'] > 2100:
+        if dump['nOps'] > 2100 and not direct_store:
             expId = os.path.basename(path).replace('expr_dump_', '').replace('.bin', '')
             fname = f'gen_eval_{expId}.cuh'
             gen_out_path = os.path.join(out_dir, fname)
@@ -1050,13 +1093,15 @@ def generate_all(dump_dir, out_dir):
             entries.append((fp, nOps_d, nTemp1_d, nTemp3_d, dump['destDim'], fname))
             guards[expId] = guard_args(dump)
             continue
-        if dump['nTemp1'] > 30:
+        if dump['nTemp1'] > 30 and not direct_store:
             print(f"Skipped {path}: nOps={dump['nOps']} nTemp1={dump['nTemp1']} exceeds limits")
             continue
         expId = os.path.basename(path).replace('expr_dump_', '').replace('.bin', '')
         fname = f'gen_eval_{expId}.cuh'
         out_path = os.path.join(out_dir, fname)
-        generate_evaluator(dump, out_path)
+        generate_evaluator(dump, out_path, direct_store)
+        if direct_store:
+            direct_store_ids.add(expId)
 
         # Compute same fingerprint as the generator
         nOps, nTemp1, nTemp3 = dump['nOps'], dump['nTemp1'], dump['nTemp3']
@@ -1072,7 +1117,9 @@ def generate_all(dump_dir, out_dir):
     for fp, nOps, nTemp1, nTemp3, destDim, fname in entries:
         expId_str = fname.replace('gen_eval_', '').replace('.cuh', '')
         kernel_path = os.path.join(out_dir, f'gen_kernel_{expId_str}.cu')
-        generate_standalone_kernel(expId_str, f'eval_expr_{fp}', kernel_path)
+        generate_standalone_kernel(
+            expId_str, f'eval_expr_{fp}', kernel_path, expId_str in direct_store_ids
+        )
         print(f"  Standalone kernel: gen_kernel_{expId_str}.cu")
 
     # Generate host-side dispatch header (declarations only)
