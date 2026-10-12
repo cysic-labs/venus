@@ -1,4 +1,5 @@
 mod proofman;
+mod const_tree_prewarm;
 mod recursion;
 mod utils;
 mod proof_manager;
