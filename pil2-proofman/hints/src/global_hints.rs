@@ -28,9 +28,25 @@ pub fn aggregate_airgroupvals<F: PrimeField64>(
     }
 
     let my_instances = pctx.dctx_get_process_instances();
+    if airgroup_values.len() < my_instances.len() {
+        return Err(ProofmanError::InvalidHints(format!(
+            "airgroup values outer length too short: expected at least {}, got {}",
+            my_instances.len(),
+            airgroup_values.len()
+        )));
+    }
 
     for (my_instance_idx, instance_id) in my_instances.iter().enumerate() {
         let (airgroup_id, _) = pctx.dctx_get_instance_info(*instance_id)?;
+        let expected_instance_len = pctx.global_info.agg_types[airgroup_id].len() * FIELD_EXTENSION;
+        if !airgroup_values[my_instance_idx].is_empty()
+            && airgroup_values[my_instance_idx].len() < expected_instance_len
+        {
+            return Err(ProofmanError::InvalidHints(format!(
+                "airgroup values for local instance {my_instance_idx} are too short: expected at least {expected_instance_len}, got {}",
+                airgroup_values[my_instance_idx].len()
+            )));
+        }
         for (idx, agg_type) in pctx.global_info.agg_types[airgroup_id].iter().enumerate() {
             let mut acc = CubicExtensionField {
                 value: [
