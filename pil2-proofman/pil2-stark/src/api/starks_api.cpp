@@ -946,6 +946,10 @@ void get_committed_pols(void *circomWitness, uint64_t* execData, void *witness, 
     getCommitedPols((Goldilocks::Element *)circomWitness, execData, (Goldilocks::Element *)witness, (Goldilocks::Element *)pPublics, sizeWitness, N, nPublics, nCommitedPols);
 }
 
+void get_committed_pols_validated(void *circomWitness, uint64_t* execData, void *witness, void* pPublics, uint64_t sizeWitness, uint64_t N, uint64_t nPublics, uint64_t nCommitedPols) {
+    getCommitedPolsValidated((Goldilocks::Element *)circomWitness, execData, (Goldilocks::Element *)witness, (Goldilocks::Element *)pPublics, sizeWitness, N, nPublics, nCommitedPols);
+}
+
 void *load_zkey(char* zkeyFile) {
     auto zkey = BinFileUtils::openExisting(zkeyFile, "zkey", 1);
     return zkey.get();
