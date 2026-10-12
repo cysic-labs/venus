@@ -12,6 +12,7 @@
 #include "cuda_graph_cache.cuh"
 #endif
 #include <iomanip>
+#include <vector>
 
 // TOTO list: //rick
 // carregar-me els d_trees
@@ -21,11 +22,11 @@ void calculateWitnessExpr_gpu(SetupCtx& setupCtx, StepsParams& h_params, StepsPa
 
     uint64_t nWitnessHints = setupCtx.expressionsBin.getNumberHintIdsByName("witness_calc");
     if(nWitnessHints > 0) {
-        uint64_t witnessHints[nWitnessHints];
-        setupCtx.expressionsBin.getHintIdsByName(witnessHints, "witness_calc");
-        std::string hintFieldDest[nWitnessHints];
-        std::string hintField[nWitnessHints];
-        HintFieldOptions hintOptions[nWitnessHints];
+        std::vector<uint64_t> witnessHints(nWitnessHints);
+        setupCtx.expressionsBin.getHintIdsByName(witnessHints.data(), "witness_calc");
+        std::vector<std::string> hintFieldDest(nWitnessHints);
+        std::vector<std::string> hintField(nWitnessHints);
+        std::vector<HintFieldOptions> hintOptions(nWitnessHints);
         for(uint64_t i = 0; i < nWitnessHints; i++) {
             hintFieldDest[i] = "reference";
             hintField[i] = "expression";
@@ -33,7 +34,7 @@ void calculateWitnessExpr_gpu(SetupCtx& setupCtx, StepsParams& h_params, StepsPa
             hintOptions[i] = options;
         }
 
-        calculateExprGPU(setupCtx, h_params, d_params, nWitnessHints, witnessHints, hintFieldDest, hintField, hintOptions, expressionsCtxGPU, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
+        calculateExprGPU(setupCtx, h_params, d_params, nWitnessHints, witnessHints.data(), hintFieldDest.data(), hintField.data(), hintOptions.data(), expressionsCtxGPU, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
     }
 }
 
@@ -48,14 +49,14 @@ void calculateWitnessSTD_gpu(SetupCtx& setupCtx, StepsParams& h_params, StepsPar
     uint64_t nImHintsAirVals = setupCtx.expressionsBin.getNumberHintIdsByName("im_airval");
     uint64_t nImTotalHints = nImHints + nImHintsAirVals;
     if(nImTotalHints > 0) {
-        uint64_t imHints[nImHints + nImHintsAirVals];
-        setupCtx.expressionsBin.getHintIdsByName(imHints, "im_col");
-        setupCtx.expressionsBin.getHintIdsByName(&imHints[nImHints], "im_airval");
-        std::string hintFieldDest[nImTotalHints];
-        std::string hintField1[nImTotalHints];
-        std::string hintField2[nImTotalHints];
-        HintFieldOptions hintOptions1[nImTotalHints];
-        HintFieldOptions hintOptions2[nImTotalHints];
+        std::vector<uint64_t> imHints(nImTotalHints);
+        setupCtx.expressionsBin.getHintIdsByName(imHints.data(), "im_col");
+        setupCtx.expressionsBin.getHintIdsByName(imHints.data() + nImHints, "im_airval");
+        std::vector<std::string> hintFieldDest(nImTotalHints);
+        std::vector<std::string> hintField1(nImTotalHints);
+        std::vector<std::string> hintField2(nImTotalHints);
+        std::vector<HintFieldOptions> hintOptions1(nImTotalHints);
+        std::vector<HintFieldOptions> hintOptions2(nImTotalHints);
         for(uint64_t i = 0; i < nImTotalHints; i++) {
             hintFieldDest[i] = "reference";
             hintField1[i] = "numerator";
@@ -67,7 +68,7 @@ void calculateWitnessSTD_gpu(SetupCtx& setupCtx, StepsParams& h_params, StepsPar
             hintOptions2[i] = options2;
         }
 
-        multiplyHintFieldsGPU(setupCtx, h_params, d_params, nImTotalHints, imHints, hintFieldDest, hintField1, hintField2, hintOptions1, hintOptions2, expressionsCtxGPU, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
+        multiplyHintFieldsGPU(setupCtx, h_params, d_params, nImTotalHints, imHints.data(), hintFieldDest.data(), hintField1.data(), hintField2.data(), hintOptions1.data(), hintOptions2.data(), expressionsCtxGPU, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
     }
 
     HintFieldOptions options1;

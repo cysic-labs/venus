@@ -10,6 +10,7 @@
 #include "gpu_timer.cuh"
 #include <iomanip>
 #include <thread>
+#include <vector>
 
 
 
@@ -24,14 +25,14 @@ void calculateWitnessSTD_BN128_gpu(SetupCtx& setupCtx, StepsParams& h_params, St
     uint64_t nImHintsAirVals = setupCtx.expressionsBin.getNumberHintIdsByName("im_airval");
     uint64_t nImTotalHints = nImHints + nImHintsAirVals;
     if(nImTotalHints > 0) {
-        uint64_t imHints[nImHints + nImHintsAirVals];
-        setupCtx.expressionsBin.getHintIdsByName(imHints, "im_col");
-        setupCtx.expressionsBin.getHintIdsByName(&imHints[nImHints], "im_airval");
-        std::string hintFieldDest[nImTotalHints];
-        std::string hintField1[nImTotalHints];
-        std::string hintField2[nImTotalHints];
-        HintFieldOptions hintOptions1[nImTotalHints];
-        HintFieldOptions hintOptions2[nImTotalHints];
+        std::vector<uint64_t> imHints(nImTotalHints);
+        setupCtx.expressionsBin.getHintIdsByName(imHints.data(), "im_col");
+        setupCtx.expressionsBin.getHintIdsByName(imHints.data() + nImHints, "im_airval");
+        std::vector<std::string> hintFieldDest(nImTotalHints);
+        std::vector<std::string> hintField1(nImTotalHints);
+        std::vector<std::string> hintField2(nImTotalHints);
+        std::vector<HintFieldOptions> hintOptions1(nImTotalHints);
+        std::vector<HintFieldOptions> hintOptions2(nImTotalHints);
         for(uint64_t i = 0; i < nImTotalHints; i++) {
             hintFieldDest[i] = "reference";
             hintField1[i] = "numerator";
@@ -43,7 +44,7 @@ void calculateWitnessSTD_BN128_gpu(SetupCtx& setupCtx, StepsParams& h_params, St
             hintOptions2[i] = options2;
         }
 
-        multiplyHintFieldsGPU(setupCtx, h_params, d_params, nImTotalHints, imHints, hintFieldDest, hintField1, hintField2, hintOptions1, hintOptions2, expressionsCtxGPU, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
+        multiplyHintFieldsGPU(setupCtx, h_params, d_params, nImTotalHints, imHints.data(), hintFieldDest.data(), hintField1.data(), hintField2.data(), hintOptions1.data(), hintOptions2.data(), expressionsCtxGPU, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
     }
 
     HintFieldOptions options1;
