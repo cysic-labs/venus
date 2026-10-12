@@ -121,3 +121,22 @@ fn validate_hint_length<T>(data: &[T], expected_len: usize, hint_name: &str) -> 
     }
     Ok(())
 }
+
+/// Reads the pair count of a hint laid out as `[num_pairs, pairs...]` and checks that the data
+/// holds exactly `num_pairs` pairs of `pair_words` words each. Once it does, the pairs' byte length
+/// cannot overflow, since a pair takes at most `pair_words * 8` bytes.
+#[inline]
+fn read_num_pairs(data: &[u64], pair_words: usize, hint_name: &str) -> anyhow::Result<usize> {
+    let Some(&num_pairs) = data.first() else {
+        anyhow::bail!("{hint_name}: data is empty");
+    };
+    let expected_len = usize::try_from(num_pairs)
+        .ok()
+        .and_then(|num_pairs| num_pairs.checked_mul(pair_words))
+        .and_then(|words| words.checked_add(1))
+        .ok_or_else(|| {
+            anyhow::anyhow!("{hint_name}: pair count {num_pairs} overflows the hint length")
+        })?;
+    validate_hint_length(data, expected_len, hint_name)?;
+    Ok(num_pairs as usize)
+}

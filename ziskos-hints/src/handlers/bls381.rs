@@ -1,4 +1,7 @@
-use crate::{handlers::validate_hint_length, hint_fields, zisklib};
+use crate::{
+    handlers::{read_num_pairs, validate_hint_length},
+    hint_fields, zisklib,
+};
 
 use anyhow::Result;
 
@@ -26,20 +29,12 @@ pub fn bls12_381_g1_add_hint(data: &[u64]) -> Result<Vec<u64>> {
 /// Processes an `HINT_BLS12_381_G1_MSM` hint.
 #[inline]
 pub fn bls12_381_g1_msm_hint(data: &[u64]) -> Result<Vec<u64>> {
-    if data.is_empty() {
-        anyhow::bail!("HINT_BLS12_381_G1_MSM: data is empty");
-    }
-
-    let num_pairs = data[0] as usize;
-
     const POINT_SIZE: usize = 96;
     const SCALAR_SIZE: usize = 32;
     const PAIR_SIZE_BYTES: usize = POINT_SIZE + SCALAR_SIZE;
     const PAIR_SIZE: usize = PAIR_SIZE_BYTES.div_ceil(8);
 
-    let expected_len = 1 + num_pairs * PAIR_SIZE;
-
-    validate_hint_length(data, expected_len, "HINT_BLS12_381_G1_MSM")?;
+    let num_pairs = read_num_pairs(data, PAIR_SIZE, "HINT_BLS12_381_G1_MSM")?;
 
     let bytes = unsafe {
         std::slice::from_raw_parts(data.as_ptr().add(1) as *const u8, num_pairs * PAIR_SIZE_BYTES)
@@ -78,20 +73,12 @@ pub fn bls12_381_g2_add_hint(data: &[u64]) -> Result<Vec<u64>> {
 /// Processes an `HINT_BLS12_381_G2_MSM` hint.
 #[inline]
 pub fn bls12_381_g2_msm_hint(data: &[u64]) -> Result<Vec<u64>> {
-    if data.is_empty() {
-        anyhow::bail!("HINT_BLS12_381_G1_MSM: data is empty");
-    }
-
-    let num_pairs = data[0] as usize;
-
     const POINT_SIZE: usize = 192;
     const SCALAR_SIZE: usize = 32;
     const PAIR_SIZE_BYTES: usize = POINT_SIZE + SCALAR_SIZE;
     const PAIR_SIZE: usize = PAIR_SIZE_BYTES.div_ceil(8);
 
-    let expected_len = 1 + num_pairs * PAIR_SIZE;
-
-    validate_hint_length(data, expected_len, "HINT_BLS12_381_G1_MSM")?;
+    let num_pairs = read_num_pairs(data, PAIR_SIZE, "HINT_BLS12_381_G2_MSM")?;
 
     let bytes = unsafe {
         std::slice::from_raw_parts(data.as_ptr().add(1) as *const u8, num_pairs * PAIR_SIZE_BYTES)
@@ -109,20 +96,12 @@ pub fn bls12_381_g2_msm_hint(data: &[u64]) -> Result<Vec<u64>> {
 /// Processes an `HINT_BLS12_381_PAIRING_CHECK` hint.
 #[inline]
 pub fn bls12_381_pairing_check_hint(data: &[u64]) -> Result<Vec<u64>> {
-    if data.is_empty() {
-        anyhow::bail!("HINT_BLS12_381_G1_MSM: data is empty");
-    }
-
-    let num_pairs = data[0] as usize;
-
     const G1_SIZE: usize = 96;
     const G2_SIZE: usize = 192;
     const PAIR_SIZE_BYTES: usize = G1_SIZE + G2_SIZE;
     const PAIR_SIZE: usize = PAIR_SIZE_BYTES.div_ceil(8);
 
-    let expected_len = 1 + num_pairs * PAIR_SIZE;
-
-    validate_hint_length(data, expected_len, "HINT_BLS12_381_PAIRING_CHECK")?;
+    let num_pairs = read_num_pairs(data, PAIR_SIZE, "HINT_BLS12_381_PAIRING_CHECK")?;
 
     let pairs = unsafe {
         std::slice::from_raw_parts(data.as_ptr().add(1) as *const u8, num_pairs * PAIR_SIZE_BYTES)

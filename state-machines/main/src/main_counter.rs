@@ -53,7 +53,11 @@ impl MainCounter {
             return true;
         }
 
-        let pub_index = data[A] << 1;
+        // An index that overflows is recorded as u64::MAX, which the executor rejects as out of bounds.
+        let Some(pub_index) = data[A].checked_mul(2) else {
+            self.publics.push((u64::MAX, 0));
+            return true;
+        };
         let pub_value = data[B];
 
         self.publics.push((pub_index, (pub_value & 0xFFFFFFFF) as u32));

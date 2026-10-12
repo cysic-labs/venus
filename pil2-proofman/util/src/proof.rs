@@ -50,23 +50,14 @@ impl VadcopFinalProof {
     }
 
     pub fn new_from_proof(proof: &[u64], compressed: bool) -> Result<Self, String> {
-        if proof.is_empty() {
-            return Err("Proof slice is empty, cannot extract public count".to_string());
-        }
-
-        let n_publics = proof[0] as usize;
-
-        if proof.len() < n_publics + 1 {
+        let (n_publics, rest) =
+            proof.split_first().ok_or_else(|| "Proof slice is empty, cannot extract public count".to_string())?;
+        let Some((publics, proof_u64)) = usize::try_from(*n_publics).ok().and_then(|n| rest.split_at_checked(n)) else {
             return Err(format!(
-                "Proof slice length ({}) is insufficient for {} publics (expected at least {})",
-                proof.len(),
-                n_publics,
-                n_publics + 1
+                "Proof slice holds {} words after the public count, fewer than its {n_publics} publics",
+                rest.len()
             ));
-        }
-
-        let rest = &proof[1..];
-        let (publics, proof_u64) = rest.split_at(n_publics);
+        };
 
         Ok(Self { public_values: cast_slice(publics).to_vec(), proof: cast_slice(proof_u64).to_vec(), compressed })
     }

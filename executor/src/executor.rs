@@ -24,7 +24,7 @@ use crate::{
     WitnessOrchestrator,
 };
 use fields::PrimeField64;
-use proofman_common::{create_pool, BufferPool, ProofCtx, ProofmanResult, SetupCtx};
+use proofman_common::{create_pool, BufferPool, ProofCtx, ProofmanError, ProofmanResult, SetupCtx};
 use proofman_util::{timer_start_info, timer_stop_and_log_info};
 use sm_main::MainSM;
 use std::{
@@ -238,8 +238,16 @@ impl<F: PrimeField64> WitnessComponent<F> for ZiskExecutor<F> {
 
         // Add public values to the proof context
         let mut publics = ZiskPublicValues::from_vec_guard(pctx.get_publics());
-        for (index, value) in main_output.public_values.iter() {
-            publics.inputs[*index as usize] = F::from_u32(*value);
+        for &(index, value) in main_output.public_values.iter() {
+            let Some(input) =
+                usize::try_from(index).ok().and_then(|index| publics.inputs.get_mut(index))
+            else {
+                return Err(ProofmanError::InvalidParameters(format!(
+                    "public output index {index} is out of bounds for {} public input words",
+                    publics.inputs.len()
+                )));
+            };
+            *input = F::from_u32(value);
         }
         drop(publics);
 
