@@ -1,12 +1,6 @@
 #[allow(dead_code)]
 pub mod air;
 #[allow(dead_code)]
-pub mod circuit;
-#[allow(dead_code)]
-pub mod gadgets;
-#[allow(dead_code)]
-pub mod manifest;
-#[allow(dead_code)]
 pub mod plonk;
 #[allow(dead_code)]
 pub mod r1cs;
@@ -168,8 +162,6 @@ fn write_layout_artifacts_with_runtime_descriptor(
     } else {
         runtime::write_runtime_dat_file(&dat_path, r1cs)?;
     }
-    runtime::write_exec_sidecars(setup_path, r1cs, &program.additions, &layout.signal_map)?;
-
     Ok(RecursiveLayoutArtifacts {
         const_path,
         exec_path,

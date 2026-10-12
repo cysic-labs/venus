@@ -21,10 +21,8 @@ fields = { workspace = true }
 mpi = { workspace = true }
 parser = { path = "vendor/circom/parser" }
 pilout-crate = { package = "pilout", path = "../pil2-proofman/pilout" }
-prost = { workspace = true }
 program_structure = { path = "vendor/circom/program_structure" }
 proofman-starks-lib-c = { path = "../pil2-proofman/provers/starks-lib-c" }
-rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use pilout_crate::pilout_proxy::PilOutProxy;
-use tracing::info;
 
 const DEFAULT_AIROUT: &str = "pil/zisk.pilout";
 
@@ -59,10 +58,6 @@ struct Args {
     #[arg(long)]
     no_recursive: bool,
 
-    /// Optional manifest of native recursive R1CS layout jobs.
-    #[arg(long)]
-    recursive_layout_manifest: Option<PathBuf>,
-
     /// Verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -95,8 +90,6 @@ fn run() -> Result<()> {
     let proof_dir = resolve_path(&root, &args.proof_dir);
     let pilout_path = resolve_path(&root, &args.airout);
     let starkstructs_path = resolve_path(&root, &args.starkstructs);
-    let recursive_layout_manifest =
-        args.recursive_layout_manifest.as_ref().map(|path| resolve_path(&root, path));
     let proving_key_dir = build_dir.join("provingKey");
 
     prepare_directories(&build_dir, &fixed_dir, &proof_dir, &proving_key_dir)?;
@@ -111,15 +104,7 @@ fn run() -> Result<()> {
     setup_layout::write_basic_air_layout(&proving_key_dir, &fixed_dir, &pilout, &settings)?;
 
     if args.recursive && !args.no_recursive {
-        if let Some(manifest_path) = recursive_layout_manifest.as_ref() {
-            let artifacts = recursive_setup::manifest::write_layouts_from_manifest(
-                manifest_path,
-                &proving_key_dir,
-            )?;
-            info!("wrote {} native recursive layout artifact sets", artifacts.len());
-        } else {
-            recursive_generation::write_recursive_artifacts(&build_dir, &proving_key_dir)?;
-        }
+        recursive_generation::write_recursive_artifacts(&build_dir, &proving_key_dir)?;
     }
 
     Ok(())

@@ -1,7 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -27,7 +25,6 @@ pub struct NativeRecursiveRuntime {
     pub source_public_prefix_words: u64,
     pub source_sections: Vec<NativeRuntimeSection>,
     pub section_copy_ops: Vec<NativeRuntimeSectionCopyOp>,
-    pub circom_wasm: Option<NativeCircomWasmRuntime>,
     pub constraints: Vec<NativeRuntimeConstraint>,
     pub custom_gates: Vec<NativeRuntimeCustomGate>,
     solver_index: OnceLock<NativeRuntimeSolverIndex>,
@@ -111,19 +108,6 @@ pub struct NativeRuntimeSectionCopyOp {
     pub section_offset_words: u64,
     pub word_len: u64,
     pub witness_offset_words: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeCircomWasmRuntime {
-    pub wasm: Vec<u8>,
-    pub inputs: Vec<NativeCircomWasmInput>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeCircomWasmInput {
-    pub hash: u64,
-    pub source_offset_words: u64,
-    pub word_len: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,8 +474,8 @@ impl NativeRecursiveRuntime {
         } else {
             (Vec::new(), copy_ops_count_offset)
         };
-        let (circom_wasm, runtime_body_end) =
-            if version >= 3 { parse_circom_wasm_runtime(path, &bytes, copy_ops_end)? } else { (None, copy_ops_end) };
+        let runtime_body_end =
+            if version >= 3 { parse_runtime_extension_tag(path, &bytes, copy_ops_end)? } else { copy_ops_end };
         let (constraints, constraints_end) = if bytes.len() >= runtime_body_end + 8 {
             parse_constraints(path, &bytes, runtime_body_end)?
         } else {
@@ -514,7 +498,6 @@ impl NativeRecursiveRuntime {
             source_public_prefix_words,
             source_sections,
             section_copy_ops,
-            circom_wasm,
             constraints,
             custom_gates,
             solver_index: OnceLock::new(),
@@ -532,12 +515,6 @@ impl NativeRecursiveRuntime {
         let total_start = Instant::now();
         self.check_witness_size(total_witness_words)?;
         self.check_source_assertions(source_words)?;
-
-        if std::env::var_os("PROOFMAN_ENABLE_CIRCOM_WASM").is_some() {
-            if let Some(circom_wasm) = &self.circom_wasm {
-                return self.generate_circom_wasm_witness(circom_wasm, source_words, total_witness_words);
-            }
-        }
 
         let mut witness = vec![F::ZERO; total_witness_words as usize];
         let mut known = vec![UNKNOWN_VALUE; total_witness_words as usize];
@@ -674,165 +651,6 @@ impl NativeRecursiveRuntime {
         Ok(())
     }
 
-    fn generate_circom_wasm_witness<F: PrimeField64>(
-        &self,
-        circom_wasm: &NativeCircomWasmRuntime,
-        source_words: &[u64],
-        total_witness_words: u64,
-    ) -> ProofmanResult<Vec<F>> {
-        let (engine, module) = circom_wasmtime_module(&circom_wasm.wasm)?;
-        let mut store = wasmtime::Store::new(engine, NativeCircomWasmHost::default());
-        let mut linker = <wasmtime::Linker<NativeCircomWasmHost>>::new(engine);
-        linker
-            .func_wrap(
-                "runtime",
-                "exceptionHandler",
-                |mut caller: wasmtime::Caller<'_, NativeCircomWasmHost>, code: i32| {
-                    caller.data_mut().exception = Some(code);
-                },
-            )
-            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to link Circom exception handler: {err}")))?;
-        linker
-            .func_wrap("runtime", "printErrorMessage", || {})
-            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to link Circom print handler: {err}")))?;
-        linker
-            .func_wrap("runtime", "writeBufferMessage", || {})
-            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to link Circom buffer handler: {err}")))?;
-        linker
-            .func_wrap("runtime", "showSharedRWMemory", || {})
-            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to link Circom memory handler: {err}")))?;
-        linker
-            .func_wrap(
-                "runtime",
-                "runCustomTemplate",
-                |mut caller: wasmtime::Caller<'_, NativeCircomWasmHost>, kind: i32, signal_base: i32| {
-                    if let Err(err) = run_circom_custom_template::<F>(&mut caller, kind, signal_base) {
-                        caller.data_mut().exception = Some(4);
-                        caller.data_mut().message = Some(err);
-                    }
-                },
-            )
-            .map_err(|err| {
-                ProofmanError::InvalidSetup(format!("failed to link Circom custom template handler: {err}"))
-            })?;
-
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .map_err(|err| ProofmanError::InvalidSetup(format!("failed to instantiate Circom witness WASM: {err}")))?;
-
-        let init = instance
-            .get_typed_func::<i32, ()>(&mut store, "init")
-            .map_err(|err| ProofmanError::InvalidSetup(format!("Circom witness WASM has no init export: {err}")))?;
-        let write_shared =
-            instance.get_typed_func::<(i32, i32), ()>(&mut store, "writeSharedRWMemory").map_err(|err| {
-                ProofmanError::InvalidSetup(format!("Circom witness WASM has no writeSharedRWMemory export: {err}"))
-            })?;
-        let set_input =
-            instance.get_typed_func::<(i32, i32, i32), ()>(&mut store, "setInputSignal").map_err(|err| {
-                ProofmanError::InvalidSetup(format!("Circom witness WASM has no setInputSignal export: {err}"))
-            })?;
-        let set_input_raw = instance.get_typed_func::<i32, ()>(&mut store, "setInputSignalRaw").ok();
-        let run = instance.get_typed_func::<(), ()>(&mut store, "run").ok();
-        let get_input_size = instance.get_typed_func::<(), i32>(&mut store, "getInputSize").map_err(|err| {
-            ProofmanError::InvalidSetup(format!("Circom witness WASM has no getInputSize export: {err}"))
-        })?;
-        let get_witness_size = instance.get_typed_func::<(), i32>(&mut store, "getWitnessSize").map_err(|err| {
-            ProofmanError::InvalidSetup(format!("Circom witness WASM has no getWitnessSize export: {err}"))
-        })?;
-        let get_witness = instance.get_typed_func::<i32, ()>(&mut store, "getWitness").map_err(|err| {
-            ProofmanError::InvalidSetup(format!("Circom witness WASM has no getWitness export: {err}"))
-        })?;
-        let get_message_char = instance.get_typed_func::<(), i32>(&mut store, "getMessageChar").map_err(|err| {
-            ProofmanError::InvalidSetup(format!("Circom witness WASM has no getMessageChar export: {err}"))
-        })?;
-        let read_shared = instance.get_typed_func::<i32, i32>(&mut store, "readSharedRWMemory").map_err(|err| {
-            ProofmanError::InvalidSetup(format!("Circom witness WASM has no readSharedRWMemory export: {err}"))
-        })?;
-
-        init.call(&mut store, 0)
-            .map_err(|err| ProofmanError::InvalidProof(format!("Circom witness init failed: {err}")))?;
-        check_circom_wasm_exception(&mut store, &get_message_char)?;
-
-        if let (Some(set_input_raw), Some(run)) = (set_input_raw.as_ref(), run.as_ref()) {
-            let input_size = get_input_size
-                .call(&mut store, ())
-                .map_err(|err| ProofmanError::InvalidProof(format!("failed to read Circom input size: {err}")))?
-                as u64;
-            if input_size > source_words.len() as u64 {
-                return Err(ProofmanError::InvalidProof(format!(
-                    "Circom WASM raw input needs {input_size} source words but source has {} words",
-                    source_words.len()
-                )));
-            }
-            for offset in 0..input_size {
-                write_circom_wasm_u64(&mut store, &write_shared, source_words[offset as usize])?;
-                set_input_raw
-                    .call(&mut store, offset as i32)
-                    .map_err(|err| ProofmanError::InvalidProof(format!("failed to set raw Circom input: {err}")))?;
-                check_circom_wasm_exception(&mut store, &get_message_char)?;
-            }
-            run.call(&mut store, ())
-                .map_err(|err| ProofmanError::InvalidProof(format!("failed to run Circom witness: {err}")))?;
-            check_circom_wasm_exception(&mut store, &get_message_char)?;
-        } else {
-            for input in &circom_wasm.inputs {
-                let source_end = input.source_offset_words.checked_add(input.word_len).ok_or_else(|| {
-                    ProofmanError::InvalidSetup("Circom WASM input source range overflows".to_string())
-                })?;
-                if source_end > source_words.len() as u64 {
-                    return Err(ProofmanError::InvalidProof(format!(
-                        "Circom WASM input reads source words [{}..{}) but source has {} words",
-                        input.source_offset_words,
-                        source_end,
-                        source_words.len()
-                    )));
-                }
-                let hmsb = (input.hash >> 32) as u32 as i32;
-                let hlsb = input.hash as u32 as i32;
-                for offset in 0..input.word_len {
-                    let value = source_words[(input.source_offset_words + offset) as usize];
-                    write_circom_wasm_u64(&mut store, &write_shared, value)?;
-                    set_input
-                        .call(&mut store, (hmsb, hlsb, offset as i32))
-                        .map_err(|err| ProofmanError::InvalidProof(format!("failed to set Circom input: {err}")))?;
-                    check_circom_wasm_exception(&mut store, &get_message_char)?;
-                }
-            }
-        }
-
-        let wasm_witness_size = get_witness_size
-            .call(&mut store, ())
-            .map_err(|err| ProofmanError::InvalidProof(format!("failed to read Circom witness size: {err}")))?
-            as u64;
-        if wasm_witness_size != self.size_witness_words {
-            return Err(ProofmanError::InvalidSetup(format!(
-                "Circom witness WASM has witness size {wasm_witness_size}, expected {}",
-                self.size_witness_words
-            )));
-        }
-
-        let mut witness = vec![F::ZERO; total_witness_words as usize];
-        for index in 0..self.size_witness_words {
-            get_witness
-                .call(&mut store, index as i32)
-                .map_err(|err| ProofmanError::InvalidProof(format!("failed to read Circom witness {index}: {err}")))?;
-            let low = read_shared
-                .call(&mut store, 0)
-                .map_err(|err| ProofmanError::InvalidProof(format!("failed to read Circom witness low word: {err}")))?
-                as u32 as u64;
-            let high = read_shared
-                .call(&mut store, 1)
-                .map_err(|err| ProofmanError::InvalidProof(format!("failed to read Circom witness high word: {err}")))?
-                as u32 as u64;
-            witness[index as usize] = F::from_u64((high << 32) | low);
-        }
-        if std::env::var_os("PROOFMAN_VALIDATE_CIRCOM_WASM").is_some() {
-            let mut known = vec![KNOWN_VALUE; witness.len()];
-            self.solve_constraints(&mut witness, &mut known)?;
-        }
-        Ok(witness)
-    }
-
     fn solve_constraints<F: PrimeField64>(&self, witness: &mut [F], known: &mut [KnownValue]) -> ProofmanResult<()> {
         if self.constraints.is_empty() && self.custom_gates.is_empty() {
             return Ok(());
@@ -948,7 +766,6 @@ impl NativeRecursiveRuntime {
             }
         }
 
-        let validate_during_solve = std::env::var_os("PROOFMAN_VALIDATE_CIRCOM_WASM").is_some();
         let mut stats = NativeRuntimeSolveStats::default();
         let mut steps = record_steps.then(|| Vec::with_capacity(self.constraints.len() + self.custom_gates.len()));
         while let Some(code) = queue.pop_front() {
@@ -980,27 +797,6 @@ impl NativeRecursiveRuntime {
                             &mut queued_constraints,
                             &mut queued_gates,
                         )?;
-                    }
-                }
-                if validate_during_solve {
-                    let a = eval_lc(&constraint.a, witness, known)?;
-                    let b = eval_lc(&constraint.b, witness, known)?;
-                    let c = eval_lc(&constraint.c, witness, known)?;
-                    if a.unknown.is_empty()
-                        && b.unknown.is_empty()
-                        && c.unknown.is_empty()
-                        && a.value * b.value != c.value
-                    {
-                        return Err(ProofmanError::InvalidProof(format_constraint_failure(
-                            "native recursive R1CS witness does not satisfy constraint",
-                            constraint_index,
-                            constraint,
-                            &a,
-                            &b,
-                            &c,
-                            witness,
-                            known,
-                        )));
                     }
                 }
             } else {
@@ -2655,293 +2451,17 @@ fn checked_table_end(path: &Path, start: usize, count: usize, row_len: usize, la
         })
 }
 
-const WASM_FIELD_BYTES: usize = 16;
-const WASM_LONG_NORMAL_TAG: u64 = 0x8000_0000_0000_0000;
-const CUSTOM_TEMPLATE_POSEIDON16: i32 = 1;
-const CUSTOM_TEMPLATE_CUST_POSEIDON16: i32 = 2;
-const CUSTOM_TEMPLATE_EVPOL4: i32 = 3;
-
-#[derive(Default)]
-struct NativeCircomWasmHost {
-    exception: Option<i32>,
-    message: Option<String>,
-}
-
-fn run_circom_custom_template<F: PrimeField64>(
-    caller: &mut wasmtime::Caller<'_, NativeCircomWasmHost>,
-    kind: i32,
-    signal_base: i32,
-) -> Result<(), String> {
-    if signal_base < 0 {
-        return Err(format!("Circom custom template has negative signal base address {signal_base}"));
-    }
-    let memory = caller
-        .get_export("memory")
-        .and_then(|export| export.into_memory())
-        .ok_or_else(|| "Circom custom template cannot access WASM memory".to_string())?;
-    let base = signal_base as usize;
-
-    match kind {
-        CUSTOM_TEMPLATE_POSEIDON16 => run_wasm_poseidon16::<F>(caller, &memory, base, false),
-        CUSTOM_TEMPLATE_CUST_POSEIDON16 => run_wasm_poseidon16::<F>(caller, &memory, base, true),
-        CUSTOM_TEMPLATE_EVPOL4 => run_wasm_evpol4::<F>(caller, &memory, base),
-        _ => Err(format!("unsupported Circom custom template kind {kind}")),
-    }
-}
-
-fn run_wasm_poseidon16<F: PrimeField64>(
-    caller: &mut wasmtime::Caller<'_, NativeCircomWasmHost>,
-    memory: &wasmtime::Memory,
-    base: usize,
-    custom: bool,
-) -> Result<(), String> {
-    let mut input = [F::ZERO; 16];
-    for (idx, slot) in input.iter_mut().enumerate() {
-        *slot = read_wasm_field_at(caller, memory, base, 208 + idx)?;
-    }
-    if custom {
-        let key0 = read_wasm_field_at(caller, memory, base, 224)?;
-        let key1 = read_wasm_field_at(caller, memory, base, 225)?;
-        input = order_cust_poseidon16_input("CustPoseidon16", input, key0, key1).map_err(|err| err.to_string())?;
-    }
-    let trace = poseidon16_trace(input);
-    for (idx, value) in trace.into_iter().enumerate() {
-        write_wasm_field_at(caller, memory, base, idx, value)?;
-    }
-    Ok(())
-}
-
-fn run_wasm_evpol4<F: PrimeField64>(
-    caller: &mut wasmtime::Caller<'_, NativeCircomWasmHost>,
-    memory: &wasmtime::Memory,
-    base: usize,
-) -> Result<(), String> {
-    let mut coefs = [[F::ZERO; 3]; 5];
-    for coef_idx in 0..5 {
-        for limb in 0..3 {
-            coefs[coef_idx][limb] = read_wasm_field_at(caller, memory, base, 3 + coef_idx * 3 + limb)?;
-        }
-    }
-    let x = [
-        read_wasm_field_at(caller, memory, base, 18)?,
-        read_wasm_field_at(caller, memory, base, 19)?,
-        read_wasm_field_at(caller, memory, base, 20)?,
-    ];
-    let result = evpol4_values(coefs, x);
-    for (idx, value) in result.into_iter().enumerate() {
-        write_wasm_field_at(caller, memory, base, idx, value)?;
-    }
-    Ok(())
-}
-
-fn read_wasm_field_at<F: PrimeField64>(
-    caller: &wasmtime::Caller<'_, NativeCircomWasmHost>,
-    memory: &wasmtime::Memory,
-    base: usize,
-    index: usize,
-) -> Result<F, String> {
-    let addr = base
-        .checked_add(
-            index
-                .checked_mul(WASM_FIELD_BYTES)
-                .ok_or_else(|| "Circom custom template signal offset overflows".to_string())?,
-        )
-        .ok_or_else(|| "Circom custom template signal address overflows".to_string())?;
-    read_wasm_fr(caller, memory, addr)
-}
-
-fn write_wasm_field_at<F: PrimeField64>(
-    caller: &mut wasmtime::Caller<'_, NativeCircomWasmHost>,
-    memory: &wasmtime::Memory,
-    base: usize,
-    index: usize,
-    value: F,
-) -> Result<(), String> {
-    let addr = base
-        .checked_add(
-            index
-                .checked_mul(WASM_FIELD_BYTES)
-                .ok_or_else(|| "Circom custom template signal offset overflows".to_string())?,
-        )
-        .ok_or_else(|| "Circom custom template signal address overflows".to_string())?;
-    write_wasm_fr(caller, memory, addr, value)
-}
-
-fn read_wasm_fr<F: PrimeField64>(
-    caller: &wasmtime::Caller<'_, NativeCircomWasmHost>,
-    memory: &wasmtime::Memory,
-    addr: usize,
-) -> Result<F, String> {
-    let data = memory.data(caller);
-    let end = addr.checked_add(WASM_FIELD_BYTES).ok_or_else(|| "Circom field address overflows".to_string())?;
-    if end > data.len() {
-        return Err(format!(
-            "Circom custom template reads field [{addr}..{end}) outside WASM memory size {}",
-            data.len()
-        ));
-    }
-    let marker = data[addr + 7];
-    if marker & 0x80 == 0 {
-        let raw = i32::from_le_bytes(
-            data[addr..addr + 4].try_into().map_err(|_| "failed to decode Circom short field".to_string())?,
-        );
-        if raw >= 0 {
-            Ok(F::from_u64(raw as u64))
-        } else {
-            Ok(-F::from_u64(raw.unsigned_abs() as u64))
-        }
-    } else {
-        if marker & 0x40 != 0 {
-            return Err("Circom custom template input was not converted out of Montgomery form".to_string());
-        }
-        let value = u64::from_le_bytes(
-            data[addr + 8..addr + 16].try_into().map_err(|_| "failed to decode Circom long field".to_string())?,
-        );
-        Ok(F::from_u64(value))
-    }
-}
-
-fn write_wasm_fr<F: PrimeField64>(
-    caller: &mut wasmtime::Caller<'_, NativeCircomWasmHost>,
-    memory: &wasmtime::Memory,
-    addr: usize,
-    value: F,
-) -> Result<(), String> {
-    let mut bytes = [0u8; WASM_FIELD_BYTES];
-    bytes[..8].copy_from_slice(&WASM_LONG_NORMAL_TAG.to_le_bytes());
-    bytes[8..].copy_from_slice(&value.as_canonical_u64().to_le_bytes());
-    memory
-        .write(caller, addr, &bytes)
-        .map_err(|err| format!("failed to write Circom custom template output at {addr}: {err}"))
-}
-
-fn check_circom_wasm_exception(
-    store: &mut wasmtime::Store<NativeCircomWasmHost>,
-    get_message_char: &wasmtime::TypedFunc<(), i32>,
-) -> ProofmanResult<()> {
-    if let Some(code) = store.data().exception {
-        let host_message = store.data().message.clone();
-        let message = host_message.unwrap_or_else(|| read_circom_wasm_message(store, get_message_char));
-        let detail = if message.is_empty() { String::new() } else { format!(": {message}") };
-        return Err(ProofmanError::InvalidProof(format!("Circom witness WASM raised exception code {code}{detail}")));
-    }
-    Ok(())
-}
-
-fn read_circom_wasm_message(
-    store: &mut wasmtime::Store<NativeCircomWasmHost>,
-    get_message_char: &wasmtime::TypedFunc<(), i32>,
-) -> String {
-    let mut out = Vec::with_capacity(256);
-    for _ in 0..256 {
-        let Ok(ch) = get_message_char.call(&mut *store, ()) else { break };
-        let ch = ch as u8;
-        if ch == 0 {
-            break;
-        }
-        out.push(ch);
-    }
-    String::from_utf8_lossy(&out).trim_end_matches(char::from(0)).to_string()
-}
-
-fn write_circom_wasm_u64(
-    store: &mut wasmtime::Store<NativeCircomWasmHost>,
-    write_shared: &wasmtime::TypedFunc<(i32, i32), ()>,
-    value: u64,
-) -> ProofmanResult<()> {
-    write_shared
-        .call(&mut *store, (0, value as u32 as i32))
-        .map_err(|err| ProofmanError::InvalidProof(format!("failed to write Circom input low word: {err}")))?;
-    write_shared
-        .call(&mut *store, (1, (value >> 32) as u32 as i32))
-        .map_err(|err| ProofmanError::InvalidProof(format!("failed to write Circom input high word: {err}")))?;
-    Ok(())
-}
-
-static CIRCOM_WASMTIME_ENGINE: OnceLock<wasmtime::Engine> = OnceLock::new();
-static CIRCOM_WASMTIME_MODULES: OnceLock<Mutex<HashMap<(u64, usize), wasmtime::Module>>> = OnceLock::new();
-
-fn circom_wasmtime_module(wasm: &[u8]) -> ProofmanResult<(&'static wasmtime::Engine, wasmtime::Module)> {
-    let engine = CIRCOM_WASMTIME_ENGINE.get_or_init(wasmtime::Engine::default);
-    let key = (hash_circom_wasm(wasm), wasm.len());
-    let cache = CIRCOM_WASMTIME_MODULES.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(module) = cache
-        .lock()
-        .map_err(|_| ProofmanError::InvalidSetup("Circom WASM module cache is poisoned".to_string()))?
-        .get(&key)
-        .cloned()
-    {
-        return Ok((engine, module));
-    }
-
-    let module = wasmtime::Module::new(engine, wasm)
-        .map_err(|err| ProofmanError::InvalidSetup(format!("invalid native Circom witness WASM: {err}")))?;
-    cache
-        .lock()
-        .map_err(|_| ProofmanError::InvalidSetup("Circom WASM module cache is poisoned".to_string()))?
-        .insert(key, module.clone());
-    Ok((engine, module))
-}
-
-fn hash_circom_wasm(wasm: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    wasm.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn parse_circom_wasm_runtime(
-    path: &Path,
-    bytes: &[u8],
-    offset: usize,
-) -> ProofmanResult<(Option<NativeCircomWasmRuntime>, usize)> {
+fn parse_runtime_extension_tag(path: &Path, bytes: &[u8], offset: usize) -> ProofmanResult<usize> {
     let tag = read_u64(bytes, offset)?;
-    let mut cursor = offset + 8;
-    match tag {
-        0 => Ok((None, cursor)),
-        1 => {
-            let wasm_len = usize::try_from(read_u64(bytes, cursor)?).map_err(|_| {
-                ProofmanError::InvalidSetup(format!("{} has an oversized Circom WASM runtime", path.display()))
-            })?;
-            cursor += 8;
-            let wasm_end = cursor.checked_add(wasm_len).ok_or_else(|| {
-                ProofmanError::InvalidSetup(format!("{} has an overflowing Circom WASM runtime", path.display()))
-            })?;
-            if wasm_end > bytes.len() {
-                return Err(ProofmanError::InvalidSetup(format!(
-                    "{} has a truncated Circom WASM runtime",
-                    path.display()
-                )));
-            }
-            let wasm = bytes[cursor..wasm_end].to_vec();
-            cursor = wasm_end;
-
-            let input_count = usize::try_from(read_u64(bytes, cursor)?).map_err(|_| {
-                ProofmanError::InvalidSetup(format!("{} has too many Circom WASM inputs", path.display()))
-            })?;
-            cursor += 8;
-            let inputs_end = checked_table_end(path, cursor, input_count, 24, "Circom WASM input")?;
-            if inputs_end > bytes.len() {
-                return Err(ProofmanError::InvalidSetup(format!(
-                    "{} has a truncated Circom WASM input table",
-                    path.display()
-                )));
-            }
-            let mut inputs = Vec::with_capacity(input_count);
-            for index in 0..input_count {
-                let input_offset = cursor + index * 24;
-                inputs.push(NativeCircomWasmInput {
-                    hash: read_u64(bytes, input_offset)?,
-                    source_offset_words: read_u64(bytes, input_offset + 8)?,
-                    word_len: read_u64(bytes, input_offset + 16)?,
-                });
-            }
-            Ok((Some(NativeCircomWasmRuntime { wasm, inputs }), inputs_end))
-        }
-        other => Err(ProofmanError::InvalidSetup(format!(
-            "{} has unsupported Circom WASM runtime tag {other}",
+    if tag != 0 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "{} has unsupported native runtime extension tag {tag}",
             path.display()
-        ))),
+        )));
     }
+    offset
+        .checked_add(8)
+        .ok_or_else(|| ProofmanError::InvalidSetup("native runtime extension offset overflows".to_string()))
 }
 
 fn parse_constraints(
@@ -3195,7 +2715,6 @@ mod tests {
             source_public_prefix_words: 1,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
-            circom_wasm: None,
             constraints,
             custom_gates: Vec::new(),
             solver_index: OnceLock::new(),
@@ -3240,7 +2759,6 @@ mod tests {
                     witness_offset_words: 7,
                 },
             ],
-            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::CMul,
@@ -3295,7 +2813,6 @@ mod tests {
                     witness_offset_words: 10,
                 },
             ],
-            circom_wasm: None,
             constraints: vec![
                 NativeRuntimeConstraint {
                     a: Vec::new(),
@@ -3361,7 +2878,6 @@ mod tests {
             source_public_prefix_words: 18,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
-            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::EvPol4,
@@ -3398,7 +2914,6 @@ mod tests {
             source_public_prefix_words: 14,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
-            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::TreeSelector4,
@@ -3431,7 +2946,6 @@ mod tests {
             source_public_prefix_words: 18,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
-            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::SelectValue1,
@@ -3465,7 +2979,6 @@ mod tests {
             source_public_prefix_words: 12,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
-            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::FFT4,
@@ -3499,7 +3012,6 @@ mod tests {
             source_public_prefix_words: 0,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
-            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::Poseidon16,
@@ -3537,7 +3049,6 @@ mod tests {
             source_public_prefix_words: 0,
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
-            circom_wasm: None,
             constraints: Vec::new(),
             custom_gates: vec![NativeRuntimeCustomGate {
                 kind: NativeRuntimeCustomGateKind::CustPoseidon16,
