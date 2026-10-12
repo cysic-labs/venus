@@ -310,12 +310,8 @@ impl<F: PrimeField64> ProofCtx<F> {
         initialize_logger(verbose_mode, None);
         let global_info: GlobalInfo = GlobalInfo::new(&proving_key_path)?;
         let n_publics = global_info.n_publics;
-        let n_proof_values = global_info
-            .proof_values_map
-            .as_ref()
-            .map(|map| map.iter().filter(|entry| entry.stage == 1).count())
-            .unwrap_or(0);
-        let n_challenges = global_info.n_challenges.iter().sum::<usize>();
+        let n_proof_values = global_info.proof_values_words()?;
+        let n_challenge_words = global_info.challenge_words()?;
 
         let weights = HashMap::new();
         let q_ops_order_weights = HashMap::new();
@@ -328,7 +324,7 @@ impl<F: PrimeField64> ProofCtx<F> {
             global_info,
             public_inputs: Values::new(n_publics),
             proof_values: Values::new(n_proof_values),
-            challenges: Values::new(n_challenges * 3),
+            challenges: Values::new(n_challenge_words),
             global_challenge: Values::new(3),
             air_instances,
             dctx: RwLock::new(dctx),
@@ -757,7 +753,7 @@ impl<F: PrimeField64> ProofCtx<F> {
 
         let mut values = Vec::new();
         let mut p = 0;
-        for proof_value in self.global_info.proof_values_map.as_ref().unwrap() {
+        for proof_value in self.global_info.proof_values_map.iter().flatten() {
             if proof_value.stage > stage as u64 {
                 break;
             }
@@ -954,11 +950,18 @@ impl<F: PrimeField64> ProofCtx<F> {
             }
         }
 
-        let max_size_buffer = (free_memory_gpu / 8.0).floor() as u64 - total_const_area - total_const_area_aggregation;
+        let max_size_buffer = ((free_memory_gpu / 8.0).floor() as u64)
+            .checked_sub(total_const_area + total_const_area_aggregation)
+            .ok_or_else(|| {
+                ProofmanError::InvalidConfiguration("Not enough GPU memory to load fixed polynomials and trees".into())
+            })?;
         let max_prover_buffer_size = sctx.max_prover_buffer_size.max(setups_vadcop.max_prover_buffer_size);
 
         let n_streams_per_gpu = match cfg!(feature = "gpu") {
             true => {
+                if max_prover_buffer_size == 0 {
+                    return Err(ProofmanError::InvalidSetup("Prover buffer size is zero".into()));
+                }
                 let max_number_proofs_per_gpu =
                     gpu_params.max_number_streams.min(max_size_buffer as usize / max_prover_buffer_size);
                 if max_number_proofs_per_gpu < 1 {

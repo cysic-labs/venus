@@ -5,10 +5,12 @@ use fields::PrimeField64;
 use proofman_starks_lib_c::{expressions_bin_new_c, expressions_bin_free_c};
 
 use crate::load_const_pols;
+use crate::global_info::proof_value_words;
 use crate::{GlobalInfo, GlobalInfoAir};
 use crate::ProofmanError;
 use crate::ProofmanResult;
 use crate::Setup;
+use crate::StarkInfo;
 use crate::ProofType;
 use crate::ParamsGPU;
 
@@ -33,6 +35,32 @@ pub fn is_preload_fixed(
     preloaded_const
         .iter()
         .any(|pc| pc.airgroup_id == airgroup_id && pc.air_id == air_id && pc.proof_type == *proof_type)
+}
+
+/// Checks that the proof values of a setup and, for basic setups, its publics fit the global buffers
+/// the prover writes them into.
+fn validate_setup_global_buffers(
+    stark_info: &StarkInfo,
+    global_info: &GlobalInfo,
+    setup_type: &ProofType,
+    label: &str,
+) -> ProofmanResult<()> {
+    let mut words = 0usize;
+    for (idx, proof_value) in stark_info.proof_values_map.iter().flatten().enumerate() {
+        if proof_value.stage == 0 {
+            return Err(ProofmanError::InvalidSetup(format!("{label} proofValuesMap[{idx}] has invalid stage")));
+        }
+        words += proof_value_words(proof_value.stage);
+    }
+    if words > global_info.proof_values_words()? {
+        return Err(ProofmanError::InvalidSetup(format!("{label} proofValuesMap exceeds the global proof values")));
+    }
+
+    if setup_type == &ProofType::Basic && stark_info.n_publics > global_info.n_publics as u64 {
+        return Err(ProofmanError::InvalidSetup(format!("{label} nPublics exceeds the global public inputs")));
+    }
+
+    Ok(())
 }
 
 pub struct SetupsVadcop<F: PrimeField64> {
@@ -285,6 +313,13 @@ impl<F: PrimeField64> SetupRepository<F> {
                     Some(&global_info.get_air_setup_path(airgroup_id, 0, &ProofType::Recursive2)),
                 );
                 if setup_type != &ProofType::Compressor || global_info.get_air_has_compressor(airgroup_id, air_id) {
+                    validate_setup_global_buffers(
+                        &setup.stark_info,
+                        global_info,
+                        setup_type,
+                        &setup_path.display().to_string(),
+                    )
+                    .unwrap_or_else(|err| panic!("{err}"));
                     let n = 1 << setup.stark_info.stark_struct.n_bits;
                     let n_bits_ext = setup.stark_info.stark_struct.n_bits_ext;
                     let trace_size = setup.stark_info.map_sections_n["cm1"] * n;
