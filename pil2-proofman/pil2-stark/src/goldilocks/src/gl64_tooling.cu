@@ -439,6 +439,8 @@ void copy_to_device_in_chunks(
     uint64_t streamId,
     TimerGPU &timer
     ){
+    if (total_size == 0) return;
+
     uint32_t gpuId = d_buffers->streamsData[streamId].gpuId;
 
     cudaSetDevice(gpuId);
@@ -503,6 +505,8 @@ void copy_to_device_in_chunks(
     uint64_t pinnedBufferSize,
     cudaStream_t stream
 ){
+    if (total_size_bytes == 0) return;
+
     if (copy_direct_registered_h2d_if_enabled(src, dst, total_size_bytes, stream)) return;
 
      uint64_t block_size = pinnedBufferSize/2;
@@ -559,6 +563,7 @@ void load_and_copy_to_device_in_chunks(
     uint64_t total_size,
     uint64_t streamId
     ){
+    if (total_size == 0) return;
 
     uint32_t gpuId = d_buffers->streamsData[streamId].gpuId;
 

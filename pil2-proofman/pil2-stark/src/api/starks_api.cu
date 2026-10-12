@@ -29,6 +29,9 @@ extern uint64_t getFinalSnarkProtocolIdGPU(void *snark_prover);
 #include <mutex>
 #include <algorithm>
 #include <map>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 
 uint32_t selectStream(DeviceCommitBuffers* d_buffers, uint64_t airgroupId, uint64_t airId, std::string proofType, bool recursive = false, bool force_recursive = false);
@@ -36,6 +39,39 @@ void reserveStream(DeviceCommitBuffers* d_buffers, uint32_t streamId);
 void closeStreamTimer(TimerGPU &timer, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, bool isProve);
 void get_proof(DeviceCommitBuffers *d_buffers, uint64_t streamId);
 void get_commit_root(DeviceCommitBuffers *d_buffers, uint64_t streamId);
+
+// The aux trace keeps publics, proof values, airgroup values and air values back to back, followed by
+// the challenge words a step needs; gather them on the heap so they reach the device in one copy.
+static std::vector<Goldilocks::Element> gather_aux_values(const StarkInfo &starkInfo, const StepsParams *params, const void *challenges, uint64_t nChallengeValues)
+{
+    const std::pair<const void *, uint64_t> parts[] = {
+        {params->publicInputs, starkInfo.nPublics},
+        {params->proofValues, starkInfo.proofValuesSize},
+        {params->airgroupValues, starkInfo.airgroupValuesSize},
+        {params->airValues, starkInfo.airValuesSize},
+        {challenges, nChallengeValues},
+    };
+    constexpr uint64_t maxValues = std::numeric_limits<uint64_t>::max() / sizeof(Goldilocks::Element);
+    uint64_t total = 0;
+    for (const auto &part : parts) {
+        if (part.second > maxValues - total) {
+            throw std::runtime_error("aux values: size overflow");
+        }
+        if (part.second > 0 && part.first == nullptr) {
+            throw std::runtime_error("aux values: null source");
+        }
+        total += part.second;
+    }
+
+    std::vector<Goldilocks::Element> values(total);
+    uint64_t offset = 0;
+    for (const auto &part : parts) {
+        if (part.second == 0) continue;
+        std::memcpy(values.data() + offset, part.first, part.second * sizeof(Goldilocks::Element));
+        offset += part.second;
+    }
+    return values;
+}
 
 static bool venus_reuse_custom_fixed_enabled()
 {
@@ -715,32 +751,8 @@ uint64_t gen_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64
         copy_to_device_in_chunks(d_buffers, params->trace, dst, total_size, streamId, timer);
     }
     
-    size_t totalCopySize = 0;
-    totalCopySize += setupCtx->starkInfo.nPublics;
-    totalCopySize += setupCtx->starkInfo.proofValuesSize;
-    totalCopySize += setupCtx->starkInfo.airgroupValuesSize;
-    totalCopySize += setupCtx->starkInfo.airValuesSize;
-    totalCopySize += FIELD_EXTENSION;
-
-    Goldilocks::Element aux_values[totalCopySize];
-    uint64_t offset = 0;
-    memcpy(aux_values + offset, params->publicInputs, setupCtx->starkInfo.nPublics * sizeof(Goldilocks::Element));
-    offset += setupCtx->starkInfo.nPublics;
-    if (setupCtx->starkInfo.proofValuesSize > 0) {
-        memcpy(aux_values + offset, params->proofValues, setupCtx->starkInfo.proofValuesSize * sizeof(Goldilocks::Element));
-        offset += setupCtx->starkInfo.proofValuesSize;
-    }
-    if (setupCtx->starkInfo.airgroupValuesSize > 0) {
-        memcpy(aux_values + offset, params->airgroupValues, setupCtx->starkInfo.airgroupValuesSize * sizeof(Goldilocks::Element));
-        offset += setupCtx->starkInfo.airgroupValuesSize;
-    }
-    if (setupCtx->starkInfo.airValuesSize > 0) {
-        memcpy(aux_values + offset, params->airValues, setupCtx->starkInfo.airValuesSize * sizeof(Goldilocks::Element));
-        offset += setupCtx->starkInfo.airValuesSize;
-    }
-    memcpy(aux_values + offset, (Goldilocks::Element *)globalChallenge, FIELD_EXTENSION * sizeof(Goldilocks::Element));
-
-    copy_to_device_in_chunks(d_buffers, aux_values, (uint8_t*)(d_aux_trace + offsetPublicInputs), totalCopySize * sizeof(Goldilocks::Element), streamId, timer);
+    std::vector<Goldilocks::Element> aux_values = gather_aux_values(setupCtx->starkInfo, params, globalChallenge, FIELD_EXTENSION);
+    copy_to_device_in_chunks(d_buffers, aux_values.data(), (uint8_t*)(d_aux_trace + offsetPublicInputs), aux_values.size() * sizeof(Goldilocks::Element), streamId, timer);
 
     gl64_t *d_const_pols = d_buffers->d_constPols[gpuLocalId] + air_instance_info->const_pols_offset;
     gl64_t *d_const_tree;
@@ -807,32 +819,8 @@ uint64_t initialize_instance(void *pSetupCtx_, uint64_t airgroupId, uint64_t air
     uint64_t *dst = (uint64_t *)(d_aux_trace + offsetStage1 + N * nCols);
     copy_to_device_in_chunks(d_buffers, params->trace, dst, total_size, streamId, timer);    
     
-    size_t totalCopySize = 0;
-    totalCopySize += setupCtx->starkInfo.nPublics;
-    totalCopySize += setupCtx->starkInfo.proofValuesSize;
-    totalCopySize += setupCtx->starkInfo.airgroupValuesSize;
-    totalCopySize += setupCtx->starkInfo.airValuesSize;
-    totalCopySize += 2 * FIELD_EXTENSION;
-
-    Goldilocks::Element aux_values[totalCopySize];
-    uint64_t offset = 0;
-    memcpy(aux_values + offset, params->publicInputs, setupCtx->starkInfo.nPublics * sizeof(Goldilocks::Element));
-    offset += setupCtx->starkInfo.nPublics;
-    if (setupCtx->starkInfo.proofValuesSize > 0) {
-        memcpy(aux_values + offset, params->proofValues, setupCtx->starkInfo.proofValuesSize * sizeof(Goldilocks::Element));
-        offset += setupCtx->starkInfo.proofValuesSize;
-    }
-    if (setupCtx->starkInfo.airgroupValuesSize > 0) {
-        memcpy(aux_values + offset, params->airgroupValues, setupCtx->starkInfo.airgroupValuesSize * sizeof(Goldilocks::Element));
-        offset += setupCtx->starkInfo.airgroupValuesSize;
-    }
-    if (setupCtx->starkInfo.airValuesSize > 0) {
-        memcpy(aux_values + offset, params->airValues, setupCtx->starkInfo.airValuesSize * sizeof(Goldilocks::Element));
-        offset += setupCtx->starkInfo.airValuesSize;
-    }
-    memcpy(aux_values + offset, (Goldilocks::Element *)params->challenges, 2 * FIELD_EXTENSION * sizeof(Goldilocks::Element));
-
-    copy_to_device_in_chunks(d_buffers, aux_values, (uint8_t*)(d_aux_trace + offsetPublicInputs), totalCopySize * sizeof(Goldilocks::Element), streamId, timer);
+    std::vector<Goldilocks::Element> aux_values = gather_aux_values(setupCtx->starkInfo, params, params->challenges, 2 * FIELD_EXTENSION);
+    copy_to_device_in_chunks(d_buffers, aux_values.data(), (uint8_t*)(d_aux_trace + offsetPublicInputs), aux_values.size() * sizeof(Goldilocks::Element), streamId, timer);
     
     gl64_t *d_const_pols = d_buffers->d_constPols[gpuLocalId] + air_instance_info->const_pols_offset;
     
@@ -1385,30 +1373,8 @@ uint64_t commit_witness(void *pSetupCtx_, void *params_, uint64_t instanceId, ui
             pCustomCommitsFixed = (Goldilocks::Element *)d_aux_trace + setupCtx->starkInfo.mapOffsets[std::make_pair("custom_fixed", false)];
         }
 
-        size_t totalCopySize = 0;
-        totalCopySize += setupCtx->starkInfo.nPublics;
-        totalCopySize += setupCtx->starkInfo.proofValuesSize;
-        totalCopySize += setupCtx->starkInfo.airgroupValuesSize;
-        totalCopySize += setupCtx->starkInfo.airValuesSize;
-
-        Goldilocks::Element aux_values[totalCopySize];
-        uint64_t offset = 0;
-        memcpy(aux_values + offset, params->publicInputs, setupCtx->starkInfo.nPublics * sizeof(Goldilocks::Element));
-        offset += setupCtx->starkInfo.nPublics;
-        if (setupCtx->starkInfo.proofValuesSize > 0) {
-            memcpy(aux_values + offset, params->proofValues, setupCtx->starkInfo.proofValuesSize * sizeof(Goldilocks::Element));
-            offset += setupCtx->starkInfo.proofValuesSize;
-        }
-        if (setupCtx->starkInfo.airgroupValuesSize > 0) {
-            memcpy(aux_values + offset, params->airgroupValues, setupCtx->starkInfo.airgroupValuesSize * sizeof(Goldilocks::Element));
-            offset += setupCtx->starkInfo.airgroupValuesSize;
-        }
-        if (setupCtx->starkInfo.airValuesSize > 0) {
-            memcpy(aux_values + offset, params->airValues, setupCtx->starkInfo.airValuesSize * sizeof(Goldilocks::Element));
-            offset += setupCtx->starkInfo.airValuesSize;
-        }
-
-        copy_to_device_in_chunks(d_buffers, aux_values, (uint8_t*)(d_aux_trace + offsetPublicInputs), totalCopySize * sizeof(Goldilocks::Element), streamId, timer);
+        std::vector<Goldilocks::Element> aux_values = gather_aux_values(setupCtx->starkInfo, params, nullptr, 0);
+        copy_to_device_in_chunks(d_buffers, aux_values.data(), (uint8_t*)(d_aux_trace + offsetPublicInputs), aux_values.size() * sizeof(Goldilocks::Element), streamId, timer);
 
         StepsParams h_params = {
             trace : (Goldilocks::Element *)d_aux_trace + offsetCm1,
