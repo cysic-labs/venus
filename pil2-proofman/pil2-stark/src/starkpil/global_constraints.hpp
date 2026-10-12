@@ -2,8 +2,204 @@
 #define GLOBAL_CONSTRAINTS_HPP
 #include "goldilocks_base_field.hpp"
 #include <nlohmann/json.hpp>
+#include <array>
+#include <vector>
 
 using json = nlohmann::json;
+
+namespace {
+
+const Hint& requireGlobalConstraintHint(ExpressionsBin &globalConstraintsBin, uint64_t hintId) {
+    if(hintId >= globalConstraintsBin.hints.size()) {
+        zklog.error("Hint id " + to_string(hintId) + " out of range.");
+        exitProcess();
+        exit(-1);
+    }
+    return globalConstraintsBin.hints[hintId];
+}
+
+const HintField& requireGlobalConstraintHintField(const Hint& hint, const std::string& hintFieldName) {
+    const HintField* match = nullptr;
+    for(const HintField& hintField : hint.fields) {
+        if(hintField.name != hintFieldName) continue;
+        if(match != nullptr) {
+            zklog.error("Hint field " + hintFieldName + " appears multiple times in hint " + hint.name + ".");
+            exitProcess();
+            exit(-1);
+        }
+        match = &hintField;
+    }
+
+    if(match == nullptr) {
+        zklog.error("Hint field " + hintFieldName + " not found in hint " + hint.name + ".");
+        exitProcess();
+        exit(-1);
+    }
+
+    return *match;
+}
+
+const HintFieldValue& requireSingleGlobalConstraintHintFieldValue(const Hint& hint, const std::string& hintFieldName) {
+    const HintField& hintField = requireGlobalConstraintHintField(hint, hintFieldName);
+    if(hintField.values.size() != 1) {
+        zklog.error("Hint field " + hintFieldName + " in " + hint.name + " must contain exactly one value.");
+        exitProcess();
+        exit(-1);
+    }
+    return hintField.values[0];
+}
+
+[[noreturn]] void failInvalidGlobalConstraintsBin(const std::string& message) {
+    zklog.error("Invalid global constraints bin metadata: " + message);
+    exitProcess();
+    exit(-1);
+}
+
+void requireGlobalRange(uint64_t offset, uint64_t width, uint64_t total, const std::string& label) {
+    if(width > total || offset > total - width) {
+        failInvalidGlobalConstraintsBin(label + " is out of range");
+    }
+}
+
+uint64_t globalPublicWords(json& globalInfo) {
+    if(!globalInfo.contains("nPublics")) {
+        failInvalidGlobalConstraintsBin("globalInfo nPublics is missing");
+    }
+    return uint64_t(globalInfo["nPublics"]);
+}
+
+uint64_t globalProofValuesSize(json& globalInfo) {
+    if(!globalInfo.contains("proofValuesMap") || !globalInfo["proofValuesMap"].is_array()) {
+        failInvalidGlobalConstraintsBin("globalInfo proofValuesMap is missing");
+    }
+
+    uint64_t size = 0;
+    for(uint64_t i = 0; i < globalInfo["proofValuesMap"].size(); ++i) {
+        uint64_t stage = globalInfo["proofValuesMap"][i]["stage"];
+        size += stage == 1 ? 1 : FIELD_EXTENSION;
+    }
+    return size;
+}
+
+uint64_t globalChallengeWords(json& globalInfo) {
+    if(!globalInfo.contains("numChallenges") || !globalInfo["numChallenges"].is_array()) {
+        failInvalidGlobalConstraintsBin("globalInfo numChallenges is missing");
+    }
+
+    uint64_t count = 0;
+    for(uint64_t i = 0; i < globalInfo["numChallenges"].size(); ++i) {
+        count += uint64_t(globalInfo["numChallenges"][i]);
+    }
+    return count * FIELD_EXTENSION;
+}
+
+uint64_t globalAirgroupValuesWords(json& globalInfo) {
+    if(!globalInfo.contains("aggTypes") || !globalInfo["aggTypes"].is_array()) {
+        failInvalidGlobalConstraintsBin("globalInfo aggTypes is missing");
+    }
+
+    uint64_t size = 0;
+    for(uint64_t i = 0; i < globalInfo["aggTypes"].size(); ++i) {
+        size += uint64_t(globalInfo["aggTypes"][i].size()) * FIELD_EXTENSION;
+    }
+    return size;
+}
+
+void validateGlobalSource(
+    json& globalInfo,
+    ParserArgs& parserArgs,
+    ParserParams& parserParams,
+    uint64_t sourceType,
+    uint64_t sourceOffset,
+    uint64_t sourceDim,
+    const std::string& label
+) {
+    if(sourceType == 0) {
+        if(sourceDim != 1) {
+            failInvalidGlobalConstraintsBin(label + " loads tmp1 as an extension value");
+        }
+        requireGlobalRange(sourceOffset, 1, parserParams.nTemp1, label + " tmp1 source");
+    } else if(sourceType == 1) {
+        requireGlobalRange(sourceOffset, sourceDim, globalPublicWords(globalInfo), label + " public input");
+    } else if(sourceType == 2) {
+        requireGlobalRange(sourceOffset, sourceDim, parserArgs.nNumbers, label + " number");
+    } else if(sourceType == 3) {
+        requireGlobalRange(sourceOffset, sourceDim, globalProofValuesSize(globalInfo), label + " proof value");
+    } else if(sourceType == 4) {
+        requireGlobalRange(sourceOffset, sourceDim, parserParams.nTemp3 * uint64_t(FIELD_EXTENSION), label + " tmp3 source");
+    } else if(sourceType == 5) {
+        requireGlobalRange(sourceOffset, sourceDim, globalAirgroupValuesWords(globalInfo), label + " airgroup value");
+    } else if(sourceType == 6) {
+        requireGlobalRange(sourceOffset, sourceDim, globalChallengeWords(globalInfo), label + " challenge");
+    } else {
+        failInvalidGlobalConstraintsBin(label + " references an unknown source type");
+    }
+}
+
+// The loader already bounds the op and arg spans, the opcodes and the temporaries of every global
+// constraint; the operands index buffers whose sizes only globalInfo knows.
+void validateGlobalParserParams(json& globalInfo, ParserArgs& parserArgs, ParserParams& parserParams) {
+    for(uint64_t kk = 0; kk < parserParams.nOps; ++kk) {
+        uint64_t opOffset = uint64_t(parserParams.opsOffset) + kk;
+        uint64_t argOffset = uint64_t(parserParams.argsOffset) + kk * 6;
+        uint8_t op = parserArgs.ops[opOffset];
+        uint16_t* args = parserArgs.args;
+        std::string label = "global op " + to_string(kk);
+
+        if(args[argOffset] > 3) {
+            failInvalidGlobalConstraintsBin(label + " has an invalid arithmetic operation");
+        }
+
+        if(op == 0) {
+            requireGlobalRange(args[argOffset + 1], 1, parserParams.nTemp1, label + " tmp1 destination");
+            validateGlobalSource(globalInfo, parserArgs, parserParams, args[argOffset + 2], args[argOffset + 3], 1, label + " source 0");
+            validateGlobalSource(globalInfo, parserArgs, parserParams, args[argOffset + 4], args[argOffset + 5], 1, label + " source 1");
+        } else if(op == 1) {
+            requireGlobalRange(args[argOffset + 1], FIELD_EXTENSION, parserParams.nTemp3 * uint64_t(FIELD_EXTENSION), label + " tmp3 destination");
+            validateGlobalSource(globalInfo, parserArgs, parserParams, args[argOffset + 2], args[argOffset + 3], FIELD_EXTENSION, label + " source 0");
+            validateGlobalSource(globalInfo, parserArgs, parserParams, args[argOffset + 4], args[argOffset + 5], 1, label + " source 1");
+        } else {
+            requireGlobalRange(args[argOffset + 1], FIELD_EXTENSION, parserParams.nTemp3 * uint64_t(FIELD_EXTENSION), label + " tmp3 destination");
+            validateGlobalSource(globalInfo, parserArgs, parserParams, args[argOffset + 2], args[argOffset + 3], FIELD_EXTENSION, label + " source 0");
+            validateGlobalSource(globalInfo, parserArgs, parserParams, args[argOffset + 4], args[argOffset + 5], FIELD_EXTENSION, label + " source 1");
+        }
+    }
+
+    if(parserParams.destDim == 1) {
+        requireGlobalRange(parserParams.destId, 1, parserParams.nTemp1, "global expression destination tmp1");
+    } else if(parserParams.destDim == FIELD_EXTENSION) {
+        requireGlobalRange(parserParams.destId * uint64_t(FIELD_EXTENSION), FIELD_EXTENSION, parserParams.nTemp3 * uint64_t(FIELD_EXTENSION), "global expression destination tmp3");
+    } else {
+        failInvalidGlobalConstraintsBin("global expression has invalid destination dimension");
+    }
+}
+
+void validateGlobalHintValue(json& globalInfo, ExpressionsBin& globalConstraintsBin, const HintFieldValue& hintFieldVal, const std::string& label) {
+    if(hintFieldVal.operand == opType::tmp) {
+        if(globalConstraintsBin.expressionsInfo.find(hintFieldVal.id) == globalConstraintsBin.expressionsInfo.end()) {
+            failInvalidGlobalConstraintsBin(label + " references an unknown expression");
+        }
+    } else if(hintFieldVal.operand == opType::public_) {
+        requireGlobalRange(hintFieldVal.id, 1, globalPublicWords(globalInfo), label + " public input");
+    } else if(hintFieldVal.operand == opType::number || hintFieldVal.operand == opType::string_) {
+        return;
+    } else if(hintFieldVal.operand == opType::airgroupvalue) {
+        if(!globalInfo.contains("aggTypes") || !globalInfo["aggTypes"].is_array()) {
+            failInvalidGlobalConstraintsBin("globalInfo aggTypes is missing");
+        }
+        requireGlobalRange(hintFieldVal.dim, 1, globalInfo["aggTypes"].size(), label + " airgroup id");
+        requireGlobalRange(hintFieldVal.id, 1, globalInfo["aggTypes"][hintFieldVal.dim].size(), label + " airgroup value");
+    } else if(hintFieldVal.operand == opType::proofvalue) {
+        if(!globalInfo.contains("proofValuesMap") || !globalInfo["proofValuesMap"].is_array()) {
+            failInvalidGlobalConstraintsBin("globalInfo proofValuesMap is missing");
+        }
+        requireGlobalRange(hintFieldVal.id, 1, globalInfo["proofValuesMap"].size(), label + " proof value");
+    } else {
+        failInvalidGlobalConstraintsBin(label + " has unknown hint field type");
+    }
+}
+
+}
 
 struct GlobalConstraintInfo {
     uint64_t id;
@@ -15,33 +211,38 @@ struct GlobalConstraintInfo {
 
 void calculateGlobalExpression(json& globalInfo, Goldilocks::Element* dest, Goldilocks::Element* publics, Goldilocks::Element* challenges, Goldilocks::Element* proofValues, Goldilocks::Element** airgroupValues, ParserArgs &parserArgs, ParserParams &parserParams) {
 
+    validateGlobalParserParams(globalInfo, parserArgs, parserParams);
+
     uint8_t* ops = &parserArgs.ops[parserParams.opsOffset];
     uint16_t* args = &parserArgs.args[parserParams.argsOffset];
 
     uint64_t i_args = 0;
 
-    Goldilocks::Element tmp1[parserParams.nTemp1];
-    Goldilocks::Element tmp3[parserParams.nTemp3*FIELD_EXTENSION];
+    std::vector<Goldilocks::Element> tmp1(parserParams.nTemp1);
+    std::vector<Goldilocks::Element> tmp3(uint64_t(parserParams.nTemp3) * FIELD_EXTENSION);
 
     uint64_t nAirgroupValues = 0;
     for(uint64_t i = 0; i < globalInfo["aggTypes"].size(); ++i) {
         nAirgroupValues += globalInfo["aggTypes"][i].size() * FIELD_EXTENSION;
     }
 
-    Goldilocks::Element airgroupvalues[nAirgroupValues];
+    std::vector<Goldilocks::Element> airgroupvalues(nAirgroupValues);
     uint64_t c = 0;
     for(uint64_t i = 0; i < globalInfo["aggTypes"].size(); ++i) {
-        memcpy(&airgroupvalues[c], airgroupValues[i], globalInfo["aggTypes"][i].size() * FIELD_EXTENSION*sizeof(Goldilocks::Element));
-        c += globalInfo["aggTypes"][i].size() * FIELD_EXTENSION;
+        uint64_t words = globalInfo["aggTypes"][i].size() * FIELD_EXTENSION;
+        if(words > 0) {
+            memcpy(airgroupvalues.data() + c, airgroupValues[i], words * sizeof(Goldilocks::Element));
+        }
+        c += words;
     }
 
     Goldilocks::Element* expressions_params[7];
-    expressions_params[0] = tmp1;
+    expressions_params[0] = tmp1.data();
     expressions_params[1] = publics;
     expressions_params[2] = parserArgs.numbers;
     expressions_params[3] = proofValues;
-    expressions_params[4] = tmp3;
-    expressions_params[5] = airgroupvalues;
+    expressions_params[4] = tmp3.data();
+    expressions_params[5] = airgroupvalues.data();
     expressions_params[6] = challenges;
 
     for (uint64_t kk = 0; kk < parserParams.nOps; ++kk) {
@@ -83,9 +284,9 @@ void verifyGlobalConstraint(json& globalInfo, uint64_t constraintId, Goldilocks:
     globalConstraintInfo.id = constraintId;
     globalConstraintInfo.valid = true;
 
-    Goldilocks::Element dest[parserParams.destDim];
+    std::array<Goldilocks::Element, FIELD_EXTENSION> dest{};
 
-    calculateGlobalExpression(globalInfo, dest, publics, challenges, proofValues, airgroupValues, parserArgs, parserParams);
+    calculateGlobalExpression(globalInfo, dest.data(), publics, challenges, proofValues, airgroupValues, parserArgs, parserParams);
 
     if(parserParams.destDim == 1) {
         globalConstraintInfo.dim = parserParams.destDim;
@@ -134,6 +335,7 @@ void verifyGlobalConstraints(json& globalInfo, ExpressionsBin &globalConstraints
 }
 
 std::string getExpressionDebug(json& globalInfo, ExpressionsBin &globalConstraintsBin, uint64_t hintId, std::string hintFieldName, HintFieldValue hintFieldVal) {
+    validateGlobalHintValue(globalInfo, globalConstraintsBin, hintFieldVal, "hint " + to_string(hintId) + " field " + hintFieldName);
     std::string debug = "Hint name " + hintFieldName + " for hint id " + to_string(hintId) + " is ";
     if (hintFieldVal.operand == opType::tmp) {
         if(globalConstraintsBin.expressionsInfo[hintFieldVal.id].line != "") {
@@ -159,48 +361,18 @@ std::string getExpressionDebug(json& globalInfo, ExpressionsBin &globalConstrain
 }
 
 uint64_t getHintFieldGlobalConstraintValues(ExpressionsBin &globalConstraintsBin, uint64_t hintId, std::string hintFieldName) {
-    if(globalConstraintsBin.hints.size() == 0) {
-        zklog.error("No hints were found.");
-        exitProcess();
-        exit(-1);
-    }
-
-    Hint hint = globalConstraintsBin.hints[hintId];
-    
-    auto hintField = std::find_if(hint.fields.begin(), hint.fields.end(), [hintFieldName](const HintField& hintField) {
-        return hintField.name == hintFieldName;
-    });
-
-    if(hintField == hint.fields.end()) {
-        zklog.error("Hint field " + hintFieldName + " not found in hint " + hint.name + ".");
-        exitProcess();
-        exit(-1);
-    }
-
-    return hintField->values.size();
+    const Hint& hint = requireGlobalConstraintHint(globalConstraintsBin, hintId);
+    const HintField& hintField = requireGlobalConstraintHintField(hint, hintFieldName);
+    return hintField.values.size();
 }
 
 void getHintFieldGlobalConstraintSizes(json& globalInfo, ExpressionsBin &globalConstraintsBin,  HintFieldInfo *hintFieldValues,  uint64_t hintId, std::string hintFieldName, bool print_expression) {
-    if(globalConstraintsBin.hints.size() == 0) {
-        zklog.error("No hints were found.");
-        exitProcess();
-        exit(-1);
-    }
+    const Hint& hint = requireGlobalConstraintHint(globalConstraintsBin, hintId);
+    const HintField& hintField = requireGlobalConstraintHintField(hint, hintFieldName);
 
-    Hint hint = globalConstraintsBin.hints[hintId];
-    
-    auto hintField = std::find_if(hint.fields.begin(), hint.fields.end(), [hintFieldName](const HintField& hintField) {
-        return hintField.name == hintFieldName;
-    });
-
-    if(hintField == hint.fields.end()) {
-        zklog.error("Hint field " + hintFieldName + " not found in hint " + hint.name + ".");
-        exitProcess();
-        exit(-1);
-    }
-
-    for(uint64_t i = 0; i < hintField->values.size(); ++i) {
-        HintFieldValue hintFieldVal = hintField->values[i];
+    for(uint64_t i = 0; i < hintField.values.size(); ++i) {
+        HintFieldValue hintFieldVal = hintField.values[i];
+        validateGlobalHintValue(globalInfo, globalConstraintsBin, hintFieldVal, "hint " + to_string(hintId) + " field " + hintFieldName);
 
         if(print_expression) {
             std::string expression_line = getExpressionDebug(globalInfo, globalConstraintsBin, hintId, hintFieldName, hintFieldVal);
@@ -248,26 +420,12 @@ void getHintFieldGlobalConstraintSizes(json& globalInfo, ExpressionsBin &globalC
 void getHintFieldGlobalConstraint(json& globalInfo, ExpressionsBin &globalConstraintsBin, HintFieldInfo *hintFieldValues, Goldilocks::Element* publicInputs, Goldilocks::Element* challenges, Goldilocks::Element* proofValues, Goldilocks::Element** airgroupValues, uint64_t hintId, std::string hintFieldName, bool print_expression) {
    
 
-    if(globalConstraintsBin.hints.size() == 0) {
-        zklog.error("No hints were found.");
-        exitProcess();
-        exit(-1);
-    }
+    const Hint& hint = requireGlobalConstraintHint(globalConstraintsBin, hintId);
+    const HintField& hintField = requireGlobalConstraintHintField(hint, hintFieldName);
 
-    Hint hint = globalConstraintsBin.hints[hintId];
-    
-    auto hintField = std::find_if(hint.fields.begin(), hint.fields.end(), [hintFieldName](const HintField& hintField) {
-        return hintField.name == hintFieldName;
-    });
-
-    if(hintField == hint.fields.end()) {
-        zklog.error("Hint field " + hintFieldName + " not found in hint " + hint.name + ".");
-        exitProcess();
-        exit(-1);
-    }
-
-    for(uint64_t i = 0; i < hintField->values.size(); ++i) {
-        HintFieldValue hintFieldVal = hintField->values[i];
+    for(uint64_t i = 0; i < hintField.values.size(); ++i) {
+        HintFieldValue hintFieldVal = hintField.values[i];
+        validateGlobalHintValue(globalInfo, globalConstraintsBin, hintFieldVal, "hint " + to_string(hintId) + " field " + hintFieldName);
        
         HintFieldInfo hintFieldInfo = hintFieldValues[i];
 
@@ -308,25 +466,10 @@ void getHintFieldGlobalConstraint(json& globalInfo, ExpressionsBin &globalConstr
 
 
 uint64_t setHintFieldGlobalConstraint(json& globalInfo, ExpressionsBin &globalConstraintsBin, Goldilocks::Element* proofValues, Goldilocks::Element* values, uint64_t hintId, std::string hintFieldName) {
-    Hint hint = globalConstraintsBin.hints[hintId];
+    const Hint& hint = requireGlobalConstraintHint(globalConstraintsBin, hintId);
+    const HintFieldValue& hintFieldVal = requireSingleGlobalConstraintHintFieldValue(hint, hintFieldName);
+    validateGlobalHintValue(globalInfo, globalConstraintsBin, hintFieldVal, "hint " + to_string(hintId) + " field " + hintFieldName);
 
-    auto hintField = std::find_if(hint.fields.begin(), hint.fields.end(), [hintFieldName](const HintField& hintField) {
-        return hintField.name == hintFieldName;
-    });
-
-    if(hintField == hint.fields.end()) {
-        zklog.error("Hint field " + hintFieldName + " not found in hint " + hint.name + ".");
-        exitProcess();
-        exit(-1);
-    }
-
-    if(hintField->values.size() != 1) {
-        zklog.error("Hint field " + hintFieldName + " in " + hint.name + "has more than one destination.");
-        exitProcess();
-        exit(-1);
-    }
-
-    auto hintFieldVal = hintField->values[0];
     if(hintFieldVal.operand == opType::proofvalue) {
         uint64_t pos = 0;
         for(uint64_t i = 0; i < hintFieldVal.id; ++i) {
