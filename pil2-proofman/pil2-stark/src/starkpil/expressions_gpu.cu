@@ -1,12 +1,49 @@
 #include "expressions_gpu.cuh"
 #include "cuda_utils.cuh"
 #include <set>
+#include <cstring>
+#include <stdexcept>
+#include <string>
 #include <sys/stat.h>
 #include "cuda_utils.hpp"
 #include "gl64_tooling.cuh"
 #include "goldilocks_cubic_extension.cuh"
 
 extern __shared__ Goldilocks::Element scratchpad[];
+
+// Copies the arguments of one expression launch into its own slot of the pinned staging buffers
+// and queues the transfer to the device. Slots are indexed by launch so a later launch never
+// overwrites arguments whose transfer is still pending.
+static void stageExpressionLaunch(
+    const char *context,
+    uint64_t countId,
+    const DestParamsGPU *h_dest_params,
+    uint64_t dest_nParams,
+    const ExpsArguments &h_expsArgs,
+    DestParamsGPU *d_destParams,
+    ExpsArguments *d_expsArgs,
+    Goldilocks::Element *pinned_exps_params,
+    Goldilocks::Element *pinned_exps_args,
+    cudaStream_t stream)
+{
+    if(countId >= VENUS_GPU_MAX_EXPS) {
+        throw std::runtime_error(std::string(context) + ": GPU expression staging capacity exceeded");
+    }
+    if(dest_nParams == 0 || dest_nParams > 2) {
+        throw std::runtime_error(std::string(context) + ": invalid destination parameter count");
+    }
+
+    uint8_t *paramsBase = reinterpret_cast<uint8_t *>(pinned_exps_params);
+    uint8_t *argsBase = reinterpret_cast<uint8_t *>(pinned_exps_args);
+    auto *paramsSlot = reinterpret_cast<DestParamsGPU *>(paramsBase + countId * 2 * sizeof(DestParamsGPU));
+    auto *argsSlot = reinterpret_cast<ExpsArguments *>(argsBase + countId * sizeof(ExpsArguments));
+
+    std::memcpy(paramsSlot, h_dest_params, dest_nParams * sizeof(DestParamsGPU));
+    CHECKCUDAERR(cudaMemcpyAsync(d_destParams, paramsSlot, dest_nParams * sizeof(DestParamsGPU), cudaMemcpyHostToDevice, stream));
+
+    std::memcpy(argsSlot, &h_expsArgs, sizeof(ExpsArguments));
+    CHECKCUDAERR(cudaMemcpyAsync(d_expsArgs, argsSlot, sizeof(ExpsArguments), cudaMemcpyHostToDevice, stream));
+}
 
 ExpressionsGPU::ExpressionsGPU(SetupCtx &setupCtx, uint32_t nRowsPack, uint32_t nBlocks) : ExpressionsCtx(setupCtx), nRowsPack(nRowsPack), nBlocks(nBlocks)
 {
@@ -171,12 +208,8 @@ void ExpressionsGPU::calculateExpressions_gpu(StepsParams *d_params, Dest dest, 
         h_dest_params[j].expId = dest.params[j].expId;
     }
 
-    memcpy(pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
-    CHECKCUDAERR(cudaMemcpyAsync(d_destParams, pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_expsArgs.dest_nParams * sizeof(DestParamsGPU), cudaMemcpyHostToDevice, stream));
+    stageExpressionLaunch("calculateExpressions_gpu", countId, h_dest_params, h_expsArgs.dest_nParams, h_expsArgs, d_destParams, d_expsArgs, pinned_exps_params, pinned_exps_args, stream);
     delete[] h_dest_params;
-
-    memcpy(pinned_exps_args + countId * sizeof(ExpsArguments), &h_expsArgs, sizeof(ExpsArguments));
-    CHECKCUDAERR(cudaMemcpyAsync(d_expsArgs, pinned_exps_args + countId * sizeof(ExpsArguments), sizeof(ExpsArguments), cudaMemcpyHostToDevice, stream));
 
     uint32_t nblocks_ = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(maxBlocks),(domainSize + nrowsPack - 1) / nrowsPack));
     uint32_t nthreads_ = nblocks_ == 1 ? domainSize : nrowsPack;
@@ -315,12 +348,8 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
         h_dest_params[j].expId = dest.params[j].expId;
     }
 
-    memcpy(pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_dest_params, h_expsArgs.dest_nParams * sizeof(DestParamsGPU));
-    CHECKCUDAERR(cudaMemcpyAsync(d_destParams, pinned_exps_params + countId * 2 * sizeof(DestParamsGPU), h_expsArgs.dest_nParams * sizeof(DestParamsGPU), cudaMemcpyHostToDevice, stream));
+    stageExpressionLaunch("calculateExpressionsQ_gpu", countId, h_dest_params, h_expsArgs.dest_nParams, h_expsArgs, d_destParams, d_expsArgs, pinned_exps_params, pinned_exps_args, stream);
     delete[] h_dest_params;
-
-    memcpy(pinned_exps_args + countId * sizeof(ExpsArguments), &h_expsArgs, sizeof(ExpsArguments));
-    CHECKCUDAERR(cudaMemcpyAsync(d_expsArgs, pinned_exps_args + countId * sizeof(ExpsArguments), sizeof(ExpsArguments), cudaMemcpyHostToDevice, stream));
 
     uint32_t nblocks_ = static_cast<uint32_t>(std::min<uint64_t>(static_cast<uint64_t>(maxBlocks),(domainSize + nrowsPack - 1) / nrowsPack));
     uint32_t nthreads_ = nblocks_ == 1 ? domainSize : nrowsPack;

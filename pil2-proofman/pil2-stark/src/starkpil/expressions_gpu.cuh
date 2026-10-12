@@ -7,6 +7,9 @@
 #include "data_layout.cuh"
 #include <omp.h>
 
+// Capacity, in expression launches per proof, of the pinned staging buffers for expression arguments.
+static constexpr uint64_t VENUS_GPU_MAX_EXPS = 40000;
+
 struct DeviceArguments
 {
     uint64_t N;

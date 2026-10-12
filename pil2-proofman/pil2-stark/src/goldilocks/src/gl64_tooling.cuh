@@ -12,6 +12,7 @@
 #include "cuda_utils.cuh"
 #include "transcriptGL.cuh"
 #include "expressions_gpu.cuh"
+#include "packed_layout.hpp"
 #include <limits.h>
 #include "fr.hpp"
 #endif
@@ -211,12 +212,13 @@ struct AirInstanceInfo {
             is_packed = packedInfo->is_packed;
             num_packed_words = packedInfo->num_packed_words;
             uint64_t nCols = setupCtx->starkInfo.mapSectionsN["cm1"];
-            if (is_packed && num_packed_words > 0) {
+            if (is_packed) {
+                validatePackedLayout("AirInstanceInfo packed trace", nCols, num_packed_words, packedInfo->unpack_info);
                 CHECKCUDAERR(cudaMalloc(&unpack_info, nCols * sizeof(uint64_t)));
                 CHECKCUDAERR(cudaMemcpy(unpack_info, packedInfo->unpack_info, nCols * sizeof(uint64_t), cudaMemcpyHostToDevice));
             }
-            cudaMemcpy(d_num_packed_words, &num_packed_words, sizeof(uint64_t), cudaMemcpyHostToDevice);
         }
+        CHECKCUDAERR(cudaMemcpy(d_num_packed_words, &num_packed_words, sizeof(uint64_t), cudaMemcpyHostToDevice));
     }
 
     ~AirInstanceInfo() {
@@ -310,7 +312,7 @@ struct StreamData{
     std::mutex mutex_stream_selection;
 
     void initialize(uint64_t max_size_proof, uint32_t gpuId_, uint32_t localStreamId_, bool recursive_, uint64_t merkleTreeArity){
-        uint64_t maxExps = 40000; // TODO: CALCULATE IT PROPERLY!
+        uint64_t maxExps = VENUS_GPU_MAX_EXPS; // TODO: CALCULATE IT PROPERLY!
         cudaSetDevice(gpuId_);
         CHECKCUDAERR(cudaStreamCreate(&stream));
         timer.init(stream);
@@ -402,7 +404,7 @@ struct DeviceRecursiveFBuffers
 
 
     DeviceRecursiveFBuffers() : owns_aux_trace(true), owns_const_tree(true), d_verkey(nullptr), const_tree_loaded(false) {
-        uint64_t maxExps = 20000;
+        uint64_t maxExps = VENUS_GPU_MAX_EXPS;
         cudaStreamCreate(&stream);
         cudaStreamCreate(&stream_const_tree);
         timer.init(stream);

@@ -2,9 +2,40 @@ use std::fs::File;
 use std::path::Path;
 use std::ops::Div;
 
+use bincode::Options;
 use bytemuck::cast_slice;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+/// Largest serialized proof file the bincode proof loaders accept.
+const MAX_PROOF_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Reads a proof written with `bincode::serialize_into`. Files larger than
+/// `MAX_PROOF_FILE_BYTES` are rejected before decoding, and the decoder may not allocate past the
+/// same limit, so a corrupt length prefix cannot trigger an unbounded allocation.
+pub fn load_bincode_proof<T: DeserializeOwned>(
+    path: &Path,
+    label: &str,
+) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+    let open = || -> std::io::Result<File> {
+        let file = File::open(path)?;
+        if file.metadata()?.len() > MAX_PROOF_FILE_BYTES {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "proof file exceeds size limit"));
+        }
+        Ok(file)
+    };
+    let file = open().map_err(|e| {
+        std::io::Error::new(e.kind(), format!("Failed to open file for loading {label}: {}: {e}", path.display()))
+    })?;
+    let proof = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(MAX_PROOF_FILE_BYTES)
+        .with_little_endian()
+        .deserialize_from(file)?;
+    Ok(proof)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VadcopFinalProof {
@@ -59,14 +90,7 @@ impl VadcopFinalProof {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let file = File::open(path.as_ref()).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("Failed to open file for loading proof: {}: {}", path.as_ref().display(), e),
-            )
-        })?;
-        let proof: VadcopFinalProof = bincode::deserialize_from(file)?;
-        Ok(proof)
+        load_bincode_proof(path.as_ref(), "proof")
     }
 
     pub fn proof_with_publics(&self) -> Vec<u8> {

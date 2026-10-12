@@ -5,6 +5,7 @@
 #include "omp.h"
 #include "starks_api.hpp"
 #include "starks_api_internal.hpp"
+#include "packed_layout.hpp"
 #include <cstdlib>
 #include <cstring>
 #include <thread>
@@ -55,6 +56,23 @@ static uint32_t venus_reuse_stream_wait_us()
         return static_cast<uint32_t>(std::min(parsed, 1000000ul));
     }();
     return value;
+}
+
+// A packed const pols file is [wordsPerRow, unpackInfo[nConstants], rows...]; its layout must
+// describe exactly the rows the file holds before it is unpacked on the device.
+static void validatePackedConstPols(const StarkInfo &starkInfo, const Goldilocks::Element *constPols, uint64_t constSize)
+{
+    const uint64_t *words = reinterpret_cast<const uint64_t *>(constPols);
+    uint64_t nConst = starkInfo.nConstants;
+    if (constSize <= nConst) {
+        throw std::runtime_error("packed const pols: file shorter than packed header");
+    }
+    uint64_t wordsPerRow = words[0];
+    validatePackedLayout("packed const pols", nConst, wordsPerRow, words + 1);
+    uint64_t nRows = 1ULL << starkInfo.starkStruct.nBits;
+    if (constSize - 1 - nConst != nRows * wordsPerRow) {
+        throw std::runtime_error("packed const pols: file size does not match packed header");
+    }
 }
 
 uint32_t register_host_memory(void *ptr, uint64_t size) {
@@ -596,6 +614,7 @@ void load_device_const_pols(uint64_t airgroupId, uint64_t airId, uint64_t initia
     Goldilocks::Element *constPols = new Goldilocks::Element[constSize];
 
     loadFileParallel(constPols, constFilename, sizeConstPols);
+    validatePackedConstPols(d_buffers->air_instances[key][proofType][0]->setupCtx->starkInfo, constPols, constSize);
     
     for(int i=0; i<d_buffers->n_gpus; ++i){
         if (onlyFirstGPU && i > 0) break;

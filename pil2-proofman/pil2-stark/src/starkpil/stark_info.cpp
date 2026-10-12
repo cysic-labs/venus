@@ -5,6 +5,77 @@
 #include "exit_process.hpp"
 #include "expressions_pack.hpp"
 #include <cstdlib>
+#include <stdexcept>
+
+static constexpr uint64_t MAX_SAFE_SHIFT_BITS = 30;
+
+static bool isSupportedArity(uint64_t arity, bool bn128)
+{
+    if (arity == 2 || arity == 3 || arity == 4) return true;
+    return bn128 && arity == 16;
+}
+
+static uint64_t checkedPow2Bits(uint64_t bits, const char *context)
+{
+    if (bits > MAX_SAFE_SHIFT_BITS) {
+        throw std::runtime_error(std::string(context) + ": unsupported power-of-two size");
+    }
+    return 1ULL << bits;
+}
+
+static uint64_t merkleDepthForBits(uint64_t bits, uint64_t arity, const char *context)
+{
+    uint64_t leaves = checkedPow2Bits(bits, context);
+    uint64_t depth = 0;
+    uint64_t capacity = 1;
+    while (capacity < leaves) {
+        capacity *= arity;
+        depth++;
+    }
+    return depth;
+}
+
+// Rejects stark structures whose sizes would overflow the 64-bit domain arithmetic or whose FRI
+// and Merkle parameters cannot describe a proof the prover and verifier agree on.
+static void validateStarkStruct(const StarkStruct &starkStruct)
+{
+    bool bn128 = starkStruct.verificationHashType == "BN128";
+    if (!bn128 && starkStruct.verificationHashType != "GL") {
+        throw std::runtime_error("StarkInfo: unsupported verification hash type");
+    }
+    if (!isSupportedArity(starkStruct.merkleTreeArity, bn128) || !isSupportedArity(starkStruct.transcriptArity, bn128)) {
+        throw std::runtime_error("StarkInfo: unsupported Merkle or transcript arity");
+    }
+    if (starkStruct.nQueries == 0) {
+        throw std::runtime_error("StarkInfo: nQueries must be nonzero");
+    }
+    if (starkStruct.nBits > starkStruct.nBitsExt) {
+        throw std::runtime_error("StarkInfo: nBits cannot exceed nBitsExt");
+    }
+    checkedPow2Bits(starkStruct.nBitsExt, "StarkInfo nBitsExt");
+    if (starkStruct.steps.empty()) {
+        throw std::runtime_error("StarkInfo: FRI steps cannot be empty");
+    }
+    if (starkStruct.steps[0].nBits != starkStruct.nBitsExt) {
+        throw std::runtime_error("StarkInfo: first FRI step must match nBitsExt");
+    }
+
+    uint64_t baseDepth = merkleDepthForBits(starkStruct.nBitsExt, starkStruct.merkleTreeArity, "StarkInfo base tree");
+    if (starkStruct.lastLevelVerification > baseDepth) {
+        throw std::runtime_error("StarkInfo: lastLevelVerification exceeds base tree depth");
+    }
+
+    for (uint64_t i = 1; i < starkStruct.steps.size(); ++i) {
+        uint64_t bits = starkStruct.steps[i].nBits;
+        if (starkStruct.steps[i - 1].nBits <= bits) {
+            throw std::runtime_error("StarkInfo: FRI steps must be strictly descending");
+        }
+        uint64_t depth = merkleDepthForBits(bits, starkStruct.merkleTreeArity, "StarkInfo FRI tree");
+        if (starkStruct.lastLevelVerification > depth) {
+            throw std::runtime_error("StarkInfo: lastLevelVerification exceeds a FRI tree depth");
+        }
+    }
+}
 
 StarkInfo::StarkInfo(string file, bool final_, bool recursive_, bool verify_constraints_, bool verify_, bool gpu_, bool preallocate_)
 {
@@ -60,6 +131,7 @@ void StarkInfo::load(json j)
         step.nBits = j["starkStruct"]["steps"][i]["nBits"];
         starkStruct.steps.push_back(step);
     }
+    validateStarkStruct(starkStruct);
 
     nPublics = j["nPublics"];
     nConstants = j["nConstants"];

@@ -1,6 +1,7 @@
 #ifndef LIB_API_INTERNAL_H
 #define LIB_API_INTERNAL_H
 #include "starks_api.hpp"
+#include "packed_layout.hpp"
 
 extern ProofDoneCallback proof_done_callback;
 
@@ -20,6 +21,7 @@ struct DeviceCommitBuffersCPU
 
     void addPackedInfoCPU(uint64_t airgroupId, uint64_t airId, uint64_t nCols, bool is_packed, uint64_t num_packed_words, uint64_t* unpack_info_) {
         if (!is_packed) return;
+        validatePackedLayout("CPU packed trace", nCols, num_packed_words, unpack_info_);
         std::vector<uint64_t> unpack_vec(unpack_info_, unpack_info_ + nCols);
         PackedInfoCPU pInfo = {is_packed, num_packed_words, unpack_vec};
         packedInfo[std::make_pair(airgroupId, airId)] = pInfo;

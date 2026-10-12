@@ -4,7 +4,7 @@ use proofman_common::{
 };
 use proofman_util::{
     timer_start_info, timer_stop_and_log_info, timer_start_debug, timer_stop_and_log_debug, create_buffer_fast,
-    VadcopFinalProof,
+    load_bincode_proof, VadcopFinalProof,
 };
 use fields::PrimeField64;
 use std::path::{Path, PathBuf};
@@ -99,14 +99,7 @@ impl SnarkProof {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let file = File::open(path.as_ref()).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("Failed to open file for loading SNARK proof: {}: {}", path.as_ref().display(), e),
-            )
-        })?;
-        let proof: SnarkProof = bincode::deserialize_from(file)?;
-        Ok(proof)
+        load_bincode_proof(path.as_ref(), "SNARK proof")
     }
 
     pub fn convert_to_json(
