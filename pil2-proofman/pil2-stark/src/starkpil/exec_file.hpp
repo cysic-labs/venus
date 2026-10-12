@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -16,10 +17,25 @@ void readExecFile(uint64_t *exec_data, std::string execFile, uint64_t nCommitedP
     uint64_t nSMap;
 
     std::ifstream file(execFile, std::ios::binary);
-    file.read(reinterpret_cast<char *>(&nAdds), sizeof(uint64_t));
-    file.read(reinterpret_cast<char *>(&nSMap), sizeof(uint64_t));
-    
-    loadFileParallel(exec_data, execFile, (2 + nAdds * 4 + nSMap * nCommitedPols) * sizeof(uint64_t));
+    if (!file.is_open()) {
+        throw std::runtime_error("readExecFile() failed to open " + execFile);
+    }
+    if (!file.read(reinterpret_cast<char *>(&nAdds), sizeof(uint64_t)) ||
+        !file.read(reinterpret_cast<char *>(&nSMap), sizeof(uint64_t))) {
+        throw std::runtime_error("readExecFile() truncated header in " + execFile);
+    }
+
+    // The header sizes the rest of the file; bound each table before summing so the word count cannot wrap.
+    constexpr uint64_t maxExecFileWords = (512ULL << 20) / sizeof(uint64_t);
+    if (nAdds > maxExecFileWords / 4 || (nCommitedPols != 0 && nSMap > maxExecFileWords / nCommitedPols)) {
+        throw std::runtime_error("readExecFile() file too large in " + execFile);
+    }
+    uint64_t totalWords = 2 + nAdds * 4 + nSMap * nCommitedPols;
+    if (totalWords > maxExecFileWords) {
+        throw std::runtime_error("readExecFile() file too large in " + execFile);
+    }
+
+    loadFileParallel(exec_data, execFile, totalWords * sizeof(uint64_t));
 }
 
 void getCommitedPols(Goldilocks::Element *circomWitness, uint64_t *exec_data, Goldilocks::Element *witness, Goldilocks::Element* publics, uint64_t sizeWitness, uint64_t N, uint64_t nPublics, uint64_t nCommitedPols)  {

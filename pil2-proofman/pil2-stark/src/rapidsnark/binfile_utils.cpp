@@ -6,6 +6,8 @@
 #include <string>
 #include <memory.h>
 #include <stdexcept>
+#include <exception>
+#include <mutex>
 
 #include "binfile_utils.hpp"
 #include "thread_utils.hpp"
@@ -296,29 +298,48 @@ namespace BinFileUtils
             throw std::range_error("readSectionToParallel: offset+len exceeds section size");
         }
 
-        u_int64_t chunkSize = (len + numThreads - 1) / numThreads;
+        numThreads = std::max(numThreads, 1);
+        u_int64_t threadCount = static_cast<u_int64_t>(numThreads);
+        u_int64_t chunkSize = len / threadCount + (len % threadCount != 0);
         std::vector<std::thread> threads;
+        // An exception escaping a std::thread terminates the process; keep the first one and rethrow it after the join.
+        std::mutex errorMutex;
+        std::exception_ptr firstError = nullptr;
         for (int i = 0; i < numThreads; i++) {
             u_int64_t off = (u_int64_t)i * chunkSize;
             if (off >= len) break;
             u_int64_t sz = std::min(chunkSize, len - off);
-            threads.emplace_back([fd = this->fileFd, dest, fileOffset, off, sz]() {
-                u_int64_t done = 0;
-                while (done < sz) {
-                    ssize_t r = ::pread(fd, (uint8_t *)dest + off + done,
-                                        sz - done, fileOffset + off + done);
-                    if (r <= 0) {
-                        throw std::system_error(errno, std::generic_category(), "pread parallel");
+            threads.emplace_back([fd = this->fileFd, dest, fileOffset, off, sz, &errorMutex, &firstError]() {
+                try {
+                    u_int64_t done = 0;
+                    while (done < sz) {
+                        ssize_t r = ::pread(fd, (uint8_t *)dest + off + done,
+                                            sz - done, fileOffset + off + done);
+                        if (r <= 0) {
+                            throw std::system_error(errno, std::generic_category(), "pread parallel");
+                        }
+                        done += r;
                     }
-                    done += r;
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(errorMutex);
+                    if (firstError == nullptr) {
+                        firstError = std::current_exception();
+                    }
                 }
             });
         }
         for (auto &t : threads) t.join();
+        if (firstError != nullptr) {
+            std::rethrow_exception(firstError);
+        }
     }
 
     void BinFile::startReadSection(u_int32_t sectionId, u_int32_t sectionPos)
     {
+        if (directRead) {
+            throw std::runtime_error("startReadSection is not supported in direct read mode");
+        }
+
         if (sections.find(sectionId) == sections.end())
         {
             throw std::range_error("Section does not exist: " + std::to_string(sectionId));
@@ -388,52 +409,36 @@ namespace BinFileUtils
 
     u_int8_t BinFile::readU8LE()
     {
-        if (pos > size || sizeof(u_int8_t) > size - pos) {
-            throw std::out_of_range("Attempting to read beyond buffer bounds");
-        }
-        u_int8_t res = *((u_int8_t *)((u_int64_t)addr + pos));
-        pos += 1;
-        return res;
+        return *((u_int8_t *)read(sizeof(u_int8_t)));
     }
 
 
     u_int16_t BinFile::readU16LE()
     {
-        if (pos > size || sizeof(u_int16_t) > size - pos) {
-            throw std::out_of_range("Attempting to read beyond buffer bounds");
-        }
-        u_int16_t res = *((u_int16_t *)((u_int64_t)addr + pos));
-        pos += 2;
-        return res;
+        return *((u_int16_t *)read(sizeof(u_int16_t)));
     }
 
 
     u_int32_t BinFile::readU32LE()
     {
-        if (pos > size || sizeof(u_int32_t) > size - pos) {
-            throw std::out_of_range("Attempting to read beyond buffer bounds");
-        }
-        u_int32_t res = *((u_int32_t *)((u_int64_t)addr + pos));
-        pos += 4;
-        return res;
+        return *((u_int32_t *)read(sizeof(u_int32_t)));
     }
 
     u_int64_t BinFile::readU64LE()
     {
-        if (pos > size || sizeof(u_int64_t) > size - pos) {
-            throw std::out_of_range("Attempting to read beyond buffer bounds u64");
-        }
-        u_int64_t res = *((u_int64_t *)((u_int64_t)addr + pos));
-        pos += 8;
-        return res;
+        return *((u_int64_t *)read(sizeof(u_int64_t)));
     }
 
     bool BinFile::sectionExists(u_int32_t sectionId) {
         return sections.find(sectionId) != sections.end();
     }
 
+    // Cursor reads address the in-memory copy of the file, which direct read mode does not keep.
     void *BinFile::read(u_int64_t len)
     {
+        if (directRead) {
+            throw std::runtime_error("cursor reads are not supported in direct read mode");
+        }
         if (pos > size || len > size - pos) {
             throw std::out_of_range("Attempting to read beyond buffer bounds in read()");
         }
@@ -444,12 +449,17 @@ namespace BinFileUtils
 
     std::string BinFile::readString()
     {
+        if (readingSection == nullptr) {
+            throw std::runtime_error("readString called without an active section");
+        }
         uint8_t *startOfString = (uint8_t *)((u_int64_t)addr + pos);
-        uint8_t *endOfString = startOfString;
         uint8_t *endOfSection = (uint8_t *)((uint64_t)readingSection->start + readingSection->size);
+        if (startOfString > endOfSection) {
+            throw std::out_of_range("readString cursor is beyond section bounds");
+        }
 
-        uint8_t *i;
-        for (i = endOfString; i != endOfSection; i++)
+        uint8_t *endOfString = nullptr;
+        for (uint8_t *i = startOfString; i != endOfSection; i++)
         {
             if (*i == 0)
             {
@@ -458,12 +468,11 @@ namespace BinFileUtils
             }
         }
 
-        if (i == endOfSection)
-        {
-            endOfString = i - 1;
+        if (endOfString == nullptr) {
+            throw std::runtime_error("Unterminated string in binfile section");
         }
 
-        uint32_t len = endOfString - startOfString;
+        size_t len = static_cast<size_t>(endOfString - startOfString);
         std::string str = std::string((const char *)startOfString, len);
         pos += len + 1;
 
