@@ -106,24 +106,54 @@ impl<F: PrimeField64> Default for HintFieldInfo<F> {
     }
 }
 
+// Bounds on the hint sizes the C hint loader reports, checked before buffers are allocated for them.
+const MAX_HINT_FIELD_VALUES: u64 = 1 << 20;
+const MAX_HINT_VALUE_ELEMENTS: u64 = 1 << 28;
+const MAX_HINT_MATRIX_POSITIONS: u64 = 1 << 20;
+const MAX_HINT_STRING_BYTES: u64 = 1 << 24;
+const MAX_HINT_EXPRESSION_LINE_BYTES: u64 = 1 << 24;
+
+fn checked_hint_len(value: u64, limit: u64, label: &str) -> ProofmanResult<usize> {
+    if value > limit {
+        return Err(ProofmanError::InvalidHints(format!("{label} exceeds limit: {value} > {limit}")));
+    }
+    Ok(value as usize)
+}
+
+/// Checks the number of values the C hint loader reports for a hint field.
+pub(crate) fn checked_hint_field_value_count(value: u64) -> ProofmanResult<usize> {
+    checked_hint_len(value, MAX_HINT_FIELD_VALUES, "hint field value count")
+}
+
 impl<F: PrimeField64> HintFieldInfo<F> {
-    pub fn init_buffers(&mut self) {
+    pub fn init_buffers(&mut self) -> ProofmanResult<()> {
         // SAFETY: the C hint loader writes every element of these buffers before Rust reads them.
         if self.size > 0 {
-            self.values = unsafe { create_buffer_fast(self.size as usize) };
+            let len = checked_hint_len(self.size, MAX_HINT_VALUE_ELEMENTS, "hint field value element count")?;
+            self.values = unsafe { create_buffer_fast(len) };
         }
 
         if self.matrix_size > 0 {
-            self.pos = unsafe { create_buffer_fast(self.matrix_size as usize) };
+            let len =
+                checked_hint_len(self.matrix_size, MAX_HINT_MATRIX_POSITIONS, "hint field matrix position count")?;
+            self.pos = unsafe { create_buffer_fast(len) };
         }
 
         if self.string_size > 0 {
-            self.string_value = unsafe { create_buffer_fast(self.string_size as usize) };
+            let len = checked_hint_len(self.string_size, MAX_HINT_STRING_BYTES, "hint field string byte count")?;
+            self.string_value = unsafe { create_buffer_fast(len) };
         }
 
         if self.expression_line_size > 0 {
-            self.expression_line = unsafe { create_buffer_fast(self.expression_line_size as usize) };
+            let len = checked_hint_len(
+                self.expression_line_size,
+                MAX_HINT_EXPRESSION_LINE_BYTES,
+                "hint field expression-line byte count",
+            )?;
+            self.expression_line = unsafe { create_buffer_fast(len) };
         }
+
+        Ok(())
     }
 }
 
@@ -952,9 +982,13 @@ fn get_hint_f<F: PrimeField64>(
         StepsParams::default()
     };
 
-    let n_hints_values = get_hint_field_values_c((&setup.p_setup).into(), hint_id as u64, hint_field_name);
+    let n_hints_values = checked_hint_field_value_count(get_hint_field_values_c(
+        (&setup.p_setup).into(),
+        hint_id as u64,
+        hint_field_name,
+    ))?;
 
-    let mut hint_field_values: Vec<HintFieldInfo<F>> = vec![HintFieldInfo::default(); n_hints_values as usize];
+    let mut hint_field_values: Vec<HintFieldInfo<F>> = vec![HintFieldInfo::default(); n_hints_values];
 
     let mut hint_field_values_c = HintFieldInfoC::from_hint_field_info_vec(&mut hint_field_values);
     let mut hint_field_values_c_ptr = hint_field_values_c.as_mut_ptr() as *mut c_void;
@@ -970,7 +1004,7 @@ fn get_hint_f<F: PrimeField64>(
     HintFieldInfoC::sync_to_hint_field_info(&mut hint_field_values, &hint_field_values_c);
 
     for hint_field_value in hint_field_values.iter_mut() {
-        hint_field_value.init_buffers();
+        hint_field_value.init_buffers()?;
     }
 
     hint_field_values_c = HintFieldInfoC::from_hint_field_info_vec(&mut hint_field_values);

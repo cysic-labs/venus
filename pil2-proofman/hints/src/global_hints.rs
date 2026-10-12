@@ -1,5 +1,8 @@
 use fields::{PrimeField64, CubicExtensionField};
-use crate::{HintCol, HintFieldInfoC, HintFieldInfo, HintFieldOutput, HintFieldValue, HintFieldValues, HintFieldValuesVec};
+use crate::{
+    checked_hint_field_value_count, HintCol, HintFieldInfoC, HintFieldInfo, HintFieldOutput, HintFieldValue,
+    HintFieldValues, HintFieldValuesVec,
+};
 use proofman_starks_lib_c::{
     get_hint_field_global_constraints_values_c, get_hint_field_global_constraints_sizes_c,
     get_hint_field_global_constraints_c, set_hint_field_global_constraints_c,
@@ -100,9 +103,13 @@ fn get_global_hint_f<F: PrimeField64>(
     hint_field_name: &str,
     print_expression: bool,
 ) -> ProofmanResult<Vec<HintFieldInfo<F>>> {
-    let n_hints_values = get_hint_field_global_constraints_values_c(sctx.get_global_bin(), hint_id, hint_field_name);
+    let n_hints_values = checked_hint_field_value_count(get_hint_field_global_constraints_values_c(
+        sctx.get_global_bin(),
+        hint_id,
+        hint_field_name,
+    ))?;
 
-    let mut hint_field_values = vec![HintFieldInfo::default(); n_hints_values as usize];
+    let mut hint_field_values = vec![HintFieldInfo::default(); n_hints_values];
 
     let mut hint_field_values_c = HintFieldInfoC::from_hint_field_info_vec(&mut hint_field_values);
     let mut hint_field_values_c_ptr = hint_field_values_c.as_mut_ptr() as *mut c_void;
@@ -119,7 +126,7 @@ fn get_global_hint_f<F: PrimeField64>(
     HintFieldInfoC::sync_to_hint_field_info(&mut hint_field_values, &hint_field_values_c);
 
     for hint_field_value in hint_field_values.iter_mut() {
-        hint_field_value.init_buffers();
+        hint_field_value.init_buffers()?;
     }
 
     hint_field_values_c = HintFieldInfoC::from_hint_field_info_vec(&mut hint_field_values);
