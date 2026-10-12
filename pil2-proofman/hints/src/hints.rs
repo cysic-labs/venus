@@ -108,20 +108,21 @@ impl<F: PrimeField64> Default for HintFieldInfo<F> {
 
 impl<F: PrimeField64> HintFieldInfo<F> {
     pub fn init_buffers(&mut self) {
+        // SAFETY: the C hint loader writes every element of these buffers before Rust reads them.
         if self.size > 0 {
-            self.values = create_buffer_fast(self.size as usize);
+            self.values = unsafe { create_buffer_fast(self.size as usize) };
         }
 
         if self.matrix_size > 0 {
-            self.pos = create_buffer_fast(self.matrix_size as usize);
+            self.pos = unsafe { create_buffer_fast(self.matrix_size as usize) };
         }
 
         if self.string_size > 0 {
-            self.string_value = create_buffer_fast(self.string_size as usize);
+            self.string_value = unsafe { create_buffer_fast(self.string_size as usize) };
         }
 
         if self.expression_line_size > 0 {
-            self.expression_line = create_buffer_fast(self.expression_line_size as usize);
+            self.expression_line = unsafe { create_buffer_fast(self.expression_line_size as usize) };
         }
     }
 }
@@ -760,14 +761,13 @@ impl HintCol {
             HintFieldType::Column => HintFieldValue::Column(hint_field.values),
             HintFieldType::ColumnExtended => {
                 let values = hint_field.values;
-                let len = values.len() / 3;
-                let capacity = values.capacity() / 3;
-
-                let extended_vec = unsafe {
-                    let ptr = values.as_ptr() as *mut CubicExtensionField<F>;
-                    std::mem::forget(values);
-                    Vec::from_raw_parts(ptr, len, capacity)
-                };
+                assert!(
+                    values.len() % 3 == 0,
+                    "extended hint column length must be a multiple of 3, got {}",
+                    values.len()
+                );
+                let extended_vec =
+                    values.chunks_exact(3).map(|v| CubicExtensionField { value: [v[0], v[1], v[2]] }).collect();
 
                 HintFieldValue::ColumnExtended(extended_vec)
             }

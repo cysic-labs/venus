@@ -55,7 +55,8 @@ enum RecursiveTraceStorage<F> {
 
 impl<F> RecursiveTraceStorage<F> {
     fn new(len: usize) -> Self {
-        take_pinned_recursive_trace(len).map_or_else(|| Self::Vec(create_buffer_fast(len)), Self::Pinned)
+        // SAFETY: recursive trace generation writes the whole trace before it is read.
+        take_pinned_recursive_trace(len).map_or_else(|| Self::Vec(unsafe { create_buffer_fast(len) }), Self::Pinned)
     }
 
     fn as_mut_ptr(&mut self) -> *mut F {
@@ -310,7 +311,8 @@ pub fn gen_recursive_proof_size<F: PrimeField64>(
         new_proof_size += 1 + setup.stark_info.n_publics;
     }
 
-    let new_proof = create_buffer_fast(new_proof_size as usize);
+    // SAFETY: the prover writes the proof into this buffer before it is read.
+    let new_proof = unsafe { create_buffer_fast(new_proof_size as usize) };
     Ok(Proof::new(witness.proof_type.clone(), witness.airgroup_id, witness.air_id, witness.global_idx, new_proof))
 }
 
@@ -816,8 +818,9 @@ pub fn generate_recursivef_proof<F: PrimeField64>(
         timer_stop_and_log_debug!(LOAD_FIXED_POLS_RECURSIVEF);
     });
 
+    // SAFETY: the committed polynomials are written into the whole trace before it is read.
     let trace: Vec<F> =
-        create_buffer_fast(setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize);
+        unsafe { create_buffer_fast(setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize) };
 
     let proof = &vadcop_proof[1..];
     let mut updated_proof: Vec<u64> = vec![0; proof.len() + 4];

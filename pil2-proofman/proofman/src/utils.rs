@@ -370,11 +370,13 @@ pub fn check_const_tree<F: PrimeField64>(setup: &Setup<F>, d_buffers: &Option<*m
     // Regenerate the const tree if needed
     if needs_regeneration {
         let const_pols_size = (setup.stark_info.n_constants * (1 << setup.stark_info.stark_struct.n_bits)) as usize;
-        let mut const_pols: Vec<F> = create_buffer_fast(const_pols_size);
+        // SAFETY: the const polynomial loader writes the whole buffer before it is read.
+        let mut const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
         let const_pols_path = setup.setup_path.display().to_string() + ".const";
         load_const_pols_c(const_pols.as_ptr() as *mut u8, const_pols_path.as_str(), const_pols.len() as u64 * 8);
 
-        let const_tree: Vec<F> = create_buffer_fast(const_pols_tree_size);
+        // SAFETY: the const tree calculation writes the whole buffer before it is read.
+        let const_tree: Vec<F> = unsafe { create_buffer_fast(const_pols_tree_size) };
         let p_stark_info = setup.p_setup.p_stark_info;
 
         let unified_buffer_gpu =
@@ -511,7 +513,8 @@ fn check_const_pols_gpu<F: PrimeField64>(setup: &Setup<F>) -> ProofmanResult<()>
 
     if needs_regeneration {
         let const_pols_size = (setup.stark_info.n_constants * (1 << setup.stark_info.stark_struct.n_bits)) as usize;
-        let const_pols: Vec<F> = create_buffer_fast(const_pols_size);
+        // SAFETY: the const polynomial loader writes the whole buffer before it is read.
+        let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
         let const_pols_path = setup.setup_path.display().to_string() + ".const";
 
         load_const_pols_c(const_pols.as_ptr() as *mut u8, const_pols_path.as_str(), const_pols.len() as u64 * 8);

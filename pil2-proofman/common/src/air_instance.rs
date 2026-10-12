@@ -291,7 +291,8 @@ impl<F: PrimeField64> AirInstance<F> {
     }
 
     pub fn init_aux_trace(&mut self, size: usize) {
-        self.aux_trace = create_buffer_fast(size);
+        // SAFETY: the prover fills the auxiliary trace before reading it.
+        self.aux_trace = unsafe { create_buffer_fast(size) };
     }
 
     pub fn init_airvalues(&mut self, size: usize) {
@@ -307,7 +308,8 @@ impl<F: PrimeField64> AirInstance<F> {
     }
 
     pub fn init_custom_commit_fixed_trace(&mut self, size: usize) {
-        self.custom_commits_fixed = create_buffer_fast(size);
+        // SAFETY: the custom-commit fixed columns are loaded into this buffer before use.
+        self.custom_commits_fixed = unsafe { create_buffer_fast(size) };
     }
 
     pub fn get_aux_trace_ptr(&self) -> *mut u8 {

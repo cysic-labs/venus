@@ -356,7 +356,8 @@ impl<F: PrimeField64> WitnessComponent<F> for VirtualTableAir {
 
             if !self.shared_tables || pctx.dctx_is_my_process_instance(instance_id)? {
                 let buffer_size = self.num_cols * self.num_rows;
-                let mut buffer = create_buffer_fast(buffer_size);
+                // SAFETY: every element is written by the parallel loop below before it is read.
+                let mut buffer = unsafe { create_buffer_fast(buffer_size) };
                 buffer.par_chunks_mut(self.num_cols).enumerate().for_each(|(row, chunk)| {
                     for (col, vec) in self.multiplicities.iter().enumerate() {
                         chunk[col] = F::from_u64(vec[row].load(Ordering::Relaxed));

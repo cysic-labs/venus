@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use named_sem::NamedSemaphore;
-use zisk_common::{io::StreamSink, reinterpret_vec};
+use zisk_common::io::StreamSink;
 use zisk_core::MAX_INPUT_SIZE;
 
 use crate::{
@@ -91,7 +91,7 @@ impl InputsShmemWriter {
 
 impl StreamSink for InputsShmemWriter {
     fn submit(&self, hints: &[u64]) -> anyhow::Result<()> {
-        self.append_input(&reinterpret_vec(hints.to_vec())?)
+        self.append_input(bytemuck::cast_slice(hints))
     }
 
     fn reset(&self) {

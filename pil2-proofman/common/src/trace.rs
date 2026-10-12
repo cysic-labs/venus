@@ -1,3 +1,7 @@
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
+
 use crate::{ProofmanError, ProofmanResult};
 
 pub trait Trace<F>: Send {
@@ -22,6 +26,141 @@ pub trait TraceRow: Copy + Default + Send {
     const IS_PACKED: bool;
 }
 
+/// Rows of a trace. They live either in a row vector allocated for the trace or in place over the
+/// allocation of a field vector handed to the trace; that allocation is only ever freed or returned
+/// as the original field vector, never with the layout of the rows.
+pub struct RowBuffer<R> {
+    rows: NonNull<R>,
+    len: usize,
+    storage: RowStorage,
+}
+
+#[derive(Clone, Copy)]
+enum RowStorage {
+    /// `rows` and `len` are the parts of a `Vec<R>` with this capacity.
+    Rows { capacity: usize },
+    /// `rows` points to the allocation of a `Vec<F>` with these parts.
+    Field { len: usize, capacity: usize, element_size: usize, element_align: usize, drop_vec: FieldVecDrop },
+}
+
+type FieldVecDrop = unsafe fn(NonNull<u8>, usize, usize);
+
+/// # Safety
+///
+/// The arguments must be the parts of a `Vec<F>` that was taken apart and is no longer used.
+unsafe fn drop_field_vec<F>(ptr: NonNull<u8>, len: usize, capacity: usize) {
+    drop(unsafe { Vec::from_raw_parts(ptr.cast::<F>().as_ptr(), len, capacity) });
+}
+
+// SAFETY: a RowBuffer owns its rows exclusively, like the vector it was built from. Field vectors
+// reused for rows hold `Copy` elements, so freeing them on another thread runs no destructor.
+unsafe impl<R: Send> Send for RowBuffer<R> {}
+// SAFETY: shared access only reads the rows.
+unsafe impl<R: Sync> Sync for RowBuffer<R> {}
+
+impl<R> RowBuffer<R> {
+    pub fn owned(rows: Vec<R>) -> Self {
+        let mut rows = ManuallyDrop::new(rows);
+        let capacity = rows.capacity();
+        Self { rows: non_null(rows.as_mut_ptr()), len: rows.len(), storage: RowStorage::Rows { capacity } }
+    }
+
+    /// Uses the allocation of `source` for its first `num_rows` rows.
+    ///
+    /// # Safety
+    ///
+    /// `R` must have the size of a whole number of `F` elements and the alignment of `F`, and
+    /// `source` must hold at least as many elements as `num_rows` rows take.
+    pub unsafe fn from_field_vec<F: Copy>(source: Vec<F>, num_rows: usize) -> Self {
+        let mut source = ManuallyDrop::new(source);
+        Self {
+            rows: non_null(source.as_mut_ptr()).cast(),
+            len: num_rows,
+            storage: RowStorage::Field {
+                len: source.len(),
+                capacity: source.capacity(),
+                element_size: std::mem::size_of::<F>(),
+                element_align: std::mem::align_of::<F>(),
+                drop_vec: drop_field_vec::<F>,
+            },
+        }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [R] {
+        self
+    }
+
+    /// Returns the rows as a vector of `field_len` field elements. Rows that reuse a field vector
+    /// give back that vector with its original length.
+    ///
+    /// # Safety
+    ///
+    /// `R` must have the size of a whole number of `F` elements and the alignment of `F`, and
+    /// `field_len` must not exceed the elements held by the rows.
+    pub unsafe fn into_field_vec<F>(self, field_len: usize) -> Vec<F> {
+        let this = ManuallyDrop::new(self);
+        let ptr = this.rows.cast::<F>().as_ptr();
+        match this.storage {
+            RowStorage::Rows { capacity } => {
+                let field_size = std::mem::size_of::<F>();
+                let capacity_bytes = capacity * std::mem::size_of::<R>();
+                assert_eq!(capacity_bytes % field_size, 0, "Trace buffer capacity is not divisible by the field size");
+                let field_capacity = capacity_bytes / field_size;
+                assert!(
+                    field_len <= field_capacity,
+                    "Trace buffer was already taken or is too small: requested {field_len} fields, capacity {field_capacity}"
+                );
+                unsafe { Vec::from_raw_parts(ptr, field_len, field_capacity) }
+            }
+            RowStorage::Field { len, capacity, element_size, element_align, .. } => {
+                assert!(
+                    element_size == std::mem::size_of::<F>() && element_align == std::mem::align_of::<F>(),
+                    "Trace buffer field type does not match the vector it was built from"
+                );
+                unsafe { Vec::from_raw_parts(ptr, len, capacity) }
+            }
+        }
+    }
+}
+
+fn non_null<T>(ptr: *mut T) -> NonNull<T> {
+    NonNull::new(ptr).expect("vector pointers are never null")
+}
+
+impl<R> Default for RowBuffer<R> {
+    fn default() -> Self {
+        Self::owned(Vec::new())
+    }
+}
+
+impl<R> Deref for RowBuffer<R> {
+    type Target = [R];
+
+    fn deref(&self) -> &[R] {
+        // SAFETY: `rows` points to `len` initialized rows owned by this buffer.
+        unsafe { std::slice::from_raw_parts(self.rows.as_ptr(), self.len) }
+    }
+}
+
+impl<R> DerefMut for RowBuffer<R> {
+    fn deref_mut(&mut self) -> &mut [R] {
+        // SAFETY: `rows` points to `len` initialized rows owned exclusively by this buffer.
+        unsafe { std::slice::from_raw_parts_mut(self.rows.as_ptr(), self.len) }
+    }
+}
+
+impl<R> Drop for RowBuffer<R> {
+    fn drop(&mut self) {
+        // SAFETY: the parts were taken from the vector that owns the allocation.
+        match self.storage {
+            RowStorage::Rows { capacity } => unsafe {
+                drop(Vec::from_raw_parts(self.rows.as_ptr(), self.len, capacity));
+            },
+            RowStorage::Field { len, capacity, drop_vec, .. } => unsafe { drop_vec(self.rows.cast(), len, capacity) },
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct GenericTrace<
     R: TraceRow,
@@ -31,16 +170,7 @@ pub struct GenericTrace<
     const COMMIT_ID: usize = 0,
 > {
     // Buffer of rows
-    pub buffer: Vec<R>,
-
-    // Length of the original Vec<F>. If zero, indicates buffer was created internally and can be dropped normally
-    src_buffer_len: usize,
-
-    // Capacity of the original Vec<F>. If zero, indicates buffer was created internally and can be dropped normally
-    src_buffer_capacity: usize,
-
-    // Number of bytes per F element in original buffer
-    src_element_size: usize,
+    pub buffer: RowBuffer<R>,
 
     // Whether the buffer was created from scratch (false) or over an existing Vec<F> (true) to reuse memory
     pub shared_buffer: bool,
@@ -66,19 +196,15 @@ impl<R: TraceRow, const NUM_ROWS: usize, const AIRGROUP_ID: usize, const AIR_ID:
 
         let buffer: Vec<R> = vec![R::default(); num_rows];
 
-        Self { buffer, src_buffer_len: 0, src_buffer_capacity: 0, src_element_size: 0, shared_buffer: false }
+        Self { buffer: RowBuffer::owned(buffer), shared_buffer: false }
     }
 
     pub fn with_capacity(num_rows: usize) -> Self {
         debug_assert!(num_rows >= 2);
         debug_assert!(num_rows & (num_rows - 1) == 0);
 
-        let mut vec: Vec<std::mem::MaybeUninit<R>> = Vec::with_capacity(num_rows);
         #[allow(unused_mut)]
-        let mut buffer: Vec<R> = unsafe {
-            vec.set_len(num_rows);
-            std::mem::transmute(vec)
-        };
+        let mut buffer: Vec<R> = vec![R::default(); num_rows];
 
         #[cfg(feature = "diagnostic")]
         unsafe {
@@ -90,13 +216,39 @@ impl<R: TraceRow, const NUM_ROWS: usize, const AIRGROUP_ID: usize, const AIR_ID:
             }
         }
 
-        Self { buffer, src_buffer_len: 0, src_buffer_capacity: 0, src_element_size: 0, shared_buffer: false }
+        Self { buffer: RowBuffer::owned(buffer), shared_buffer: false }
     }
 
-    pub fn new_from_vec_zeroes<F: Default + Clone + Send>(mut buffer: Vec<F>) -> ProofmanResult<Self> {
-        let row_size = R::ROW_SIZE;
-        let num_rows = NUM_ROWS;
-        let used_len = num_rows * row_size;
+    /// Checks that a row is exactly `ROW_SIZE` elements of `F`, so rows and field vectors can
+    /// share one allocation.
+    fn validate_row_layout<F>() -> ProofmanResult<()> {
+        let row_bytes = std::mem::size_of::<R>();
+        let field_bytes = std::mem::size_of::<F>();
+        if field_bytes == 0
+            || R::ROW_SIZE.checked_mul(field_bytes) != Some(row_bytes)
+            || std::mem::align_of::<R>() != std::mem::align_of::<F>()
+        {
+            return Err(ProofmanError::InvalidParameters(format!(
+                "Trace row {} ({row_bytes} bytes, align {}) is not ROW_SIZE={} elements of {} ({field_bytes} bytes, align {})",
+                std::any::type_name::<R>(),
+                std::mem::align_of::<R>(),
+                R::ROW_SIZE,
+                std::any::type_name::<F>(),
+                std::mem::align_of::<F>()
+            )));
+        }
+        Ok(())
+    }
+
+    fn used_len() -> ProofmanResult<usize> {
+        NUM_ROWS
+            .checked_mul(R::ROW_SIZE)
+            .ok_or_else(|| ProofmanError::InvalidParameters("Trace buffer length overflows usize".to_string()))
+    }
+
+    pub fn new_from_vec_zeroes<F: Default + Copy + Send>(mut buffer: Vec<F>) -> ProofmanResult<Self> {
+        Self::validate_row_layout::<F>()?;
+        let used_len = Self::used_len()?;
 
         if buffer.len() < used_len {
             return Err(ProofmanError::InvalidParameters(format!(
@@ -109,22 +261,15 @@ impl<R: TraceRow, const NUM_ROWS: usize, const AIRGROUP_ID: usize, const AIR_ID:
             *x = <F>::default();
         });
 
-        let ptr = buffer.as_mut_ptr();
-        let src_buffer_len = buffer.len();
-        let src_buffer_capacity = buffer.capacity();
-        let src_element_size = std::mem::size_of::<F>();
-
-        std::mem::forget(buffer);
-
-        let buffer = unsafe { Vec::from_raw_parts(ptr as *mut R, num_rows, num_rows) };
-
-        Ok(Self { buffer, src_buffer_len, src_buffer_capacity, src_element_size, shared_buffer: true })
+        // SAFETY: the row layout was validated and the buffer holds `NUM_ROWS` rows.
+        let buffer = unsafe { RowBuffer::from_field_vec(buffer, NUM_ROWS) };
+        Ok(Self { buffer, shared_buffer: true })
     }
 
-    pub fn new_from_vec<F>(mut buffer: Vec<F>) -> ProofmanResult<Self> {
-        let row_size = R::ROW_SIZE;
+    pub fn new_from_vec<F: Copy>(mut buffer: Vec<F>) -> ProofmanResult<Self> {
+        Self::validate_row_layout::<F>()?;
         let num_rows = NUM_ROWS;
-        let expected_len = num_rows * row_size;
+        let expected_len = Self::used_len()?;
 
         if buffer.len() < expected_len {
             return Err(ProofmanError::InvalidParameters(format!(
@@ -147,16 +292,9 @@ impl<R: TraceRow, const NUM_ROWS: usize, const AIRGROUP_ID: usize, const AIR_ID:
             }
         }
 
-        let ptr = buffer.as_mut_ptr();
-        let src_buffer_len = buffer.len();
-        let src_buffer_capacity = buffer.capacity();
-        let src_element_size = std::mem::size_of::<F>();
-
-        std::mem::forget(buffer);
-
-        let buffer = unsafe { Vec::from_raw_parts(ptr as *mut R, num_rows, num_rows) };
-
-        Ok(Self { buffer, src_buffer_len, src_buffer_capacity, src_element_size, shared_buffer: true })
+        // SAFETY: the row layout was validated and the buffer holds `NUM_ROWS` rows.
+        let buffer = unsafe { RowBuffer::from_field_vec(buffer, num_rows) };
+        Ok(Self { buffer, shared_buffer: true })
     }
 
     pub fn par_iter_mut_chunks(&mut self, n: usize) -> impl IndexedParallelIterator<Item = &mut [R]> {
@@ -168,25 +306,12 @@ impl<R: TraceRow, const NUM_ROWS: usize, const AIRGROUP_ID: usize, const AIR_ID:
     }
 
     pub fn get_buffer<F>(&mut self) -> Vec<F> {
-        let mut buffer = std::mem::take(&mut self.buffer);
-
-        if !self.shared_buffer {
-            // Buffer was created internally, not from external Vec<F>
-            let len = NUM_ROWS * R::ROW_SIZE;
-            return unsafe { Vec::from_raw_parts(buffer.as_ptr() as *mut F, len, len) };
+        if let Err(err) = Self::validate_row_layout::<F>() {
+            panic!("{err}");
         }
-
-        // Buffer was created from external Vec<F>, restore original metadata
-        let ptr = buffer.as_mut_ptr();
-        let original_len = self.src_buffer_len;
-        let original_capacity = self.src_buffer_capacity;
-
-        std::mem::forget(buffer);
-
-        self.src_buffer_len = 0; // prevent double free
-        self.src_buffer_capacity = 0;
-
-        unsafe { Vec::from_raw_parts(ptr as *mut F, original_len, original_capacity) }
+        let len = Self::used_len().unwrap_or_else(|err| panic!("{err}"));
+        // SAFETY: the row layout was validated and the rows hold `len` field elements.
+        unsafe { std::mem::take(&mut self.buffer).into_field_vec(len) }
     }
 
     pub fn is_shared_buffer(&self) -> bool {
@@ -283,33 +408,6 @@ impl<R: TraceRow, const NUM_ROWS: usize, const AIRGROUP_ID: usize, const AIR_ID:
     }
 }
 
-impl<R: TraceRow, const NUM_ROWS: usize, const AIRGROUP_ID: usize, const AIR_ID: usize, const COMMIT_ID: usize> Drop
-    for GenericTrace<R, NUM_ROWS, AIRGROUP_ID, AIR_ID, COMMIT_ID>
-{
-    fn drop(&mut self) {
-        if !self.shared_buffer || self.src_buffer_len == 0 {
-            // Buffer was created internally, drop normally
-            // The Vec<R> will handle its own cleanup
-        } else {
-            // Buffer was created from external Vec<F>, need to restore original metadata
-            let src_buffer_len = self.src_buffer_len * self.src_element_size;
-            let src_buffer_capacity = self.src_buffer_capacity * self.src_element_size;
-
-            // Take ownership of the buffer to prevent double-drop
-            let buffer = std::mem::take(&mut self.buffer);
-            let ptr = buffer.as_ptr();
-            std::mem::forget(buffer);
-
-            // Reconstruct the original Vec<F> with correct length and capacity
-            unsafe {
-                // NOTE: This is safe because we are restoring the original buffer
-                let _original_buffer = Vec::from_raw_parts(ptr as *mut u8, src_buffer_len, src_buffer_capacity);
-                // _original_buffer will be dropped automatically here
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,8 +415,11 @@ mod tests {
     use crate as common;
 
     // A simple TraceRow implementation for tests
+    #[repr(C)]
     #[derive(Copy, Clone, Default)]
-    struct SampleTestRow;
+    struct SampleTestRow {
+        values: [u64; 4],
+    }
     impl TraceRow for SampleTestRow {
         const ROW_SIZE: usize = 4;
         const IS_PACKED: bool = false;
@@ -394,14 +495,14 @@ mod tests {
         let mut t = SampleTrace::new_zeroes();
         // Write distinct sentinel per chunk using 4 chunks
         t.par_iter_mut_chunks(4).enumerate().for_each(|(i, chunk)| {
-            for row in chunk.iter_mut() {
-                *row = SampleTestRow;
-            }
-            // store sentinel by writing to first element of chunk if we could
-            // (We cannot access internal fields of row; this test ensures iteration doesn't panic.)
             assert!(!chunk.is_empty());
-            assert!(i < 4);
+            for row in chunk.iter_mut() {
+                row.values = [i as u64; 4];
+            }
         });
+        for row in 0..16 {
+            assert_eq!(t[row].values, [(row / 4) as u64; 4]);
+        }
     }
 
     #[test]

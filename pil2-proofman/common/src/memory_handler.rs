@@ -35,7 +35,8 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
         let mut registered_buffers = Vec::new();
         let mut registered_bytes = 0usize;
         for _ in 0..n_buffers {
-            let mut buffer = create_buffer_fast(buffer_size);
+            // SAFETY: witness buffers are fully written by witness computation before they are read.
+            let mut buffer = unsafe { create_buffer_fast(buffer_size) };
             if register_buffers {
                 let bytes = buffer_size.saturating_mul(mem::size_of::<F>());
                 if let Some((base, size)) = aligned_host_range(buffer.as_mut_ptr() as usize, bytes) {
@@ -91,7 +92,8 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
                 "MemoryHandler::Not enough valid buffers (found {}), creating a new one.",
                 valid_buffers.len()
             );
-            valid_buffers.push(create_buffer_fast(self.buffer_size));
+            // SAFETY: witness buffers are fully written by witness computation before they are read.
+            valid_buffers.push(unsafe { create_buffer_fast(self.buffer_size) });
         }
 
         for buf in valid_buffers.into_iter() {

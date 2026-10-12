@@ -689,7 +689,8 @@ impl<F: PrimeField64> Setup<F> {
             let n_cols = stark_info.map_sections_n["cm1"];
 
             if verify_constraints && !cfg!(feature = "gpu") {
-                let const_pols: Vec<F> = create_buffer_fast(const_pols_size);
+                // SAFETY: the const polynomial loader writes the whole buffer before it is read.
+                let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
                 (
                     stark_info,
                     p_stark_info,
@@ -710,8 +711,9 @@ impl<F: PrimeField64> Setup<F> {
                     n_operations_quotient,
                 )
             } else {
-                let const_pols: Vec<F> = create_buffer_fast(const_pols_size);
-                let const_pols_tree: Vec<F> = create_buffer_fast(const_tree_size);
+                // SAFETY: the const polynomial and const tree loaders write both buffers before they are read.
+                let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
+                let const_pols_tree: Vec<F> = unsafe { create_buffer_fast(const_tree_size) };
                 let mut const_pols_size_packed = 0;
                 if cfg!(feature = "gpu") && setup_type != &ProofType::RecursiveF {
                     let words_per_row: u64 = if Path::new(&const_pols_path).exists() {

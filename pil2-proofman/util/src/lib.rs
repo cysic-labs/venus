@@ -7,21 +7,17 @@ use std::mem::MaybeUninit;
 mod proof;
 pub use proof::*;
 
-pub fn create_buffer_fast<F>(buffer_size: usize) -> Vec<F> {
+/// Allocates a `Vec<F>` of `buffer_size` elements without initializing them.
+///
+/// # Safety
+///
+/// The caller must fully initialize every element before any safe code reads the vector.
+pub unsafe fn create_buffer_fast<F>(buffer_size: usize) -> Vec<F> {
     let mut buffer: Vec<MaybeUninit<F>> = Vec::with_capacity(buffer_size);
     unsafe {
         buffer.set_len(buffer_size);
     }
     let buffer: Vec<F> = unsafe { std::mem::transmute(buffer) };
-    buffer
-}
-
-pub fn create_buffer_fast_u8(buffer_size: usize) -> Vec<u8> {
-    let mut buffer: Vec<MaybeUninit<u8>> = Vec::with_capacity(buffer_size);
-    unsafe {
-        buffer.set_len(buffer_size);
-    }
-    let buffer: Vec<u8> = unsafe { std::mem::transmute(buffer) };
     buffer
 }
 

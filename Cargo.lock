@@ -314,6 +314,7 @@ name = "asm-runner"
 version = "0.16.1"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "libc",
  "mem-common",
  "mem-planner-cpp",
@@ -6541,6 +6542,7 @@ version = "0.16.1"
 dependencies = [
  "anyhow",
  "bincode",
+ "bytemuck",
  "fields",
  "libc",
  "mpi",

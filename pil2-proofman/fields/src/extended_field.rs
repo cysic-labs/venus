@@ -6,6 +6,7 @@ use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAss
 use std::ops::{Index, IndexMut};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[repr(transparent)]
 pub struct CubicExtensionField<F: Display> {
     pub value: [F; 3],
 }

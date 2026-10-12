@@ -180,7 +180,8 @@ impl<F: PrimeField64> SnarkWrapper<F> {
         } else if cfg!(feature = "gpu") {
             Arc::new(Vec::new())
         } else {
-            Arc::new(create_buffer_fast(setup_recursivef.prover_buffer_size as usize))
+            // SAFETY: the recursive final prover fills the auxiliary trace before reading it.
+            Arc::new(unsafe { create_buffer_fast(setup_recursivef.prover_buffer_size as usize) })
         };
 
         timer_start_info!(INITIALIZING_FINAL_SNARK_PROVER);
@@ -409,7 +410,8 @@ pub fn generate_and_verify_recursivef<F: PrimeField64>(
     let aux_trace = if cfg!(feature = "gpu") {
         Arc::new(Vec::new())
     } else {
-        Arc::new(create_buffer_fast(setup_recursivef.prover_buffer_size as usize))
+        // SAFETY: the recursive final prover fills the auxiliary trace before reading it.
+        Arc::new(unsafe { create_buffer_fast(setup_recursivef.prover_buffer_size as usize) })
     };
 
     timer_stop_and_log_info!(LOADING_RECURSIVE_F_SETUP);

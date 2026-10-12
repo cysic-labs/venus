@@ -64,8 +64,9 @@ pub fn calculate_fixed_tree<F: PrimeField64>(setup: &Setup<F>) {
     let const_pols_size = (setup.stark_info.n_constants * (1 << setup.stark_info.stark_struct.n_bits)) as usize;
     let const_pols_tree_size = setup.const_tree_size;
 
-    let const_pols: Vec<F> = create_buffer_fast(const_pols_size);
-    let const_tree: Vec<F> = create_buffer_fast(const_pols_tree_size);
+    // SAFETY: the loaders and the tree calculation below write both buffers before they are read.
+    let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
+    let const_tree: Vec<F> = unsafe { create_buffer_fast(const_pols_tree_size) };
 
     let const_pols_path = setup.setup_path.display().to_string() + ".const";
     let const_pols_tree_path = &setup.const_pols_tree_path.clone();
@@ -145,8 +146,9 @@ pub fn calculate_fixed_tree_snark<F: PrimeField64>(setup: &Setup<F>) {
     let const_pols_size = (setup.stark_info.n_constants * (1 << setup.stark_info.stark_struct.n_bits)) as usize;
     let const_pols_tree_size = setup.const_tree_size;
 
-    let const_pols: Vec<F> = create_buffer_fast(const_pols_size);
-    let const_tree: Vec<F> = create_buffer_fast(const_pols_tree_size);
+    // SAFETY: the loaders and the tree calculation below write both buffers before they are read.
+    let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
+    let const_tree: Vec<F> = unsafe { create_buffer_fast(const_pols_tree_size) };
 
     let const_pols_path = setup.setup_path.display().to_string() + ".const";
     let const_pols_tree_path_cpu = setup.setup_path.display().to_string() + ".consttree";

@@ -1580,11 +1580,14 @@ where
         let (aux_trace, const_pols, const_tree) = if cfg!(feature = "gpu") {
             (Arc::new(Vec::new()), Arc::new(Vec::new()), Arc::new(Vec::new()))
         } else {
-            (
-                Arc::new(create_buffer_fast(sctx.max_prover_buffer_size.max(setups_vadcop.max_prover_buffer_size))),
-                Arc::new(create_buffer_fast(sctx.max_const_size.max(setups_vadcop.max_const_size))),
-                Arc::new(create_buffer_fast(sctx.max_const_tree_size.max(setups_vadcop.max_const_tree_size))),
-            )
+            // SAFETY: the CPU prover loads or computes every element of these buffers before reading it.
+            unsafe {
+                (
+                    Arc::new(create_buffer_fast(sctx.max_prover_buffer_size.max(setups_vadcop.max_prover_buffer_size))),
+                    Arc::new(create_buffer_fast(sctx.max_const_size.max(setups_vadcop.max_const_size))),
+                    Arc::new(create_buffer_fast(sctx.max_const_tree_size.max(setups_vadcop.max_const_tree_size))),
+                )
+            }
         };
 
         let max_num_threads = configured_num_threads(mpi_ctx.node_n_processes as usize);
@@ -1618,7 +1621,8 @@ where
 
         let prover_buffer_recursive = if aggregation {
             let prover_buffer_size = get_recursive_buffer_sizes(&pctx, &setups_vadcop)?;
-            Arc::new(create_buffer_fast(prover_buffer_size))
+            // SAFETY: the recursive provers write this buffer before reading it.
+            Arc::new(unsafe { create_buffer_fast(prover_buffer_size) })
         } else {
             Arc::new(Vec::new())
         };
@@ -3240,7 +3244,8 @@ where
             None => (false, 0),
         };
 
-        let proof = create_buffer_fast(setup.proof_size as usize);
+        // SAFETY: the prover writes the proof into this buffer before it is read.
+        let proof = unsafe { create_buffer_fast(setup.proof_size as usize) };
         *proofs[instance_id].write().unwrap() =
             Some(Proof::new(ProofType::Basic, airgroup_id, air_id, Some(instance_id), proof));
 
@@ -3471,7 +3476,8 @@ where
         );
 
         if verify_constraints {
-            let const_pols: Vec<F> = create_buffer_fast(setup.const_pols_size);
+            // SAFETY: load_const_pols writes the whole buffer before it is read.
+            let const_pols: Vec<F> = unsafe { create_buffer_fast(setup.const_pols_size) };
             load_const_pols(setup, &const_pols);
             air_instance.init_fixed(const_pols);
         }
