@@ -15,6 +15,8 @@ pub struct Boundary {
 
 pub struct VerifierInfo {
     pub n_stages: u32,
+    /// Number of publics the AIR binds to its trace; a proof must carry exactly this many.
+    pub n_publics: u64,
     pub n_constants: u64,
     pub n_evals: u64,
     pub n_bits: u64,
@@ -66,6 +68,9 @@ pub fn stark_verify<C: Poseidon2Constants<W>, const W: usize>(
 
     let n_publics = proof[p as usize];
     p += 1;
+    if n_publics != verifier_info.n_publics {
+        return false;
+    }
 
     let mut publics = Vec::with_capacity(n_publics as usize);
     for _ in 0..n_publics {

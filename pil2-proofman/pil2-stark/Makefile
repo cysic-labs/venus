@@ -107,7 +107,9 @@ else ifeq ($(UNAME_S),Linux)
     CXX      = g++
     
     # Add MPI compiler flags if needed
-    MPI_CPPFLAGS := $(shell which mpicc >/dev/null 2>&1 && mpicc --showme:compile 2>/dev/null || echo "")
+    # Some MPI wrappers (e.g. OpenMPI modules) add -pthread to the compile flags; CPPFLAGS is also
+    # passed to nvcc, which rejects it, and CXXFLAGS already carries -pthread for the host compiler.
+    MPI_CPPFLAGS := $(filter-out -pthread,$(shell which mpicc >/dev/null 2>&1 && mpicc --showme:compile 2>/dev/null || echo ""))
     MPI_LDFLAGS := $(shell which mpicc >/dev/null 2>&1 && mpicc --showme:link 2>/dev/null || echo "")
     CPPFLAGS = -I/usr/include -I/usr/local/include -MMD -MP $(INC_FLAGS)
     CXXFLAGS = -std=c++17 -Wall -pthread -Wno-unused-label -fPIC -fopenmp

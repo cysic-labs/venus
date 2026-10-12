@@ -129,7 +129,7 @@ airtemplate ArithEq384(const int N) {
         sel_op[i] * (1 - sel_op[i]) === 0;
 
         // selector latch
-        expr sel_op_active = clock_set(start: 1, end: 20);
+        expr sel_op_active = clock_set(start: 1, end: CLOCKS - 1);
         sel_op_active * (sel_op[i] - 'sel_op[i]) === 0;
 
         // only one selector could be enabled
@@ -303,20 +303,11 @@ airtemplate ArithEq384(const int N) {
     //     1  ->  0     POS
     //     1  ->  1     ZERO, NEG
     //
-    // As we made for prime tables, for first clock of cycle, 'borrow must be 0, we could do it
-    // using a different table for first chunk, basically a table that ignores 'borrow value.
-    //
-    // 'borrow  borrow  valid values
-    // -------  ------  ------------
-    //     0  ->  0     ZERO, POS
-    //     0  ->  1     NEG
-    //     1  ->  0     ZERO, POS
-    //     1  ->  1     NEG
-    //
-    // These tables are bigger than previous prime table.
-    // They has size of 2 * (2 * CHUNK_SIZE - 1) ≈ 2^18 rows, to avoid increment the degree or add
-    // extra column, we replicate this table for all chunks, total size is 2^18 * 2^4 = 2^22 rows.
-    // An extra column here is "pay" for each instance, but in a table is paid once.
+    // A single 2^18-row table (ARITH_EQ_LT_TABLE_ID) holds the transitions above for every chunk.
+    // At the first clock of the cycle 'borrow is masked to 0, and the result is below the modulus
+    // only if the borrow out of the most significant chunk (last clock) is 1, which the LAST_CLK
+    // constraint below enforces. It relies on the selector latch keeping the check selectors
+    // constant along the cycle.
 
     col witness bits(1) x3_lt;
     col witness bits(1) y3_lt;
@@ -333,6 +324,7 @@ airtemplate ArithEq384(const int N) {
 
     lookup_assumes(ARITH_EQ_LT_TABLE_ID, [2 * 'x3_lt * (1 - CLK_0) + x3_lt, delta_x3], sel: sel_check_x_lt_prime);
     lookup_assumes(ARITH_EQ_LT_TABLE_ID, [2 * 'y3_lt * (1 - CLK_0) + y3_lt, delta_y3], sel: sel_check_y_lt_prime);
+    LAST_CLK * (sel_check_x_lt_prime * (x3_lt - 1) + sel_check_y_lt_prime * (y3_lt - 1)) === 0;
 
     col witness bits(64, signed) carry[MAX_CEQS][CBC];
     for (int i = 0; i < MAX_CEQS; ++i) {
@@ -347,6 +339,14 @@ airtemplate ArithEq384(const int N) {
                 eq[i][j] + carry[i][j] === carry[i][j+1] * CHUNK_SIZE;
             }
         }
+    }
+
+    // The chunk terms of arith384_mod (x1*y1+x2-x3-q0*y2-q1*y2*2^384) beyond the cycle are the
+    // chunks of q1*y2 from 2^384 upwards. They must vanish instead of being carried into the next
+    // operation's equation; every term is a product of range-checked chunks, so the sums are zero
+    // only if all products are zero. They are expressed relative to the first clock of the cycle.
+    for (int j = 0; j < length(eq_arith384_mod_zero_chunks); ++j) {
+        arith384_mod_clk0 * eq_arith384_mod_zero_chunks[j] === 0;
     }
 
     // There are some values that no change during all cycle, normally we define a constraint

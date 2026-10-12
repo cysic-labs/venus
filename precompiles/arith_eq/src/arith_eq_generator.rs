@@ -31,7 +31,9 @@ fn main() {
     let pil_file = pil_code_path.join("arith256.pil");
     eq.generate_pil_code_to_file("eq_arith256", pil_file.to_str().unwrap());
 
-    let mut eq = Equation::new(&config);
+    // The chunks of q1*y2 from 2^256 upwards do not fit in the cycle; they must be zero.
+    let arith256_mod_config = EquationConfig { force_extra_clocks_zero: true, ..config.clone() };
+    let mut eq = Equation::new(&arith256_mod_config);
     eq.parse(
         "x1*y1+x2-x3-q0*y2-q1*y2*p2_256",
         &[("p2_256", "0x10000000000000000000000000000000000000000000000000000000000000000")],

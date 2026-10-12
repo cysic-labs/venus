@@ -117,6 +117,10 @@ pub struct PlonkLayoutShape {
     pub n_ev_pol4_rows: usize,
     pub n_tree_selector4_rows: usize,
     pub n_select_val1_rows: usize,
+    /// Rows after the PLONK rows that hold the public signals, `connection_cols` per row.
+    pub n_public_rows: usize,
+    /// Fixed `PUBLIC_ROW_BIT` columns that encode the 1-based index of each public row.
+    pub n_public_row_bits: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +176,9 @@ pub fn calculate_layout_shape_from_program(
 
     let plonk_row_info =
         calculate_plonk_constraint_rows(&program.constraints, policy, &program.custom_gates_info);
+    let n_publics = r1cs.n_outputs + r1cs.n_pub_inputs;
+    let n_public_rows = public_rows(n_publics, policy);
+    let n_public_row_bits = public_row_bits(n_public_rows);
     let n_used_rows = plonk_row_info.n_rows
         + n_cmul_rows
         + n_poseidon12_rows
@@ -179,7 +186,8 @@ pub fn calculate_layout_shape_from_program(
         + n_fft4_rows
         + n_ev_pol4_rows
         + n_tree_selector4_rows
-        + n_select_val1_rows;
+        + n_select_val1_rows
+        + n_public_rows;
     let n_bits = checked_domain_bits(n_used_rows)?;
     let n_rows = 1usize
         .checked_shl(n_bits)
@@ -191,7 +199,7 @@ pub fn calculate_layout_shape_from_program(
         n_bits,
         n_rows,
         n_used_rows,
-        n_publics: r1cs.n_outputs + r1cs.n_pub_inputs,
+        n_publics,
         n_plonk_constraints: program.constraints.len(),
         n_plonk_rows: plonk_row_info.n_rows,
         n_plonk_constraints_in_rows: plonk_row_info.constraints_in_rows,
@@ -204,6 +212,8 @@ pub fn calculate_layout_shape_from_program(
         n_ev_pol4_rows,
         n_tree_selector4_rows,
         n_select_val1_rows,
+        n_public_rows,
+        n_public_row_bits,
     })
 }
 
@@ -280,6 +290,8 @@ pub fn build_layout_from_program(
         policy,
         &mut extra_rows,
     )?;
+
+    place_public_signals(&mut signal_map, shape.n_publics, &mut row, policy)?;
 
     if row != shape.n_used_rows {
         bail!("recursive PLONK layout used {row} rows but expected {}", shape.n_used_rows);
@@ -541,6 +553,54 @@ fn count_constraint(info: &mut PlonkRowInfo, custom: bool) {
     } else {
         info.constraints_in_rows += 1;
     }
+}
+
+/// Number of witness columns that take part in the copy-constraint argument.
+pub fn connection_columns(kind: PlonkLayoutKind) -> usize {
+    LayoutPolicy::for_kind(kind).connection_cols
+}
+
+/// Number of rows needed to hold `n_publics` public signals, one per connection column.
+fn public_rows(n_publics: u32, policy: LayoutPolicy) -> usize {
+    ceil_div(n_publics as usize, policy.connection_cols)
+}
+
+/// Number of bits needed to encode the 1-based indexes `1..=n_public_rows` of the public rows.
+fn public_row_bits(n_public_rows: usize) -> usize {
+    (usize::BITS - n_public_rows.leading_zeros()) as usize
+}
+
+/// Bit `bit` of the 1-based index of public row `public_row`. A public row is selected by the
+/// product over the bits of `PUBLIC_ROW_BIT[i]` or `1 - PUBLIC_ROW_BIT[i]`; the columns are zero
+/// outside the public rows and every index has a set bit, so the product vanishes there.
+pub fn public_row_bit(public_row: usize, bit: usize) -> bool {
+    ((public_row + 1) >> bit) & 1 == 1
+}
+
+/// Places public signal `k` (Circom wire `1 + k`) at column `k % W`, row `start + k / W`, where W
+/// is the number of connection columns. The copy constraints then tie each of these cells to every
+/// other use of the wire, and the public constraints tie each cell to `publics[k]`.
+pub fn public_signal_position(
+    k: usize,
+    public_start: usize,
+    connection_cols: usize,
+) -> (usize, usize) {
+    (k % connection_cols, public_start + k / connection_cols)
+}
+
+fn place_public_signals(
+    signal_map: &mut [Vec<u32>],
+    n_publics: u32,
+    row: &mut usize,
+    policy: LayoutPolicy,
+) -> Result<()> {
+    let start = *row;
+    for k in 0..n_publics as usize {
+        let (col, public_row) = public_signal_position(k, start, policy.connection_cols);
+        signal_map[col][public_row] = checked_signal(1 + k as u64)?;
+    }
+    *row += public_rows(n_publics, policy);
+    Ok(())
 }
 
 fn checked_domain_bits(n_used_rows: usize) -> Result<u32> {
@@ -1003,6 +1063,21 @@ fn build_fixed_columns(
 
     out.push(id_column(namespace, shape.n_rows)?);
     out.push(l1_column(shape.n_rows));
+
+    // Bits of the 1-based index of each public row, used to select the public rows that bind the
+    // public cells to the public inputs.
+    let public_start = shape.n_used_rows - shape.n_public_rows;
+    for bit in 0..shape.n_public_row_bits {
+        let mut values = vec![0; shape.n_rows];
+        for public_row in 0..shape.n_public_rows {
+            values[public_start + public_row] = u64::from(public_row_bit(public_row, bit));
+        }
+        out.push(FixedColumn {
+            name: format!("{namespace}.PUBLIC_ROW_BIT"),
+            lengths: vec![bit as u32],
+            values,
+        });
+    }
     Ok(out)
 }
 
@@ -1463,9 +1538,12 @@ mod tests {
         assert_eq!(shape.n_cmul_rows, 2);
         assert_eq!(shape.n_poseidon12_rows, 5);
         assert_eq!(shape.n_ev_pol4_rows, 1);
-        assert_eq!(shape.n_used_rows, 8);
-        assert_eq!(shape.n_bits, 3);
-        assert_eq!(shape.n_rows, 8);
+        // The 5 publics fit in one extra row after the gate rows.
+        assert_eq!(shape.n_public_rows, 1);
+        assert_eq!(shape.n_public_row_bits, 1);
+        assert_eq!(shape.n_used_rows, 9);
+        assert_eq!(shape.n_bits, 4);
+        assert_eq!(shape.n_rows, 16);
         Ok(())
     }
 

@@ -1,6 +1,7 @@
 #include "expressions_gpu.cuh"
 #include "cuda_utils.cuh"
 #include <set>
+#include <sys/stat.h>
 #include "cuda_utils.hpp"
 #include "gl64_tooling.cuh"
 #include "goldilocks_cubic_extension.cuh"
@@ -216,8 +217,11 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
                     ParserArgs &pa = setupCtx.expressionsBin.expressionsBinArgsExpressions;
                     uint8_t *ops = &pa.ops[pp.opsOffset];
                     uint16_t *args = &pa.args[pp.argsOffset];
+                    const char *dumpDir = std::getenv("VENUS_DUMP_EXPRS_DIR");
+                    if (dumpDir == nullptr || dumpDir[0] == '\0') dumpDir = "temp";
+                    mkdir(dumpDir, 0775);
                     char dumpPath[256];
-                    snprintf(dumpPath, sizeof(dumpPath), "/tmp/expr_dump_%lu.bin", expId);
+                    snprintf(dumpPath, sizeof(dumpPath), "%s/expr_dump_%lu.bin", dumpDir, expId);
                     FILE *df = fopen(dumpPath, "wb");
                     if (df) {
                         uint32_t nStages = setupCtx.starkInfo.nStages;
@@ -335,7 +339,12 @@ void ExpressionsGPU::calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest,
 
     // Dispatch to generated standalone kernel by expId, fallback to interpreter
     TimerStartCategoryGPU(timer, EXPRESSIONS);
-    if (!dispatchGeneratedKernel(qExpId, nBlocks_, nThreads_, sharedMem, stream,
+    ParserArgs &qParserArgs = setupCtx.expressionsBin.expressionsBinArgsExpressions;
+    const uint8_t *qOps = &qParserArgs.ops[qParserParams.opsOffset];
+    const uint16_t *qArgs = &qParserArgs.args[qParserParams.argsOffset];
+    const int64_t *qNextStrides = domainExtended ? nextStridesExtended : nextStrides;
+    const uint32_t qNOpenings = static_cast<uint32_t>(setupCtx.starkInfo.openingPoints.size());
+    if (!dispatchGeneratedKernel(qExpId, qParserParams, qOps, qArgs, qNextStrides, qNOpenings, nBlocks_, nThreads_, sharedMem, stream,
             d_params, d_deviceArgs, d_expsArgs, d_destParams)) {
         if (std::getenv("VENUS_LOG_EXPR_FALLBACK") != nullptr) {
             fprintf(stderr, "[VENUS] expression fallback expId=%lu nOps=%lu nTemp1=%u nTemp3=%u domain=%lu blocks=%u threads=%u shared=%zu\n",

@@ -145,6 +145,10 @@ airtemplate Dma64Aligned(int N = 2**21,                   // Rows of instance
     airval is_last_segment;            // 1 if this is the last segment, 0 otherwise.
     is_last_segment * (1 - is_last_segment) === 0;
 
+    // The final segment must finish the DMA sequence; otherwise the continuation state
+    // can be suppressed before the remaining operation suffix is proven.
+    is_last_segment * (1 - segment_last_seq_end) === 0;
+
     // the inputcpy or memset doesn't has source, they don't use it
 
     if (has_src) {
@@ -647,4 +651,4 @@ airtemplate Dma64Aligned(int N = 2**21,                   // Rows of instance
     // 
     // Analyze if it's possible that the equal memcmp could be done directly by Dma64Aligned without
     // using controller, pre or post.
-}   
+}

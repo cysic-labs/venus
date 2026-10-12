@@ -188,13 +188,8 @@ fn write_air_setup_files(
     namespace: &str,
     config: RecursiveAirSetupConfig,
 ) -> Result<()> {
-    let recursive_air = air::build_air_layout(
-        layout,
-        config.airgroup_id,
-        config.air_id,
-        &config.air_name,
-        layout.shape.n_publics,
-    )?;
+    let recursive_air =
+        air::build_air_layout(layout, config.airgroup_id, config.air_id, &config.air_name)?;
     let empty_airgroup_values: &[AirGroupValue] = &[];
     let mut draft = build_air_stark_draft(AirInput {
         airgroup_id: config.airgroup_id,

@@ -101,10 +101,20 @@ airtemplate Arith(const int N = 2**18) {
     div_overflow * div_by_zero === 0;
     div_by_zero * div_overflow === 0;
 
+    expr sum_all_as = 0;
+    for (int i = 0; i < length(a); ++i) {
+        sum_all_as = sum_all_as + a[i];
+    }
+
     expr sum_all_ds = 0;
     for (int i = 0; i < length(d); ++i) {
         sum_all_ds = sum_all_ds + d[i];
     }
+
+    // In signed division, if dividend and divisor signs differ, a non-negative
+    // quotient is valid only when the quotient is exactly zero.
+    const expr quotient_negative = np + nb - 2 * np * nb;
+    main_div * quotient_negative * (1 - na) * sum_all_as === 0;
 
     // In normal signed division, a negative dividend can have a non-negative
     // remainder only when the remainder is exactly zero.

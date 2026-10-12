@@ -5,7 +5,12 @@ use pilout_crate::pilout::{
     HintField, HintFieldArray, Operand, Symbol, SymbolType,
 };
 
-use crate::recursive_setup::plonk::{FixedColumn, PlonkLayout, PlonkLayoutKind};
+use crate::recursive_setup::plonk::{
+    connection_columns, public_row_bit, public_signal_position, FixedColumn, PlonkLayout,
+    PlonkLayoutKind, PlonkLayoutShape,
+};
+
+mod poseidon;
 
 const GOLDILOCKS_MODULUS: u128 = 18_446_744_069_414_584_321;
 const GOLDILOCKS_K: u64 = 12_275_445_934_081_160_404;
@@ -22,7 +27,6 @@ pub fn build_air_layout(
     airgroup_id: u32,
     air_id: u32,
     air_name: &str,
-    n_publics: u32,
 ) -> Result<RecursiveAirLayout> {
     let n_rows = u32::try_from(layout.shape.n_rows)
         .with_context(|| format!("recursive AIR row count {} exceeds u32", layout.shape.n_rows))?;
@@ -32,7 +36,7 @@ pub fn build_air_layout(
     let connection_width = connection_intermediate_width(layout.shape.kind);
 
     let (expressions, constraints, hints) = build_recursive_constraints(
-        layout.shape.kind,
+        &layout.shape,
         airgroup_id,
         air_id,
         fixed_namespace(&layout.fixed_columns).as_deref(),
@@ -58,7 +62,7 @@ pub fn build_air_layout(
         airgroup_id,
         air_id,
         witness_width,
-        n_publics,
+        layout.shape.n_publics,
     )?;
 
     Ok(RecursiveAirLayout { air, symbols, hints })
@@ -77,12 +81,12 @@ pub fn connection_im_low_width(kind: PlonkLayoutKind) -> u32 {
 }
 
 fn build_recursive_constraints(
-    kind: PlonkLayoutKind,
+    shape: &PlonkLayoutShape,
     airgroup_id: u32,
     air_id: u32,
     namespace: Option<&str>,
 ) -> (Vec<Expression>, Vec<Constraint>, Vec<Hint>) {
-    let mut builder = RecursiveExpressionBuilder::new(kind);
+    let mut builder = RecursiveExpressionBuilder::new(shape.kind);
     builder.add_plonk_constraints();
     builder.add_poseidon_constraints();
     builder.add_cmul_constraints();
@@ -90,22 +94,10 @@ fn build_recursive_constraints(
     builder.add_evpol4_constraints();
     builder.add_tree_selector4_constraints();
     builder.add_select_value1_constraints();
+    builder.add_public_constraints(shape.n_publics, shape.n_public_rows, shape.n_public_row_bits);
     let hints = builder.add_connection_constraints(airgroup_id, air_id, namespace);
-    builder.pad_legacy_expression_ids();
     let (expressions, constraints) = builder.finish();
     (expressions, constraints, hints)
-}
-
-fn build_non_connection_constraints(kind: PlonkLayoutKind) -> (Vec<Expression>, Vec<Constraint>) {
-    let mut builder = RecursiveExpressionBuilder::new(kind);
-    builder.add_plonk_constraints();
-    builder.add_poseidon_constraints();
-    builder.add_cmul_constraints();
-    builder.add_fft4_constraints();
-    builder.add_evpol4_constraints();
-    builder.add_tree_selector4_constraints();
-    builder.add_select_value1_constraints();
-    builder.finish()
 }
 
 fn to_proto_fixed_col(column: &FixedColumn) -> FixedCol {
@@ -319,11 +311,12 @@ struct FixedIds {
     plonk: u32,
     id: u32,
     l1: u32,
+    public_row_bit_start: u32,
 }
 
 impl FixedIds {
     fn for_kind(kind: PlonkLayoutKind) -> Self {
-        let connection_cols = connection_columns(kind);
+        let connection_cols = connection_columns(kind) as u32;
         let c_start = connection_cols;
         let flags_start = c_start + 10;
         Self {
@@ -341,15 +334,8 @@ impl FixedIds {
             plonk: flags_start + 9,
             id: flags_start + 10,
             l1: flags_start + 11,
+            public_row_bit_start: flags_start + 12,
         }
-    }
-}
-
-fn connection_columns(kind: PlonkLayoutKind) -> u32 {
-    match kind {
-        PlonkLayoutKind::Aggregation => 27,
-        PlonkLayoutKind::Compressor => 36,
-        PlonkLayoutKind::FinalVadcop => 33,
     }
 }
 
@@ -372,87 +358,6 @@ struct RecursiveExpressionBuilder {
     constraints: Vec<Constraint>,
 }
 
-struct PoseidonFullRoundCache {
-    t0: Vec<Option<Expr>>,
-    t1: Vec<Option<Expr>>,
-    t2: Vec<Option<Expr>>,
-    t3: Vec<Option<Expr>>,
-    mat: Vec<Option<Expr>>,
-    stored: Vec<Option<Expr>>,
-}
-
-impl PoseidonFullRoundCache {
-    fn new() -> Self {
-        Self {
-            t0: vec![None; 4],
-            t1: vec![None; 4],
-            t2: vec![None; 4],
-            t3: vec![None; 4],
-            mat: vec![None; 16],
-            stored: vec![None; 4],
-        }
-    }
-}
-
-#[derive(Clone)]
-enum PoseidonPartialNode {
-    Direct(Expr),
-    Intermediate(usize),
-    Sum(usize),
-    First(usize),
-    Limb { round: usize, idx: usize },
-}
-
-struct PoseidonPartialRoundGraph<I> {
-    nodes: Vec<PoseidonPartialNode>,
-    values: Vec<Option<Expr>>,
-    states: Vec<[usize; 16]>,
-    sums: Vec<usize>,
-    intermediates: Vec<usize>,
-    intermediate: I,
-}
-
-impl<I> PoseidonPartialRoundGraph<I> {
-    fn new(input: &[Expr], intermediate: I) -> Self {
-        let mut graph = Self {
-            nodes: Vec::new(),
-            values: Vec::new(),
-            states: Vec::with_capacity(23),
-            sums: Vec::with_capacity(22),
-            intermediates: Vec::with_capacity(22),
-            intermediate,
-        };
-
-        let initial_state =
-            std::array::from_fn(|idx| graph.push(PoseidonPartialNode::Direct(input[idx].clone())));
-        graph.states.push(initial_state);
-
-        for round in 0..22 {
-            let intermediate = graph.push(PoseidonPartialNode::Intermediate(round));
-            graph.intermediates.push(intermediate);
-            let sum = graph.push(PoseidonPartialNode::Sum(round));
-            graph.sums.push(sum);
-            let next_state = std::array::from_fn(|idx| {
-                if idx == 0 {
-                    graph.push(PoseidonPartialNode::First(round))
-                } else {
-                    graph.push(PoseidonPartialNode::Limb { round, idx })
-                }
-            });
-            graph.states.push(next_state);
-        }
-
-        graph
-    }
-
-    fn push(&mut self, node: PoseidonPartialNode) -> usize {
-        let idx = self.nodes.len();
-        self.nodes.push(node);
-        self.values.push(None);
-        idx
-    }
-}
-
 impl RecursiveExpressionBuilder {
     fn new(kind: PlonkLayoutKind) -> Self {
         Self {
@@ -467,18 +372,47 @@ impl RecursiveExpressionBuilder {
         (self.expressions, self.constraints)
     }
 
-    fn pad_legacy_expression_ids(&mut self) {
-        let target = match self.kind {
-            PlonkLayoutKind::Aggregation => 3838,
-            PlonkLayoutKind::Compressor => 3915,
-            PlonkLayoutKind::FinalVadcop => 4045,
-        };
-
-        // The checked-in recursive verifier was generated from legacy PIL
-        // expression ids. These placeholders are intentionally unreachable and
-        // only keep cExpId/friExpId aligned with that verifier.
-        while self.expressions.len() < target {
-            self.add(self.zero(), self.zero());
+    /// Binds every public input to its trace cell. With `sel[r]` the selector of public row `r`
+    /// (a product of `PUBLIC_ROW_BIT` factors) and `pub[r][c] = publics[r * W + c]`, where W is the
+    /// number of connection columns, each connection column `c` gets
+    /// `(sum_r sel[r]) * a[c] - sum_r sel[r] * pub[r][c] === 0`. On public row `r` only `sel[r]` is
+    /// 1, so the constraint forces `a[c] = pub[r][c]` (or 0 past the last public); elsewhere every
+    /// selector is 0. Without these constraints the publics would only be absorbed into the
+    /// transcript and a prover could claim arbitrary public values.
+    fn add_public_constraints(&mut self, n_publics: u32, n_public_rows: usize, n_bits: usize) {
+        if n_public_rows == 0 {
+            return;
+        }
+        let connection_cols = self.fixed.connection_cols as usize;
+        let selectors: Vec<Expr> = (0..n_public_rows)
+            .map(|public_row| {
+                let factors = (0..n_bits)
+                    .map(|bit| {
+                        let column =
+                            self.fixed_selector(self.fixed.public_row_bit_start + bit as u32);
+                        if public_row_bit(public_row, bit) {
+                            column
+                        } else {
+                            self.sub(self.one(), column)
+                        }
+                    })
+                    .collect();
+                self.product(factors)
+            })
+            .collect();
+        let public_row = self.sum(selectors.clone());
+        let mut bound_terms = vec![Vec::new(); connection_cols];
+        for k in 0..n_publics as usize {
+            let (col, row) = public_signal_position(k, 0, connection_cols);
+            let public = self.public(k as u32);
+            let term = self.mul(selectors[row].clone(), public);
+            bound_terms[col].push(term);
+        }
+        for (col, terms) in bound_terms.into_iter().enumerate() {
+            let bound = self.sum(terms);
+            let cell = self.mul(public_row.clone(), self.a(col as u32));
+            let constraint = self.sub(cell, bound);
+            self.assert_zero(constraint);
         }
     }
 
@@ -616,31 +550,6 @@ impl RecursiveExpressionBuilder {
     fn add_select_value1_constraints(&mut self) {
         let selector = self.fixed_selector(self.fixed.select_value1);
         self.add_select_constraints(selector, 4);
-    }
-
-    fn add_poseidon_constraints(&mut self) {
-        let first_col = match self.kind {
-            PlonkLayoutKind::Aggregation => 27,
-            PlonkLayoutKind::Compressor => 36,
-            PlonkLayoutKind::FinalVadcop => 33,
-        };
-        let input_order_out = self.array_a(first_col, 0, 16);
-        let input_order_in = self.array_a(0, 0, 16);
-        self.add_poseidon_input_order(
-            &input_order_in,
-            self.a(16),
-            self.a(17),
-            &input_order_out,
-            self.fixed_selector(self.fixed.poseidon_sponge),
-            self.fixed_selector(self.fixed.poseidon_compression),
-        );
-
-        match self.kind {
-            PlonkLayoutKind::Compressor => self.add_poseidon_compressor_rounds(first_col),
-            PlonkLayoutKind::Aggregation | PlonkLayoutKind::FinalVadcop => {
-                self.add_poseidon_aggregation_rounds(first_col)
-            }
-        }
     }
 
     fn add_connection_constraints(
@@ -802,541 +711,6 @@ impl RecursiveExpressionBuilder {
         self.add(minus_one, self.one())
     }
 
-    fn add_poseidon_aggregation_rounds(&mut self, first_col: u32) {
-        let input_p = self.array_a(first_col, 0, 16);
-        let output_p = self.array_a(first_col, 1, 16);
-        let mut st0 = self.array_a(first_col + 16, 0, 16);
-        st0.extend(self.array_a(18, -2, 6));
-
-        let output_f = self.array_a(first_col + 16, 0, 16);
-        let mut constants_f_values = vec![None; 16];
-        let mut input_f_cache = vec![None; 16];
-        self.add_poseidon_full_round_with(
-            |builder, idx| {
-                builder.poseidon_aggregation_pow7(
-                    first_col,
-                    idx,
-                    false,
-                    &mut constants_f_values,
-                    &mut input_f_cache,
-                )
-            },
-            |_, idx| output_f[idx].clone(),
-            |builder| builder.poseidon_aggregation_full_selector(),
-        );
-        let mut constants_f2_values = vec![None; 16];
-        let mut input_f2_cache = vec![None; 16];
-        self.add_poseidon_full_round_with(
-            |builder, idx| {
-                builder.poseidon_aggregation_pow7(
-                    first_col,
-                    idx,
-                    true,
-                    &mut constants_f2_values,
-                    &mut input_f2_cache,
-                )
-            },
-            |builder, idx| builder.poseidon_output_f2(first_col, idx),
-            |builder| builder.poseidon_aggregation_full_selector(),
-        );
-        let mut tail_cache = vec![None; 6];
-        let partial_selector = self.fixed_selector(self.fixed.poseidon_partial_round);
-        self.add_poseidon_partial_round_with(
-            &input_p,
-            &output_p,
-            &st0,
-            |builder, round| {
-                if round < 16 {
-                    builder.poseidon_aggregation_pow7(
-                        first_col,
-                        round,
-                        true,
-                        &mut constants_f2_values,
-                        &mut input_f2_cache,
-                    )
-                } else {
-                    builder.poseidon_tail_pow7(round - 16, -2, &mut tail_cache)
-                }
-            },
-            partial_selector,
-        );
-    }
-
-    fn add_poseidon_compressor_rounds(&mut self, first_col: u32) {
-        let input_p = self.array_a(first_col, -1, 16);
-        let output_p = self.array_a(first_col, 1, 16);
-        let mut st0 = self.array_a(first_col, 0, 16);
-        st0.extend(self.array_a(18, -5, 6));
-
-        let mut constants_values = vec![None; 16];
-        let mut input_f_cache = vec![None; 16];
-        self.add_poseidon_full_round_with(
-            |builder, idx| {
-                builder.poseidon_compressor_pow7(
-                    first_col,
-                    idx,
-                    &mut constants_values,
-                    &mut input_f_cache,
-                )
-            },
-            |builder, idx| builder.poseidon_output_f2(first_col, idx),
-            |builder| builder.poseidon_compressor_full_selector(),
-        );
-        let mut tail_cache = vec![None; 6];
-        let partial_selector = self.fixed_selector(self.fixed.poseidon_partial_round);
-        self.add_poseidon_partial_round_with(
-            &input_p,
-            &output_p,
-            &st0,
-            |builder, round| {
-                if round < 16 {
-                    builder.poseidon_compressor_pow7(
-                        first_col,
-                        round,
-                        &mut constants_values,
-                        &mut input_f_cache,
-                    )
-                } else {
-                    builder.poseidon_tail_pow7(round - 16, -5, &mut tail_cache)
-                }
-            },
-            partial_selector,
-        );
-    }
-
-    fn add_poseidon_input_order(
-        &mut self,
-        input: &[Expr],
-        bit0: Expr,
-        bit1: Expr,
-        output: &[Expr],
-        sponge: Expr,
-        compression: Expr,
-    ) {
-        self.add_bool_constraint(compression.clone(), bit0.clone());
-        self.add_bool_constraint(compression.clone(), bit1.clone());
-
-        let mut mask00 = None;
-        let mut mask10 = None;
-        let mut mask01 = None;
-        let mut mask11 = None;
-
-        self.add_poseidon_full_round_with(
-            |builder, idx| {
-                builder.poseidon_ordered_input(
-                    idx,
-                    input,
-                    &bit0,
-                    &bit1,
-                    &mut mask00,
-                    &mut mask10,
-                    &mut mask01,
-                    &mut mask11,
-                    &sponge,
-                    &compression,
-                )
-            },
-            |_, idx| output[idx].clone(),
-            |builder| builder.add(sponge.clone(), compression.clone()),
-        );
-    }
-
-    fn add_poseidon_full_round(&mut self, input: &[Expr], output: &[Expr], selector: Expr) {
-        self.add_poseidon_full_round_with(
-            |_, idx| input[idx].clone(),
-            |_, idx| output[idx].clone(),
-            |_| selector.clone(),
-        );
-    }
-
-    fn add_poseidon_full_round_with<F, O, S>(
-        &mut self,
-        mut input: F,
-        mut output: O,
-        mut selector: S,
-    ) where
-        F: FnMut(&mut Self, usize) -> Expr,
-        O: FnMut(&mut Self, usize) -> Expr,
-        S: FnMut(&mut Self) -> Expr,
-    {
-        let mut cache = PoseidonFullRoundCache::new();
-
-        for idx in 0..16 {
-            let selector = selector(self);
-            let output = output(self, idx);
-            let mat = self.poseidon_full_mat(idx, &mut input, &mut cache);
-            let stored = self.poseidon_full_stored(idx % 4, &mut input, &mut cache);
-            let rhs = self.add(mat, stored);
-            let diff = self.sub(output, rhs);
-            let constraint = self.mul(selector, diff);
-            self.assert_zero(constraint);
-        }
-    }
-
-    fn poseidon_aggregation_full_selector(&mut self) -> Expr {
-        self.sum(vec![
-            self.fixed_selector(self.fixed.poseidon_sponge),
-            self.fixed_selector(self.fixed.poseidon_compression),
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
-            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
-            self.fixed_selector(self.fixed.poseidon_final),
-        ])
-    }
-
-    fn poseidon_compressor_full_selector(&mut self) -> Expr {
-        self.sum(vec![
-            self.fixed_selector(self.fixed.poseidon_sponge),
-            self.fixed_selector(self.fixed.poseidon_compression),
-            self.fixed_selector_offset(self.fixed.poseidon_sponge, -1),
-            self.fixed_selector_offset(self.fixed.poseidon_compression, -1),
-            self.fixed_selector_offset(self.fixed.poseidon_sponge, -2),
-            self.fixed_selector_offset(self.fixed.poseidon_compression, -2),
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 2),
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, -1),
-            self.fixed_selector_offset(self.fixed.poseidon_final, 2),
-            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
-            self.fixed_selector(self.fixed.poseidon_final),
-        ])
-    }
-
-    fn poseidon_full_stored<F>(
-        &mut self,
-        idx: usize,
-        input: &mut F,
-        cache: &mut PoseidonFullRoundCache,
-    ) -> Expr
-    where
-        F: FnMut(&mut Self, usize) -> Expr,
-    {
-        if let Some(value) = &cache.stored[idx] {
-            return value.clone();
-        }
-        let mut acc = self.poseidon_full_mat(idx, input, cache);
-        for group in 1..4 {
-            let value = self.poseidon_full_mat(group * 4 + idx, input, cache);
-            acc = self.add(acc, value);
-        }
-        cache.stored[idx] = Some(acc.clone());
-        acc
-    }
-
-    fn poseidon_full_mat<F>(
-        &mut self,
-        idx: usize,
-        input: &mut F,
-        cache: &mut PoseidonFullRoundCache,
-    ) -> Expr
-    where
-        F: FnMut(&mut Self, usize) -> Expr,
-    {
-        if let Some(value) = &cache.mat[idx] {
-            return value.clone();
-        }
-        let group = idx / 4;
-        let value = match idx % 4 {
-            0 => {
-                let t3 = self.poseidon_full_t3(group, input, cache);
-                let mat1 = self.poseidon_full_mat(group * 4 + 1, input, cache);
-                self.add(t3, mat1)
-            }
-            1 => {
-                let t0 = self.poseidon_full_t0(group, input, cache);
-                let four_t0 = self.mul(self.number(4), t0);
-                let t2 = self.poseidon_full_t2(group, input, cache);
-                self.add(four_t0, t2)
-            }
-            2 => {
-                let t2 = self.poseidon_full_t2(group, input, cache);
-                let mat3 = self.poseidon_full_mat(group * 4 + 3, input, cache);
-                self.add(t2, mat3)
-            }
-            3 => {
-                let t1 = self.poseidon_full_t1(group, input, cache);
-                let four_t1 = self.mul(self.number(4), t1);
-                let t3 = self.poseidon_full_t3(group, input, cache);
-                self.add(four_t1, t3)
-            }
-            _ => unreachable!(),
-        };
-        cache.mat[idx] = Some(value.clone());
-        value
-    }
-
-    fn poseidon_full_t0<F>(
-        &mut self,
-        group: usize,
-        input: &mut F,
-        cache: &mut PoseidonFullRoundCache,
-    ) -> Expr
-    where
-        F: FnMut(&mut Self, usize) -> Expr,
-    {
-        if let Some(value) = &cache.t0[group] {
-            return value.clone();
-        }
-        let base = group * 4;
-        let input0 = input(self, base);
-        let input1 = input(self, base + 1);
-        let value = self.add(input0, input1);
-        cache.t0[group] = Some(value.clone());
-        value
-    }
-
-    fn poseidon_full_t1<F>(
-        &mut self,
-        group: usize,
-        input: &mut F,
-        cache: &mut PoseidonFullRoundCache,
-    ) -> Expr
-    where
-        F: FnMut(&mut Self, usize) -> Expr,
-    {
-        if let Some(value) = &cache.t1[group] {
-            return value.clone();
-        }
-        let base = group * 4;
-        let input2 = input(self, base + 2);
-        let input3 = input(self, base + 3);
-        let value = self.add(input2, input3);
-        cache.t1[group] = Some(value.clone());
-        value
-    }
-
-    fn poseidon_full_t2<F>(
-        &mut self,
-        group: usize,
-        input: &mut F,
-        cache: &mut PoseidonFullRoundCache,
-    ) -> Expr
-    where
-        F: FnMut(&mut Self, usize) -> Expr,
-    {
-        if let Some(value) = &cache.t2[group] {
-            return value.clone();
-        }
-        let base = group * 4;
-        let input1 = input(self, base + 1);
-        let twice_1 = self.mul(self.number(2), input1);
-        let t1 = self.poseidon_full_t1(group, input, cache);
-        let value = self.add(twice_1, t1);
-        cache.t2[group] = Some(value.clone());
-        value
-    }
-
-    fn poseidon_full_t3<F>(
-        &mut self,
-        group: usize,
-        input: &mut F,
-        cache: &mut PoseidonFullRoundCache,
-    ) -> Expr
-    where
-        F: FnMut(&mut Self, usize) -> Expr,
-    {
-        if let Some(value) = &cache.t3[group] {
-            return value.clone();
-        }
-        let base = group * 4;
-        let input3 = input(self, base + 3);
-        let twice_3 = self.mul(self.number(2), input3);
-        let t0 = self.poseidon_full_t0(group, input, cache);
-        let value = self.add(twice_3, t0);
-        cache.t3[group] = Some(value.clone());
-        value
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn poseidon_ordered_input(
-        &mut self,
-        idx: usize,
-        input: &[Expr],
-        bit0: &Expr,
-        bit1: &Expr,
-        mask00: &mut Option<Expr>,
-        mask10: &mut Option<Expr>,
-        mask01: &mut Option<Expr>,
-        mask11: &mut Option<Expr>,
-        sponge: &Expr,
-        compression: &Expr,
-    ) -> Expr {
-        let mask00 = self.poseidon_mask00(bit0, bit1, mask00);
-        let compressed = if idx < 4 {
-            let term0 = self.mul(mask00, input[idx].clone());
-            let mask10 = self.poseidon_mask10(bit0, bit1, mask10);
-            let mask01 = self.poseidon_mask01(bit0, bit1, mask01);
-            let partial = self.add(mask10, mask01);
-            let mask11 = self.poseidon_mask11(bit0, bit1, mask11);
-            let non_zero = self.add(partial, mask11);
-            let term1 = self.mul(non_zero, input[idx + 4].clone());
-            self.add(term0, term1)
-        } else if idx < 8 {
-            let term0 = self.mul(mask00, input[idx].clone());
-            let mask10 = self.poseidon_mask10(bit0, bit1, mask10);
-            let term1 = self.mul(mask10, input[idx - 4].clone());
-            let partial = self.add(term0, term1);
-            let mask01 = self.poseidon_mask01(bit0, bit1, mask01);
-            let mask11 = self.poseidon_mask11(bit0, bit1, mask11);
-            let upper = self.add(mask01, mask11);
-            let term2 = self.mul(upper, input[idx + 4].clone());
-            self.add(partial, term2)
-        } else if idx < 12 {
-            let mask10 = self.poseidon_mask10(bit0, bit1, mask10);
-            let same = self.add(mask00, mask10);
-            let mask01 = self.poseidon_mask01(bit0, bit1, mask01);
-            let mask11 = self.poseidon_mask11(bit0, bit1, mask11);
-            let term0 = self.mul(same, input[idx].clone());
-            let term1 = self.mul(mask01, input[idx - 8].clone());
-            let partial = self.add(term0, term1);
-            let term2 = self.mul(mask11, input[idx + 4].clone());
-            self.add(partial, term2)
-        } else {
-            let mask10 = self.poseidon_mask10(bit0, bit1, mask10);
-            let same = self.add(mask00, mask10);
-            let mask01 = self.poseidon_mask01(bit0, bit1, mask01);
-            let same = self.add(same, mask01);
-            let mask11 = self.poseidon_mask11(bit0, bit1, mask11);
-            let term0 = self.mul(same, input[idx].clone());
-            let term1 = self.mul(mask11, input[idx - 12].clone());
-            self.add(term0, term1)
-        };
-        let compressed_value = self.mul(compression.clone(), compressed);
-        let sponge_value = self.mul(sponge.clone(), input[idx].clone());
-        self.add(compressed_value, sponge_value)
-    }
-
-    fn poseidon_mask00(&mut self, bit0: &Expr, bit1: &Expr, cache: &mut Option<Expr>) -> Expr {
-        if let Some(mask) = cache {
-            return mask.clone();
-        }
-        let not_b0 = self.sub(self.one(), bit0.clone());
-        let not_b1 = self.sub(self.one(), bit1.clone());
-        let mask = self.mul(not_b0, not_b1);
-        *cache = Some(mask.clone());
-        mask
-    }
-
-    fn poseidon_mask10(&mut self, bit0: &Expr, bit1: &Expr, cache: &mut Option<Expr>) -> Expr {
-        if let Some(mask) = cache {
-            return mask.clone();
-        }
-        let not_b1 = self.sub(self.one(), bit1.clone());
-        let mask = self.mul(bit0.clone(), not_b1);
-        *cache = Some(mask.clone());
-        mask
-    }
-
-    fn poseidon_mask01(&mut self, bit0: &Expr, bit1: &Expr, cache: &mut Option<Expr>) -> Expr {
-        if let Some(mask) = cache {
-            return mask.clone();
-        }
-        let not_b0 = self.sub(self.one(), bit0.clone());
-        let mask = self.mul(not_b0, bit1.clone());
-        *cache = Some(mask.clone());
-        mask
-    }
-
-    fn poseidon_mask11(&mut self, bit0: &Expr, bit1: &Expr, cache: &mut Option<Expr>) -> Expr {
-        if let Some(mask) = cache {
-            return mask.clone();
-        }
-        let mask = self.mul(bit0.clone(), bit1.clone());
-        *cache = Some(mask.clone());
-        mask
-    }
-
-    fn add_poseidon_partial_round_with<I>(
-        &mut self,
-        input: &[Expr],
-        output: &[Expr],
-        st0: &[Expr],
-        intermediate: I,
-        selector: Expr,
-    ) where
-        I: FnMut(&mut Self, usize) -> Expr,
-    {
-        let mut graph = PoseidonPartialRoundGraph::new(input, intermediate);
-        for round in 0..22 {
-            let state0_id = graph.states[round][0];
-            let state0 = self.eval_poseidon_partial_node(&mut graph, state0_id);
-            let diff = self.sub(st0[round].clone(), state0);
-            let constraint = self.mul(selector.clone(), diff);
-            self.assert_zero(constraint);
-        }
-
-        for idx in 0..16 {
-            let state_id = graph.states[22][idx];
-            let state = self.eval_poseidon_partial_node(&mut graph, state_id);
-            let diff = self.sub(output[idx].clone(), state);
-            let constraint = self.mul(selector.clone(), diff);
-            self.assert_zero(constraint);
-        }
-    }
-
-    fn eval_poseidon_partial_node<I>(
-        &mut self,
-        graph: &mut PoseidonPartialRoundGraph<I>,
-        node_id: usize,
-    ) -> Expr
-    where
-        I: FnMut(&mut Self, usize) -> Expr,
-    {
-        let cache_value = !matches!(graph.nodes[node_id], PoseidonPartialNode::Intermediate(round) if round >= 16);
-        if cache_value {
-            if let Some(value) = &graph.values[node_id] {
-                return value.clone();
-            }
-        }
-
-        let node = graph.nodes[node_id].clone();
-        let value = match node {
-            PoseidonPartialNode::Direct(value) => value,
-            PoseidonPartialNode::Intermediate(round) => (graph.intermediate)(self, round),
-            PoseidonPartialNode::Sum(round) => {
-                let intermediate_id = graph.intermediates[round];
-                let mut acc = self.eval_poseidon_partial_node(graph, intermediate_id);
-                for idx in 1..16 {
-                    let state_id = graph.states[round][idx];
-                    let state = self.eval_poseidon_partial_node(graph, state_id);
-                    acc = self.add(acc, state);
-                }
-                acc
-            }
-            PoseidonPartialNode::First(round) => {
-                let intermediate_id = graph.intermediates[round];
-                let intermediate = self.eval_poseidon_partial_node(graph, intermediate_id);
-                let first_scaled = self.mul(intermediate, self.number(Poseidon16::DIAG[0]));
-                let sum_id = graph.sums[round];
-                let partial_sum = self.eval_poseidon_partial_node(graph, sum_id);
-                self.add(first_scaled, partial_sum)
-            }
-            PoseidonPartialNode::Limb { round, idx } => {
-                let state_id = graph.states[round][idx];
-                let state = self.eval_poseidon_partial_node(graph, state_id);
-                let scaled = self.mul(state, self.number(Poseidon16::DIAG[idx]));
-                let sum_id = graph.sums[round];
-                let partial_sum = self.eval_poseidon_partial_node(graph, sum_id);
-                self.add(scaled, partial_sum)
-            }
-        };
-
-        if cache_value {
-            graph.values[node_id] = Some(value.clone());
-        }
-        value
-    }
-
-    fn poseidon_tail_pow7(
-        &mut self,
-        tail_idx: usize,
-        offset: i32,
-        tail_cache: &mut [Option<Expr>],
-    ) -> Expr {
-        self.pow7_cached_top(&mut tail_cache[tail_idx], |builder| {
-            let value = builder.a_offset(18 + tail_idx as u32, offset);
-            let constant = builder.number(Poseidon16::RC[80 + tail_idx]);
-            builder.add(value, constant)
-        })
-    }
-
     fn add_select_constraints(&mut self, selector: Expr, value_width: u32) {
         let key0 = self.a(4 * value_width);
         let key1 = self.a(4 * value_width + 1);
@@ -1414,160 +788,6 @@ impl RecursiveExpressionBuilder {
         let key01 = self.mul(not_key0, key1.clone());
         let key11 = self.mul(key0, key1);
         [key00, key10, key01, key11]
-    }
-
-    fn poseidon_aggregation_constant(&mut self, idx: usize, second_half: bool) -> Expr {
-        let base = if second_half { 16 } else { 0 };
-        let sponge_or_compression = self.add(
-            self.fixed_selector(self.fixed.poseidon_sponge),
-            self.fixed_selector(self.fixed.poseidon_compression),
-        );
-        let mut acc = self.mul(sponge_or_compression, self.number(Poseidon16::RC[idx + base]));
-        let term = self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 1),
-            self.number(Poseidon16::RC[idx + if second_half { 48 } else { 32 }]),
-        );
-        acc = self.add(acc, term);
-        let term = self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
-            self.number(Poseidon16::RC[idx + if second_half { 102 } else { 86 }]),
-        );
-        acc = self.add(acc, term);
-        let term = self.mul(
-            self.fixed_selector(self.fixed.poseidon_final),
-            self.number(Poseidon16::RC[idx + if second_half { 134 } else { 118 }]),
-        );
-        acc = self.add(acc, term);
-        if second_half {
-            let term = self.mul(
-                self.fixed_selector(self.fixed.poseidon_partial_round),
-                self.number(Poseidon16::RC[idx + 64]),
-            );
-            acc = self.add(acc, term);
-        }
-        acc
-    }
-
-    fn poseidon_aggregation_constant_cached(
-        &mut self,
-        idx: usize,
-        second_half: bool,
-        cache: &mut [Option<Expr>],
-    ) -> Expr {
-        if let Some(value) = &cache[idx] {
-            return value.clone();
-        }
-        let value = self.poseidon_aggregation_constant(idx, second_half);
-        cache[idx] = Some(value.clone());
-        value
-    }
-
-    fn poseidon_aggregation_pow7(
-        &mut self,
-        first_col: u32,
-        idx: usize,
-        second_half: bool,
-        constants_cache: &mut [Option<Expr>],
-        input6_cache: &mut [Option<Expr>],
-    ) -> Expr {
-        let col = first_col + idx as u32 + if second_half { 16 } else { 0 };
-        self.pow7_cached_top(&mut input6_cache[idx], |builder| {
-            let value = builder.a(col);
-            let constant =
-                builder.poseidon_aggregation_constant_cached(idx, second_half, constants_cache);
-            builder.add(value, constant)
-        })
-    }
-
-    fn poseidon_compressor_constant(&mut self, idx: usize) -> Expr {
-        let r0 = self.add(
-            self.fixed_selector(self.fixed.poseidon_sponge),
-            self.fixed_selector(self.fixed.poseidon_compression),
-        );
-        let mut acc = self.mul(r0, self.number(Poseidon16::RC[idx]));
-
-        let r1 = self.add(
-            self.fixed_selector_offset(self.fixed.poseidon_sponge, -1),
-            self.fixed_selector_offset(self.fixed.poseidon_compression, -1),
-        );
-        let term = self.mul(r1, self.number(Poseidon16::RC[idx + 16]));
-        acc = self.add(acc, term);
-
-        let r2 = self.add(
-            self.fixed_selector_offset(self.fixed.poseidon_sponge, -2),
-            self.fixed_selector_offset(self.fixed.poseidon_compression, -2),
-        );
-        let term = self.mul(r2, self.number(Poseidon16::RC[idx + 32]));
-        acc = self.add(acc, term);
-
-        let term = self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, 2),
-            self.number(Poseidon16::RC[idx + 48]),
-        );
-        acc = self.add(acc, term);
-        let term = self.mul(
-            self.fixed_selector(self.fixed.poseidon_partial_round),
-            self.number(Poseidon16::RC[idx + 64]),
-        );
-        acc = self.add(acc, term);
-        let term = self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_partial_round, -1),
-            self.number(Poseidon16::RC[idx + 86]),
-        );
-        acc = self.add(acc, term);
-        let term = self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_final, 2),
-            self.number(Poseidon16::RC[idx + 102]),
-        );
-        acc = self.add(acc, term);
-        let term = self.mul(
-            self.fixed_selector_offset(self.fixed.poseidon_final, 1),
-            self.number(Poseidon16::RC[idx + 118]),
-        );
-        acc = self.add(acc, term);
-        let term = self.mul(
-            self.fixed_selector(self.fixed.poseidon_final),
-            self.number(Poseidon16::RC[idx + 134]),
-        );
-        self.add(acc, term)
-    }
-
-    fn poseidon_compressor_constant_cached(
-        &mut self,
-        idx: usize,
-        cache: &mut [Option<Expr>],
-    ) -> Expr {
-        if let Some(value) = &cache[idx] {
-            return value.clone();
-        }
-        let value = self.poseidon_compressor_constant(idx);
-        cache[idx] = Some(value.clone());
-        value
-    }
-
-    fn poseidon_compressor_pow7(
-        &mut self,
-        first_col: u32,
-        idx: usize,
-        constants_cache: &mut [Option<Expr>],
-        input6_cache: &mut [Option<Expr>],
-    ) -> Expr {
-        let col = first_col + idx as u32;
-        self.pow7_cached_top(&mut input6_cache[idx], |builder| {
-            let value = builder.a(col);
-            let constant = builder.poseidon_compressor_constant_cached(idx, constants_cache);
-            builder.add(value, constant)
-        })
-    }
-
-    fn poseidon_output_f2(&mut self, first_col: u32, idx: usize) -> Expr {
-        let idx = idx as u32;
-        let final_selector = self.fixed_selector(self.fixed.poseidon_final);
-        let final_out = self.mul(final_selector, self.a(idx));
-        let non_final_selector =
-            self.sub(self.one(), self.fixed_selector(self.fixed.poseidon_final));
-        let non_final = self.mul(non_final_selector, self.a_offset(first_col + idx, 1));
-        self.add(final_out, non_final)
     }
 
     fn plonk_slots(&self) -> Vec<PlonkSlot> {
@@ -1814,6 +1034,14 @@ impl RecursiveExpressionBuilder {
 
     fn array_a(&self, start: u32, offset: i32, len: u32) -> Vec<Expr> {
         (0..len).map(|idx| self.a_offset(start + idx, offset)).collect()
+    }
+
+    fn public(&self, idx: u32) -> Expr {
+        Expr {
+            operand: Operand {
+                operand: Some(operand::Operand::PublicValue(operand::PublicValue { idx })),
+            },
+        }
     }
 
     fn challenge(&self, stage: u32, idx: u32) -> Expr {
@@ -2204,14 +1432,25 @@ mod tests {
 
     #[test]
     fn builds_aggregation_air_column_schema() -> Result<()> {
-        let layout =
-            build_layout(&one_constraint_r1cs(), PlonkLayoutKind::Aggregation, "Recursive2")?;
-        let air = build_air_layout(&layout, 0, 0, "recursive2", 473)?;
+        let layout = build_layout(
+            &one_constraint_r1cs_with_publics(473),
+            PlonkLayoutKind::Aggregation,
+            "Recursive2",
+        )?;
+        let air = build_air_layout(&layout, 0, 0, "recursive2")?;
 
+        // 49 base fixed columns plus the 5 bits that index the ceil(473 / 27) = 18 public rows.
+        assert_eq!(layout.shape.n_public_rows, 18);
         assert_eq!(air.air.name.as_deref(), Some("recursive2"));
-        assert_eq!(air.air.fixed_cols.len(), 49);
+        assert_eq!(air.air.fixed_cols.len(), 49 + 5);
         assert_eq!(air.air.stage_widths, vec![59, 4]);
-        assert_eq!(air.air.constraints.len(), 158);
+        // 158 gate/connection constraints plus one public binding constraint per connection column.
+        assert_eq!(air.air.constraints.len(), 158 + 27);
+        assert!(air.symbols.iter().any(|symbol| {
+            symbol.name == "Recursive2.PUBLIC_ROW_BIT"
+                && symbol.r#type == SymbolType::FixedCol as i32
+                && symbol.lengths == [5]
+        }));
         assert_eq!(air.hints.iter().filter(|hint| hint.name == "im_col").count(), 3);
         assert_eq!(air.hints.iter().filter(|hint| hint.name == "gprod_col").count(), 1);
         assert_eq!(air.hints.iter().filter(|hint| hint.name == "gprod_debug_data").count(), 54);
@@ -2254,17 +1493,6 @@ mod tests {
     }
 
     #[test]
-    fn builds_non_connection_constraint_groups() {
-        let (_, aggregation) = build_non_connection_constraints(PlonkLayoutKind::Aggregation);
-        let (_, compressor) = build_non_connection_constraints(PlonkLayoutKind::Compressor);
-        let (_, final_vadcop) = build_non_connection_constraints(PlonkLayoutKind::FinalVadcop);
-
-        assert_eq!(aggregation.len(), 153);
-        assert_eq!(compressor.len(), 143);
-        assert_eq!(final_vadcop.len(), 155);
-    }
-
-    #[test]
     fn records_connection_grouping_like_legacy_std_prod() {
         assert_eq!(connection_groups(27, 8).len(), 3);
         assert_eq!(connection_groups(33, 8).len(), 4);
@@ -2273,9 +1501,12 @@ mod tests {
 
     #[test]
     fn formats_connection_hints_for_stark_codegen() -> Result<()> {
-        let layout =
-            build_layout(&one_constraint_r1cs(), PlonkLayoutKind::Aggregation, "Recursive2")?;
-        let recursive = build_air_layout(&layout, 0, 0, "recursive2", 473)?;
+        let layout = build_layout(
+            &one_constraint_r1cs_with_publics(473),
+            PlonkLayoutKind::Aggregation,
+            "Recursive2",
+        )?;
+        let recursive = build_air_layout(&layout, 0, 0, "recursive2")?;
         let settings = StarkSettings { blowup_factor: Some(3), ..Default::default() };
         let stark_struct = generate_stark_struct(&settings, layout.shape.n_bits as u64)?;
         let draft = build_air_stark_draft(AirInput {
@@ -2294,6 +1525,63 @@ mod tests {
         assert!(draft.stark_info.opening_points.contains(&-1));
         assert!(draft.stark_info.opening_points.contains(&1));
         Ok(())
+    }
+
+    #[test]
+    fn binds_every_public_to_its_trace_cell() -> Result<()> {
+        for (kind, width) in [
+            (PlonkLayoutKind::Aggregation, 27usize),
+            (PlonkLayoutKind::Compressor, 36),
+            (PlonkLayoutKind::FinalVadcop, 33),
+        ] {
+            let n_publics = 70u32;
+            let layout = build_layout(&one_constraint_r1cs_with_publics(n_publics), kind, "Rec")?;
+            let air = build_air_layout(&layout, 0, 0, "rec")?;
+            let shape = &layout.shape;
+            let public_start = shape.n_used_rows - shape.n_public_rows;
+            assert_eq!(shape.n_public_rows, (n_publics as usize).div_ceil(width));
+            for k in 0..n_publics as usize {
+                assert_eq!(layout.signal_map[k % width][public_start + k / width], 1 + k as u32);
+            }
+
+            // The selector of a public row, a product of PUBLIC_ROW_BIT factors, is 1 exactly on
+            // that row and 0 on every other row of the trace.
+            let bit_start = FixedIds::for_kind(kind).public_row_bit_start as usize;
+            let bits = &layout.fixed_columns[bit_start..bit_start + shape.n_public_row_bits];
+            for public_row in 0..shape.n_public_rows {
+                for row in 0..shape.n_rows {
+                    let selected = bits.iter().enumerate().all(|(bit, column)| {
+                        column.values[row] == u64::from(public_row_bit(public_row, bit))
+                    });
+                    assert_eq!(selected, row == public_start + public_row);
+                }
+            }
+
+            // Every public is weighted by the selector of its row exactly once.
+            let public_refs = air
+                .air
+                .expressions
+                .iter()
+                .filter(|expression| {
+                    matches!(
+                        &expression.operation,
+                        Some(expression::Operation::Mul(expression::Mul {
+                            rhs: Some(Operand { operand: Some(operand::Operand::PublicValue(_)) }),
+                            ..
+                        }))
+                    )
+                })
+                .count();
+            assert_eq!(public_refs, n_publics as usize);
+        }
+        Ok(())
+    }
+
+    fn one_constraint_r1cs_with_publics(n_publics: u32) -> R1cs {
+        let mut r1cs = one_constraint_r1cs();
+        r1cs.n_outputs = n_publics;
+        r1cs.n_vars += n_publics;
+        r1cs
     }
 
     fn one_constraint_r1cs() -> R1cs {

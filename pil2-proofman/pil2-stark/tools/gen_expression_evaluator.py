@@ -7,7 +7,7 @@ CUDA device functions with register-resident temporaries. The generated code
 exactly mirrors the interpreter semantics in expressions_gpu.cu load__().
 
 Usage:
-  VENUS_DUMP_EXPRS=1 make prove   # produces /tmp/expr_dump_*.bin
+  VENUS_DUMP_EXPRS=1 make prove   # produces temp/expr_dump_*.bin (or VENUS_DUMP_EXPRS_DIR)
   python3 tools/gen_expression_evaluator.py  # generates .cuh files
 """
 
@@ -45,6 +45,152 @@ def read_dump(path):
         'ops': ops, 'args': args_raw, 'numbers': numbers, 'nNumbers': nNumbers,
         'strides': strides
     }
+
+
+def expression_fingerprint(dump):
+    """FNV-1a over expression metadata and bytecode; must match venusGeneratedExprFingerprint."""
+    h = 1469598103934665603
+
+    def mix_byte(value):
+        nonlocal h
+        h ^= value & 0xFF
+        h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+
+    def mix32(value):
+        for shift in (0, 8, 16, 24):
+            mix_byte(value >> shift)
+
+    for value in (dump['expId'], dump['nOps'], dump['nArgs'], dump['nTemp1'], dump['nTemp3'], dump['destDim']):
+        mix32(value)
+    for op in dump['ops']:
+        mix_byte(op)
+    for arg in dump['args']:
+        mix_byte(arg)
+        mix_byte(arg >> 8)
+    return h
+
+
+def stride_fingerprint(dump):
+    """FNV-1a over the opening-point strides; must match venusGeneratedStrideFingerprint."""
+    h = 1469598103934665603
+
+    def mix_byte(value):
+        nonlocal h
+        h ^= value & 0xFF
+        h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+
+    for shift in (0, 8, 16, 24):
+        mix_byte(dump['nOpenings'] >> shift)
+    for i in range(dump['nOpenings']):
+        value = dump['strides'][i] & 0xFFFFFFFFFFFFFFFF
+        for shift in range(0, 64, 8):
+            mix_byte(value >> shift)
+    return h
+
+
+# Host-side helpers emitted into generated_kernels.cuh. A generated kernel is straight-line code
+# for one exact expression, so it is only dispatched when the runtime bytecode and strides match
+# the dump it was generated from; any setup change falls back to the interpreter.
+GUARD_HELPERS = r'''
+inline uint64_t venusGeneratedExprFingerprint(const ParserParams &parserParams, const uint8_t *ops, const uint16_t *args) {
+    struct CacheEntry {
+        const uint8_t *ops = nullptr;
+        const uint16_t *args = nullptr;
+        uint32_t expId = 0;
+        uint32_t nOps = 0;
+        uint32_t nArgs = 0;
+        uint32_t nTemp1 = 0;
+        uint32_t nTemp3 = 0;
+        uint32_t destDim = 0;
+        uint64_t fingerprint = 0;
+        bool valid = false;
+    };
+    static thread_local CacheEntry cache[256];
+    CacheEntry &entry = cache[parserParams.expId & 255U];
+    if (entry.valid && entry.ops == ops && entry.args == args && entry.expId == parserParams.expId &&
+        entry.nOps == parserParams.nOps && entry.nArgs == parserParams.nArgs &&
+        entry.nTemp1 == parserParams.nTemp1 && entry.nTemp3 == parserParams.nTemp3 &&
+        entry.destDim == parserParams.destDim) {
+        return entry.fingerprint;
+    }
+
+    constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
+    constexpr uint64_t FNV_PRIME = 1099511628211ULL;
+    uint64_t h = FNV_OFFSET;
+    auto mixByte = [&](uint8_t value) {
+        h ^= value;
+        h *= FNV_PRIME;
+    };
+    auto mix32 = [&](uint32_t value) {
+        mixByte(static_cast<uint8_t>(value));
+        mixByte(static_cast<uint8_t>(value >> 8));
+        mixByte(static_cast<uint8_t>(value >> 16));
+        mixByte(static_cast<uint8_t>(value >> 24));
+    };
+
+    mix32(parserParams.expId);
+    mix32(parserParams.nOps);
+    mix32(parserParams.nArgs);
+    mix32(parserParams.nTemp1);
+    mix32(parserParams.nTemp3);
+    mix32(parserParams.destDim);
+    for (uint32_t i = 0; i < parserParams.nOps; ++i) {
+        mixByte(ops[i]);
+    }
+    for (uint32_t i = 0; i < parserParams.nArgs; ++i) {
+        uint16_t value = args[i];
+        mixByte(static_cast<uint8_t>(value));
+        mixByte(static_cast<uint8_t>(value >> 8));
+    }
+    entry.ops = ops;
+    entry.args = args;
+    entry.expId = parserParams.expId;
+    entry.nOps = parserParams.nOps;
+    entry.nArgs = parserParams.nArgs;
+    entry.nTemp1 = parserParams.nTemp1;
+    entry.nTemp3 = parserParams.nTemp3;
+    entry.destDim = parserParams.destDim;
+    entry.fingerprint = h;
+    entry.valid = true;
+    return h;
+}
+
+inline uint64_t venusGeneratedStrideFingerprint(const int64_t *nextStrides, uint32_t nOpenings) {
+    constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
+    constexpr uint64_t FNV_PRIME = 1099511628211ULL;
+    uint64_t h = FNV_OFFSET;
+    auto mixByte = [&](uint8_t value) {
+        h ^= value;
+        h *= FNV_PRIME;
+    };
+    for (uint32_t shift = 0; shift < 32; shift += 8) {
+        mixByte(static_cast<uint8_t>(nOpenings >> shift));
+    }
+    for (uint32_t i = 0; i < nOpenings; ++i) {
+        uint64_t value = static_cast<uint64_t>(nextStrides[i]);
+        for (uint32_t shift = 0; shift < 64; shift += 8) {
+            mixByte(static_cast<uint8_t>(value >> shift));
+        }
+    }
+    return h;
+}
+
+inline bool venusGeneratedExprMatches(const ParserParams &parserParams, const uint8_t *ops, const uint16_t *args,
+    const int64_t *nextStrides, uint32_t nOpenings,
+    uint32_t expectedExpId, uint32_t expectedNOps, uint32_t expectedNArgs, uint32_t expectedNTemp1,
+    uint32_t expectedNTemp3, uint32_t expectedDestDim, uint64_t expectedFingerprint,
+    uint32_t expectedNOpenings, uint64_t expectedStrideFingerprint) {
+    if (ops == nullptr || args == nullptr || nextStrides == nullptr) return false;
+    if (parserParams.expId != expectedExpId || parserParams.nOps != expectedNOps ||
+        parserParams.nArgs != expectedNArgs || parserParams.nTemp1 != expectedNTemp1 ||
+        parserParams.nTemp3 != expectedNTemp3 || parserParams.destDim != expectedDestDim ||
+        nOpenings != expectedNOpenings) {
+        return false;
+    }
+    return venusGeneratedExprFingerprint(parserParams, ops, args) == expectedFingerprint &&
+           venusGeneratedStrideFingerprint(nextStrides, nOpenings) == expectedStrideFingerprint;
+}
+'''
 
 
 def gen_load(src_type, src_arg, src_offset, dim, dump, var_prefix):
@@ -885,6 +1031,7 @@ def generate_all(dump_dir, out_dir):
 
     os.makedirs(out_dir, exist_ok=True)
     entries = []  # (fingerprint, nOps, nTemp1, nTemp3, destDim, filename)
+    guards = {}  # expId -> venusGeneratedExprMatches arguments after the runtime ones
 
     for path in dump_files:
         dump = read_dump(path)
@@ -901,6 +1048,7 @@ def generate_all(dump_dir, out_dir):
             fp_data += struct.pack(f'<{min(32, len(args_d))}H', *args_d[:min(32, len(args_d))])
             fp = hashlib.md5(fp_data).hexdigest()[:8]
             entries.append((fp, nOps_d, nTemp1_d, nTemp3_d, dump['destDim'], fname))
+            guards[expId] = guard_args(dump)
             continue
         if dump['nTemp1'] > 30:
             print(f"Skipped {path}: nOps={dump['nOps']} nTemp1={dump['nTemp1']} exceeds limits")
@@ -918,31 +1066,7 @@ def generate_all(dump_dir, out_dir):
         fp_data += struct.pack(f'<{min(32, len(args))}H', *args[:min(32, len(args))])
         fp = hashlib.md5(fp_data).hexdigest()[:8]
         entries.append((fp, nOps, nTemp1, nTemp3, dump['destDim'], fname))
-
-    # Generate dispatch header
-    dispatch_path = os.path.join(out_dir, 'generated_dispatch.cuh')
-    with open(dispatch_path, 'w') as f:
-        f.write('// Auto-generated dispatch header for expression evaluators\n')
-        f.write('// Include all generated evaluator files\n\n')
-        for _, _, _, _, _, fname in entries:
-            f.write(f'#include "{fname}"\n')
-        f.write('\n// Dispatch function: tries generated evaluator, returns false if no match\n')
-        f.write('template<bool IsCyclic>\n')
-        f.write('__device__ __forceinline__ bool dispatch_generated_eval(\n')
-        f.write('    const StepsParams* __restrict__ dParams,\n')
-        f.write('    const DeviceArguments* __restrict__ dArgs,\n')
-        f.write('    const ExpsArguments* __restrict__ dExpsArgs,\n')
-        f.write('    Goldilocks::Element **expressions_params,\n')
-        f.write('    uint32_t bufferCommitsSize, uint64_t row,\n')
-        f.write('    uint32_t nOps, uint32_t nTemp1, uint32_t nTemp3)\n')
-        f.write('{\n')
-        for fp, nOps, nTemp1, nTemp3, _, _ in entries:
-            f.write(f'    if (nOps == {nOps} && nTemp1 == {nTemp1} && nTemp3 == {nTemp3}) {{\n')
-            f.write(f'        eval_expr_{fp}<IsCyclic>(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, row);\n')
-            f.write(f'        return true;\n')
-            f.write(f'    }}\n')
-        f.write('    return false;\n')
-        f.write('}\n')
+        guards[expId] = guard_args(dump)
 
     # Generate standalone kernel .cu files
     for fp, nOps, nTemp1, nTemp3, destDim, fname in entries:
@@ -960,14 +1084,18 @@ def generate_all(dump_dir, out_dir):
             expId_str = fname.replace('gen_eval_', '').replace('.cuh', '')
             f.write(f'// expId={expId_str} nOps={nOps} nTemp1={nTemp1} nTemp3={nTemp3}\n')
             f.write(f'__global__ void computeExpression_gen_{expId_str}_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);\n\n')
+        f.write(GUARD_HELPERS)
         # Dispatch function for host code
-        f.write('// Host-side dispatch by expId\n')
-        f.write('inline bool dispatchGeneratedKernel(uint64_t expId, dim3 nBlocks, dim3 nThreads, size_t sharedMem, cudaStream_t stream,\n')
+        f.write('\n// Host-side dispatch by expId after validating the generated evaluator matches the setup bytecode.\n')
+        f.write('inline bool dispatchGeneratedKernel(uint64_t expId, const ParserParams &parserParams, const uint8_t *ops, const uint16_t *args,\n')
+        f.write('    const int64_t *nextStrides, uint32_t nOpenings, dim3 nBlocks, dim3 nThreads, size_t sharedMem, cudaStream_t stream,\n')
         f.write('    StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams) {\n')
         f.write('    switch (expId) {\n')
         for fp, nOps, nTemp1, nTemp3, destDim, fname in entries:
             expId_str = fname.replace('gen_eval_', '').replace('.cuh', '')
-            f.write(f'    case {expId_str}: computeExpression_gen_{expId_str}_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;\n')
+            f.write(f'    case {expId_str}:\n')
+            f.write(f'        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, {guards[expId_str]})) return false;\n')
+            f.write(f'        computeExpression_gen_{expId_str}_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;\n')
         f.write('    default: return false;\n')
         f.write('    }\n')
         f.write('}\n')
@@ -976,10 +1104,16 @@ def generate_all(dump_dir, out_dir):
     return True
 
 
+def guard_args(dump):
+    return (f"{dump['expId']}, {dump['nOps']}, {dump['nArgs']}, {dump['nTemp1']}, {dump['nTemp3']}, "
+            f"{dump['destDim']}, 0x{expression_fingerprint(dump):016x}ULL, {dump['nOpenings']}, "
+            f"0x{stride_fingerprint(dump):016x}ULL")
+
+
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dump-dir', default='/tmp', help='Directory with expr_dump_*.bin files')
+    parser.add_argument('--dump-dir', default='temp', help='Directory with expr_dump_*.bin files')
     parser.add_argument('--out-dir', default=None, help='Output directory for .cuh files')
     args = parser.parse_args()
 

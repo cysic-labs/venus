@@ -48,10 +48,20 @@ airtemplate ArithMul64(const int N = 2**18, const int dual_result = 0) {
         sum_all_bs = sum_all_bs + b[i];                 // all b are values of 16 bits (verified by range_check)
     }
 
+    expr sum_all_as = 0;
+    for (int i = 0; i < length(a); ++i) {
+        sum_all_as = sum_all_as + a[i];
+    }
+
     expr sum_all_ds = 0;
     for (int i = 0; i < length(d); ++i) {
         sum_all_ds = sum_all_ds + d[i];
     }
+
+    // In signed division, if dividend and divisor signs differ, a non-negative
+    // quotient is valid only when the quotient is exactly zero.
+    const expr quotient_negative = np + nb - 2 * np * nb;
+    main_div * quotient_negative * (1 - na) * sum_all_as === 0;
 
     // In normal signed division, a negative dividend can have a non-negative
     // remainder only when the remainder is exactly zero.

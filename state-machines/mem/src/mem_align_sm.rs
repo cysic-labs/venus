@@ -629,27 +629,29 @@ impl<F: PrimeField64> MemAlignSM<F> {
                         first_read_row.set_sel(i, true);
                     }
 
-                    first_write_row.set_reg(i, Self::get_byte(value_first_write, i, 0));
+                    let first_write_reg = Self::get_byte(value_first_write, i, 0);
+                    first_write_row.set_reg(i, first_write_reg);
                     if i >= offset {
                         first_write_row.set_sel(i, true);
                     }
 
+                    let second_write_reg = Self::get_byte(value_second_write, i, 0);
+                    second_write_row.set_reg(i, second_write_reg);
+                    if i < rem_bytes {
+                        second_write_row.set_sel(i, true);
+                    }
+
                     value_row.set_reg(i, {
                         if i < rem_bytes {
-                            second_write_row.get_reg(i)
+                            second_write_reg
                         } else if i >= offset {
-                            first_write_row.get_reg(i)
+                            first_write_reg
                         } else {
                             Self::get_byte(value, i, CHUNK_NUM - offset)
                         }
                     });
                     if i == offset {
                         value_row.set_sel(i, true);
-                    }
-
-                    second_write_row.set_reg(i, Self::get_byte(value_second_write, i, 0));
-                    if i < rem_bytes {
-                        second_write_row.set_sel(i, true);
                     }
 
                     second_read_row.set_reg(i, Self::get_byte(value_second_read, i, 0));

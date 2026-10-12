@@ -10,6 +10,7 @@ mod pilout_info;
 mod recursive_circom;
 mod recursive_generation;
 mod recursive_setup;
+mod rust_verifier;
 mod setup_layout;
 mod stark_struct;
 
@@ -22,7 +23,6 @@ use pilout_crate::pilout_proxy::PilOutProxy;
 use tracing::info;
 
 const DEFAULT_AIROUT: &str = "pil/zisk.pilout";
-const EMBEDDED_ZISK_PILOUT: &[u8] = include_bytes!("../assets/pil/zisk.pilout");
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Native Rust proving-key setup generator")]
@@ -35,7 +35,7 @@ struct Args {
     #[arg(short = 'b', long, default_value = "build")]
     build_dir: PathBuf,
 
-    /// Existing PILOUT file. The default Venus PILOUT is embedded as a fallback.
+    /// Existing PILOUT file generated from the current PIL sources.
     #[arg(short = 'a', long, default_value = DEFAULT_AIROUT)]
     airout: PathBuf,
 
@@ -100,7 +100,7 @@ fn run() -> Result<()> {
     let proving_key_dir = build_dir.join("provingKey");
 
     prepare_directories(&build_dir, &fixed_dir, &proof_dir, &proving_key_dir)?;
-    let pilout_path = resolve_airout(&build_dir, &pilout_path)?;
+    let pilout_path = resolve_airout(&pilout_path)?;
 
     let pilout = PilOutProxy::new(&pilout_path.display().to_string())
         .map_err(|err| anyhow::anyhow!("failed to load PILOUT {}: {err}", pilout_path.display()))?;
@@ -142,25 +142,16 @@ fn resolve_path(root: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn resolve_airout(build_dir: &Path, requested: &Path) -> Result<PathBuf> {
+fn resolve_airout(requested: &Path) -> Result<PathBuf> {
     if requested.exists() {
         return Ok(requested.to_path_buf());
     }
 
     if requested.ends_with(Path::new(DEFAULT_AIROUT)) {
-        let embedded_path = build_dir.join("embedded").join("zisk.pilout");
-        if let Some(parent) = embedded_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        fs::write(&embedded_path, EMBEDDED_ZISK_PILOUT)
-            .with_context(|| format!("failed to write {}", embedded_path.display()))?;
-        info!(
-            "PILOUT {} not found; using embedded Venus PILOUT {}",
-            requested.display(),
-            embedded_path.display()
+        anyhow::bail!(
+            "PILOUT was not found at {}; run `make compile-pil` before generating the proving key",
+            requested.display()
         );
-        return Ok(embedded_path);
     }
 
     anyhow::bail!("PILOUT was not found at {}", requested.display());

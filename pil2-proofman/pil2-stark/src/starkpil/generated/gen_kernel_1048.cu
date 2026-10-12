@@ -1,4 +1,4 @@
-// Standalone generated kernel for expression 518
+// Standalone generated kernel for expression 1048
 // Compiled in its own CU for optimal register allocation
 #include "expressions_gpu.cuh"
 #include "cuda_utils.cuh"
@@ -25,9 +25,9 @@ __device__ __noinline__ static void storePolynomial__(ExpsArguments *d_expsArgs,
     }
 }
 
-#include "gen_eval_518.cuh"
+#include "gen_eval_1048.cuh"
 
-__global__ void computeExpression_gen_518_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)
+__global__ void computeExpression_gen_1048_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams)
 {
     int chunk_idx = blockIdx.x;
     uint64_t nchunks = d_expsArgs->domainSize / blockDim.x;
@@ -58,9 +58,9 @@ __global__ void computeExpression_gen_518_(StepsParams *d_params, DeviceArgument
     while (chunk_idx < nchunks) {
         uint64_t i = chunk_idx * blockDim.x;
         if (chunk_idx < k_min_chunk || chunk_idx >= k_max_chunk) {
-            eval_expr_5c75a2d5<true>(d_params, d_deviceArgs, d_expsArgs, expressions_params, bufferCommitsSize, i);
+            eval_expr_9066233d<true>(d_params, d_deviceArgs, d_expsArgs, expressions_params, bufferCommitsSize, i);
         } else {
-            eval_expr_5c75a2d5<false>(d_params, d_deviceArgs, d_expsArgs, expressions_params, bufferCommitsSize, i);
+            eval_expr_9066233d<false>(d_params, d_deviceArgs, d_expsArgs, expressions_params, bufferCommitsSize, i);
         }
         chunk_idx += gridDim.x;
     }

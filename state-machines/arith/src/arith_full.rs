@@ -103,7 +103,10 @@ impl<F: PrimeField64> ArithFullSM<F> {
         // Split the arith_trace.buffer into slices matching each inner vector’s length.
         let flat_inputs: Vec<_> = inputs.iter().flatten().collect(); // Vec<&OperationData<u64>>
         let flat_buffer = arith_trace.buffer.as_mut_slice();
-        let chunk_size = total_inputs.div_ceil(rayon::current_num_threads());
+        // A chunk whose operations are all frequent ops (frops) still plans an instance, because its
+        // collector records their multiplicities in the frops table; the instance then has no inputs
+        // and its whole trace is padding. `par_chunks_mut` panics on a zero chunk size.
+        let chunk_size = total_inputs.div_ceil(rayon::current_num_threads()).max(1);
 
         flat_buffer.par_chunks_mut(chunk_size).zip(flat_inputs.par_chunks(chunk_size)).for_each(
             |(trace_slice, input_slice)| {

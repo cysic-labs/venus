@@ -38,28 +38,28 @@ require "blake2/pil/blake2br.pil"
 enable_range_stats();
 
 proofval enable_input_data;
-enable_input_data * (1 - enable_input_data);
+enable_input_data * (1 - enable_input_data) === 0;
 
 proofval enable_rom_data;
-enable_rom_data * (1 - enable_rom_data);
+enable_rom_data * (1 - enable_rom_data) === 0;
 
 proofval enable_dma_64_aligned;
-enable_dma_64_aligned * (1 - enable_dma_64_aligned);
+enable_dma_64_aligned * (1 - enable_dma_64_aligned) === 0;
 
 proofval enable_dma_64_aligned_inputcpy;
-enable_dma_64_aligned_inputcpy * (1 - enable_dma_64_aligned_inputcpy);
+enable_dma_64_aligned_inputcpy * (1 - enable_dma_64_aligned_inputcpy) === 0;
 
 proofval enable_dma_64_aligned_mem;
-enable_dma_64_aligned_mem * (1 - enable_dma_64_aligned_mem);
+enable_dma_64_aligned_mem * (1 - enable_dma_64_aligned_mem) === 0;
 
 proofval enable_dma_64_aligned_memcpy;
-enable_dma_64_aligned_memcpy * (1 - enable_dma_64_aligned_memcpy);
+enable_dma_64_aligned_memcpy * (1 - enable_dma_64_aligned_memcpy) === 0;
 
 proofval enable_dma_64_aligned_memset;
-enable_dma_64_aligned_memset * (1 - enable_dma_64_aligned_memset);
+enable_dma_64_aligned_memset * (1 - enable_dma_64_aligned_memset) === 0;
 
 proofval enable_dma_unaligned;
-enable_dma_unaligned * (1 - enable_dma_unaligned);
+enable_dma_unaligned * (1 - enable_dma_unaligned) === 0;
 
 const int PUBLIC_INPUTS_64_BITS = 32;  // 32 x 64 bits = 2048 bits
 public inputs[PUBLIC_INPUTS_64_BITS * 2]; // 2 x 32-bits = 64 bits

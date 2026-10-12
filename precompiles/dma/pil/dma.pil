@@ -217,7 +217,14 @@ airtemplate Dma(int N = 2**21,
     const expr pre_op = _pre_op;
     const expr post_op = _pre_op + OP_DMA_POST_OFFSET;
     const expr sel = _sel;
-    sel * (1 - sel) === 0;      
+    sel * (1 - sel) === 0;
+
+    // Extended DMA variants carry count in the operation argument instead of
+    // reading it from EXTRA_PARAMS_ADDR, so they must be tied to a base op that
+    // normally performs that count load.
+    const expr sel_count_from_mem = sel_load_count_from_mem - sel_extended;
+    sel_extended * (1 - sel_load_count_from_mem) === 0;
+    sel_count_from_mem * (1 - sel_count_from_mem) === 0;
 
     // assuming max memory of 4GB (32 bits)
     // count: 24 bits RC + 8 bits T
@@ -546,7 +553,7 @@ airtemplate Dma(int N = 2**21,
     // For OP_DMA_MEMCPY and OP_DMA_MEMCMP we need read the third parameter (count), to do it 
     // we read a specific position on RAM, EXTRA_PARAM_ADDR.
     
-    precompiled_mem_load(sel: sel_load_count_from_mem - sel_extended, 
+    precompiled_mem_load(sel: sel_count_from_mem,
                          main_step:, 
                          addr: EXTRA_PARAMS_ADDR, 
                          value: [count_bus, 0]);

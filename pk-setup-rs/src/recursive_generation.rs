@@ -20,6 +20,7 @@ use crate::recursive_setup::runtime::RuntimeDescriptor;
 use crate::recursive_setup::{
     write_setup_with_runtime_descriptor, PlonkLayoutKind, RecursiveAirSetupConfig,
 };
+use crate::rust_verifier::{render_rust_verifier, RustVerifierEntry};
 use crate::stark_struct::{generate_stark_struct, StarkSettings, StarkStruct};
 
 const RECURSIVE_N_BITS: u64 = 17;
@@ -325,6 +326,11 @@ fn write_recursive2(
         root_c_recursive2: product.verkey.clone(),
     };
     write_text(&setup_path.with_extension("vks.json"), serde_json::to_string_pretty(&vks)?)?;
+    write_rust_verifier(
+        &setup_path,
+        &product,
+        RustVerifierEntry { name: "verify_recursive2", with_bytes_entry: false },
+    )?;
 
     Ok(product)
 }
@@ -375,7 +381,7 @@ fn write_vadcop_final(
     );
     let setup_path =
         proving_key_dir.join(&vadcop_info.name).join("vadcop_final").join("vadcop_final");
-    compile_and_write_setup(
+    let product = compile_and_write_setup(
         circom_dir,
         r1cs_dir,
         gl_include,
@@ -389,7 +395,13 @@ fn write_vadcop_final(
         0,
         "FinalVadcop".to_string(),
         StarkStructMode::Final,
-    )
+    )?;
+    write_rust_verifier(
+        &setup_path,
+        &product,
+        RustVerifierEntry { name: "verify_vadcop_final", with_bytes_entry: true },
+    )?;
+    Ok(product)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -421,7 +433,7 @@ fn write_vadcop_final_compressed(
     );
     let setup_path =
         proving_key_dir.join(name).join("vadcop_final_compressed").join("vadcop_final_compressed");
-    compile_and_write_setup(
+    let product = compile_and_write_setup(
         circom_dir,
         r1cs_dir,
         gl_include,
@@ -435,7 +447,27 @@ fn write_vadcop_final_compressed(
         0,
         "VadcopFinalCompressed".to_string(),
         StarkStructMode::FinalCompressed,
-    )
+    )?;
+    write_rust_verifier(
+        &setup_path,
+        &product,
+        RustVerifierEntry { name: "verify_vadcop_final_compressed", with_bytes_entry: true },
+    )?;
+    Ok(product)
+}
+
+/// Writes `<setup>.verifier.rs`, the native verifier that `make generate-rust-verifiers` copies
+/// into `pil2-proofman/verifier/src`.
+fn write_rust_verifier(
+    setup_path: &Path,
+    product: &SetupProduct,
+    entry: RustVerifierEntry,
+) -> Result<()> {
+    let source = render_rust_verifier(&product.stark_info, &product.verifier_info, entry)
+        .with_context(|| {
+            format!("failed to render the native verifier of {}", setup_path.display())
+        })?;
+    write_text(&setup_path.with_extension("verifier.rs"), source)
 }
 
 #[derive(Debug, Clone)]
@@ -480,6 +512,10 @@ fn compile_and_write_setup(
         &metadata.signal_replacements,
     );
     let shape = calculate_layout_shape(&r1cs, kind)?;
+    info!(
+        "{circuit_name}: {} of {} rows used ({} public rows for {} publics)",
+        shape.n_used_rows, shape.n_rows, shape.n_public_rows, shape.n_publics
+    );
     let stark_struct = match stark_mode {
         StarkStructMode::Fixed(stark_struct) => {
             if stark_struct.n_bits != u64::from(shape.n_bits) {
@@ -520,10 +556,13 @@ fn compile_and_write_setup(
 }
 
 fn recursive_stark_struct() -> Result<StarkStruct> {
+    // recursive2 verifies three proofs of this same AIR and must fit in 2^RECURSIVE_N_BITS rows.
+    // The grinding bits trade prover work for FRI queries, each of which costs about 1.7k rows of
+    // recursive2: 23 bits give 71 queries and keep recursive2 below the bound.
     let settings = StarkSettings {
         blowup_factor: Some(3),
         last_level_verification: Some(1),
-        pow_bits: Some(20),
+        pow_bits: Some(23),
         ..Default::default()
     };
     generate_stark_struct(&settings, RECURSIVE_N_BITS)

@@ -5,6 +5,7 @@
     "ArithEq384": { "hasCompressor": true },
     "DmaPrePost": { "hasCompressor": true },
     "Blake2br": { "hasCompressor": true },
+    "MemAlign": { "powBits": 17 },
     "VirtualTable0": { "lastLevelVerification": 1 },
     "VirtualTable1": { "lastLevelVerification": 1 },
     "SpecifiedRanges": { "lastLevelVerification": 1 },

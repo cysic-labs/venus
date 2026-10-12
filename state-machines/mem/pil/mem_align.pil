@@ -162,7 +162,21 @@ airtemplate MemAlign(const int N = 2**10, const int RC = 2, const int CHUNK_NUM 
     // 3] Prove unaligned memory accesses against the Main component
     col witness bits(1) sel_prove;
 
+    sel_prove * (1 - sel_prove) === 0;
     sel_prove * sel_assume === 0; // Disjoint selectors
+
+    // Keep the aligned backing accesses at the timestamp of the unaligned
+    // operation, with stores at the following memory timestamp. The ROM lookup
+    // fixes the row order; these constraints bind the otherwise independent
+    // memory-permutation steps across each MemAlign subprogram:
+    //   RV    : R(s) V(s)
+    //   RWV   : R(s) W(s+1) V(s)
+    //   RVR   : R(s) V(s) R(s)
+    //   RWVWR : R(s) W(s+1) V(s) W(s+1) R(s)
+    sel_up_to_down * reset * (wr' * (step' - step - 1) + (1 - wr') * (step' - step)) === 0;
+    sel_up_to_down * wr * (1 - reset) * (step' - step + 1) === 0;
+    sel_prove * sel_down_to_up' * (wr' * (step' - step - 1) + (1 - wr') * (step' - step)) === 0;
+    sel_down_to_up * wr * (step' - step + 1) === 0;
 
     // On prove steps, we reconstruct the value in the correct manner chosen by the selectors
     expr prove_val[RC];
@@ -180,6 +194,16 @@ airtemplate MemAlign(const int N = 2**10, const int RC = 2, const int CHUNK_NUM 
             prove_val[rc_index] += sel[_offset] * _tmp;
         }
     }
+
+    // sel_prove selects memory-bus value rows; wr and the adjacent row selectors
+    // are ROM-bound. The preceding aligned read selects bytes from the first word,
+    // and a following down-to-up read selects the crossing remainder. Every other
+    // byte is outside the requested width and must be zero.
+    expr unbacked_bytes = 0;
+    for (int i = 0; i < CHUNK_NUM; i++) {
+        unbacked_bytes += (1 - 'sel[i] - sel_down_to_up' * sel[i]') * reg[i];
+    }
+    sel_prove * (1 - wr) * unbacked_bytes === 0;
 
     // We prove and assume with the same permutation check but with disjoint and different sign selectors
     col witness bits(32) value[RC];

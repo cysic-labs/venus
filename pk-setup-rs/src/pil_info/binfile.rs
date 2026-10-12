@@ -698,12 +698,13 @@ fn default_operations() -> Vec<OperationShape> {
     ]
 }
 
+/// Compacted slots of the temporaries of one code block, per dimension.
 #[derive(Default)]
-struct IdMaps {
-    id1d: HashMap<u64, u64>,
-    id3d: HashMap<u64, u64>,
-    count1d: u64,
-    count3d: u64,
+pub(crate) struct IdMaps {
+    pub(crate) id1d: HashMap<u64, u64>,
+    pub(crate) id3d: HashMap<u64, u64>,
+    pub(crate) count1d: u64,
+    pub(crate) count3d: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -714,15 +715,36 @@ struct Segment {
 }
 
 fn get_id_maps(code: &[CodeLineJson]) -> Result<IdMaps> {
+    compact_tmp_ids(code.iter().map(|line| {
+        std::iter::once(&line.dest)
+            .chain(&line.src)
+            .filter(|reference| reference.ref_type == "tmp")
+            .map(|reference| Ok((reference.id.context("tmp reference missing id")?, reference.dim)))
+            .collect::<Result<Vec<_>>>()
+    }))
+}
+
+/// Assigns slots to temporaries so that temporaries with disjoint live ranges share a slot.
+/// `lines` yields, for each code line, its temporary operands as `(id, dim)`.
+pub(crate) fn compact_tmp_ids(
+    lines: impl IntoIterator<Item = Result<Vec<(u64, u64)>>>,
+) -> Result<IdMaps> {
     let mut ini1d = HashMap::<u64, usize>::new();
     let mut end1d = HashMap::<u64, usize>::new();
     let mut ini3d = HashMap::<u64, usize>::new();
     let mut end3d = HashMap::<u64, usize>::new();
 
-    for (idx, line) in code.iter().enumerate() {
-        visit_tmp(&line.dest, idx, &mut ini1d, &mut end1d, &mut ini3d, &mut end3d)?;
-        for src in &line.src {
-            visit_tmp(src, idx, &mut ini1d, &mut end1d, &mut ini3d, &mut end3d)?;
+    for (idx, tmps) in lines.into_iter().enumerate() {
+        for (id, dim) in tmps? {
+            let (ini, end) = if dim == 1 {
+                (&mut ini1d, &mut end1d)
+            } else if dim == FIELD_EXTENSION {
+                (&mut ini3d, &mut end3d)
+            } else {
+                anyhow::bail!("invalid tmp dimension {dim}");
+            };
+            ini.entry(id).or_insert(idx);
+            end.insert(id, idx);
         }
     }
 
@@ -732,30 +754,6 @@ fn get_id_maps(code: &[CodeLineJson]) -> Result<IdMaps> {
     assign_segments(&segments1d, &mut maps.id1d, &mut maps.count1d);
     assign_segments(&segments3d, &mut maps.id3d, &mut maps.count3d);
     Ok(maps)
-}
-
-fn visit_tmp(
-    reference: &CodeRefJson,
-    idx: usize,
-    ini1d: &mut HashMap<u64, usize>,
-    end1d: &mut HashMap<u64, usize>,
-    ini3d: &mut HashMap<u64, usize>,
-    end3d: &mut HashMap<u64, usize>,
-) -> Result<()> {
-    if reference.ref_type != "tmp" {
-        return Ok(());
-    }
-    let id = reference.id.context("tmp reference missing id")?;
-    let (ini, end) = if reference.dim == 1 {
-        (ini1d, end1d)
-    } else if reference.dim == FIELD_EXTENSION {
-        (ini3d, end3d)
-    } else {
-        anyhow::bail!("invalid tmp dimension {}", reference.dim);
-    };
-    ini.entry(id).or_insert(idx);
-    end.insert(id, idx);
-    Ok(())
 }
 
 fn collect_segments(ini: &HashMap<u64, usize>, end: &HashMap<u64, usize>) -> Vec<Segment> {

@@ -422,4 +422,18 @@ mod tests_frops {
     fn test_multiple_chunks_only_last_chunk_has_frops() {
         base_test_multiple_chunks([0, 1]);
     }
+
+    #[test]
+    fn test_frops_only_chunk_plans_an_empty_instance() {
+        // The instance collects the frops multiplicities, so it is planned even though it has no
+        // full operations and its witness is all padding.
+        let counts = [InstFropsCount::new(ChunkId(0), 0, 64)];
+        let expected = vec![(
+            CheckPoint::Multiple(vec![ChunkId(0)]),
+            [(ChunkId(0), (0, true, CollectSkipper::new(0)))]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+        )];
+        assert_eq!(plan_with_frops(&counts, 10), expected);
+    }
 }

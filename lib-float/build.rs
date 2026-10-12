@@ -81,6 +81,17 @@ fn track_cpp_changes(c_path: &Path) {
 
     // If any C++ source file changed, force a rebuild
     if cpp_files_have_changed(&cpp_files, &lib_file) {
+        // A fresh checkout can leave the sources newer than the committed prebuilt library
+        // purely because of file mtimes. `make clean` would delete that library before the
+        // rebuild, so without a RISC-V cross compiler keep the prebuilt one instead of failing.
+        if !command_exists("riscv64-unknown-elf-gcc") {
+            println!(
+                "cargo:warning=lib-float sources look newer than `{}`, but riscv64-unknown-elf-gcc \
+                 is not in PATH; using the prebuilt library",
+                lib_file.display()
+            );
+            return;
+        }
         eprintln!("Changes detected! Running `make clean` and recompiling...");
         run_command("make", &["clean"], c_path);
         run_command("make", &[], c_path);
@@ -88,6 +99,11 @@ fn track_cpp_changes(c_path: &Path) {
         println!("No C++ source changes detected, skipping rebuild.");
     }
 }
+/// Returns whether `cmd` can be spawned from PATH
+fn command_exists(cmd: &str) -> bool {
+    Command::new(cmd).arg("--version").output().is_ok()
+}
+
 /// Checks if any `.cpp`, `.h`, or `.hpp` file has changed since the last build
 fn cpp_files_have_changed(cpp_files: &[PathBuf], lib_file: &Path) -> bool {
     let mut modified_files: Vec<PathBuf> = Vec::new();
