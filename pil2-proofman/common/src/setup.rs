@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use std::sync::RwLock;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use libloading::{Library, Symbol};
 use std::ffi::{CString, OsString};
-use bytemuck::cast_slice;
+use bytemuck::{cast_slice, cast_slice_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{NativeRecursiveRuntime, RowInfo};
 
@@ -15,8 +15,8 @@ use proofman_starks_lib_c::set_memory_expressions_c;
 use proofman_starks_lib_c::{
     expressions_bin_new_c, stark_info_new_c, stark_info_free_c, expressions_bin_free_c, get_map_totaln_c,
     get_map_totaln_custom_commits_fixed_c, get_map_totaln_contributions_c, get_proof_size_c, get_max_n_tmp1_c,
-    get_max_n_tmp3_c, get_const_tree_size_c, load_const_pols_c, load_const_tree_c, read_exec_file_c,
-    get_proof_pinned_size_c, get_operations_quotient_c, calculate_words_per_row_c,
+    get_max_n_tmp3_c, get_const_tree_size_c, load_const_pols_c, load_const_tree_c, get_proof_pinned_size_c,
+    get_operations_quotient_c, calculate_words_per_row_c, validate_expressions_bin_c,
 };
 use proofman_util::create_buffer_fast;
 
@@ -42,6 +42,7 @@ const MAX_QUERY_CONSTANT_VALUES: u64 = 1 << 20;
 const SUPPORTED_STARK_N_STAGES: u32 = 2;
 const FIELD_EXTENSION: u64 = 3;
 const MAX_STARKINFO_JSON_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_EXEC_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_VERKEY_JSON_BYTES: u64 = 16 * 1024 * 1024;
 
 fn invalid_setup(message: impl Into<String>) -> ProofmanError {
@@ -487,6 +488,59 @@ fn checked_packed_const_words(words_per_row: u64, domain_size: usize, n_constant
     Ok(words)
 }
 
+/// Returns the number of words of an exec file laid out as `[n_adds, n_smap, additions (4 words
+/// each), signal map (n_cols words per row)]`, after checking that its header matches its length.
+fn checked_exec_data_size_words(
+    exec_filename: &str,
+    n_adds: u64,
+    n_smap: u64,
+    n_cols: u64,
+    file_len: u64,
+) -> ProofmanResult<usize> {
+    let expected_bytes = n_adds
+        .checked_mul(4)
+        .zip(n_smap.checked_mul(n_cols))
+        .and_then(|(add_words, smap_words)| add_words.checked_add(smap_words))
+        .and_then(|words| words.checked_add(2))
+        .and_then(|words| words.checked_mul(8))
+        .filter(|&bytes| bytes <= MAX_EXEC_FILE_BYTES)
+        .ok_or_else(|| invalid_setup(format!("{exec_filename} exec file header exceeds the size limit")))?;
+    if file_len != expected_bytes {
+        return Err(invalid_setup(format!(
+            "{exec_filename} exec file has {file_len} bytes, its header declares {expected_bytes}"
+        )));
+    }
+    Ok((expected_bytes / 8) as usize)
+}
+
+/// Checks that every signal the exec data reads lies in the circuit witness: additions read the
+/// witness or earlier additions, the signal map reads the witness or any addition, and the publics
+/// follow the constant one at the start of the witness. Exec data that passes can be gathered
+/// without per-index checks.
+fn validate_exec_references(
+    exec_filename: &str,
+    exec_data: &[u64],
+    size_witness: u64,
+    n_publics: u64,
+) -> ProofmanResult<()> {
+    let n_adds = exec_data[0];
+    let (additions, signal_map) = exec_data[2..].split_at(n_adds as usize * 4);
+    if n_publics > 0 && n_publics >= size_witness {
+        return Err(invalid_setup(format!("{exec_filename} public input index exceeds witness size")));
+    }
+    for (i, addition) in additions.chunks_exact(4).enumerate() {
+        let available_witness = size_witness.saturating_add(i as u64);
+        if addition[0] >= available_witness || addition[1] >= available_witness {
+            return Err(invalid_setup(format!("{exec_filename} exec addition index exceeds witness size")));
+        }
+    }
+    let total_witness = size_witness.saturating_add(n_adds);
+    if signal_map.iter().any(|&signal| signal != 0 && signal >= total_witness) {
+        return Err(invalid_setup(format!("{exec_filename} exec signal index exceeds witness size")));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 #[repr(C)]
 pub struct SetupC {
@@ -540,6 +594,8 @@ pub struct Setup<F: PrimeField64> {
     pub verkey: Vec<F>,
     pub verkey_file: String,
     pub exec_data: RwLock<Option<Vec<u64>>>,
+    /// Whether `exec_data` was checked against the circuit's witness size when it was loaded.
+    pub exec_data_validated: AtomicBool,
     pub n_cols: u64,
     pub n_operations_quotient: u64,
     pub preallocate: bool,
@@ -666,6 +722,7 @@ impl<F: PrimeField64> Setup<F> {
                 preallocate_const,
             );
             let expressions_bin = expressions_bin_new_c(expressions_bin_path.as_str(), false, false);
+            validate_expressions_bin_c(expressions_bin, p_stark_info);
             let n_max_tmp1 = get_max_n_tmp1_c(expressions_bin);
             let n_max_tmp3 = get_max_n_tmp3_c(expressions_bin);
             set_memory_expressions_c(p_stark_info, n_max_tmp1, n_max_tmp3);
@@ -779,6 +836,7 @@ impl<F: PrimeField64> Setup<F> {
             circom_library: RwLock::new(None),
             native_runtime: RwLock::new(None),
             exec_data: RwLock::new(None),
+            exec_data_validated: AtomicBool::new(false),
             setup_path: setup_path.to_path_buf().clone(),
             setup_type: setup_type.clone(),
             air_name: air_info.name.clone(),
@@ -945,12 +1003,13 @@ impl<F: PrimeField64> Setup<F> {
         Ok(())
     }
 
+    /// Loads the exec file of a recursive setup. Once the circuit is loaded, the exec data is checked
+    /// against its witness size, so the committed polynomials can be gathered without per-index
+    /// checks.
     pub fn set_exec_file_data(&self) -> ProofmanResult<()> {
+        self.exec_data_validated.store(false, Ordering::Release);
         let exec_filename = self.setup_path.display().to_string() + ".exec";
-        let exec_filename_str = CString::new(exec_filename.as_str()).unwrap();
-        let exec_filename_ptr = exec_filename_str.as_ptr() as *mut std::os::raw::c_char;
-
-        let mut file = File::open(exec_filename)?;
+        let mut file = File::open(&exec_filename)?;
 
         let mut bytes = [0u8; 8];
 
@@ -960,10 +1019,21 @@ impl<F: PrimeField64> Setup<F> {
         file.read_exact(&mut bytes)?;
         let n_smap = u64::from_le_bytes(bytes);
 
-        let exec_data_size = 2 + n_adds * 4 + n_smap * self.n_cols;
-        let mut exec_file_data: Vec<u64> = vec![0; exec_data_size as usize];
-        read_exec_file_c(exec_file_data.as_mut_ptr(), exec_filename_ptr, self.n_cols);
+        let exec_data_size =
+            checked_exec_data_size_words(&exec_filename, n_adds, n_smap, self.n_cols, file.metadata()?.len())?;
+        let mut exec_file_data: Vec<u64> = vec![0; exec_data_size];
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(cast_slice_mut(&mut exec_file_data))?;
+
+        let validated = match *self.size_witness.read().unwrap() {
+            Some(size_witness) => {
+                validate_exec_references(&exec_filename, &exec_file_data, size_witness, self.stark_info.n_publics)?;
+                true
+            }
+            None => false,
+        };
         *self.exec_data.write().unwrap() = Some(exec_file_data);
+        self.exec_data_validated.store(validated, Ordering::Release);
         Ok(())
     }
 }

@@ -355,6 +355,13 @@ pub fn expressions_bin_new_c(filename: &str, global: bool, verify: bool) -> *mut
 }
 
 #[cfg(not(feature = "no_lib_link"))]
+pub fn validate_expressions_bin_c(p_expressions_bin: *mut c_void, p_stark_info: *mut c_void) {
+    unsafe {
+        validate_expressions_bin(p_expressions_bin, p_stark_info);
+    }
+}
+
+#[cfg(not(feature = "no_lib_link"))]
 pub fn get_max_n_tmp1_c(p_expressions_bin: *mut c_void) -> u64 {
     unsafe { get_max_n_tmp1(p_expressions_bin) }
 }
@@ -1159,6 +1166,32 @@ pub fn get_committed_pols_c(
 }
 
 #[cfg(not(feature = "no_lib_link"))]
+#[allow(clippy::too_many_arguments)]
+pub fn get_committed_pols_validated_c(
+    circomWitness: *mut u8,
+    exec_data: *mut u64,
+    witness: *mut u8,
+    pPublics: *mut u8,
+    sizeWitness: u64,
+    N: u64,
+    nPublics: u64,
+    nCols: u64,
+) {
+    unsafe {
+        get_committed_pols_validated(
+            circomWitness as *mut std::os::raw::c_void,
+            exec_data,
+            witness as *mut std::os::raw::c_void,
+            pPublics as *mut std::os::raw::c_void,
+            sizeWitness,
+            N,
+            nPublics,
+            nCols,
+        );
+    }
+}
+
+#[cfg(not(feature = "no_lib_link"))]
 pub fn add_publics_aggregation_c(proof: *mut u8, offset: u64, publics: *mut u8, nPublics: u64) {
     unsafe {
         add_publics_aggregation(
@@ -1829,6 +1862,9 @@ pub fn expressions_bin_new_c(_filename: &str, _global: bool, _verify: bool) -> *
 }
 
 #[cfg(feature = "no_lib_link")]
+pub fn validate_expressions_bin_c(_p_expressions_bin: *mut c_void, _p_stark_info: *mut c_void) {}
+
+#[cfg(feature = "no_lib_link")]
 pub fn get_max_n_tmp1_c(_p_expressions_bin: *mut c_void) -> u64 {
     10000
 }
@@ -2316,6 +2352,21 @@ pub fn get_committed_pols_c(
     _nCols: u64,
 ) {
     trace!("··· {}", "get_committed_pols: This is a mock call because there is no linked library");
+}
+
+#[cfg(feature = "no_lib_link")]
+#[allow(clippy::too_many_arguments)]
+pub fn get_committed_pols_validated_c(
+    _circomWitness: *mut u8,
+    _exec_data: *mut u64,
+    _witness: *mut u8,
+    _pPublics: *mut u8,
+    _sizeWitness: u64,
+    _N: u64,
+    _nPublics: u64,
+    _nCols: u64,
+) {
+    trace!("··· {}", "get_committed_pols_validated: This is a mock call because there is no linked library");
 }
 
 #[cfg(feature = "no_lib_link")]

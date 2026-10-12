@@ -144,6 +144,11 @@ extern "C" {
 
     pub fn get_operations_quotient(pExpressionsBin: *mut ::std::os::raw::c_void, pStarkInfo: *mut ::std::os::raw::c_void) -> u64;
 
+    pub fn validate_expressions_bin(
+        pExpressionsBin: *mut ::std::os::raw::c_void,
+        pStarkInfo: *mut ::std::os::raw::c_void,
+    );
+
     pub fn expressions_bin_free(pExpressionsBin: *mut ::std::os::raw::c_void);
 
     // Hints
@@ -419,6 +424,17 @@ extern "C" {
     pub fn read_exec_file(exec_data: *mut u64, exec_file: *mut ::std::os::raw::c_char, nCommitedPols: u64);
     
     pub fn get_committed_pols(
+        circomWitness: *mut ::std::os::raw::c_void,
+        execData: *mut u64,
+        witness: *mut ::std::os::raw::c_void,
+        pPublics: *mut ::std::os::raw::c_void,
+        sizeWitness: u64,
+        N: u64,
+        nPublics: u64,
+        nCols: u64,
+    );
+
+    pub fn get_committed_pols_validated(
         circomWitness: *mut ::std::os::raw::c_void,
         execData: *mut u64,
         witness: *mut ::std::os::raw::c_void,

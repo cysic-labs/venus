@@ -1090,12 +1090,12 @@ pub fn initialize_witness_circom<F: PrimeField64>(pctx: &ProofCtx<F>, setups: &S
         for (air_id, _) in air_group.iter().enumerate() {
             if pctx.global_info.get_air_has_compressor(airgroup_id, air_id) {
                 let setup = setups.sctx_compressor.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
-                setup.set_exec_file_data()?;
                 setup.set_circom_circuit()?;
+                setup.set_exec_file_data()?;
             }
             let setup = setups.sctx_recursive1.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
-            setup.set_exec_file_data()?;
             setup.set_circom_circuit()?;
+            setup.set_exec_file_data()?;
         }
     }
 

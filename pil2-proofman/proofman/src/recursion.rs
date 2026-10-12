@@ -11,6 +11,7 @@ use std::io::Write;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::mem;
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 
 use proofman_common::{
@@ -458,7 +459,14 @@ pub fn generate_recursive_proof<F: PrimeField64>(
 
     let exec_data_ptr = setup.exec_data.read().unwrap().as_ref().map(|v| v.as_ptr() as *mut u64).unwrap();
 
-    get_committed_pols_c(
+    // Exec data validated at load time is gathered without per-index checks.
+    let get_committed_pols = if setup.exec_data_validated.load(Ordering::Acquire) {
+        get_committed_pols_validated_c
+    } else {
+        get_committed_pols_c
+    };
+
+    get_committed_pols(
         witness.circom_witness.as_ptr() as *mut u8,
         exec_data_ptr,
         trace.as_mut_ptr() as *mut u8,
@@ -895,7 +903,7 @@ pub fn generate_recursivef_proof<F: PrimeField64>(
     });
 
     // SAFETY: the committed polynomials are written into the whole trace before it is read.
-    let trace: Vec<F> =
+    let mut trace: Vec<F> =
         unsafe { create_buffer_fast(setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize) };
 
     let proof = &vadcop_proof[1..];
@@ -909,15 +917,22 @@ pub fn generate_recursivef_proof<F: PrimeField64>(
     let circom_witness = generate_witness::<F>(setup, 0, &updated_proof, output_dir_path)?;
     timer_stop_and_log_debug!(GENERATE_RECURSIVEF_WITNESS);
 
-    let publics = vec![F::ZERO; setup.stark_info.n_publics as usize];
+    let mut publics = vec![F::ZERO; setup.stark_info.n_publics as usize];
 
     let exec_data_ptr = setup.exec_data.read().unwrap().as_ref().map(|v| v.as_ptr() as *mut u64).unwrap();
 
-    get_committed_pols_c(
+    // Exec data validated at load time is gathered without per-index checks.
+    let get_committed_pols = if setup.exec_data_validated.load(Ordering::Acquire) {
+        get_committed_pols_validated_c
+    } else {
+        get_committed_pols_c
+    };
+
+    get_committed_pols(
         circom_witness.as_ptr() as *mut u8,
         exec_data_ptr,
-        trace.as_ptr() as *mut u8,
-        publics.as_ptr() as *mut u8,
+        trace.as_mut_ptr() as *mut u8,
+        publics.as_mut_ptr() as *mut u8,
         setup.size_witness.read().unwrap().unwrap(),
         1 << (setup.stark_info.stark_struct.n_bits),
         setup.stark_info.n_publics,
@@ -933,11 +948,11 @@ pub fn generate_recursivef_proof<F: PrimeField64>(
     // prove
     let p_prove = gen_recursive_proof_final_c(
         p_setup,
-        trace.as_ptr() as *mut u8,
+        trace.as_mut_ptr() as *mut u8,
         prover_buffer.as_ptr() as *mut u8,
         setup.get_const_ptr(),
         setup.get_const_tree_ptr(),
-        publics.as_ptr() as *mut u8,
+        publics.as_mut_ptr() as *mut u8,
         &recursivef_json_str,
         0,
         0,
