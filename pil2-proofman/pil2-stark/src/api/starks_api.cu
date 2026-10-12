@@ -1847,9 +1847,11 @@ uint32_t selectStream(DeviceCommitBuffers* d_buffers, uint64_t airgroupId, uint6
     // Original selection logic for single stream
     uint32_t maxFree = 0;
     uint32_t streamId = 0;
+    uint32_t selectedGpuLocalId = 0;
     for (uint32_t i = 0; i < d_buffers->n_gpus; i++) {
-        if (countFreeStreamsGPU[i] > maxFree || (countFreeStreamsGPU[i] == maxFree && countUnusedStreams[i] > countUnusedStreams[streamId])) {
+        if (countFreeStreamsGPU[i] > maxFree || (countFreeStreamsGPU[i] == maxFree && countUnusedStreams[i] > countUnusedStreams[selectedGpuLocalId])) {
             maxFree = countFreeStreamsGPU[i];
+            selectedGpuLocalId = i;
             streamId = streamIdxGPU[i];
         }
     }
