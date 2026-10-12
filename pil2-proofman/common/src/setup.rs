@@ -3,10 +3,9 @@ use fields::PrimeField64;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::fs::File;
-use std::fs;
 use std::io::Read;
 use libloading::{Library, Symbol};
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use bytemuck::cast_slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{NativeRecursiveRuntime, RowInfo};
@@ -30,6 +29,59 @@ pub type GetSizeWitnessFunc = unsafe extern "C" fn() -> u64;
 pub type GetCircomCircuitFunc = unsafe extern "C" fn(dat_file: *const c_char) -> *mut c_void;
 
 pub type FreeCircomCircuitFunc = unsafe extern "C" fn(circuit: *mut c_void);
+
+const MAX_STARKINFO_JSON_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_VERKEY_JSON_BYTES: u64 = 16 * 1024 * 1024;
+
+fn invalid_setup(message: impl Into<String>) -> ProofmanError {
+    ProofmanError::InvalidSetup(message.into())
+}
+
+fn recursive_library_loading_allowed(value: Option<OsString>) -> bool {
+    value
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn unsafe_recursive_library_loading_enabled() -> bool {
+    recursive_library_loading_allowed(std::env::var_os("PROOFMAN_ALLOW_UNSAFE_RECURSIVE_SO"))
+}
+
+fn read_to_string_limited(path: &Path, max_bytes: u64, label: &str) -> ProofmanResult<String> {
+    let file =
+        File::open(path).map_err(|err| invalid_setup(format!("Failed to open {label} {}: {err}", path.display())))?;
+    let len = file
+        .metadata()
+        .map_err(|err| invalid_setup(format!("Failed to stat {label} {}: {err}", path.display())))?
+        .len();
+    if len > max_bytes {
+        return Err(invalid_setup(format!("{label} {} exceeds size limit", path.display())));
+    }
+    let mut contents = String::with_capacity(len as usize);
+    file.take(max_bytes + 1)
+        .read_to_string(&mut contents)
+        .map_err(|err| invalid_setup(format!("Failed to read {label} {}: {err}", path.display())))?;
+    if contents.len() as u64 > max_bytes {
+        return Err(invalid_setup(format!("{label} {} exceeds size limit", path.display())));
+    }
+    Ok(contents)
+}
+
+fn read_first_u64_limited(path: &Path, label: &str) -> ProofmanResult<u64> {
+    let mut file =
+        File::open(path).map_err(|err| invalid_setup(format!("Failed to open {label} {}: {err}", path.display())))?;
+    let len = file
+        .metadata()
+        .map_err(|err| invalid_setup(format!("Failed to stat {label} {}: {err}", path.display())))?
+        .len();
+    if len < 8 {
+        return Err(invalid_setup(format!("{label} {} is too short", path.display())));
+    }
+    let mut word = [0u8; 8];
+    file.read_exact(&mut word)
+        .map_err(|err| invalid_setup(format!("Failed to read {label} {}: {err}", path.display())))?;
+    Ok(u64::from_le_bytes(word))
+}
 
 #[derive(Debug)]
 #[repr(C)]
@@ -192,8 +244,9 @@ impl<F: PrimeField64> Setup<F> {
             )
         } else {
             // Otherwise, initialize the pointers with their respective values
-            let stark_info_json = std::fs::read_to_string(&stark_info_path)
-                .unwrap_or_else(|_| panic!("Failed to read file {}", &stark_info_path));
+            let stark_info_json =
+                read_to_string_limited(Path::new(&stark_info_path), MAX_STARKINFO_JSON_BYTES, "starkinfo")
+                    .unwrap_or_else(|err| panic!("{err}"));
             let stark_info = StarkInfo::from_json(&stark_info_json);
             let recursive = setup_type != &ProofType::Basic;
             let recursive_final = setup_type == &ProofType::RecursiveF;
@@ -227,9 +280,8 @@ impl<F: PrimeField64> Setup<F> {
             let verkey = if setup_type == &ProofType::RecursiveF {
                 vec![]
             } else {
-                let mut file = File::open(&verkey_file).expect("Unable to open file");
-                let mut json_str = String::new();
-                file.read_to_string(&mut json_str).expect("Unable to read file");
+                let json_str = read_to_string_limited(Path::new(&verkey_file), MAX_VERKEY_JSON_BYTES, "verkey")
+                    .unwrap_or_else(|err| panic!("{err}"));
                 let vk: Vec<u64> = serde_json::from_str(&json_str).expect("Unable to parse JSON");
                 vk.iter().map(|&x| F::from_u64(x)).collect::<Vec<F>>()
             };
@@ -263,12 +315,8 @@ impl<F: PrimeField64> Setup<F> {
                 let mut const_pols_size_packed = 0;
                 if cfg!(feature = "gpu") && setup_type != &ProofType::RecursiveF {
                     let words_per_row: u64 = if Path::new(&const_pols_path).exists() {
-                        let bytes = fs::read(&const_pols_path).expect("Failed to read const_pols file");
-                        if bytes.len() >= 8 {
-                            u64::from_le_bytes(bytes[..8].try_into().unwrap())
-                        } else {
-                            0
-                        }
+                        read_first_u64_limited(Path::new(&const_pols_path), "GPU const pols")
+                            .unwrap_or_else(|err| panic!("{err}"))
                     } else {
                         calculate_words_per_row_c(p_stark_info, &(setup_path.display().to_string() + ".const"))
                     };
@@ -385,29 +433,58 @@ impl<F: PrimeField64> Setup<F> {
     }
 
     pub fn set_circom_circuit(&self) -> ProofmanResult<()> {
+        let dat_filename = self.setup_path.display().to_string() + ".dat";
+        let runtime_dat_filename = self.setup_path.display().to_string() + ".runtime.dat";
+        let mut native_runtime_errors = Vec::new();
+        for dat_path in [Path::new(dat_filename.as_str()), Path::new(runtime_dat_filename.as_str())] {
+            if dat_path.exists() {
+                match NativeRecursiveRuntime::from_dat_file(dat_path) {
+                    Ok(runtime) => {
+                        *self.size_witness.write().unwrap() = Some(runtime.size_witness_words);
+                        *self.native_runtime.write().unwrap() = Some(runtime);
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        native_runtime_errors.push(format!("{}: {err}", dat_path.display()));
+                    }
+                }
+            }
+        }
+
         let lib_extension = if cfg!(target_os = "macos") { ".dylib" } else { ".so" };
         let rust_lib_filename = self.setup_path.display().to_string() + lib_extension;
         let rust_lib_path = Path::new(rust_lib_filename.as_str());
 
-        let dat_filename = self.setup_path.display().to_string() + ".dat";
-        let dat_filename_str = CString::new(dat_filename.as_str()).unwrap();
-        let dat_filename_ptr = dat_filename_str.as_ptr() as *mut std::os::raw::c_char;
-
         if !rust_lib_path.exists() {
-            let runtime_dat_filename = self.setup_path.display().to_string() + ".runtime.dat";
-            for dat_path in [Path::new(dat_filename.as_str()), Path::new(runtime_dat_filename.as_str())] {
-                if dat_path.exists() {
-                    let runtime = NativeRecursiveRuntime::from_dat_file(dat_path)?;
-                    *self.size_witness.write().unwrap() = Some(runtime.size_witness_words);
-                    *self.native_runtime.write().unwrap() = Some(runtime);
-                    return Ok(());
-                }
+            if !native_runtime_errors.is_empty() {
+                return Err(ProofmanError::InvalidSetup(format!(
+                    "Failed to load native recursive runtime from {}",
+                    native_runtime_errors.join("; ")
+                )));
             }
-
             return Err(ProofmanError::InvalidSetup(format!(
-                "Rust lib dynamic library not found at path: {rust_lib_path:?}"
+                "Native recursive runtime not found at paths: {dat_filename:?}, {runtime_dat_filename:?}"
             )));
         }
+        if !unsafe_recursive_library_loading_enabled() {
+            let native_error_suffix = if native_runtime_errors.is_empty() {
+                String::new()
+            } else {
+                format!(" Native runtime parse errors: {}", native_runtime_errors.join("; "))
+            };
+            return Err(ProofmanError::InvalidSetup(format!(
+                "Refusing to load recursive setup dynamic library {rust_lib_path:?}; \
+                 use native .dat/.runtime.dat setup artifacts or set \
+                 PROOFMAN_ALLOW_UNSAFE_RECURSIVE_SO=1 for a trusted legacy setup.{native_error_suffix}"
+            )));
+        }
+
+        tracing::warn!(
+            "Loading trusted legacy recursive setup dynamic library {:?}; this executes host code",
+            rust_lib_path
+        );
+        let dat_filename_str = CString::new(dat_filename.as_str()).unwrap();
+        let dat_filename_ptr = dat_filename_str.as_ptr() as *mut std::os::raw::c_char;
 
         let library: Library = unsafe { Library::new(rust_lib_path)? };
 
@@ -447,5 +524,21 @@ impl<F: PrimeField64> Setup<F> {
         read_exec_file_c(exec_file_data.as_mut_ptr(), exec_filename_ptr, self.n_cols);
         *self.exec_data.write().unwrap() = Some(exec_file_data);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recursive_library_loading_requires_opt_in_value() {
+        assert!(!recursive_library_loading_allowed(None));
+        assert!(!recursive_library_loading_allowed(Some(OsString::new())));
+        assert!(!recursive_library_loading_allowed(Some(OsString::from("0"))));
+        assert!(!recursive_library_loading_allowed(Some(OsString::from("false"))));
+        assert!(recursive_library_loading_allowed(Some(OsString::from("1"))));
+        assert!(recursive_library_loading_allowed(Some(OsString::from("true"))));
+        assert!(recursive_library_loading_allowed(Some(OsString::from("TRUE"))));
     }
 }
