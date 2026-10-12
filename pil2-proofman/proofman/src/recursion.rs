@@ -33,6 +33,9 @@ pub type GetWitnessFinalFunc =
     unsafe extern "C" fn(zkin: *mut c_void, dat_file: *const c_char, witness: *mut c_void, n_mutexes: u64) -> i64;
 
 pub const N_RECURSIVE_PROOFS_PER_AGGREGATION: usize = 3;
+/// The final SNARK witness holds 32-byte BN128 field elements.
+const FINAL_SNARK_FIELD_BYTES: u64 = 32;
+const MAX_FINAL_SNARK_WITNESS_BYTES: u64 = 1 << 30;
 
 /// Checks that the buffers handed to the recursive prover hold what the setup makes it read and
 /// write: the witness and trace columns, the output proof after `initial_idx`, and the CPU prover
@@ -1003,8 +1006,14 @@ pub fn generate_witness_final_snark(proof: *mut c_void, setup_path: &Path) -> Pr
         let get_size_witness: Symbol<GetSizeWitnessFunc> = library.get(b"getSizeWitness\0")?;
         let size_witness = get_size_witness();
 
-        let witness: Vec<u8> = vec![0; (size_witness * 32) as usize];
-        let witness_ptr = witness.as_ptr() as *mut u8;
+        let witness_bytes = size_witness
+            .checked_mul(FINAL_SNARK_FIELD_BYTES)
+            .filter(|&bytes| bytes <= MAX_FINAL_SNARK_WITNESS_BYTES)
+            .ok_or_else(|| {
+                ProofmanError::InvalidSetup(format!("final snark witness of {size_witness} elements is too large"))
+            })?;
+        let mut witness: Vec<u8> = vec![0; witness_bytes as usize];
+        let witness_ptr = witness.as_mut_ptr();
 
         let get_witness_final: Symbol<GetWitnessFinalFunc> = library.get(b"getWitness\0")?;
         let nmutex = rayon::current_num_threads();
@@ -1024,8 +1033,7 @@ fn generate_witness<F: PrimeField64>(
     zkin: &[u64],
     output_dir_path: &Path,
 ) -> ProofmanResult<Vec<F>> {
-    let mut witness_size = setup.size_witness.read().unwrap().unwrap();
-    witness_size += *setup.exec_data.read().unwrap().as_ref().unwrap().first().unwrap();
+    let witness_size = recursive_witness_size(setup)?;
 
     if let Some(runtime) = setup.native_runtime.read().unwrap().as_ref() {
         return match runtime.generate_witness::<F>(zkin, witness_size) {
@@ -1049,7 +1057,7 @@ fn generate_witness<F: PrimeField64>(
         };
     }
 
-    let witness: Vec<F> = vec![F::ZERO; witness_size as usize];
+    let mut witness: Vec<F> = vec![F::ZERO; witness_size as usize];
 
     let circom_circuit_guard = setup.circom_circuit.read().unwrap();
     let circom_circuit_ptr = match *circom_circuit_guard {
@@ -1062,7 +1070,7 @@ fn generate_witness<F: PrimeField64>(
         let library =
             library_guard.as_ref().ok_or(ProofmanError::InvalidSetup("Circom library not loaded".to_string()))?;
         let get_witness: Symbol<GetWitnessFunc> = library.get(b"getWitness\0")?;
-        get_witness(zkin.as_ptr() as *mut u64, circom_circuit_ptr, witness.as_ptr() as *mut c_void, 1)
+        get_witness(zkin.as_ptr() as *mut u64, circom_circuit_ptr, witness.as_mut_ptr() as *mut c_void, 1)
     };
 
     if res != 0 {
