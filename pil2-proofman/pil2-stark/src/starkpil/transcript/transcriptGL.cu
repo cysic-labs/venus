@@ -3,8 +3,12 @@
 #include "gl64_tooling.cuh"
 
 #include "math.h"
+#include <mutex>
 
-static int initialized = 0;
+// Device ids that init_const can track; constants are uploaded once per device.
+static constexpr uint32_t MAX_TRANSCRIPT_DEVICES = 32;
+static uint32_t initialized_arity_by_device[MAX_TRANSCRIPT_DEVICES] = {};
+static std::mutex transcript_gl_init_mutex;
 
 __device__ __constant__ gl64_t POSEIDON2_GPU_C[150]; // we allocate the masimum possible size
 __device__ __constant__ gl64_t POSEIDON2_GPU_D[16];  // we allocate the masimum possible size
@@ -197,33 +201,46 @@ TranscriptGL_GPU::TranscriptGL_GPU(uint64_t arity, bool custom, cudaStream_t str
 void TranscriptGL_GPU::init_const(uint32_t* gpu_ids, uint32_t num_gpu_ids, uint32_t arity_init)
 {
 
+    std::lock_guard<std::mutex> lock(transcript_gl_init_mutex);
+
     int deviceId;
     CHECKCUDAERR(cudaGetDevice(&deviceId));
-    if (initialized == 0)
+    for(int i = 0; i < num_gpu_ids; i++)
     {
-        for(int i = 0; i < num_gpu_ids; i++)
-        {     
-            CHECKCUDAERR(cudaSetDevice(gpu_ids[i]));
-            if(arity_init == 2) {
-                CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_C, Poseidon2GoldilocksConstants::C8,  (8 * Poseidon2GoldilocksConstants::ROUNDS_F + Poseidon2GoldilocksConstants::ROUNDS_P_8) * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
-                CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_D, Poseidon2GoldilocksConstants::D8, 8 * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
-            } else if (arity_init == 3) {
-                CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_C, Poseidon2GoldilocksConstants::C12, (12 * Poseidon2GoldilocksConstants::ROUNDS_F + Poseidon2GoldilocksConstants::ROUNDS_P_12) * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
-                CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_D, Poseidon2GoldilocksConstants::D12, 12 * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
-            } else if (arity_init == 4) {
-                CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_C, Poseidon2GoldilocksConstants::C16, (16 * Poseidon2GoldilocksConstants::ROUNDS_F + Poseidon2GoldilocksConstants::ROUNDS_P_16) * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
-                CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_D, Poseidon2GoldilocksConstants::D16, 16 * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
-            } else {
-                zklog.error("TranscriptGL_GPU::init_const: Unsupported arity");
-                exitProcess();
-                exit(-1);
-            }
-        
-        }   
-        initialized = 1;
-       
+        uint32_t gpu_id = gpu_ids[i];
+        if (gpu_id >= MAX_TRANSCRIPT_DEVICES) {
+            zklog.error("TranscriptGL_GPU::init_const: Unsupported GPU id");
+            exitProcess();
+            exit(-1);
+        }
+        uint32_t initialized_arity = initialized_arity_by_device[gpu_id];
+        if (initialized_arity == arity_init) {
+            continue;
+        }
+        if (initialized_arity != 0) {
+            zklog.error("TranscriptGL_GPU::init_const: Mixed transcript arities on one GPU context are unsupported");
+            exitProcess();
+            exit(-1);
+        }
+
+        CHECKCUDAERR(cudaSetDevice(gpu_id));
+        if(arity_init == 2) {
+            CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_C, Poseidon2GoldilocksConstants::C8,  (8 * Poseidon2GoldilocksConstants::ROUNDS_F + Poseidon2GoldilocksConstants::ROUNDS_P_8) * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
+            CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_D, Poseidon2GoldilocksConstants::D8, 8 * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
+        } else if (arity_init == 3) {
+            CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_C, Poseidon2GoldilocksConstants::C12, (12 * Poseidon2GoldilocksConstants::ROUNDS_F + Poseidon2GoldilocksConstants::ROUNDS_P_12) * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
+            CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_D, Poseidon2GoldilocksConstants::D12, 12 * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
+        } else if (arity_init == 4) {
+            CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_C, Poseidon2GoldilocksConstants::C16, (16 * Poseidon2GoldilocksConstants::ROUNDS_F + Poseidon2GoldilocksConstants::ROUNDS_P_16) * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
+            CHECKCUDAERR(cudaMemcpyToSymbol(POSEIDON2_GPU_D, Poseidon2GoldilocksConstants::D16, 16 * sizeof(uint64_t), 0, cudaMemcpyHostToDevice));
+        } else {
+            zklog.error("TranscriptGL_GPU::init_const: Unsupported arity");
+            exitProcess();
+            exit(-1);
+        }
+        initialized_arity_by_device[gpu_id] = arity_init;
     }
-    cudaSetDevice(deviceId);
+    CHECKCUDAERR(cudaSetDevice(deviceId));
 }
 
 void TranscriptGL_GPU::put(Goldilocks::Element *input, uint64_t size, cudaStream_t stream)

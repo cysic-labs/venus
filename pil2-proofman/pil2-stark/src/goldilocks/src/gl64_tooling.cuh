@@ -311,7 +311,7 @@ struct StreamData{
 
     std::mutex mutex_stream_selection;
 
-    void initialize(uint64_t max_size_proof, uint32_t gpuId_, uint32_t localStreamId_, bool recursive_, uint64_t merkleTreeArity){
+    void initialize(uint64_t max_size_proof, uint32_t gpuId_, uint32_t localStreamId_, bool recursive_, uint64_t transcriptArity){
         uint64_t maxExps = VENUS_GPU_MAX_EXPS; // TODO: CALCULATE IT PROPERLY!
         cudaSetDevice(gpuId_);
         CHECKCUDAERR(cudaStreamCreate(&stream));
@@ -334,13 +334,13 @@ struct StreamData{
         proofBuffer = nullptr;
         airgroupId = UINT64_MAX;
         airId = UINT64_MAX;
-        arity = merkleTreeArity;
+        arity = transcriptArity;
 
-        transcript = new TranscriptGL_GPU(merkleTreeArity,
+        transcript = new TranscriptGL_GPU(transcriptArity,
                                     true,
                                     stream);
 
-        transcript_helper = new TranscriptGL_GPU(merkleTreeArity,
+        transcript_helper = new TranscriptGL_GPU(transcriptArity,
                                            true,
                                            stream);
 
@@ -387,6 +387,8 @@ struct DeviceRecursiveFBuffers
     TimerGPU timer;
     gl64_t *d_aux_trace;
     gl64_t *d_const_tree;
+    uint64_t auxTraceSize;  // Bytes reachable from d_aux_trace
+    uint64_t constTreeSize; // Bytes reachable from d_const_tree
     RawFr::Element *d_verkey;  // Verification key on GPU
     uint8_t* pinnedBuffer;
     uint8_t* pinnedBufferConstTree;
@@ -403,7 +405,10 @@ struct DeviceRecursiveFBuffers
     DestParamsGPU *d_destParams;
 
 
-    DeviceRecursiveFBuffers() : owns_aux_trace(true), owns_const_tree(true), d_verkey(nullptr), const_tree_loaded(false) {
+    DeviceRecursiveFBuffers()
+        : d_aux_trace(nullptr), d_const_tree(nullptr), auxTraceSize(0), constTreeSize(0),
+          d_verkey(nullptr), pinnedBuffer(nullptr), pinnedBufferConstTree(nullptr),
+          owns_aux_trace(true), owns_const_tree(true), const_tree_loaded(false) {
         uint64_t maxExps = VENUS_GPU_MAX_EXPS;
         cudaStreamCreate(&stream);
         cudaStreamCreate(&stream_const_tree);
@@ -443,6 +448,7 @@ struct DeviceCommitBuffers
     Goldilocks::Element **pinned_buffer;
     Goldilocks::Element **pinned_buffer_extra;
     gl64_t **gpuMemoryBuffer;
+    uint64_t *gpuMemoryBufferSize; // Bytes allocated for each gpuMemoryBuffer entry
     bool recursive;
     uint64_t max_size_proof;
 

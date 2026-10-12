@@ -8,6 +8,7 @@
 #include "packed_layout.hpp"
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <thread>
 
 
@@ -355,8 +356,10 @@ void *gen_device_buffers(uint32_t node_rank, uint32_t node_size, const int32_t* 
     d_buffers->pinned_buffer = (Goldilocks::Element **)malloc(d_buffers->n_gpus * sizeof(Goldilocks::Element *));
     d_buffers->pinned_buffer_extra = (Goldilocks::Element **)malloc(d_buffers->n_gpus * sizeof(Goldilocks::Element *));
     d_buffers->gpuMemoryBuffer = (gl64_t **)malloc(d_buffers->n_gpus * sizeof(gl64_t*));
+    d_buffers->gpuMemoryBufferSize = (uint64_t *)malloc(d_buffers->n_gpus * sizeof(uint64_t));
     for (uint32_t i = 0; i < d_buffers->n_gpus; i++) {
         d_buffers->gpuMemoryBuffer[i] = nullptr;
+        d_buffers->gpuMemoryBufferSize[i] = 0;
     }
     
     // Allocate mutex array using placement new
@@ -419,6 +422,7 @@ void alloc_device_large_buffers(void *d_buffers_, uint64_t auxTraceArea, uint64_
         gl64_t *gpuMemoryBlock;
         CHECKCUDAERR(cudaMalloc(&gpuMemoryBlock, totalGpuMemoryPerGpu));
         d_buffers->gpuMemoryBuffer[i] = gpuMemoryBlock;  // Store the base pointer
+        d_buffers->gpuMemoryBufferSize[i] = totalGpuMemoryPerGpu;
         
         // Allocate separate buffer for constant polynomials
         CHECKCUDAERR(cudaMalloc(&d_buffers->d_constPols[i], constPolsSize));
@@ -463,7 +467,7 @@ void alloc_device_large_buffers(void *d_buffers_, uint64_t auxTraceArea, uint64_
     zklog.info("All GPU memory allocations successful");
 }
 
-uint64_t gen_device_streams(void *d_buffers_, uint64_t n_streams, uint64_t n_recursive_streams, uint64_t maxSizeProverBuffer, uint64_t maxSizeProverBufferAggregation, uint64_t maxProofSize, uint64_t merkleTreeArity) {
+uint64_t gen_device_streams(void *d_buffers_, uint64_t n_streams, uint64_t n_recursive_streams, uint64_t maxSizeProverBuffer, uint64_t maxSizeProverBufferAggregation, uint64_t maxProofSize, uint64_t transcriptArity) {
     
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     d_buffers->n_streams = n_streams;
@@ -489,11 +493,11 @@ uint64_t gen_device_streams(void *d_buffers_, uint64_t n_streams, uint64_t n_rec
         uint64_t gpu_stream_start = i * (d_buffers->n_streams + d_buffers->n_recursive_streams);
 
         for (uint64_t j = 0; j < d_buffers->n_streams; j++) {
-            d_buffers->streamsData[gpu_stream_start + j].initialize(maxProofSize, d_buffers->my_gpu_ids[i], j, false, merkleTreeArity);
+            d_buffers->streamsData[gpu_stream_start + j].initialize(maxProofSize, d_buffers->my_gpu_ids[i], j, false, transcriptArity);
         }
 
         for (uint64_t j = 0; j < d_buffers->n_recursive_streams; j++) {
-            d_buffers->streamsData[gpu_stream_start + d_buffers->n_streams + j].initialize(maxProofSize, d_buffers->my_gpu_ids[i], j, true, merkleTreeArity);
+            d_buffers->streamsData[gpu_stream_start + d_buffers->n_streams + j].initialize(maxProofSize, d_buffers->my_gpu_ids[i], j, true, transcriptArity);
         }
     }
 
@@ -546,6 +550,7 @@ void free_device_buffers(void *d_buffers_)
     free(d_buffers->pinned_buffer);
     free(d_buffers->pinned_buffer_extra);
     free(d_buffers->gpuMemoryBuffer);
+    free(d_buffers->gpuMemoryBufferSize);
 
     if (d_buffers->streamsData != nullptr) {
         for (uint64_t i = 0; i < d_buffers->n_total_streams; i++) {
@@ -1130,11 +1135,18 @@ void *gen_device_buffers_recursivef(void *pSetupCtx_, uint64_t proverBufferSize,
     
     // Initialize BN128 Poseidon GPU constants for merkletree and transcript
     PoseidonBN128GPU::initGPUConstants(&gpuId, 1);
-    uint64_t transcriptArity = setupCtx->starkInfo.starkStruct.merkleTreeCustom ? setupCtx->starkInfo.starkStruct.merkleTreeArity : 16;
+    uint64_t transcriptArity = setupCtx->starkInfo.starkStruct.merkleTreeCustom ? setupCtx->starkInfo.starkStruct.transcriptArity : 16;
     TranscriptBN128_GPU::init_const(&gpuId, 1, transcriptArity);
 
     uint64_t sizeConstTree = get_const_tree_size((void *)&setupCtx->starkInfo) * sizeof(Goldilocks::Element);
-    uint64_t sizeAuxTrace = proverBufferSize;
+    if (proverBufferSize > std::numeric_limits<uint64_t>::max() / sizeof(Goldilocks::Element)) {
+        zklog.error("Recursive final prover buffer element count overflows uint64 bytes");
+        exitProcess();
+    }
+    // proverBufferSize counts field elements; device buffers are sized in bytes.
+    uint64_t sizeAuxTrace = proverBufferSize * sizeof(Goldilocks::Element);
+    d_buffers->auxTraceSize = sizeAuxTrace;
+    d_buffers->constTreeSize = sizeConstTree;
 
     if (d_commit_buffer_ == nullptr) {
         NTT_Goldilocks_GPU::init_twiddle_factors_and_r(22, 1, &gpuId); //max nBitsExt=21
@@ -1145,12 +1157,25 @@ void *gen_device_buffers_recursivef(void *pSetupCtx_, uint64_t proverBufferSize,
         CHECKCUDAERR(cudaMalloc(&d_buffers->d_const_tree, sizeConstTree));
     } else {
         DeviceCommitBuffers *d_commit_buffer = (DeviceCommitBuffers *)d_commit_buffer_;
-        gl64_t *d_unifiedBuffer = d_commit_buffer->gpuMemoryBuffer[d_commit_buffer->gpus_g2l[gpuId]];
+        uint32_t gpuLocalId = d_commit_buffer->gpus_g2l[gpuId];
+        if (sizeConstTree > std::numeric_limits<uint64_t>::max() - sizeAuxTrace) {
+            zklog.error("Recursive final prover buffer size overflows uint64");
+            exitProcess();
+        }
+        uint64_t requiredUnifiedSize = sizeConstTree + sizeAuxTrace;
+        uint64_t availableUnifiedSize = d_commit_buffer->gpuMemoryBufferSize[gpuLocalId];
+        if (requiredUnifiedSize > availableUnifiedSize) {
+            zklog.error("Recursive final prover requires " + std::to_string(requiredUnifiedSize) +
+                        " bytes in the unified GPU buffer but only " + std::to_string(availableUnifiedSize) +
+                        " bytes are allocated on GPU " + std::to_string(gpuId));
+            exitProcess();
+        }
+        gl64_t *d_unifiedBuffer = d_commit_buffer->gpuMemoryBuffer[gpuLocalId];
         // Always reuse first buffer for d_aux_trace
         d_buffers->owns_aux_trace = false;
         d_buffers->owns_const_tree = false;
         d_buffers->d_const_tree = d_unifiedBuffer;
-        d_buffers->d_aux_trace = d_unifiedBuffer + (sizeConstTree / 8);
+        d_buffers->d_aux_trace = d_unifiedBuffer + (sizeConstTree / sizeof(Goldilocks::Element));
     }
 
     RawFr rawFr;
@@ -1188,6 +1213,11 @@ void load_fixed_pols_recursivef(void *pSetupCtx_, void *pConstTree, void *d_buff
     cudaSetDevice(gpuId);
 
     uint64_t sizeConstTree = get_const_tree_size((void *)&setupCtx->starkInfo) * sizeof(Goldilocks::Element);
+    if (sizeConstTree > d_buffers->constTreeSize) {
+        zklog.error("Recursive final const tree requires " + std::to_string(sizeConstTree) +
+                    " bytes but only " + std::to_string(d_buffers->constTreeSize) + " bytes are available");
+        exitProcess();
+    }
 
     gl64_t * d_const_tree = (gl64_t *)d_buffers->d_const_tree;
     uint8_t * pinnedBuffer = d_buffers->pinnedBufferConstTree;
@@ -1228,6 +1258,16 @@ void *gen_recursive_proof_final(void *pSetupCtx_, uint64_t airgroupId, uint64_t 
     uint64_t nCols = setupCtx->starkInfo.mapSectionsN["cm1"];
     uint64_t sizeWitness = N * nCols * sizeof(Goldilocks::Element);
     uint64_t sizePublicInputs = setupCtx->starkInfo.nPublics * sizeof(Goldilocks::Element);
+    if (setupCtx->starkInfo.mapTotalN > std::numeric_limits<uint64_t>::max() / sizeof(Goldilocks::Element)) {
+        zklog.error("Recursive final aux trace map size overflows uint64 bytes");
+        exitProcess();
+    }
+    uint64_t requiredAuxTraceSize = setupCtx->starkInfo.mapTotalN * sizeof(Goldilocks::Element);
+    if (requiredAuxTraceSize > d_buffers->auxTraceSize) {
+        zklog.error("Recursive final aux trace requires " + std::to_string(requiredAuxTraceSize) +
+                    " bytes but only " + std::to_string(d_buffers->auxTraceSize) + " bytes are available");
+        exitProcess();
+    }
 
     gl64_t* d_aux_trace = d_buffers->d_aux_trace;
     uint8_t* pinnedBuffer = d_buffers->pinnedBuffer;

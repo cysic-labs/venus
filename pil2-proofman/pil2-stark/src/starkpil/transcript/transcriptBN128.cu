@@ -4,9 +4,12 @@
 #include "gl64_tooling.cuh"
 
 #include <math.h>
+#include <mutex>
 
-// Track if transcript constants have been initialized
-static int transcriptBN128_initialized = 0;
+// Device ids that init_const can track; constants are uploaded once per device.
+static constexpr uint32_t MAX_TRANSCRIPT_DEVICES = 32;
+static uint32_t transcriptBN128_initialized_arity_by_device[MAX_TRANSCRIPT_DEVICES] = {};
+static std::mutex transcript_bn128_init_mutex;
 
 // Macro to declare shared memory arrays for FrElement without dynamic initialization warning
 // Uses raw uint32_t storage with reinterpret_cast
@@ -22,11 +25,11 @@ __device__ PoseidonBN128GPU::FrElement *TRANSCRIPT_GPU_M_ptr = nullptr;
 __device__ PoseidonBN128GPU::FrElement *TRANSCRIPT_GPU_P_ptr = nullptr;
 __device__ PoseidonBN128GPU::FrElement *TRANSCRIPT_GPU_S_ptr = nullptr;
 
-// Host-side pointers for cleanup
-static PoseidonBN128GPU::FrElement *h_TRANSCRIPT_GPU_C = nullptr;
-static PoseidonBN128GPU::FrElement *h_TRANSCRIPT_GPU_M = nullptr;
-static PoseidonBN128GPU::FrElement *h_TRANSCRIPT_GPU_P = nullptr;
-static PoseidonBN128GPU::FrElement *h_TRANSCRIPT_GPU_S = nullptr;
+// Host-side pointers for cleanup, one set per device.
+static PoseidonBN128GPU::FrElement *h_TRANSCRIPT_GPU_C_by_device[MAX_TRANSCRIPT_DEVICES] = {};
+static PoseidonBN128GPU::FrElement *h_TRANSCRIPT_GPU_M_by_device[MAX_TRANSCRIPT_DEVICES] = {};
+static PoseidonBN128GPU::FrElement *h_TRANSCRIPT_GPU_P_by_device[MAX_TRANSCRIPT_DEVICES] = {};
+static PoseidonBN128GPU::FrElement *h_TRANSCRIPT_GPU_S_by_device[MAX_TRANSCRIPT_DEVICES] = {};
 
 // Round counts for partial rounds (indexed by t-2)
 __device__ __constant__ int TRANSCRIPT_N_ROUNDS_P[16] = {56, 57, 56, 60, 60, 63, 64, 63, 60, 66, 60, 65, 70, 60, 64, 68};
@@ -400,24 +403,24 @@ void TranscriptBN128_GPU::reset(cudaStream_t stream)
 }
 
 // Helper macro for initializing constants for a single t value
-#define INIT_TRANSCRIPT_T_CONSTANTS(t_val) do { \
-    CHECKCUDAERR(cudaMalloc(&h_TRANSCRIPT_GPU_C, sizeof(PoseidonBN128Constants::C##t_val))); \
-    CHECKCUDAERR(cudaMemcpy(h_TRANSCRIPT_GPU_C, PoseidonBN128Constants::C##t_val, sizeof(PoseidonBN128Constants::C##t_val), cudaMemcpyHostToDevice)); \
-    CHECKCUDAERR(cudaMemcpyToSymbol(TRANSCRIPT_GPU_C_ptr, &h_TRANSCRIPT_GPU_C, sizeof(PoseidonBN128GPU::FrElement*))); \
-    CHECKCUDAERR(cudaMalloc(&h_TRANSCRIPT_GPU_M, sizeof(PoseidonBN128Constants::M##t_val))); \
-    CHECKCUDAERR(cudaMemcpy(h_TRANSCRIPT_GPU_M, PoseidonBN128Constants::M##t_val, sizeof(PoseidonBN128Constants::M##t_val), cudaMemcpyHostToDevice)); \
-    CHECKCUDAERR(cudaMemcpyToSymbol(TRANSCRIPT_GPU_M_ptr, &h_TRANSCRIPT_GPU_M, sizeof(PoseidonBN128GPU::FrElement*))); \
-    CHECKCUDAERR(cudaMalloc(&h_TRANSCRIPT_GPU_P, sizeof(PoseidonBN128Constants::P##t_val))); \
-    CHECKCUDAERR(cudaMemcpy(h_TRANSCRIPT_GPU_P, PoseidonBN128Constants::P##t_val, sizeof(PoseidonBN128Constants::P##t_val), cudaMemcpyHostToDevice)); \
-    CHECKCUDAERR(cudaMemcpyToSymbol(TRANSCRIPT_GPU_P_ptr, &h_TRANSCRIPT_GPU_P, sizeof(PoseidonBN128GPU::FrElement*))); \
-    CHECKCUDAERR(cudaMalloc(&h_TRANSCRIPT_GPU_S, sizeof(PoseidonBN128Constants::S##t_val))); \
-    CHECKCUDAERR(cudaMemcpy(h_TRANSCRIPT_GPU_S, PoseidonBN128Constants::S##t_val, sizeof(PoseidonBN128Constants::S##t_val), cudaMemcpyHostToDevice)); \
-    CHECKCUDAERR(cudaMemcpyToSymbol(TRANSCRIPT_GPU_S_ptr, &h_TRANSCRIPT_GPU_S, sizeof(PoseidonBN128GPU::FrElement*))); \
+#define INIT_TRANSCRIPT_T_CONSTANTS(device_id, t_val) do { \
+    CHECKCUDAERR(cudaMalloc(&h_TRANSCRIPT_GPU_C_by_device[device_id], sizeof(PoseidonBN128Constants::C##t_val))); \
+    CHECKCUDAERR(cudaMemcpy(h_TRANSCRIPT_GPU_C_by_device[device_id], PoseidonBN128Constants::C##t_val, sizeof(PoseidonBN128Constants::C##t_val), cudaMemcpyHostToDevice)); \
+    CHECKCUDAERR(cudaMemcpyToSymbol(TRANSCRIPT_GPU_C_ptr, &h_TRANSCRIPT_GPU_C_by_device[device_id], sizeof(PoseidonBN128GPU::FrElement*))); \
+    CHECKCUDAERR(cudaMalloc(&h_TRANSCRIPT_GPU_M_by_device[device_id], sizeof(PoseidonBN128Constants::M##t_val))); \
+    CHECKCUDAERR(cudaMemcpy(h_TRANSCRIPT_GPU_M_by_device[device_id], PoseidonBN128Constants::M##t_val, sizeof(PoseidonBN128Constants::M##t_val), cudaMemcpyHostToDevice)); \
+    CHECKCUDAERR(cudaMemcpyToSymbol(TRANSCRIPT_GPU_M_ptr, &h_TRANSCRIPT_GPU_M_by_device[device_id], sizeof(PoseidonBN128GPU::FrElement*))); \
+    CHECKCUDAERR(cudaMalloc(&h_TRANSCRIPT_GPU_P_by_device[device_id], sizeof(PoseidonBN128Constants::P##t_val))); \
+    CHECKCUDAERR(cudaMemcpy(h_TRANSCRIPT_GPU_P_by_device[device_id], PoseidonBN128Constants::P##t_val, sizeof(PoseidonBN128Constants::P##t_val), cudaMemcpyHostToDevice)); \
+    CHECKCUDAERR(cudaMemcpyToSymbol(TRANSCRIPT_GPU_P_ptr, &h_TRANSCRIPT_GPU_P_by_device[device_id], sizeof(PoseidonBN128GPU::FrElement*))); \
+    CHECKCUDAERR(cudaMalloc(&h_TRANSCRIPT_GPU_S_by_device[device_id], sizeof(PoseidonBN128Constants::S##t_val))); \
+    CHECKCUDAERR(cudaMemcpy(h_TRANSCRIPT_GPU_S_by_device[device_id], PoseidonBN128Constants::S##t_val, sizeof(PoseidonBN128Constants::S##t_val), cudaMemcpyHostToDevice)); \
+    CHECKCUDAERR(cudaMemcpyToSymbol(TRANSCRIPT_GPU_S_ptr, &h_TRANSCRIPT_GPU_S_by_device[device_id], sizeof(PoseidonBN128GPU::FrElement*))); \
 } while(0)
 
 void TranscriptBN128_GPU::init_const(uint32_t* gpu_ids, uint32_t num_gpu_ids, uint32_t arity)
 {
-    if (transcriptBN128_initialized) return;
+    std::lock_guard<std::mutex> lock(transcript_bn128_init_mutex);
 
     int deviceId;
     CHECKCUDAERR(cudaGetDevice(&deviceId));
@@ -427,35 +430,51 @@ void TranscriptBN128_GPU::init_const(uint32_t* gpu_ids, uint32_t num_gpu_ids, ui
 
     for (uint32_t i = 0; i < num_gpu_ids; i++)
     {
-        CHECKCUDAERR(cudaSetDevice(gpu_ids[i]));
+        uint32_t gpu_id = gpu_ids[i];
+        if (gpu_id >= MAX_TRANSCRIPT_DEVICES) {
+            zklog.error("TranscriptBN128_GPU::init_const: Unsupported GPU id");
+            exitProcess();
+            exit(-1);
+        }
+        uint32_t initialized_arity = transcriptBN128_initialized_arity_by_device[gpu_id];
+        if (initialized_arity == arity) {
+            continue;
+        }
+        if (initialized_arity != 0) {
+            zklog.error("TranscriptBN128_GPU::init_const: Mixed transcript arities on one GPU context are unsupported");
+            exitProcess();
+            exit(-1);
+        }
+
+        CHECKCUDAERR(cudaSetDevice(gpu_id));
 
         // Initialize constants for the specific t value based on arity
         switch(t) {
-            case 2:  INIT_TRANSCRIPT_T_CONSTANTS(2);  break;
-            case 3:  INIT_TRANSCRIPT_T_CONSTANTS(3);  break;
-            case 4:  INIT_TRANSCRIPT_T_CONSTANTS(4);  break;
-            case 5:  INIT_TRANSCRIPT_T_CONSTANTS(5);  break;
-            case 6:  INIT_TRANSCRIPT_T_CONSTANTS(6);  break;
-            case 7:  INIT_TRANSCRIPT_T_CONSTANTS(7);  break;
-            case 8:  INIT_TRANSCRIPT_T_CONSTANTS(8);  break;
-            case 9:  INIT_TRANSCRIPT_T_CONSTANTS(9);  break;
-            case 10: INIT_TRANSCRIPT_T_CONSTANTS(10); break;
-            case 11: INIT_TRANSCRIPT_T_CONSTANTS(11); break;
-            case 12: INIT_TRANSCRIPT_T_CONSTANTS(12); break;
-            case 13: INIT_TRANSCRIPT_T_CONSTANTS(13); break;
-            case 14: INIT_TRANSCRIPT_T_CONSTANTS(14); break;
-            case 15: INIT_TRANSCRIPT_T_CONSTANTS(15); break;
-            case 16: INIT_TRANSCRIPT_T_CONSTANTS(16); break;
-            case 17: INIT_TRANSCRIPT_T_CONSTANTS(17); break;
+            case 2:  INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 2);  break;
+            case 3:  INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 3);  break;
+            case 4:  INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 4);  break;
+            case 5:  INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 5);  break;
+            case 6:  INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 6);  break;
+            case 7:  INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 7);  break;
+            case 8:  INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 8);  break;
+            case 9:  INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 9);  break;
+            case 10: INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 10); break;
+            case 11: INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 11); break;
+            case 12: INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 12); break;
+            case 13: INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 13); break;
+            case 14: INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 14); break;
+            case 15: INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 15); break;
+            case 16: INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 16); break;
+            case 17: INIT_TRANSCRIPT_T_CONSTANTS(gpu_id, 17); break;
             default:
                 zklog.error("TranscriptBN128_GPU::init_const: Unsupported t value: " + std::to_string(t));
                 exitProcess();
                 exit(-1);
         }
+        transcriptBN128_initialized_arity_by_device[gpu_id] = arity;
     }
 
     CHECKCUDAERR(cudaSetDevice(deviceId));
-    transcriptBN128_initialized = 1;
 }
 
 #undef INIT_TRANSCRIPT_T_CONSTANTS

@@ -93,16 +93,16 @@ string opType2string (const opType op);
 class PolMap
 {
 public:
-    uint64_t stage;
+    uint64_t stage = 0;
     std::string name;
     vector<uint64_t> lengths;
-    uint64_t dim;
-    bool imPol;
-    uint64_t stagePos;
-    uint64_t stageId;
-    uint64_t commitId;
-    uint64_t expId;
-    uint64_t polsMapId;
+    uint64_t dim = 0;
+    bool imPol = false;
+    uint64_t stagePos = 0;
+    uint64_t stageId = 0;
+    uint64_t commitId = 0;
+    uint64_t expId = 0;
+    uint64_t polsMapId = 0;
 };
 
 class EvMap
@@ -115,11 +115,11 @@ public:
         custom = 2,
     } eType;
 
-    eType type;
-    uint64_t id;
-    int64_t prime;
-    uint64_t commitId;
-    uint64_t openingPos;
+    eType type = cm;
+    uint64_t id = 0;
+    int64_t prime = 0;
+    uint64_t commitId = 0;
+    uint64_t openingPos = 0;
 
     void setType (string s)
     {

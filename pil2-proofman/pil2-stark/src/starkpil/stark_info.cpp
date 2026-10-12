@@ -5,9 +5,12 @@
 #include "exit_process.hpp"
 #include "expressions_pack.hpp"
 #include <cstdlib>
+#include <limits>
+#include <map>
 #include <stdexcept>
 
 static constexpr uint64_t MAX_SAFE_SHIFT_BITS = 30;
+static constexpr uint64_t MAX_FRI_QUERIES = 4096;
 
 static bool isSupportedArity(uint64_t arity, bool bn128)
 {
@@ -49,6 +52,9 @@ static void validateStarkStruct(const StarkStruct &starkStruct)
     if (starkStruct.nQueries == 0) {
         throw std::runtime_error("StarkInfo: nQueries must be nonzero");
     }
+    if (starkStruct.nQueries > MAX_FRI_QUERIES) {
+        throw std::runtime_error("StarkInfo: nQueries exceeds supported limit");
+    }
     if (starkStruct.nBits > starkStruct.nBitsExt) {
         throw std::runtime_error("StarkInfo: nBits cannot exceed nBitsExt");
     }
@@ -73,6 +79,157 @@ static void validateStarkStruct(const StarkStruct &starkStruct)
         uint64_t depth = merkleDepthForBits(bits, starkStruct.merkleTreeArity, "StarkInfo FRI tree");
         if (starkStruct.lastLevelVerification > depth) {
             throw std::runtime_error("StarkInfo: lastLevelVerification exceeds a FRI tree depth");
+        }
+    }
+}
+
+static uint64_t requireMapSection(const std::map<std::string, uint64_t> &mapSectionsN, const std::string &section)
+{
+    auto it = mapSectionsN.find(section);
+    if (it == mapSectionsN.end()) {
+        throw std::runtime_error("StarkInfo: missing map section " + section);
+    }
+    return it->second;
+}
+
+static uint64_t absOpeningPoint(int64_t point)
+{
+    if (point == std::numeric_limits<int64_t>::min()) {
+        throw std::runtime_error("StarkInfo: opening point is unsupported");
+    }
+    return point < 0 ? static_cast<uint64_t>(-point) : static_cast<uint64_t>(point);
+}
+
+// Opening points are row offsets on the trace domain; the prover and verifier evaluate at
+// xi * w^point, so an offset must stay inside the domain to address a distinct row.
+static void validateOpeningPoints(const vector<int64_t> &openingPoints, const StarkStruct &starkStruct)
+{
+    if (openingPoints.empty()) {
+        throw std::runtime_error("StarkInfo: openingPoints cannot be empty");
+    }
+    if (openingPoints.size() > MAX_FRI_QUERIES) {
+        throw std::runtime_error("StarkInfo: openingPoints exceeds supported limit");
+    }
+
+    const uint64_t domainSize = 1ULL << starkStruct.nBits;
+    for (int64_t point : openingPoints) {
+        if (absOpeningPoint(point) >= domainSize) {
+            throw std::runtime_error("StarkInfo: opening point exceeds trace domain");
+        }
+    }
+}
+
+static void validatePolMapSpan(const PolMap &polMap, uint64_t sectionColumns, const std::string &context)
+{
+    if (polMap.dim != 1 && polMap.dim != FIELD_EXTENSION) {
+        throw std::runtime_error(context + ": unsupported polynomial dimension");
+    }
+    if (polMap.stagePos > sectionColumns || polMap.dim > sectionColumns - polMap.stagePos) {
+        throw std::runtime_error(context + ": polynomial column span is out of range");
+    }
+}
+
+// The quotient is committed as qDeg field-extension columns in the last stage, and splitting it
+// into qDeg pieces is only sound when the extended domain covers its degree.
+static void validateQMetadata(
+        uint64_t qDeg,
+        uint64_t qDim,
+        uint64_t nStages,
+        const StarkStruct &starkStruct,
+        const std::map<std::string, uint64_t> &mapSectionsN)
+{
+    if (qDim != FIELD_EXTENSION) {
+        throw std::runtime_error("StarkInfo: qDim must match field extension width");
+    }
+    if (qDeg == 0) {
+        throw std::runtime_error("StarkInfo: qDeg must be nonzero");
+    }
+    if (qDeg > (1ULL << (starkStruct.nBitsExt - starkStruct.nBits))) {
+        throw std::runtime_error("StarkInfo: qDeg exceeds quotient blowup");
+    }
+    const std::string qSection = "cm" + to_string(nStages + 1);
+    if (requireMapSection(mapSectionsN, qSection) != qDeg * qDim) {
+        throw std::runtime_error("StarkInfo: " + qSection + " section does not match qDeg*qDim");
+    }
+}
+
+// Every polynomial map entry must address columns that exist in its section; provers and
+// verifiers index commitment buffers with these spans without further checks.
+static void validatePolMaps(
+        uint64_t nStages,
+        uint64_t nConstants,
+        const vector<CustomCommits> &customCommits,
+        const vector<PolMap> &cmPolsMap,
+        const vector<PolMap> &constPolsMap,
+        const vector<vector<PolMap>> &customCommitsMap,
+        const std::map<std::string, uint64_t> &mapSectionsN)
+{
+    if (requireMapSection(mapSectionsN, "const") != nConstants) {
+        throw std::runtime_error("StarkInfo: const section does not match nConstants");
+    }
+
+    for (uint64_t i = 0; i < cmPolsMap.size(); ++i) {
+        const PolMap &polMap = cmPolsMap[i];
+        if (polMap.polsMapId != i) {
+            throw std::runtime_error("StarkInfo: cmPolsMap polsMapId does not match its index");
+        }
+        if (polMap.stage == 0 || polMap.stage > nStages + 1) {
+            throw std::runtime_error("StarkInfo: cmPolsMap has invalid stage");
+        }
+        const std::string section = "cm" + to_string(polMap.stage);
+        validatePolMapSpan(polMap, requireMapSection(mapSectionsN, section), "StarkInfo cmPolsMap");
+    }
+
+    for (uint64_t i = 0; i < constPolsMap.size(); ++i) {
+        const PolMap &polMap = constPolsMap[i];
+        if (polMap.polsMapId != i) {
+            throw std::runtime_error("StarkInfo: constPolsMap polsMapId does not match its index");
+        }
+        if (polMap.stage != 0) {
+            throw std::runtime_error("StarkInfo: constPolsMap has invalid stage");
+        }
+        validatePolMapSpan(polMap, nConstants, "StarkInfo constPolsMap");
+    }
+
+    if (customCommitsMap.size() != customCommits.size()) {
+        throw std::runtime_error("StarkInfo: customCommitsMap size does not match customCommits");
+    }
+    for (uint64_t commitId = 0; commitId < customCommitsMap.size(); ++commitId) {
+        const uint64_t sectionColumns = requireMapSection(mapSectionsN, customCommits[commitId].name + "0");
+        for (uint64_t i = 0; i < customCommitsMap[commitId].size(); ++i) {
+            const PolMap &polMap = customCommitsMap[commitId][i];
+            if (polMap.commitId != commitId || polMap.polsMapId != i) {
+                throw std::runtime_error("StarkInfo: customCommitsMap metadata does not match its index");
+            }
+            validatePolMapSpan(polMap, sectionColumns, "StarkInfo customCommitsMap");
+        }
+    }
+}
+
+static void validateEvalMap(
+        const vector<EvMap> &evMap,
+        const vector<int64_t> &openingPoints,
+        const vector<PolMap> &cmPolsMap,
+        const vector<PolMap> &constPolsMap,
+        const vector<vector<PolMap>> &customCommitsMap)
+{
+    for (const EvMap &ev : evMap) {
+        if (ev.openingPos >= openingPoints.size()) {
+            throw std::runtime_error("StarkInfo: evMap openingPos is out of range");
+        }
+        if (openingPoints[ev.openingPos] != ev.prime) {
+            throw std::runtime_error("StarkInfo: evMap openingPos does not match prime");
+        }
+        if (ev.type == EvMap::eType::cm) {
+            if (ev.id >= cmPolsMap.size()) {
+                throw std::runtime_error("StarkInfo: evMap committed polynomial id is out of range");
+            }
+        } else if (ev.type == EvMap::eType::_const) {
+            if (ev.id >= constPolsMap.size()) {
+                throw std::runtime_error("StarkInfo: evMap const polynomial id is out of range");
+            }
+        } else if (ev.commitId >= customCommitsMap.size() || ev.id >= customCommitsMap[ev.commitId].size()) {
+            throw std::runtime_error("StarkInfo: evMap custom polynomial id is out of range");
         }
     }
 }
@@ -162,6 +319,7 @@ void StarkInfo::load(json j)
     for(uint64_t i = 0; i < j["openingPoints"].size(); i++) {
         openingPoints.push_back(j["openingPoints"][i]);
     }
+    validateOpeningPoints(openingPoints, starkStruct);
 
     for(uint64_t i = 0; i < j["boundaries"].size(); i++) {
         Boundary b;
@@ -331,6 +489,9 @@ void StarkInfo::load(json j)
         mapSectionsN[it.key()] = it.value();
     }
 
+    validateQMetadata(qDeg, qDim, nStages, starkStruct, mapSectionsN);
+    validatePolMaps(nStages, nConstants, customCommits, cmPolsMap, constPolsMap, customCommitsMap, mapSectionsN);
+    validateEvalMap(evMap, openingPoints, cmPolsMap, constPolsMap, customCommitsMap);
     getProofSize();
 
     if(verify) {

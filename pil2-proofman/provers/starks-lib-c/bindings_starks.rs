@@ -605,7 +605,7 @@ extern "C" {
         maxSizeProverBuffer: u64,
         maxSizeProverBufferAggregation: u64,
         maxProofSize: u64,
-        merkle_tree_arity: u64,
+        transcript_arity: u64,
     ) -> u64;
 
     pub fn alloc_device_large_buffers(

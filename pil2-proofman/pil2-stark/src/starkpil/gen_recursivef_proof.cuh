@@ -72,8 +72,8 @@ void *genRecursiveProofBN128_gpu(SetupCtx& setupCtx, uint64_t airgroupId, uint64
     StepsParams *params_pinned = d_buffers->params_pinned;
     Goldilocks::Element *pinned_exps_params = d_buffers->pinned_exps_params;
     Goldilocks::Element *pinned_exps_args = d_buffers->pinned_exps_args;
-    TranscriptBN128_GPU d_transcript(setupCtx.starkInfo.starkStruct.merkleTreeArity, setupCtx.starkInfo.starkStruct.merkleTreeCustom, stream);
-    TranscriptBN128_GPU d_transcript_helper(setupCtx.starkInfo.starkStruct.merkleTreeArity, setupCtx.starkInfo.starkStruct.merkleTreeCustom, stream);
+    TranscriptBN128_GPU d_transcript(setupCtx.starkInfo.starkStruct.transcriptArity, setupCtx.starkInfo.starkStruct.merkleTreeCustom, stream);
+    TranscriptBN128_GPU d_transcript_helper(setupCtx.starkInfo.starkStruct.transcriptArity, setupCtx.starkInfo.starkStruct.merkleTreeCustom, stream);
 
     StepsParams *d_params = d_buffers->d_params;
     ExpsArguments *d_expsArgs = d_buffers->d_expsArgs;
