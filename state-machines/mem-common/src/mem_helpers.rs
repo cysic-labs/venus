@@ -6,7 +6,6 @@ use zisk_common::ChunkId;
 use zisk_core::{CHUNK_SIZE_BITS, RAM_ADDR, RAM_SIZE};
 
 const CHUNK_MEM_STEP_BITS: u64 = CHUNK_SIZE_BITS as u64 + MEM_STEPS_BY_MAIN_STEP_BITS;
-const CHUNK_MEM_STEPS: u64 = 1 << CHUNK_MEM_STEP_BITS;
 
 use static_assertions::const_assert;
 const_assert!(CHUNK_MEM_STEP_BITS <= 24);
@@ -32,21 +31,6 @@ impl MemHelpers {
     #[inline(always)]
     pub fn mem_step_to_main_step(step: u64) -> u64 {
         (step - MEM_STEP_BASE) >> MEM_STEPS_BY_MAIN_STEP_BITS
-    }
-    #[inline(always)]
-    pub fn first_chunk_mem_step(chunk: ChunkId) -> u64 {
-        ((chunk.0 as u64) >> CHUNK_MEM_STEP_BITS) + MEM_STEP_BASE
-    }
-    #[inline(always)]
-    pub fn last_chunk_mem_step(chunk: ChunkId) -> u64 {
-        ((chunk.0 as u64) >> CHUNK_MEM_STEP_BITS) + MEM_STEP_BASE + CHUNK_MEM_STEPS - 1
-    }
-    #[inline(always)]
-    pub fn max_distance_between_chunks(from_chunk: ChunkId, to_chunk: ChunkId) -> u64 {
-        debug_assert!(from_chunk <= to_chunk);
-        let from_step = Self::first_chunk_mem_step(from_chunk);
-        let to_step = Self::last_chunk_mem_step(to_chunk);
-        to_step - from_step
     }
 
     #[inline(always)]
@@ -197,14 +181,6 @@ impl MemHelpers {
         ]
     }
 
-    #[inline(always)]
-    pub fn get_distance_by_chunks(from_step: u64, to_step: u64) -> u64 {
-        debug_assert!(from_step <= to_step);
-
-        let from_chunk = Self::mem_step_to_chunk(from_step);
-        let to_chunk = Self::mem_step_to_chunk(to_step);
-        Self::max_distance_between_chunks(from_chunk, to_chunk)
-    }
     #[inline(always)]
     pub fn encode_mem_align_rows_and_count(rows: u32, count: u32) -> u32 {
         debug_assert!(rows == 3 || rows == 5);

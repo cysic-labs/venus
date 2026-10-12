@@ -1019,15 +1019,18 @@ pub fn opc_divu_w(ctx: &mut InstContext) {
     (ctx.c, ctx.flag) = op_divu_w(ctx.a, ctx.b);
 }
 
-/// Sets c to a / b, as 32-bits signed values, and flag to false.
+/// Sets c to a / b, as 32-bits signed values sign-extended to 64 bits, and flag to false.
 /// If b=0 (divide by zero) it sets c to 2^64 - 1, and sets flag to true.
+/// If a=0x80000000 (MIN_I32) and b=0xFFFFFFFF (-1) the quotient overflows 32 bits and c is
+/// MIN_I32 sign-extended, i.e. 0xFFFFFFFF80000000.
 #[inline(always)]
 pub const fn op_div_w(a: u64, b: u64) -> (u64, bool) {
     if b as i32 == 0 {
         return (M64, true);
     }
 
-    ((((a as i32) as i64) / ((b as i32) as i64)) as u64, false)
+    let quotient = ((a as i32) as i64) / ((b as i32) as i64);
+    ((quotient as i32) as u64, false)
 }
 
 /// InstContext-based wrapper over op_div_w()
@@ -2710,6 +2713,13 @@ pub fn ops_dma_memcpy(ctx: &InstContext, stats: &mut dyn OpStats) {
 pub fn ops_dma_xmemcpy(ctx: &InstContext, stats: &mut dyn OpStats) {
     ops_dma_memcpys(ctx, stats, true)
 }
+
+/// Number of whole 64-bit words a DMA operation processes between its pre and post bytes.
+#[inline(always)]
+fn dma_loop_count(count: u64, pre_count: u64, post_count: u64) -> usize {
+    ((count - pre_count - post_count) >> 3) as usize
+}
+
 #[inline(always)]
 fn ops_dma_memcpys(ctx: &InstContext, stats: &mut dyn OpStats, extended: bool) {
     let addr_a = ctx.a;
@@ -2743,7 +2753,7 @@ fn ops_dma_memcpys(ctx: &InstContext, stats: &mut dyn OpStats, extended: bool) {
         stats.mem_align_write(addr64_a_end, 1);
     }
 
-    let loop_count = ((count - pre_count - post_count) >> 32) as usize;
+    let loop_count = dma_loop_count(count, pre_count, post_count);
     if loop_count == 0 {
         // with count < 8, there aren't 64-bits loops.
         stats.add_extras(&[
@@ -2754,8 +2764,8 @@ fn ops_dma_memcpys(ctx: &InstContext, stats: &mut dyn OpStats, extended: bool) {
         // calculate the resources used by 64-bits loop.
         // count used are number of bytes read to demostrate memcmp(), usually count_eq + 1,
         // but if all bytes are equal count = count_eq, no need extra reads
-        let first_loop_dst64 = (addr_a + pre_count) >> 3;
-        let first_loop_src64 = (addr_b + pre_count) >> 3;
+        let first_loop_dst64 = (addr_a + pre_count) & !0x07;
+        let first_loop_src64 = (addr_b + pre_count) & !0x07;
 
         // same alignment
         if addr_a & 0x07 == addr_b & 0x07 {
@@ -2939,7 +2949,7 @@ fn ops_dma_memcmps(ctx: &InstContext, stats: &mut dyn OpStats, extended: bool) {
         stats.mem_align_read(addr64_a_end, 1);
     }
 
-    let loop_count = ((count - pre_count - post_count) >> 32) as usize;
+    let loop_count = dma_loop_count(count, pre_count, post_count);
     if loop_count == 0 {
         // with count < 8, there aren't 64-bits loops.
         stats.add_extras(&[
@@ -2950,8 +2960,8 @@ fn ops_dma_memcmps(ctx: &InstContext, stats: &mut dyn OpStats, extended: bool) {
         // calculate the resources used by 64-bits loop.
         // count used are number of bytes read to demostrate memcmp(), usually count_eq + 1,
         // but if all bytes are equal count = count_eq, no need extra reads
-        let first_loop_dst64 = (addr_a + pre_count) >> 3;
-        let first_loop_src64 = (addr_b + pre_count) >> 3;
+        let first_loop_dst64 = (addr_a + pre_count) & !0x07;
+        let first_loop_src64 = (addr_b + pre_count) & !0x07;
 
         // same alignment
         if addr_a & 0x07 == addr_b & 0x07 {
@@ -3182,7 +3192,7 @@ pub fn ops_dma_inputcpy(ctx: &InstContext, stats: &mut dyn OpStats) {
 
     let offset_a = addr_a & 0x07;
     let addr64_a = addr_a - offset_a;
-    let pre_count = (8 - offset_a) & 0x07;
+    let pre_count = std::cmp::min((8 - offset_a) & 0x07, count);
 
     if pre_count > 0 {
         stats.mem_align_read(addr64_a, 1);
@@ -3196,7 +3206,7 @@ pub fn ops_dma_inputcpy(ctx: &InstContext, stats: &mut dyn OpStats) {
         stats.mem_align_write(addr64_a_end, 1);
     }
 
-    let loop_count = ((count - pre_count - post_count) >> 32) as usize;
+    let loop_count = dma_loop_count(count, pre_count, post_count);
     if loop_count == 0 {
         // with count < 8, there aren't 64-bits loops.
         stats.add_extras(&[
@@ -3207,7 +3217,7 @@ pub fn ops_dma_inputcpy(ctx: &InstContext, stats: &mut dyn OpStats) {
         // calculate the resources used by 64-bits loop.
         // count used are number of bytes read to demostrate memcmp(), usually count_eq + 1,
         // but if all bytes are equal count = count_eq, no need extra reads
-        let first_loop_dst64 = (addr_a + pre_count) >> 3;
+        let first_loop_dst64 = (addr_a + pre_count) & !0x07;
 
         stats.mem_align_write(first_loop_dst64, loop_count);
         stats.add_extras(&[
@@ -3324,7 +3334,7 @@ pub fn ops_dma_xmemset(ctx: &InstContext, stats: &mut dyn OpStats) {
         stats.mem_align_write(addr64_a_end, 1);
     }
 
-    let loop_count = ((count - pre_count - post_count) >> 32) as usize;
+    let loop_count = dma_loop_count(count, pre_count, post_count);
     if loop_count == 0 {
         // with count < 8, there aren't 64-bits loops.
         stats.add_extras(&[
@@ -3335,7 +3345,7 @@ pub fn ops_dma_xmemset(ctx: &InstContext, stats: &mut dyn OpStats) {
         // calculate the resources used by 64-bits loop.
         // count used are number of bytes read to demostrate memcmp(), usually count_eq + 1,
         // but if all bytes are equal count = count_eq, no need extra reads
-        let first_loop_dst64 = (addr_a + pre_count) >> 3;
+        let first_loop_dst64 = (addr_a + pre_count) & !0x07;
 
         stats.mem_align_write(first_loop_dst64, loop_count);
         // add information about other machines to demostrate operation

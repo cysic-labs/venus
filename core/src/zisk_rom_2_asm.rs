@@ -4950,8 +4950,51 @@ impl ZiskRom2Asm {
 
                 *code += &format!("\tje pc_{:x}_divw_done\n", ctx.pc);
 
-                // Divide
+                // Check overflow: INT32_MIN / -1 returns INT32_MIN sign-extended, and must not
+                // execute x86 idiv, which faults on it.
                 *code += &format!("pc_{:x}_divw_divide:\n", ctx.pc);
+                *code += &format!(
+                    "\tmov {}, 0x80000000 {}\n",
+                    REG_VALUE_W,
+                    ctx.comment_str("DivW: value == 0x80000000")
+                );
+                *code += &format!(
+                    "\tcmp {}, {} {}\n",
+                    REG_A_W,
+                    REG_VALUE_W,
+                    ctx.comment_str("DivW: if a == 0x80000000, then check b")
+                );
+                *code += &format!(
+                    "\tjne pc_{:x}_divw_do_divide {}\n",
+                    ctx.pc,
+                    ctx.comment_str("DivW: if a is not 0x80000000, divide")
+                );
+                *code += &format!(
+                    "\tmov {}, 0xffffffff {}\n",
+                    REG_VALUE_W,
+                    ctx.comment_str("DivW: value == 0xffffffff")
+                );
+                *code += &format!(
+                    "\tcmp {}, {} {}\n",
+                    REG_B_W,
+                    REG_VALUE_W,
+                    ctx.comment_str("DivW: if b == 0xffffffff, return a")
+                );
+                *code += &format!(
+                    "\tjne pc_{:x}_divw_do_divide {}\n",
+                    ctx.pc,
+                    ctx.comment_str("DivW: if b is not 0xffffffff, divide")
+                );
+                *code += &format!(
+                    "\tmovsxd {}, {} {}\n",
+                    REG_C,
+                    REG_A_W,
+                    ctx.comment_str("DivW: overflow result is sign-extended a")
+                );
+                *code += &format!("\tjmp pc_{:x}_divw_done\n", ctx.pc);
+
+                // Divide
+                *code += &format!("pc_{:x}_divw_do_divide:\n", ctx.pc);
                 *code += &format!(
                     "\tmov {}, {} {}\n",
                     REG_VALUE_W,
@@ -5003,8 +5046,51 @@ impl ZiskRom2Asm {
 
                 *code += &format!("\tje pc_{:x}_remw_done\n", ctx.pc);
 
-                // Divide
+                // Check overflow: INT32_MIN % -1 returns 0, and must not execute x86 idiv, which
+                // faults on it.
                 *code += &format!("pc_{:x}_remw_divide:\n", ctx.pc);
+                *code += &format!(
+                    "\tmov {}, 0x80000000 {}\n",
+                    REG_VALUE_W,
+                    ctx.comment_str("RemW: value == 0x80000000")
+                );
+                *code += &format!(
+                    "\tcmp {}, {} {}\n",
+                    REG_A_W,
+                    REG_VALUE_W,
+                    ctx.comment_str("RemW: if a == 0x80000000, then check b")
+                );
+                *code += &format!(
+                    "\tjne pc_{:x}_remw_do_divide {}\n",
+                    ctx.pc,
+                    ctx.comment_str("RemW: if a is not 0x80000000, divide")
+                );
+                *code += &format!(
+                    "\tmov {}, 0xffffffff {}\n",
+                    REG_VALUE_W,
+                    ctx.comment_str("RemW: value == 0xffffffff")
+                );
+                *code += &format!(
+                    "\tcmp {}, {} {}\n",
+                    REG_B_W,
+                    REG_VALUE_W,
+                    ctx.comment_str("RemW: if b == 0xffffffff, return zero")
+                );
+                *code += &format!(
+                    "\tjne pc_{:x}_remw_do_divide {}\n",
+                    ctx.pc,
+                    ctx.comment_str("RemW: if b is not 0xffffffff, divide")
+                );
+                *code += &format!(
+                    "\txor {}, {} {}\n",
+                    REG_C,
+                    REG_C,
+                    ctx.comment_str("RemW: overflow remainder is zero")
+                );
+                *code += &format!("\tjmp pc_{:x}_remw_done\n", ctx.pc);
+
+                // Divide
+                *code += &format!("pc_{:x}_remw_do_divide:\n", ctx.pc);
                 *code += &format!(
                     "\tmov {}, {} {}\n",
                     REG_VALUE_W,

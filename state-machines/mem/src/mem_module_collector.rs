@@ -47,8 +47,6 @@ impl MemModuleCollector {
         is_first_chunk_of_segment: bool,
         is_dual: bool,
     ) -> Self {
-        // let prev_addr = mem_check_point.reference_addr;
-        // let prev_step = MemHelpers::first_chunk_mem_step(mem_check_point.reference_addr_chunk);
         let count = mem_check_point.count;
         let to_count = mem_check_point.to_count;
         let skip = mem_check_point.from_skip;
@@ -487,7 +485,9 @@ impl MemModuleCollector {
 
         let addr = MemBusData::get_addr(data);
         let bytes = MemBusData::get_bytes(data);
-        if (addr + bytes as u32) > self.filter_min_addr && addr <= self.filter_max_addr {
+        // Widen before adding so an access ending at the top of the address space cannot wrap.
+        let addr_end = addr as u64 + bytes as u64;
+        if addr_end > self.filter_min_addr as u64 && addr <= self.filter_max_addr {
             self.bus_data_to_input(addr, data);
         }
         true
