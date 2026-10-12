@@ -819,6 +819,7 @@ uint64_t gen_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_
 void get_stream_proofs(void *d_buffers_){}
 void get_stream_proofs_non_blocking(void *d_buffers_){}
 void get_stream_id_proof(void *d_buffers_, uint64_t streamId) {}
+uint32_t claim_ready_instance(void *d_buffers_, uint64_t streamId, uint64_t instanceId, uint64_t airgroupId, uint64_t airId) { return 0; }
 uint32_t direct_registered_h2d_done(void *d_buffers_, uint64_t streamId) { return 1; }
 
 // Recursive proof

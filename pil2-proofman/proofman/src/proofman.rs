@@ -37,7 +37,7 @@ use mpi::topology::Communicator;
 use proofman_starks_lib_c::{
     gen_proof_c, commit_witness_c, load_custom_commit_c, calculate_impols_expressions_c,
     calculate_witness_expressions_c, clear_proof_done_callback_c, launch_callback_c, initialize_instance_c,
-    calculate_trace_instance_c,
+    calculate_trace_instance_c, claim_ready_instance_c,
 };
 
 use std::{
@@ -2223,14 +2223,40 @@ where
             self.handle_recursives.lock().unwrap().push(handle_recursive);
         }
 
-        let instance_ids_in_streams: Vec<i64> = vec![-1; self.n_streams];
-        get_instances_ready_c(self.pctx.get_device_buffers_ptr(), instance_ids_in_streams.as_ptr() as *mut i64);
+        let mut instance_ids_in_streams: Vec<i64> = vec![-1; self.n_streams];
+        get_instances_ready_c(self.pctx.get_device_buffers_ptr(), instance_ids_in_streams.as_mut_ptr());
 
+        // A stream reported ready may be selected for other work before it is used here, so each
+        // one is claimed first; instances whose stream cannot be claimed are proven from scratch.
+        let claimed_instances = (0..instances.len()).map(|_| AtomicBool::new(false)).collect::<Vec<_>>();
         instance_ids_in_streams.par_iter().enumerate().for_each(|(stream_id, instance_id)| {
             if *instance_id < 0 {
                 return;
             }
+            let instance_id = *instance_id as usize;
+            if instance_id >= claimed_instances.len() {
+                self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::ProofmanError(format!(
+                    "ready stream {stream_id} returned out-of-range instance {instance_id}"
+                ))));
+                return;
+            }
             if self.cancellation_info.read().unwrap().token.is_cancelled() {
+                return;
+            }
+            let (airgroup_id, air_id) = match self.pctx.dctx_get_instance_info(instance_id) {
+                Ok(air) => air,
+                Err(e) => {
+                    self.cancellation_info.write().unwrap().cancel(Some(e));
+                    return;
+                }
+            };
+            if !claim_ready_instance_c(
+                self.pctx.get_device_buffers_ptr(),
+                stream_id as u64,
+                instance_id as u64,
+                airgroup_id as u64,
+                air_id as u64,
+            ) {
                 return;
             }
             proofs_pending.increment();
@@ -2238,7 +2264,7 @@ where
                 &self.proofs,
                 &self.pctx,
                 &self.sctx,
-                *instance_id as usize,
+                instance_id,
                 &output_dir_path,
                 &self.aux_trace,
                 &self.const_pols,
@@ -2247,11 +2273,12 @@ where
                 options.save_proofs,
             ) {
                 Ok(used_stream_id) => {
-                    let is_shared_buffer = self.pctx.is_shared_buffer(*instance_id as usize);
+                    claimed_instances[instance_id].store(true, Ordering::Relaxed);
+                    let is_shared_buffer = self.pctx.is_shared_buffer(instance_id);
                     if is_shared_buffer {
-                        self.memory_handler.to_be_released_instance_after_h2d(*instance_id as usize, used_stream_id);
+                        self.memory_handler.to_be_released_instance_after_h2d(instance_id, used_stream_id);
                     } else {
-                        self.pctx.free_instance(*instance_id as usize);
+                        self.pctx.free_instance(instance_id);
                     }
                 }
                 Err(e) => {
@@ -2260,10 +2287,7 @@ where
             }
         });
 
-        let mut my_instances_calculated = vec![false; instances.len()];
-        for instance_id in instance_ids_in_streams.iter().filter(|&&id| id >= 0) {
-            my_instances_calculated[*instance_id as usize] = true;
-        }
+        let my_instances_calculated = claimed_instances.into_iter().map(AtomicBool::into_inner).collect::<Vec<_>>();
 
         let compressor_first_order = std::env::var_os("VENUS_COMPRESSOR_FIRST_ORDER").is_some();
         if std::env::var_os("VENUS_WEIGHTED_PROOF_ORDER").is_some() {

@@ -1012,6 +1012,20 @@ pub fn get_stream_id_proof_c(d_buffers: *mut c_void, stream_id: u64) {
     }
 }
 
+/// Reserves `stream_id` for proving `instance_id` from the stage-1 commitment the stream already
+/// holds. Returns false when the stream no longer holds a completed commitment of that instance.
+#[cfg(not(feature = "no_lib_link"))]
+#[allow(clippy::too_many_arguments)]
+pub fn claim_ready_instance_c(
+    d_buffers: *mut c_void,
+    stream_id: u64,
+    instance_id: u64,
+    airgroup_id: u64,
+    air_id: u64,
+) -> bool {
+    unsafe { claim_ready_instance(d_buffers, stream_id, instance_id, airgroup_id, air_id) != 0 }
+}
+
 #[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn direct_registered_h2d_done_c(d_buffers: *mut c_void, stream_id: u64) -> bool {
@@ -2218,6 +2232,19 @@ pub fn get_stream_proofs_non_blocking_c(_d_buffers: *mut c_void) {
 #[allow(clippy::too_many_arguments)]
 pub fn get_stream_id_proof_c(_d_buffers: *mut c_void, _stream_id: u64) {
     trace!("{}: ··· {}", "ffi     ", "get_stream_id_proof: This is a mock call because there is no linked library");
+}
+
+#[cfg(feature = "no_lib_link")]
+#[allow(clippy::too_many_arguments)]
+pub fn claim_ready_instance_c(
+    _d_buffers: *mut c_void,
+    _stream_id: u64,
+    _instance_id: u64,
+    _airgroup_id: u64,
+    _air_id: u64,
+) -> bool {
+    trace!("{}: ··· {}", "ffi     ", "claim_ready_instance: This is a mock call because there is no linked library");
+    false
 }
 
 #[cfg(feature = "no_lib_link")]

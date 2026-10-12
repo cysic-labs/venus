@@ -93,9 +93,44 @@ uint32_t prewarm_const_tree_host_cache(char *constTreeFilename, uint64_t constTr
 
 void get_instances_ready(void *d_buffers_, int64_t* instances_ready) {
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
+    if (d_buffers == nullptr || instances_ready == nullptr) return;
     for (uint32_t i = 0; i < d_buffers->n_total_streams; i++) {
-        instances_ready[i] = d_buffers->streamsData[i].instanceId;
+        instances_ready[i] = -1;
+        StreamData &streamData = d_buffers->streamsData[i];
+        std::lock_guard<std::mutex> lock(streamData.mutex_stream_selection);
+        if (streamData.recursive || streamData.status != 3 || streamData.instanceId < 0 ||
+            streamData.root != nullptr || streamData.proofBuffer != nullptr ||
+            streamData.proofType != string("witness")) {
+            continue;
+        }
+        cudaSetDevice(streamData.gpuId);
+        if (cudaEventQuery(streamData.end_event) == cudaSuccess) {
+            instances_ready[i] = streamData.instanceId;
+        }
     }
+}
+
+uint32_t claim_ready_instance(void *d_buffers_, uint64_t streamId, uint64_t instanceId, uint64_t airgroupId, uint64_t airId) {
+    DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
+    if (d_buffers == nullptr || streamId >= d_buffers->n_total_streams) return 0;
+
+    StreamData &streamData = d_buffers->streamsData[streamId];
+    std::lock_guard<std::mutex> lock(streamData.mutex_stream_selection);
+    if (streamData.recursive || streamData.status != 3 ||
+        streamData.instanceId != static_cast<int64_t>(instanceId) ||
+        streamData.airgroupId != airgroupId || streamData.airId != airId ||
+        streamData.root != nullptr || streamData.proofBuffer != nullptr ||
+        streamData.proofType != string("witness")) {
+        return 0;
+    }
+
+    cudaSetDevice(streamData.gpuId);
+    cudaError_t err = cudaEventQuery(streamData.end_event);
+    if (err == cudaErrorNotReady) return 0;
+    CHECKCUDAERR(err);
+
+    reserveStream(d_buffers, streamId);
+    return 1;
 }
 
 void *gen_device_buffers(uint32_t node_rank, uint32_t node_size, const int32_t* numa_nodes, uint32_t arity, uint32_t max_n_bits_ext)
@@ -604,8 +639,14 @@ uint64_t gen_proof(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64
     std::string proofType = "basic";
 
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
+    if (skipRecalculation) {
+        if (streamId_ >= d_buffers->n_total_streams) {
+            skipRecalculation = false;
+        } else if (d_buffers->streamsData[streamId_].status != 1) {
+            skipRecalculation = claim_ready_instance(d_buffers_, streamId_, instanceId, airgroupId, airId) != 0;
+        }
+    }
     uint32_t streamId = skipRecalculation ? streamId_ : selectStream(d_buffers, airgroupId, airId, proofType, false);
-    if (skipRecalculation) reserveStream(d_buffers, streamId);
     uint32_t gpuId = d_buffers->streamsData[streamId].gpuId;
     uint32_t gpuLocalId = d_buffers->gpus_g2l[gpuId];
     cudaSetDevice(gpuId);
