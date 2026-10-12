@@ -1,6 +1,7 @@
 #ifndef EXPRESSIONS_PACK_HPP
 #define EXPRESSIONS_PACK_HPP
 #include "expressions_ctx.hpp"
+#include <vector>
 
 #define DEBUG 0
 #define DEBUG_ROW 0
@@ -325,7 +326,7 @@ public:
 
 
         ParserArgs parserArgs = verify_constraints ? setupCtx.expressionsBin.expressionsBinArgsConstraints : setupCtx.expressionsBin.expressionsBinArgsExpressions;
-        ParserParams parserParams[dest.params.size()];
+        std::vector<ParserParams> parserParams(dest.params.size());
 
         uint64_t maxTemp1Size = 0;
         uint64_t maxTemp3Size = 0;

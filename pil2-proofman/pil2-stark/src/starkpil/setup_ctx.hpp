@@ -4,6 +4,7 @@
 #include "stark_info.hpp"
 #include "const_pols.hpp"
 #include "expressions_bin.hpp"
+#include <vector>
 
 class ProverHelpers {
     public: 
@@ -56,7 +57,7 @@ class ProverHelpers {
                 std::memcpy(&zi[i*FIELD_EXTENSION], zi_, FIELD_EXTENSION * sizeof(Goldilocks::Element));
             } else if(boundary.name == "everyRow") {
                 uint64_t nRoots = boundary.offsetMin + boundary.offsetMax;
-                Goldilocks::Element roots[nRoots];
+                std::vector<Goldilocks::Element> roots(nRoots);
                 Goldilocks::Element zi_[3] = { Goldilocks::one(), Goldilocks::zero(), Goldilocks::zero()};
                 for(uint64_t k = 0; k < boundary.offsetMin; ++k) {
                     roots[k] = Goldilocks::one();
@@ -165,7 +166,7 @@ class ProverHelpers {
         uint64_t NExtended = 1 << nBitsExt;
         uint64_t N = 1 << nBits;
         uint64_t nRoots = offsetMin + offsetMax;
-        Goldilocks::Element roots[nRoots];
+        std::vector<Goldilocks::Element> roots(nRoots);
 
         for(uint64_t i = 0; i < offsetMin; ++i) {
             roots[i] = Goldilocks::one();

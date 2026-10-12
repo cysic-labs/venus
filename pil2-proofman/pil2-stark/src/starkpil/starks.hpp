@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 #include "utils.hpp"
 #include "timer.hpp"
 #include "const_pols.hpp"
@@ -199,7 +200,7 @@ void Starks<ElementType>::computeQ(uint64_t step, Goldilocks::Element *buffer, F
         nttExtended.INTT(&buffer[setupCtx.starkInfo.mapOffsets[std::make_pair("q", true)]], &buffer[setupCtx.starkInfo.mapOffsets[std::make_pair("q", true)]], NExtended, setupCtx.starkInfo.qDim);
     }
 
-    Goldilocks::Element S[setupCtx.starkInfo.qDeg];
+    std::vector<Goldilocks::Element> S(setupCtx.starkInfo.qDeg);
     Goldilocks::Element shiftIn = Goldilocks::exp(Goldilocks::inv(Goldilocks::shift()), N);
     S[0] = Goldilocks::one();
     for(uint64_t i = 1; i < setupCtx.starkInfo.qDeg; i++) {
@@ -243,8 +244,8 @@ template <typename ElementType>
 void Starks<ElementType>::computeLEv(Goldilocks::Element *xiChallenge, Goldilocks::Element *LEv, std::vector<int64_t> &openingPoints, NTT_Goldilocks &ntt) {
     uint64_t N = 1 << setupCtx.starkInfo.starkStruct.nBits;
         
-    Goldilocks::Element xis[openingPoints.size() * FIELD_EXTENSION];
-    Goldilocks::Element xisShifted[openingPoints.size() * FIELD_EXTENSION];
+    std::vector<Goldilocks::Element> xis(openingPoints.size() * FIELD_EXTENSION);
+    std::vector<Goldilocks::Element> xisShifted(openingPoints.size() * FIELD_EXTENSION);
     
     Goldilocks::Element shift_inv = Goldilocks::inv(Goldilocks::shift());
         for (uint64_t i = 0; i < openingPoints.size(); ++i)
@@ -330,24 +331,24 @@ void Starks<ElementType>::evmap(StepsParams& params, Goldilocks::Element *LEv, s
     {
         int thread_idx = omp_get_thread_num();
         Goldilocks::Element *evals_acc_thread = &evals_acc[thread_idx * size_thread];
+        std::vector<Goldilocks::Element> LEv_(openingPoints.size() * FIELD_EXTENSION);
 #pragma omp for
         for (uint64_t k = 0; k < N; k++)
         {
-            Goldilocks3::Element LEv_[openingPoints.size()];
             for(uint64_t o = 0; o < openingPoints.size(); o++) {
                 uint64_t pos = (o + k*openingPoints.size()) * FIELD_EXTENSION;
-                LEv_[o][0] = LEv[pos];
-                LEv_[o][1] = LEv[pos + 1];
-                LEv_[o][2] = LEv[pos + 2];
+                LEv_[o * FIELD_EXTENSION] = LEv[pos];
+                LEv_[o * FIELD_EXTENSION + 1] = LEv[pos + 1];
+                LEv_[o * FIELD_EXTENSION + 2] = LEv[pos + 2];
             }
             uint64_t row = (k << extendBits);
             for (uint64_t i = 0; i < nEvals; i++)
             {
                 Goldilocks3::Element res;
                 if (dims[i] == 1) {
-                    Goldilocks3::mul(res, LEv_[openingPos[i]], pointers[i][row*strides[i]]);
+                    Goldilocks3::mul(res, (Goldilocks3::Element &)(LEv_[openingPos[i] * FIELD_EXTENSION]), pointers[i][row*strides[i]]);
                 } else {
-                    Goldilocks3::mul(res, LEv_[openingPos[i]], (Goldilocks3::Element &)(pointers[i][row*strides[i]]));
+                    Goldilocks3::mul(res, (Goldilocks3::Element &)(LEv_[openingPos[i] * FIELD_EXTENSION]), (Goldilocks3::Element &)(pointers[i][row*strides[i]]));
                 }
                 Goldilocks3::add((Goldilocks3::Element &)(evals_acc_thread[i * FIELD_EXTENSION]), (Goldilocks3::Element &)(evals_acc_thread[i * FIELD_EXTENSION]), res);
             }
@@ -428,7 +429,7 @@ uint64_t xiChallengeIndex = 0;
 
     Goldilocks::Element *xiChallenge = &params.challenges[xiChallengeIndex * FIELD_EXTENSION];
     
-    Goldilocks::Element xis[setupCtx.starkInfo.openingPoints.size() * FIELD_EXTENSION];
+    std::vector<Goldilocks::Element> xis(setupCtx.starkInfo.openingPoints.size() * FIELD_EXTENSION);
     for (uint64_t i = 0; i < setupCtx.starkInfo.openingPoints.size(); ++i)
     {
         uint64_t openingAbs = setupCtx.starkInfo.openingPoints[i] < 0 ? -setupCtx.starkInfo.openingPoints[i] : setupCtx.starkInfo.openingPoints[i];
@@ -439,7 +440,7 @@ uint64_t xiChallengeIndex = 0;
         Goldilocks3::mul((Goldilocks3::Element &)(xis[i * FIELD_EXTENSION]), (Goldilocks3::Element &)xiChallenge[0], w);
     }
 
-    expressionsCtx.setXi(xis);
+    expressionsCtx.setXi(xis.data());
 
     expressionsCtx.calculateExpression(params, &params.aux_trace[setupCtx.starkInfo.mapOffsets[std::make_pair("f", true)]], setupCtx.starkInfo.friExpId);
 

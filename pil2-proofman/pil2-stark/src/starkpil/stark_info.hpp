@@ -61,8 +61,8 @@ class Boundary
 {
 public:
     std::string name;
-    uint64_t offsetMin;
-    uint64_t offsetMax;
+    uint64_t offsetMin = 0;
+    uint64_t offsetMax = 0;
 };
 
 class StepStruct

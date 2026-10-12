@@ -891,8 +891,8 @@ uint64_t gen_recursive_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airI
     d_buffers->proofType = string(proofType);
 
 
-    Goldilocks::Element evals[setupCtx->starkInfo.evMap.size() * FIELD_EXTENSION];
-    Goldilocks::Element challenges[setupCtx->starkInfo.challengesMap.size() * FIELD_EXTENSION];
+    std::vector<Goldilocks::Element> evals(setupCtx->starkInfo.evMap.size() * FIELD_EXTENSION);
+    std::vector<Goldilocks::Element> challenges(setupCtx->starkInfo.challengesMap.size() * FIELD_EXTENSION);
     Goldilocks::Element airgroupValues[FIELD_EXTENSION];
 
     StepsParams params = {
@@ -900,9 +900,9 @@ uint64_t gen_recursive_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airI
         .aux_trace = (Goldilocks::Element *)aux_trace,
         .publicInputs = (Goldilocks::Element *)pPublicInputs,
         .proofValues = nullptr,
-        .challenges = challenges,
+        .challenges = challenges.data(),
         .airgroupValues = airgroupValues,
-        .evals = evals,
+        .evals = evals.data(),
         .xDivXSub = nullptr,
         .pConstPolsAddress = (Goldilocks::Element *)pConstPols,
         .pConstPolsExtendedTreeAddress = (Goldilocks::Element *)pConstTree,

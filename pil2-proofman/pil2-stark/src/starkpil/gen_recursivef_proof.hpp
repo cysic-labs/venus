@@ -61,17 +61,17 @@ void *genRecursiveProofBN128(SetupCtx& setupCtx, uint64_t airgroupId, uint64_t a
 
     TranscriptBN128 transcript(setupCtx.starkInfo.starkStruct.transcriptArity, setupCtx.starkInfo.starkStruct.merkleTreeCustom);
 
-    Goldilocks::Element evals[setupCtx.starkInfo.evMap.size() * FIELD_EXTENSION];
-    Goldilocks::Element challenges[setupCtx.starkInfo.challengesMap.size() * FIELD_EXTENSION];
+    std::vector<Goldilocks::Element> evals(setupCtx.starkInfo.evMap.size() * FIELD_EXTENSION);
+    std::vector<Goldilocks::Element> challenges(setupCtx.starkInfo.challengesMap.size() * FIELD_EXTENSION);
     
     StepsParams params = {
         .trace = witness,
         .aux_trace = aux_trace,
         .publicInputs = publicInputs,
         .proofValues = nullptr,
-        .challenges = challenges,
+        .challenges = challenges.data(),
         .airgroupValues = nullptr,
-        .evals = evals,
+        .evals = evals.data(),
         .xDivXSub = nullptr,
         .pConstPolsAddress = pConstPols,
         .pConstPolsExtendedTreeAddress = pConstTree,
@@ -184,10 +184,10 @@ void *genRecursiveProofBN128(SetupCtx& setupCtx, uint64_t airgroupId, uint64_t a
     }
 
     if(!setupCtx.starkInfo.starkStruct.hashCommits) {
-        starks.addTranscriptGL(transcript, evals, setupCtx.starkInfo.evMap.size() * FIELD_EXTENSION);
+        starks.addTranscriptGL(transcript, evals.data(), setupCtx.starkInfo.evMap.size() * FIELD_EXTENSION);
     } else {
         RawFr::Element hash[nFieldElements];
-        starks.calculateHash(hash, evals, setupCtx.starkInfo.evMap.size() * FIELD_EXTENSION);
+        starks.calculateHash(hash, evals.data(), setupCtx.starkInfo.evMap.size() * FIELD_EXTENSION);
         starks.addTranscript(transcript, hash, nFieldElements);
     }
 
@@ -240,7 +240,7 @@ void *genRecursiveProofBN128(SetupCtx& setupCtx, uint64_t airgroupId, uint64_t a
     }
     TimerStopAndLog(STARK_FRI_FOLDING);
     TimerStart(STARK_NONCE_GRINDING);
-    uint64_t friQueries[setupCtx.starkInfo.starkStruct.nQueries];
+    std::vector<uint64_t> friQueries(setupCtx.starkInfo.starkStruct.nQueries);
 
     uint64_t nonce;
 
@@ -260,12 +260,12 @@ void *genRecursiveProofBN128(SetupCtx& setupCtx, uint64_t airgroupId, uint64_t a
     TranscriptBN128 transcriptPermutation(setupCtx.starkInfo.starkStruct.transcriptArity, setupCtx.starkInfo.starkStruct.merkleTreeCustom);
     starks.addTranscriptGL(transcriptPermutation, challenge, FIELD_EXTENSION);
     starks.addTranscriptGL(transcriptPermutation, (Goldilocks::Element *)&nonce, 1);
-    transcriptPermutation.getPermutations(friQueries, setupCtx.starkInfo.starkStruct.nQueries, setupCtx.starkInfo.starkStruct.steps[0].nBits);
+    transcriptPermutation.getPermutations(friQueries.data(), setupCtx.starkInfo.starkStruct.nQueries, setupCtx.starkInfo.starkStruct.steps[0].nBits);
 
     uint64_t nTrees = setupCtx.starkInfo.nStages + setupCtx.starkInfo.customCommits.size() + 2;
-    FRI<RawFr::Element>::proveQueries(friQueries, setupCtx.starkInfo.starkStruct.nQueries, proof, starks.treesGL, nTrees);
+    FRI<RawFr::Element>::proveQueries(friQueries.data(), setupCtx.starkInfo.starkStruct.nQueries, proof, starks.treesGL, nTrees);
     for(uint64_t step = 1; step < setupCtx.starkInfo.starkStruct.steps.size(); ++step) {
-        FRI<RawFr::Element>::proveFRIQueries(friQueries, setupCtx.starkInfo.starkStruct.nQueries, step, setupCtx.starkInfo.starkStruct.steps[step].nBits, proof, starks.treesFRI[step - 1]);
+        FRI<RawFr::Element>::proveFRIQueries(friQueries.data(), setupCtx.starkInfo.starkStruct.nQueries, step, setupCtx.starkInfo.starkStruct.steps[step].nBits, proof, starks.treesFRI[step - 1]);
     }
 
     FRI<RawFr::Element>::setFinalPol(proof, friPol, setupCtx.starkInfo.starkStruct.steps[setupCtx.starkInfo.starkStruct.steps.size() - 1].nBits);
