@@ -65,15 +65,15 @@ pub fn calculate_fixed_tree<F: PrimeField64>(setup: &Setup<F>) {
     let const_pols_tree_size = setup.const_tree_size;
 
     // SAFETY: the loaders and the tree calculation below write both buffers before they are read.
-    let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
-    let const_tree: Vec<F> = unsafe { create_buffer_fast(const_pols_tree_size) };
+    let mut const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
+    let mut const_tree: Vec<F> = unsafe { create_buffer_fast(const_pols_tree_size) };
 
     let const_pols_path = setup.setup_path.display().to_string() + ".const";
     let const_pols_tree_path = &setup.const_pols_tree_path.clone();
 
     tracing::info!("··· Loading const pols for AIR {} of type {:?}", setup.air_name, setup.setup_type);
 
-    load_const_pols_c(const_pols.as_ptr() as *mut u8, const_pols_path.as_str(), const_pols.len() as u64 * 8);
+    load_const_pols_c(const_pols.as_mut_ptr() as *mut u8, const_pols_path.as_str(), const_pols.len() as u64 * 8);
 
     tracing::debug!("··· Loading const tree for AIR {} of type {:?}", setup.air_name, setup.setup_type);
 
@@ -94,7 +94,7 @@ pub fn calculate_fixed_tree<F: PrimeField64>(setup: &Setup<F>) {
         if valid_file {
             load_const_tree_c(
                 setup.p_setup.p_stark_info,
-                const_tree.as_ptr() as *mut u8,
+                const_tree.as_mut_ptr() as *mut u8,
                 const_pols_tree_path.as_str(),
                 (const_tree.len() * 8) as u64,
                 verkey_path.as_str(),
@@ -107,7 +107,7 @@ pub fn calculate_fixed_tree<F: PrimeField64>(setup: &Setup<F>) {
     };
 
     if gpu {
-        pack_const_pols_c(p_stark_info, const_pols.as_ptr() as *mut u8, setup.const_pols_path.as_str());
+        pack_const_pols_c(p_stark_info, const_pols.as_mut_ptr() as *mut u8, setup.const_pols_path.as_str());
     }
 
     if !valid_root {
@@ -123,19 +123,19 @@ pub fn calculate_fixed_tree<F: PrimeField64>(setup: &Setup<F>) {
                 );
                 calculate_const_tree_c(
                     p_stark_info,
-                    const_pols_transposed.as_ptr() as *mut u8,
-                    const_tree.as_ptr() as *mut u8,
+                    const_pols_transposed.as_mut_ptr() as *mut u8,
+                    const_tree.as_mut_ptr() as *mut u8,
                     std::ptr::null_mut(),
                 );
-                write_const_tree_c(p_stark_info, const_tree.as_ptr() as *mut u8, const_pols_tree_path.as_str());
+                write_const_tree_c(p_stark_info, const_tree.as_mut_ptr() as *mut u8, const_pols_tree_path.as_str());
             } else {
                 calculate_const_tree_c(
                     p_stark_info,
-                    const_pols.as_ptr() as *mut u8,
-                    const_tree.as_ptr() as *mut u8,
+                    const_pols.as_mut_ptr() as *mut u8,
+                    const_tree.as_mut_ptr() as *mut u8,
                     std::ptr::null_mut(),
                 );
-                write_const_tree_c(p_stark_info, const_tree.as_ptr() as *mut u8, const_pols_tree_path.as_str());
+                write_const_tree_c(p_stark_info, const_tree.as_mut_ptr() as *mut u8, const_pols_tree_path.as_str());
             }
         }
         timer_stop_and_log_info!(WRITING_CONST_TREE);
@@ -147,8 +147,8 @@ pub fn calculate_fixed_tree_snark<F: PrimeField64>(setup: &Setup<F>) {
     let const_pols_tree_size = setup.const_tree_size;
 
     // SAFETY: the loaders and the tree calculation below write both buffers before they are read.
-    let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
-    let const_tree: Vec<F> = unsafe { create_buffer_fast(const_pols_tree_size) };
+    let mut const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
+    let mut const_tree: Vec<F> = unsafe { create_buffer_fast(const_pols_tree_size) };
 
     let const_pols_path = setup.setup_path.display().to_string() + ".const";
     let const_pols_tree_path_cpu = setup.setup_path.display().to_string() + ".consttree";
@@ -156,7 +156,7 @@ pub fn calculate_fixed_tree_snark<F: PrimeField64>(setup: &Setup<F>) {
 
     tracing::debug!("··· Loading const pols for AIR {} of type {:?}", setup.air_name, setup.setup_type);
 
-    load_const_pols_c(const_pols.as_ptr() as *mut u8, const_pols_path.as_str(), const_pols.len() as u64 * 8);
+    load_const_pols_c(const_pols.as_mut_ptr() as *mut u8, const_pols_path.as_str(), const_pols.len() as u64 * 8);
 
     tracing::debug!("··· Loading const tree for AIR {} of type {:?}", setup.air_name, setup.setup_type);
 
@@ -177,7 +177,7 @@ pub fn calculate_fixed_tree_snark<F: PrimeField64>(setup: &Setup<F>) {
         if valid_file {
             load_const_tree_c(
                 setup.p_setup.p_stark_info,
-                const_tree.as_ptr() as *mut u8,
+                const_tree.as_mut_ptr() as *mut u8,
                 const_pols_tree_path_cpu.as_str(),
                 (const_tree.len() * 8) as u64,
                 verkey_path.as_str(),
@@ -191,8 +191,12 @@ pub fn calculate_fixed_tree_snark<F: PrimeField64>(setup: &Setup<F>) {
 
     if !valid_root {
         timer_start_info!(WRITING_CONST_TREE);
-        calculate_const_tree_bn128_c(p_stark_info, const_pols.as_ptr() as *mut u8, const_tree.as_ptr() as *mut u8);
-        write_const_tree_bn128_c(p_stark_info, const_tree.as_ptr() as *mut u8, const_pols_tree_path_cpu.as_str());
+        calculate_const_tree_bn128_c(
+            p_stark_info,
+            const_pols.as_mut_ptr() as *mut u8,
+            const_tree.as_mut_ptr() as *mut u8,
+        );
+        write_const_tree_bn128_c(p_stark_info, const_tree.as_mut_ptr() as *mut u8, const_pols_tree_path_cpu.as_str());
         timer_stop_and_log_info!(WRITING_CONST_TREE);
     }
     if cfg!(feature = "gpu") {
@@ -213,9 +217,9 @@ pub fn calculate_fixed_tree_snark<F: PrimeField64>(setup: &Setup<F>) {
             // save constant pols and extended pols with tiles layout
             tile_const_pols_c(
                 p_stark_info,
-                const_pols.as_ptr() as *mut u8,
+                const_pols.as_mut_ptr() as *mut u8,
                 setup.const_pols_path.as_str(),
-                const_tree.as_ptr() as *mut u8,
+                const_tree.as_mut_ptr() as *mut u8,
                 const_pols_tree_path_gpu.as_str(),
                 std::ptr::null_mut(),
             );
@@ -226,23 +230,14 @@ pub fn calculate_fixed_tree_snark<F: PrimeField64>(setup: &Setup<F>) {
     }
 }
 
-pub fn load_const_pols<F: PrimeField64>(setup: &Setup<F>, const_pols: &[F]) {
+pub fn load_const_pols<F: PrimeField64>(setup: &Setup<F>, const_pols: &mut [F]) {
     let const_pols_path = setup.setup_path.display().to_string() + ".const";
     let const_pols_size = setup.const_pols_size;
-    load_const_pols_c(const_pols.as_ptr() as *mut u8, const_pols_path.as_str(), const_pols_size as u64 * 8);
-}
-
-pub fn load_const_pols_tree<F: PrimeField64>(setup: &Setup<F>, const_tree: &[F]) {
-    let const_pols_tree_path = &setup.const_pols_tree_path;
-    let const_pols_tree_size = setup.const_tree_size;
-
-    tracing::debug!("FixedCol   : ··· Loading const tree for AIR {} of type {:?}", setup.air_name, setup.setup_type);
-
-    load_const_tree_c(
-        setup.p_setup.p_stark_info,
-        const_tree.as_ptr() as *mut u8,
-        const_pols_tree_path.as_str(),
-        (const_pols_tree_size * 8) as u64,
-        &setup.verkey_file,
+    assert!(
+        const_pols.len() >= const_pols_size,
+        "const_pols buffer too small: got {}, expected at least {}",
+        const_pols.len(),
+        const_pols_size
     );
+    load_const_pols_c(const_pols.as_mut_ptr() as *mut u8, const_pols_path.as_str(), const_pols_size as u64 * 8);
 }

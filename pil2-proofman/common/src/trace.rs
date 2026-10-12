@@ -15,7 +15,7 @@ pub trait Trace<F>: Send {
     fn is_packed(&self) -> bool;
 }
 
-pub trait Values<F>: Send {
+pub trait Values<F> {
     fn get_buffer(&mut self) -> Vec<F>;
 }
 

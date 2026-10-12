@@ -782,10 +782,22 @@ impl<F: PrimeField64> Setup<F> {
         }
     }
 
-    pub fn load_const_pols(&self) {
+    /// Loads the constant polynomials into this setup's buffer.
+    ///
+    /// # Safety
+    ///
+    /// The loader writes through a shared reference: no reference to `self.const_pols` may be used
+    /// while it runs.
+    pub unsafe fn load_const_pols(&self) {
         if self.const_pols_loaded.load(Ordering::Acquire) {
             return;
         }
+        assert!(
+            self.const_pols.len() >= self.const_pols_size,
+            "const_pols buffer too small: got {}, expected at least {}",
+            self.const_pols.len(),
+            self.const_pols_size
+        );
         load_const_pols_c(
             self.const_pols.as_ptr() as *mut u8,
             self.const_pols_path.as_str(),
@@ -794,8 +806,21 @@ impl<F: PrimeField64> Setup<F> {
         self.const_pols_loaded.store(true, Ordering::Release);
     }
 
-    pub fn load_const_pols_tree(&self) {
+    /// Loads the constant polynomial tree into this setup's buffer.
+    ///
+    /// # Safety
+    ///
+    /// The loader writes through a shared reference: no reference to `self.const_pols_tree` may be
+    /// used while it runs.
+    pub unsafe fn load_const_pols_tree(&self) -> ProofmanResult<()> {
         let const_pols_tree_size = self.const_tree_size;
+        if self.const_pols_tree.len() < const_pols_tree_size {
+            return Err(invalid_setup(format!(
+                "const tree buffer too small: got {}, expected at least {}",
+                self.const_pols_tree.len(),
+                const_pols_tree_size
+            )));
+        }
 
         load_const_tree_c(
             self.p_setup.p_stark_info,
@@ -804,6 +829,7 @@ impl<F: PrimeField64> Setup<F> {
             (const_pols_tree_size * 8) as u64,
             &(self.setup_path.display().to_string() + ".verkey.json"),
         );
+        Ok(())
     }
 
     pub fn get_const_pols(&self, first_row: usize, num_rows: usize, offset: Option<usize>) -> Vec<RowInfo> {

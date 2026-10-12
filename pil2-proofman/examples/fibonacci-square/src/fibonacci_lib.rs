@@ -12,7 +12,8 @@ witness_library!(WitnessLib, Goldilocks);
 
 impl<F: PrimeField64> WitnessLibrary<F> for WitnessLib {
     fn register_witness(&mut self, wcm: &WitnessManager<F>) -> ProofmanResult<()> {
-        let std_lib = Std::new(wcm.get_pctx(), wcm.get_sctx(), true)?;
+        let pctx = wcm.get_pctx();
+        let std_lib = Std::new(pctx.clone(), wcm.get_sctx(), true)?;
         let module = Module::new(FibonacciSquareTrace::<F>::NUM_ROWS as u64, std_lib.clone());
         let fibonacci = FibonacciSquare::new();
 
@@ -23,7 +24,7 @@ impl<F: PrimeField64> WitnessLibrary<F> for WitnessLib {
 
         let public_inputs: BuildPublics = load_from_json(&wcm.get_public_inputs_path());
 
-        let mut publics = BuildPublicValues::from_vec_guard(wcm.get_pctx().get_publics());
+        let mut publics = BuildPublicValues::from_vec_guard(pctx.get_publics());
 
         publics.module = F::from_u64(public_inputs.module);
         publics.in1 = F::from_u64(public_inputs.in1);
@@ -39,7 +40,7 @@ impl<F: PrimeField64> WitnessLibrary<F> for WitnessLib {
 
         publics.out = F::from_u64(b);
 
-        let mut proof_values = BuildProofValues::from_vec_guard(wcm.get_pctx().get_proof_values());
+        let mut proof_values = BuildProofValues::from_vec_guard(pctx.get_proof_values());
         proof_values.value1 = F::from_u64(5);
         proof_values.value2 = F::from_u64(125);
         Ok(())

@@ -46,11 +46,15 @@ impl<F: PrimeField64> WitnessComponent<F> for FibonacciSquare {
 
             tracing::debug!("··· Starting witness computation stage {}", 1);
 
-            let mut publics = BuildPublicValues::from_vec_guard(pctx.get_publics());
-
-            let module = F::as_canonical_u64(&publics.module);
-            let mut a = F::as_canonical_u64(&publics.in1);
-            let mut b = F::as_canonical_u64(&publics.in2);
+            // The publics stay locked while the view is alive, so read them and release the lock.
+            let (module, mut a, mut b) = {
+                let publics = BuildPublicValues::from_vec_guard(pctx.get_publics());
+                (
+                    F::as_canonical_u64(&publics.module),
+                    F::as_canonical_u64(&publics.in1),
+                    F::as_canonical_u64(&publics.in2),
+                )
+            };
 
             let mut trace = FibonacciSquareTrace::new_from_vec_zeroes(buffer_pool.take_buffer())?;
 
@@ -66,7 +70,7 @@ impl<F: PrimeField64> WitnessComponent<F> for FibonacciSquare {
                 trace[i].b = F::from_u64(b);
             }
 
-            publics.out = trace[trace.num_rows() - 1].b;
+            BuildPublicValues::from_vec_guard(pctx.get_publics()).out = trace[trace.num_rows() - 1].b;
 
             let mut air_values = FibonacciSquareAirValues::<F>::new();
             air_values.fibo1[0] = F::from_u64(1);

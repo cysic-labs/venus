@@ -33,10 +33,15 @@ impl<F: PrimeField64> WitnessComponent<F> for Module<F> {
     ) -> ProofmanResult<()> {
         if stage == 1 {
             tracing::debug!("··· Starting witness computation stage 1");
-            let publics = BuildPublicValues::from_vec_guard(pctx.get_publics());
-            let module = F::as_canonical_u64(&publics.module);
-            let mut a = F::as_canonical_u64(&publics.in1);
-            let mut b = F::as_canonical_u64(&publics.in2);
+            // The publics stay locked while the view is alive, so read them and release the lock.
+            let (module, mut a, mut b) = {
+                let publics = BuildPublicValues::from_vec_guard(pctx.get_publics());
+                (
+                    F::as_canonical_u64(&publics.module),
+                    F::as_canonical_u64(&publics.in1),
+                    F::as_canonical_u64(&publics.in2),
+                )
+            };
 
             //range_check(colu: mod - x_mod, min: 1, max: 2**8-1);
             let range = self.std_lib.get_range_id(1, (1 << 8) - 1, None)?;

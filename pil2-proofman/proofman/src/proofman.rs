@@ -795,7 +795,8 @@ where
         let setup = self.sctx.get_setup(airgroup_id, air_id)?;
 
         if !setup.const_pols_loaded.load(Ordering::Acquire) {
-            setup.load_const_pols();
+            // SAFETY: the setup buffer is only read below, after it is loaded.
+            unsafe { setup.load_const_pols() };
         }
 
         Ok(setup.get_const_pols(first_row, num_rows, offset))
@@ -1777,7 +1778,6 @@ where
                 let values_contributions_clone = self.values_contributions.clone();
                 let roots_contributions_clone = self.roots_contributions.clone();
                 let aux_trace_clone = self.aux_trace.clone();
-                let const_pols_clone = self.const_pols.clone();
                 let memory_handler_clone = self.memory_handler.clone();
                 let contributions_rx_clone = self.contributions_rx.clone();
                 let cancellation_info_clone = self.cancellation_info.clone();
@@ -1798,7 +1798,6 @@ where
                                 &values_contributions_clone,
                                 instance_id,
                                 &aux_trace_clone,
-                                &const_pols_clone,
                             ) {
                                 cancellation_info_clone.write().unwrap().cancel(Some(e));
                                 break;
@@ -3477,8 +3476,8 @@ where
 
         if verify_constraints {
             // SAFETY: load_const_pols writes the whole buffer before it is read.
-            let const_pols: Vec<F> = unsafe { create_buffer_fast(setup.const_pols_size) };
-            load_const_pols(setup, &const_pols);
+            let mut const_pols: Vec<F> = unsafe { create_buffer_fast(setup.const_pols_size) };
+            load_const_pols(setup, &mut const_pols);
             air_instance.init_fixed(const_pols);
         }
         air_instance.init_custom_commit_fixed_trace(setup.custom_commits_fixed_buffer_size as usize);
@@ -3555,7 +3554,6 @@ where
         values_contributions: &[Mutex<Vec<F>>],
         instance_id: usize,
         aux_trace: &[F],
-        const_pols: &[F],
     ) -> ProofmanResult<()> {
         let n_field_elements = 4;
         let (airgroup_id, air_id) = pctx.dctx_get_instance_info(instance_id)?;
@@ -3572,10 +3570,17 @@ where
 
         let mut steps_params = pctx.get_air_instance_params(instance_id, true);
 
+        // Contribution workers run concurrently, so each call loads the fixed columns into a buffer it owns.
+        let mut const_pols: Vec<F> = if cfg!(feature = "gpu") {
+            Vec::new()
+        } else {
+            // SAFETY: load_const_pols writes the whole buffer before it is read.
+            unsafe { create_buffer_fast(setup.const_pols_size) }
+        };
         if cfg!(not(feature = "gpu")) {
             steps_params.aux_trace = aux_trace.as_ptr() as *mut u8;
-            load_const_pols(setup, const_pols);
-            steps_params.p_const_pols = const_pols.as_ptr() as *mut u8;
+            load_const_pols(setup, &mut const_pols);
+            steps_params.p_const_pols = const_pols.as_mut_ptr() as *mut u8;
         }
 
         let p_steps_params: *mut u8 = (&steps_params).into();

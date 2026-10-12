@@ -170,8 +170,11 @@ impl<F: PrimeField64> SnarkWrapper<F> {
 
         check_const_tree(&setup_recursivef, &d_buffers)?;
 
-        setup_recursivef.load_const_pols();
-        setup_recursivef.load_const_pols_tree();
+        // SAFETY: the setup was just created and its fixed buffers are not read before they are loaded.
+        unsafe {
+            setup_recursivef.load_const_pols();
+            setup_recursivef.load_const_pols_tree()?;
+        }
 
         timer_stop_and_log_info!(LOADING_RECURSIVE_F_SETUP);
 
@@ -404,8 +407,11 @@ pub fn generate_and_verify_recursivef<F: PrimeField64>(
 
     check_const_tree(&setup_recursivef, &None)?;
 
-    setup_recursivef.load_const_pols();
-    setup_recursivef.load_const_pols_tree();
+    // SAFETY: the setup was just created and its fixed buffers are not read before they are loaded.
+    unsafe {
+        setup_recursivef.load_const_pols();
+        setup_recursivef.load_const_pols_tree()?;
+    }
 
     let aux_trace = if cfg!(feature = "gpu") {
         Arc::new(Vec::new())

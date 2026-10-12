@@ -416,6 +416,7 @@ fn values_impl(input: TokenStream2) -> Result<TokenStream2> {
 
     let row_struct_name = parsed_input.row_struct_name;
     let values_struct_name = parsed_input.struct_name;
+    let values_storage_name = format_ident!("{}Storage", values_struct_name);
     let generics = parsed_input.generics.params;
     let fields = parsed_input.fields;
 
@@ -447,37 +448,67 @@ fn values_impl(input: TokenStream2) -> Result<TokenStream2> {
     };
 
     let values_struct = quote! {
+        enum #values_storage_name<'a, #generics> {
+            Owned(Vec<#generics>),
+            Guard(std::sync::RwLockWriteGuard<'a, Vec<#generics>>),
+            Taken,
+        }
+
+        /// Typed view of a values buffer. A buffer borrowed through `from_vec_guard` stays locked
+        /// for as long as the view is alive.
         pub struct #values_struct_name<'a, #generics> {
-            pub buffer: Vec<#generics>,
-            pub slice_values: &'a mut #row_struct_name<#generics>,
+            storage: #values_storage_name<'a, #generics>,
         }
 
         impl<'a, #generics: Default + Clone + Copy> #values_struct_name<'a, #generics> {
             pub fn new() -> Self {
-                let mut buffer = vec![#generics::default(); #row_struct_name::<#generics>::TOTAL_SIZE]; // Interpolate here as well
+                let buffer = vec![#generics::default(); #row_struct_name::<#generics>::TOTAL_SIZE]; // Interpolate here as well
 
-                let slice_values = unsafe {
-                    let ptr = buffer.as_mut_ptr() as *mut #row_struct_name<#generics>;
-                    &mut *ptr
-                };
-
-                #values_struct_name {
-                    buffer: buffer,
-                    slice_values,
-                }
+                Self::from_storage(#values_storage_name::Owned(buffer))
             }
 
             pub fn from_vec_guard(
-                mut external_buffer_rw: std::sync::RwLockWriteGuard<Vec<#generics>>,
+                external_buffer_rw: std::sync::RwLockWriteGuard<'a, Vec<#generics>>,
             ) -> Self {
-                let slice_values = unsafe {
-                    let ptr = external_buffer_rw.as_mut_ptr() as *mut #row_struct_name<#generics>;
-                    &mut *ptr
-                };
+                Self::from_storage(#values_storage_name::Guard(external_buffer_rw))
+            }
+        }
 
-                #values_struct_name {
-                    buffer: Vec::new(),
-                    slice_values,
+        impl<'a, #generics> #values_struct_name<'a, #generics> {
+            /// Checks that the row is exactly `TOTAL_SIZE` field elements and that the buffer holds
+            /// a whole row, so the buffer can be viewed as a row.
+            fn from_storage(storage: #values_storage_name<'a, #generics>) -> Self {
+                let row_bytes = std::mem::size_of::<#row_struct_name<#generics>>();
+                let field_bytes = std::mem::size_of::<#generics>();
+                assert!(
+                    field_bytes != 0
+                        && #total_size.checked_mul(field_bytes) == Some(row_bytes)
+                        && std::mem::align_of::<#row_struct_name<#generics>>() == std::mem::align_of::<#generics>(),
+                    "values row layout does not match TOTAL_SIZE field elements"
+                );
+                let values = Self { storage };
+                assert!(
+                    values.buffer().len() >= #total_size,
+                    "Values buffer too small: got {}, expected at least {}",
+                    values.buffer().len(),
+                    #total_size
+                );
+                values
+            }
+
+            fn buffer(&self) -> &[#generics] {
+                match &self.storage {
+                    #values_storage_name::Owned(buffer) => buffer,
+                    #values_storage_name::Guard(buffer) => buffer,
+                    #values_storage_name::Taken => panic!("Values buffer has already been taken"),
+                }
+            }
+
+            fn buffer_mut(&mut self) -> &mut [#generics] {
+                match &mut self.storage {
+                    #values_storage_name::Owned(buffer) => buffer,
+                    #values_storage_name::Guard(buffer) => buffer,
+                    #values_storage_name::Taken => panic!("Values buffer has already been taken"),
                 }
             }
         }
@@ -486,27 +517,31 @@ fn values_impl(input: TokenStream2) -> Result<TokenStream2> {
             type Target = #row_struct_name<#generics>;
 
             fn deref(&self) -> &Self::Target {
-                &self.slice_values
+                // SAFETY: from_storage checked the row layout and that the buffer holds a row.
+                unsafe { &*(self.buffer().as_ptr() as *const #row_struct_name<#generics>) }
             }
         }
 
         impl<'a, #generics> std::fmt::Debug for #values_struct_name<'a, #generics>
         where #generics: std::fmt::Debug {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-                std::fmt::Debug::fmt(&self.slice_values, f)
+                std::fmt::Debug::fmt(&**self, f)
             }
         }
 
         impl<'a, #generics> std::ops::DerefMut for #values_struct_name<'a, #generics> {
             fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.slice_values
+                // SAFETY: from_storage checked the row layout and that the buffer holds a row.
+                unsafe { &mut *(self.buffer_mut().as_mut_ptr() as *mut #row_struct_name<#generics>) }
             }
         }
 
-        impl<'a, #generics: Send> common::trace::Values<#generics> for #values_struct_name<'a, #generics> {
+        impl<'a, #generics> common::trace::Values<#generics> for #values_struct_name<'a, #generics> {
             fn get_buffer(&mut self) -> Vec<#generics> {
-                let buffer = std::mem::take(&mut self.buffer);
-                buffer
+                match std::mem::replace(&mut self.storage, #values_storage_name::Taken) {
+                    #values_storage_name::Owned(buffer) => buffer,
+                    #values_storage_name::Guard(_) | #values_storage_name::Taken => Vec::new(),
+                }
             }
         }
 
