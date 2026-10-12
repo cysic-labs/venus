@@ -1,5 +1,5 @@
 // Auto-generated CHUNKED expression evaluator for 5092-op expression
-// Split into 3 chunks for optimal register allocation
+// Split into 1 chunks for optimal register allocation
 // Fingerprint: 1ee0d8c6  nOps=5092 nTemp1=71 nTemp3=4
 #define GENERATED_EVAL_NOPS_1ee0d8c6 5092
 #define GENERATED_EVAL_NTEMP1_1ee0d8c6 71
@@ -26,7 +26,7 @@ struct ChunkedEvalContext {
     uint64_t row;
 };
 
-// Chunk 0: ops [0, 1969) = 1969 ops
+// Chunk 0: ops [0, 5092) = 5092 ops
 __device__ __noinline__ static void chunk_1ee0d8c6_0(
     const StepsParams* __restrict__ dParams,
     const DeviceArguments* __restrict__ dArgs,
@@ -34,47 +34,6 @@ __device__ __noinline__ static void chunk_1ee0d8c6_0(
     Goldilocks::Element **expressions_params,
     uint32_t bufferCommitsSize,
     const ChunkedEvalContext& ctx,
-    gl64_t& tmp1_0,
-    gl64_t& tmp1_1,
-    gl64_t& tmp1_2,
-    gl64_t& tmp1_3,
-    gl64_t& tmp1_4,
-    gl64_t& tmp1_5,
-    gl64_t& tmp1_6,
-    gl64_t& tmp1_9,
-    gl64_t& tmp1_11,
-    gl64_t& tmp1_12,
-    gl64_t& tmp1_15,
-    gl64_t& tmp1_16,
-    gl64_t& tmp1_18,
-    gl64_t& tmp1_22,
-    gl64_t& tmp1_24,
-    gl64_t& tmp1_45,
-    gl64_t& tmp1_46,
-    gl64_t& tmp1_47,
-    gl64_t& tmp1_48,
-    gl64_t& tmp1_49,
-    gl64_t& tmp1_50,
-    gl64_t& tmp1_51,
-    gl64_t& tmp1_52,
-    gl64_t& tmp1_53,
-    gl64_t& tmp1_54,
-    gl64_t& tmp1_55,
-    gl64_t& tmp1_56,
-    gl64_t& tmp1_57,
-    gl64_t& tmp1_58,
-    gl64_t& tmp1_59,
-    gl64_t& tmp1_60,
-    gl64_t& tmp1_61,
-    gl64_t& tmp1_62,
-    gl64_t& tmp1_63,
-    gl64_t& tmp1_64,
-    gl64_t& tmp1_65,
-    gl64_t& tmp1_66,
-    gl64_t& tmp1_67,
-    gl64_t& tmp1_68,
-    gl64_t& tmp1_69,
-    gl64_t& tmp1_70,
     gl64_t& tmp3_0,
     gl64_t& tmp3_1,
     gl64_t& tmp3_2
@@ -98,16 +57,31 @@ __device__ __noinline__ static void chunk_1ee0d8c6_0(
     const uint64_t nCols_0 = ctx.nCols_0;
     const uint64_t nCols_1 = ctx.nCols_1;
     const uint64_t nCols_2 = ctx.nCols_2;
+    gl64_t tmp1_0 = gl64_t(uint64_t(0));
+    gl64_t tmp1_1 = gl64_t(uint64_t(0));
+    gl64_t tmp1_2 = gl64_t(uint64_t(0));
+    gl64_t tmp1_3 = gl64_t(uint64_t(0));
+    gl64_t tmp1_4 = gl64_t(uint64_t(0));
+    gl64_t tmp1_5 = gl64_t(uint64_t(0));
+    gl64_t tmp1_6 = gl64_t(uint64_t(0));
     gl64_t tmp1_7 = gl64_t(uint64_t(0));
     gl64_t tmp1_8 = gl64_t(uint64_t(0));
+    gl64_t tmp1_9 = gl64_t(uint64_t(0));
     gl64_t tmp1_10 = gl64_t(uint64_t(0));
+    gl64_t tmp1_11 = gl64_t(uint64_t(0));
+    gl64_t tmp1_12 = gl64_t(uint64_t(0));
     gl64_t tmp1_13 = gl64_t(uint64_t(0));
     gl64_t tmp1_14 = gl64_t(uint64_t(0));
+    gl64_t tmp1_15 = gl64_t(uint64_t(0));
+    gl64_t tmp1_16 = gl64_t(uint64_t(0));
     gl64_t tmp1_17 = gl64_t(uint64_t(0));
+    gl64_t tmp1_18 = gl64_t(uint64_t(0));
     gl64_t tmp1_19 = gl64_t(uint64_t(0));
     gl64_t tmp1_20 = gl64_t(uint64_t(0));
     gl64_t tmp1_21 = gl64_t(uint64_t(0));
+    gl64_t tmp1_22 = gl64_t(uint64_t(0));
     gl64_t tmp1_23 = gl64_t(uint64_t(0));
+    gl64_t tmp1_24 = gl64_t(uint64_t(0));
     gl64_t tmp1_25 = gl64_t(uint64_t(0));
     gl64_t tmp1_26 = gl64_t(uint64_t(0));
     gl64_t tmp1_27 = gl64_t(uint64_t(0));
@@ -128,6 +102,41 @@ __device__ __noinline__ static void chunk_1ee0d8c6_0(
     gl64_t tmp1_42 = gl64_t(uint64_t(0));
     gl64_t tmp1_43 = gl64_t(uint64_t(0));
     gl64_t tmp1_44 = gl64_t(uint64_t(0));
+    gl64_t tmp1_45 = gl64_t(uint64_t(0));
+    gl64_t tmp1_46 = gl64_t(uint64_t(0));
+    gl64_t tmp1_47 = gl64_t(uint64_t(0));
+    gl64_t tmp1_48 = gl64_t(uint64_t(0));
+    gl64_t tmp1_49 = gl64_t(uint64_t(0));
+    gl64_t tmp1_50 = gl64_t(uint64_t(0));
+    gl64_t tmp1_51 = gl64_t(uint64_t(0));
+    gl64_t tmp1_52 = gl64_t(uint64_t(0));
+    gl64_t tmp1_53 = gl64_t(uint64_t(0));
+    gl64_t tmp1_54 = gl64_t(uint64_t(0));
+    gl64_t tmp1_55 = gl64_t(uint64_t(0));
+    gl64_t tmp1_56 = gl64_t(uint64_t(0));
+    gl64_t tmp1_57 = gl64_t(uint64_t(0));
+    gl64_t tmp1_58 = gl64_t(uint64_t(0));
+    gl64_t tmp1_59 = gl64_t(uint64_t(0));
+    gl64_t tmp1_60 = gl64_t(uint64_t(0));
+    gl64_t tmp1_61 = gl64_t(uint64_t(0));
+    gl64_t tmp1_62 = gl64_t(uint64_t(0));
+    gl64_t tmp1_63 = gl64_t(uint64_t(0));
+    gl64_t tmp1_64 = gl64_t(uint64_t(0));
+    gl64_t tmp1_65 = gl64_t(uint64_t(0));
+    gl64_t tmp1_66 = gl64_t(uint64_t(0));
+    gl64_t tmp1_67 = gl64_t(uint64_t(0));
+    gl64_t tmp1_68 = gl64_t(uint64_t(0));
+    gl64_t tmp1_69 = gl64_t(uint64_t(0));
+    gl64_t tmp1_70 = gl64_t(uint64_t(0));
+    gl64_t tmp3_3 = gl64_t(uint64_t(0));
+    gl64_t tmp3_4 = gl64_t(uint64_t(0));
+    gl64_t tmp3_5 = gl64_t(uint64_t(0));
+    gl64_t tmp3_6 = gl64_t(uint64_t(0));
+    gl64_t tmp3_7 = gl64_t(uint64_t(0));
+    gl64_t tmp3_8 = gl64_t(uint64_t(0));
+    gl64_t tmp3_9 = gl64_t(uint64_t(0));
+    gl64_t tmp3_10 = gl64_t(uint64_t(0));
+    gl64_t tmp3_11 = gl64_t(uint64_t(0));
 
     gl64_t s0_0 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_3 ? getBufferOffset_pack256(chunkBase, 55, domainSize, nCols_0) : getBufferOffset(logicalRow_3, 55, domainSize, nCols_0)];
     gl64_t s1_0 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[false ? getBufferOffset_pack256(chunkBase, 46, domainSize, nCols_0) : getBufferOffset(logicalRow_0, 46, domainSize, nCols_0)];
@@ -4101,81 +4110,6 @@ __device__ __noinline__ static void chunk_1ee0d8c6_0(
     tmp1_47 = tmp1_48 * tmp1_47;
     gl64_t s1_1968 = *(gl64_t*)&expressions_params[9][188];
     tmp1_48 = tmp1_47 * s1_1968;
-}
-
-// Chunk 1: ops [1969, 3580) = 1611 ops
-__device__ __noinline__ static void chunk_1ee0d8c6_1(
-    const StepsParams* __restrict__ dParams,
-    const DeviceArguments* __restrict__ dArgs,
-    const ExpsArguments* __restrict__ dExpsArgs,
-    Goldilocks::Element **expressions_params,
-    uint32_t bufferCommitsSize,
-    const ChunkedEvalContext& ctx,
-    gl64_t& tmp1_0,
-    gl64_t& tmp1_1,
-    gl64_t& tmp1_2,
-    gl64_t& tmp1_3,
-    gl64_t& tmp1_4,
-    gl64_t& tmp1_5,
-    gl64_t& tmp1_6,
-    gl64_t& tmp1_9,
-    gl64_t& tmp1_11,
-    gl64_t& tmp1_12,
-    gl64_t& tmp1_15,
-    gl64_t& tmp1_16,
-    gl64_t& tmp1_18,
-    gl64_t& tmp1_22,
-    gl64_t& tmp1_24,
-    gl64_t& tmp1_45,
-    gl64_t& tmp1_46,
-    gl64_t& tmp1_47,
-    gl64_t& tmp1_48,
-    gl64_t& tmp1_49,
-    gl64_t& tmp1_50,
-    gl64_t& tmp1_51,
-    gl64_t& tmp1_52,
-    gl64_t& tmp1_53,
-    gl64_t& tmp1_54,
-    gl64_t& tmp1_55,
-    gl64_t& tmp1_56,
-    gl64_t& tmp1_57,
-    gl64_t& tmp1_58,
-    gl64_t& tmp1_59,
-    gl64_t& tmp1_60,
-    gl64_t& tmp1_61,
-    gl64_t& tmp1_62,
-    gl64_t& tmp1_63,
-    gl64_t& tmp1_64,
-    gl64_t& tmp1_65,
-    gl64_t& tmp1_66,
-    gl64_t& tmp1_67,
-    gl64_t& tmp1_68,
-    gl64_t& tmp1_69,
-    gl64_t& tmp1_70,
-    gl64_t& tmp3_0,
-    gl64_t& tmp3_1,
-    gl64_t& tmp3_2
-)
-{
-    const uint64_t domainSize = ctx.domainSize;
-    const uint64_t chunkBase = ctx.chunkBase;
-    const uint64_t row = ctx.row;
-    const uint64_t logicalRow_0 = ctx.logicalRow_0;
-    const bool usePack256_0 = ctx.usePack256_0;
-    const uint64_t logicalRow_1 = ctx.logicalRow_1;
-    const bool usePack256_1 = ctx.usePack256_1;
-    const uint64_t logicalRow_2 = ctx.logicalRow_2;
-    const bool usePack256_2 = ctx.usePack256_2;
-    const uint64_t logicalRow_3 = ctx.logicalRow_3;
-    const bool usePack256_3 = ctx.usePack256_3;
-    const uint64_t logicalRow_4 = ctx.logicalRow_4;
-    const bool usePack256_4 = ctx.usePack256_4;
-    const uint64_t logicalRow_5 = ctx.logicalRow_5;
-    const bool usePack256_5 = ctx.usePack256_5;
-    const uint64_t nCols_0 = ctx.nCols_0;
-    const uint64_t nCols_1 = ctx.nCols_1;
-    const uint64_t nCols_2 = ctx.nCols_2;
-
     gl64_t s1_1969 = *(gl64_t*)&expressions_params[9][189];
     tmp1_0 = tmp1_0 * s1_1969;
     tmp1_0 = tmp1_0 + tmp1_45;
@@ -7905,90 +7839,6 @@ __device__ __noinline__ static void chunk_1ee0d8c6_1(
     tmp1_3 = tmp1_3 + tmp1_24;
     tmp1_3 = tmp1_12 - tmp1_3;
     tmp3_0 = tmp3_0 + tmp1_3; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-}
-
-// Chunk 2: ops [3580, 5092) = 1512 ops
-__device__ __noinline__ static void chunk_1ee0d8c6_2(
-    const StepsParams* __restrict__ dParams,
-    const DeviceArguments* __restrict__ dArgs,
-    const ExpsArguments* __restrict__ dExpsArgs,
-    Goldilocks::Element **expressions_params,
-    uint32_t bufferCommitsSize,
-    const ChunkedEvalContext& ctx,
-    gl64_t& tmp1_0,
-    gl64_t& tmp1_1,
-    gl64_t& tmp1_2,
-    gl64_t& tmp1_3,
-    gl64_t& tmp1_4,
-    gl64_t& tmp1_5,
-    gl64_t& tmp1_6,
-    gl64_t& tmp1_9,
-    gl64_t& tmp1_11,
-    gl64_t& tmp1_12,
-    gl64_t& tmp1_15,
-    gl64_t& tmp1_16,
-    gl64_t& tmp1_18,
-    gl64_t& tmp1_22,
-    gl64_t& tmp1_24,
-    gl64_t& tmp1_45,
-    gl64_t& tmp1_46,
-    gl64_t& tmp1_47,
-    gl64_t& tmp1_48,
-    gl64_t& tmp1_49,
-    gl64_t& tmp1_50,
-    gl64_t& tmp1_51,
-    gl64_t& tmp1_52,
-    gl64_t& tmp1_53,
-    gl64_t& tmp1_54,
-    gl64_t& tmp1_55,
-    gl64_t& tmp1_56,
-    gl64_t& tmp1_57,
-    gl64_t& tmp1_58,
-    gl64_t& tmp1_59,
-    gl64_t& tmp1_60,
-    gl64_t& tmp1_61,
-    gl64_t& tmp1_62,
-    gl64_t& tmp1_63,
-    gl64_t& tmp1_64,
-    gl64_t& tmp1_65,
-    gl64_t& tmp1_66,
-    gl64_t& tmp1_67,
-    gl64_t& tmp1_68,
-    gl64_t& tmp1_69,
-    gl64_t& tmp1_70,
-    gl64_t& tmp3_0,
-    gl64_t& tmp3_1,
-    gl64_t& tmp3_2
-)
-{
-    const uint64_t domainSize = ctx.domainSize;
-    const uint64_t chunkBase = ctx.chunkBase;
-    const uint64_t row = ctx.row;
-    const uint64_t logicalRow_0 = ctx.logicalRow_0;
-    const bool usePack256_0 = ctx.usePack256_0;
-    const uint64_t logicalRow_1 = ctx.logicalRow_1;
-    const bool usePack256_1 = ctx.usePack256_1;
-    const uint64_t logicalRow_2 = ctx.logicalRow_2;
-    const bool usePack256_2 = ctx.usePack256_2;
-    const uint64_t logicalRow_3 = ctx.logicalRow_3;
-    const bool usePack256_3 = ctx.usePack256_3;
-    const uint64_t logicalRow_4 = ctx.logicalRow_4;
-    const bool usePack256_4 = ctx.usePack256_4;
-    const uint64_t logicalRow_5 = ctx.logicalRow_5;
-    const bool usePack256_5 = ctx.usePack256_5;
-    const uint64_t nCols_0 = ctx.nCols_0;
-    const uint64_t nCols_1 = ctx.nCols_1;
-    const uint64_t nCols_2 = ctx.nCols_2;
-    gl64_t tmp3_3 = gl64_t(uint64_t(0));
-    gl64_t tmp3_4 = gl64_t(uint64_t(0));
-    gl64_t tmp3_5 = gl64_t(uint64_t(0));
-    gl64_t tmp3_6 = gl64_t(uint64_t(0));
-    gl64_t tmp3_7 = gl64_t(uint64_t(0));
-    gl64_t tmp3_8 = gl64_t(uint64_t(0));
-    gl64_t tmp3_9 = gl64_t(uint64_t(0));
-    gl64_t tmp3_10 = gl64_t(uint64_t(0));
-    gl64_t tmp3_11 = gl64_t(uint64_t(0));
-
     gl64_t s1_3580_0 = *(gl64_t*)&expressions_params[13][6];
     gl64_t s1_3580_1 = *(gl64_t*)&expressions_params[13][6+1];
     gl64_t s1_3580_2 = *(gl64_t*)&expressions_params[13][6+2];
@@ -13099,54 +12949,11 @@ __device__ __forceinline__ void eval_expr_1ee0d8c6(
     ctx.nCols_0 = dArgs->mapSectionsN[0];
     ctx.nCols_1 = dArgs->mapSectionsN[1];
     ctx.nCols_2 = dArgs->mapSectionsN[2];
-    gl64_t tmp1_0 = gl64_t(uint64_t(0));
-    gl64_t tmp1_1 = gl64_t(uint64_t(0));
-    gl64_t tmp1_2 = gl64_t(uint64_t(0));
-    gl64_t tmp1_3 = gl64_t(uint64_t(0));
-    gl64_t tmp1_4 = gl64_t(uint64_t(0));
-    gl64_t tmp1_5 = gl64_t(uint64_t(0));
-    gl64_t tmp1_6 = gl64_t(uint64_t(0));
-    gl64_t tmp1_9 = gl64_t(uint64_t(0));
-    gl64_t tmp1_11 = gl64_t(uint64_t(0));
-    gl64_t tmp1_12 = gl64_t(uint64_t(0));
-    gl64_t tmp1_15 = gl64_t(uint64_t(0));
-    gl64_t tmp1_16 = gl64_t(uint64_t(0));
-    gl64_t tmp1_18 = gl64_t(uint64_t(0));
-    gl64_t tmp1_22 = gl64_t(uint64_t(0));
-    gl64_t tmp1_24 = gl64_t(uint64_t(0));
-    gl64_t tmp1_45 = gl64_t(uint64_t(0));
-    gl64_t tmp1_46 = gl64_t(uint64_t(0));
-    gl64_t tmp1_47 = gl64_t(uint64_t(0));
-    gl64_t tmp1_48 = gl64_t(uint64_t(0));
-    gl64_t tmp1_49 = gl64_t(uint64_t(0));
-    gl64_t tmp1_50 = gl64_t(uint64_t(0));
-    gl64_t tmp1_51 = gl64_t(uint64_t(0));
-    gl64_t tmp1_52 = gl64_t(uint64_t(0));
-    gl64_t tmp1_53 = gl64_t(uint64_t(0));
-    gl64_t tmp1_54 = gl64_t(uint64_t(0));
-    gl64_t tmp1_55 = gl64_t(uint64_t(0));
-    gl64_t tmp1_56 = gl64_t(uint64_t(0));
-    gl64_t tmp1_57 = gl64_t(uint64_t(0));
-    gl64_t tmp1_58 = gl64_t(uint64_t(0));
-    gl64_t tmp1_59 = gl64_t(uint64_t(0));
-    gl64_t tmp1_60 = gl64_t(uint64_t(0));
-    gl64_t tmp1_61 = gl64_t(uint64_t(0));
-    gl64_t tmp1_62 = gl64_t(uint64_t(0));
-    gl64_t tmp1_63 = gl64_t(uint64_t(0));
-    gl64_t tmp1_64 = gl64_t(uint64_t(0));
-    gl64_t tmp1_65 = gl64_t(uint64_t(0));
-    gl64_t tmp1_66 = gl64_t(uint64_t(0));
-    gl64_t tmp1_67 = gl64_t(uint64_t(0));
-    gl64_t tmp1_68 = gl64_t(uint64_t(0));
-    gl64_t tmp1_69 = gl64_t(uint64_t(0));
-    gl64_t tmp1_70 = gl64_t(uint64_t(0));
     gl64_t tmp3_0 = gl64_t(uint64_t(0));
     gl64_t tmp3_1 = gl64_t(uint64_t(0));
     gl64_t tmp3_2 = gl64_t(uint64_t(0));
 
-    chunk_1ee0d8c6_0(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, ctx, tmp1_0, tmp1_1, tmp1_2, tmp1_3, tmp1_4, tmp1_5, tmp1_6, tmp1_9, tmp1_11, tmp1_12, tmp1_15, tmp1_16, tmp1_18, tmp1_22, tmp1_24, tmp1_45, tmp1_46, tmp1_47, tmp1_48, tmp1_49, tmp1_50, tmp1_51, tmp1_52, tmp1_53, tmp1_54, tmp1_55, tmp1_56, tmp1_57, tmp1_58, tmp1_59, tmp1_60, tmp1_61, tmp1_62, tmp1_63, tmp1_64, tmp1_65, tmp1_66, tmp1_67, tmp1_68, tmp1_69, tmp1_70, tmp3_0, tmp3_1, tmp3_2);
-    chunk_1ee0d8c6_1(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, ctx, tmp1_0, tmp1_1, tmp1_2, tmp1_3, tmp1_4, tmp1_5, tmp1_6, tmp1_9, tmp1_11, tmp1_12, tmp1_15, tmp1_16, tmp1_18, tmp1_22, tmp1_24, tmp1_45, tmp1_46, tmp1_47, tmp1_48, tmp1_49, tmp1_50, tmp1_51, tmp1_52, tmp1_53, tmp1_54, tmp1_55, tmp1_56, tmp1_57, tmp1_58, tmp1_59, tmp1_60, tmp1_61, tmp1_62, tmp1_63, tmp1_64, tmp1_65, tmp1_66, tmp1_67, tmp1_68, tmp1_69, tmp1_70, tmp3_0, tmp3_1, tmp3_2);
-    chunk_1ee0d8c6_2(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, ctx, tmp1_0, tmp1_1, tmp1_2, tmp1_3, tmp1_4, tmp1_5, tmp1_6, tmp1_9, tmp1_11, tmp1_12, tmp1_15, tmp1_16, tmp1_18, tmp1_22, tmp1_24, tmp1_45, tmp1_46, tmp1_47, tmp1_48, tmp1_49, tmp1_50, tmp1_51, tmp1_52, tmp1_53, tmp1_54, tmp1_55, tmp1_56, tmp1_57, tmp1_58, tmp1_59, tmp1_60, tmp1_61, tmp1_62, tmp1_63, tmp1_64, tmp1_65, tmp1_66, tmp1_67, tmp1_68, tmp1_69, tmp1_70, tmp3_0, tmp3_1, tmp3_2);
+    chunk_1ee0d8c6_0(dParams, dArgs, dExpsArgs, expressions_params, bufferCommitsSize, ctx, tmp3_0, tmp3_1, tmp3_2);
 
     // Write final result and store
     *(gl64_t*)&expressions_params[bufferCommitsSize + 1][0 * blockDim.x + threadIdx.x] = tmp3_0;

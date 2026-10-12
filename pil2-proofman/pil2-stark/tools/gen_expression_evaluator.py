@@ -677,10 +677,11 @@ def generate_chunked_evaluator(dump, out_path):
     args = dump['args']
     strides = dump['strides']
 
-    # Keep chunks small enough for nvcc/cicc to compile large generated
-    # expressions predictably. Device-call overhead is paid once per row tile,
-    # while very large straight-line chunks can spend minutes in the compiler.
-    target_size = min(int(os.environ.get('VENUS_GEN_EXPR_CHUNK_SIZE', '1800')), nOps)
+    # Split only expressions well above the size of the recursion-layer constraint
+    # polynomials: the 4-5K-op vadcop_final and compressor ones run about twice as fast
+    # as one chunk than split at 1800 ops, while much larger straight-line chunks can
+    # spend minutes in nvcc/cicc.
+    target_size = min(int(os.environ.get('VENUS_GEN_EXPR_CHUNK_SIZE', '6000')), nOps)
     boundaries = find_chunk_boundaries(dump, target_chunk_size=target_size)
     nChunks = len(boundaries)
 
