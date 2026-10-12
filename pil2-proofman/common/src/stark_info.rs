@@ -1,6 +1,6 @@
 // use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
@@ -107,6 +107,10 @@ pub struct PolMap {
     pub stage_id: u64,
     #[serde(default)]
     pub lengths: Vec<u64>,
+    #[serde(default, rename = "commitId")]
+    pub commit_id: u64,
+    #[serde(default, rename = "polsMapId")]
+    pub pols_map_id: u64,
 }
 
 #[allow(dead_code)]
@@ -125,8 +129,8 @@ pub struct CustomCommits {
 }
 
 #[allow(dead_code)]
-#[derive(Default, Deserialize, Debug, Clone)]
-enum EvMapEType {
+#[derive(Default, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvMapEType {
     #[serde(rename = "cm")]
     #[default]
     Cm,
@@ -136,22 +140,17 @@ enum EvMapEType {
     Custom,
 }
 
-fn deserialize_bool_from_int<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value: i32 = Deserialize::deserialize(deserializer)?;
-    Ok(value != 0)
-}
-
 #[allow(dead_code)]
 #[derive(Default, Deserialize, Debug, Clone)]
 pub struct EvMap {
     #[serde(rename = "type")]
-    type_: EvMapEType,
-    id: u64,
-    #[serde(deserialize_with = "deserialize_bool_from_int")]
-    prime: bool,
+    pub type_: EvMapEType,
+    pub id: u64,
+    pub prime: i64,
+    #[serde(default, rename = "commitId")]
+    pub commit_id: Option<u64>,
+    #[serde(default, rename = "openingPos")]
+    pub opening_pos: Option<u64>,
 }
 
 #[allow(dead_code)]
@@ -178,6 +177,8 @@ pub struct StarkInfo {
     pub cm_pols_map: Option<Vec<PolMap>>,
     #[serde(rename = "publicsMap")]
     pub publics_map: Option<Vec<PolMap>>,
+    #[serde(default, rename = "proofValuesMap")]
+    pub proof_values_map: Option<Vec<PolMap>>,
     #[serde(rename = "customCommitsMap")]
     pub custom_commits_map: Vec<Option<Vec<PolMap>>>,
     #[serde(rename = "challengesMap")]

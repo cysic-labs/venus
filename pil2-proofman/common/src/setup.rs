@@ -1,6 +1,7 @@
 use std::os::raw::{c_void, c_char};
 use fields::PrimeField64;
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 use std::sync::RwLock;
 use std::fs::File;
 use std::io::Read;
@@ -21,7 +22,7 @@ use proofman_util::create_buffer_fast;
 
 use crate::{GlobalInfoAir, ProofmanError};
 use crate::ProofType;
-use crate::StarkInfo;
+use crate::{EvMapEType, StarkInfo};
 use crate::ProofmanResult;
 
 pub type GetSizeWitnessFunc = unsafe extern "C" fn() -> u64;
@@ -30,6 +31,16 @@ pub type GetCircomCircuitFunc = unsafe extern "C" fn(dat_file: *const c_char) ->
 
 pub type FreeCircomCircuitFunc = unsafe extern "C" fn(circuit: *mut c_void);
 
+const MAX_STARK_VECTOR_WORDS: usize = if usize::BITS >= 64 { 1usize << 33 } else { usize::MAX / 8 };
+const MAX_STARK_COLUMNS: u64 = 1_000_000;
+const MAX_SAFE_SHIFT_BITS: u64 = 30;
+const MAX_STARK_BLOWUP_BITS: u64 = 32;
+const MAX_FRI_QUERIES: u64 = 4096;
+const MAX_CHALLENGE_MAP_ENTRIES: usize = 4096;
+const MAX_METADATA_MAP_ENTRIES: usize = 1 << 20;
+const MAX_QUERY_CONSTANT_VALUES: u64 = 1 << 20;
+const SUPPORTED_STARK_N_STAGES: u32 = 2;
+const FIELD_EXTENSION: u64 = 3;
 const MAX_STARKINFO_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_VERKEY_JSON_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -81,6 +92,389 @@ fn read_first_u64_limited(path: &Path, label: &str) -> ProofmanResult<u64> {
     file.read_exact(&mut word)
         .map_err(|err| invalid_setup(format!("Failed to read {label} {}: {err}", path.display())))?;
     Ok(u64::from_le_bytes(word))
+}
+
+fn checked_domain_size(n_bits: u64, label: &str) -> ProofmanResult<usize> {
+    if n_bits > MAX_SAFE_SHIFT_BITS {
+        return Err(invalid_setup(format!("{label} n_bits exceeds supported limit")));
+    }
+    if n_bits >= usize::BITS as u64 {
+        return Err(invalid_setup(format!("{label} n_bits is too large")));
+    }
+    1usize.checked_shl(n_bits as u32).ok_or_else(|| invalid_setup(format!("{label} n_bits is too large")))
+}
+
+fn checked_word_product(count: u64, domain_size: usize, label: &str) -> ProofmanResult<usize> {
+    if count > MAX_STARK_COLUMNS {
+        return Err(invalid_setup(format!("{label} column count exceeds limit")));
+    }
+    let count = usize::try_from(count).map_err(|_| invalid_setup(format!("{label} column count is too large")))?;
+    let words = count.checked_mul(domain_size).ok_or_else(|| invalid_setup(format!("{label} size overflow")))?;
+    if words > MAX_STARK_VECTOR_WORDS {
+        return Err(invalid_setup(format!("{label} size exceeds limit")));
+    }
+    Ok(words)
+}
+
+fn require_map_section(stark_info: &StarkInfo, section: &str, label: &str) -> ProofmanResult<u64> {
+    stark_info
+        .map_sections_n
+        .get(section)
+        .copied()
+        .ok_or_else(|| invalid_setup(format!("{label} is missing {section} section")))
+}
+
+fn checked_abs_opening(point: i64, label: &str) -> ProofmanResult<u64> {
+    if point == i64::MIN {
+        return Err(invalid_setup(format!("{label} contains unsupported opening point")));
+    }
+    Ok(if point < 0 { (-(point + 1)) as u64 + 1 } else { point as u64 })
+}
+
+fn validate_opening_points(
+    stark_info: &StarkInfo,
+    domain_size: usize,
+    extended_domain_size: usize,
+    label: &str,
+) -> ProofmanResult<()> {
+    if stark_info.opening_points.is_empty() {
+        return Err(invalid_setup(format!("{label} has empty openingPoints")));
+    }
+    if stark_info.opening_points.len() as u64 > MAX_FRI_QUERIES {
+        return Err(invalid_setup(format!("{label} openingPoints exceeds supported limit")));
+    }
+    let blowup = 1u64
+        .checked_shl((stark_info.stark_struct.n_bits_ext - stark_info.stark_struct.n_bits) as u32)
+        .ok_or_else(|| invalid_setup(format!("{label} blowup factor is too large")))?;
+    let mut seen = HashSet::new();
+    for &point in &stark_info.opening_points {
+        if !seen.insert(point) {
+            return Err(invalid_setup(format!("{label} has duplicate openingPoints")));
+        }
+        let abs_point = checked_abs_opening(point, label)?;
+        if abs_point >= domain_size as u64 {
+            return Err(invalid_setup(format!("{label} opening point exceeds trace domain")));
+        }
+        let extended = abs_point
+            .checked_mul(blowup)
+            .ok_or_else(|| invalid_setup(format!("{label} opening point extension overflow")))?;
+        if extended >= extended_domain_size as u64 {
+            return Err(invalid_setup(format!("{label} opening point exceeds extended domain")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_pol_span(stage_pos: u64, dim: u64, section_columns: u64, label: &str) -> ProofmanResult<()> {
+    if dim != 1 && dim != FIELD_EXTENSION {
+        return Err(invalid_setup(format!("{label} has unsupported polynomial dimension")));
+    }
+    let end = stage_pos.checked_add(dim).ok_or_else(|| invalid_setup(format!("{label} polynomial span overflow")))?;
+    if end > section_columns {
+        return Err(invalid_setup(format!("{label} polynomial column span is out of range")));
+    }
+    Ok(())
+}
+
+fn validate_pol_maps(stark_info: &StarkInfo, label: &str) -> ProofmanResult<()> {
+    let const_columns = require_map_section(stark_info, "const", label)?;
+    if const_columns != stark_info.n_constants {
+        return Err(invalid_setup(format!("{label} const section does not match nConstants")));
+    }
+
+    let cm_pols =
+        stark_info.cm_pols_map.as_deref().ok_or_else(|| invalid_setup(format!("{label} is missing cmPolsMap")))?;
+    for (idx, pol) in cm_pols.iter().enumerate() {
+        if pol.pols_map_id != idx as u64 {
+            return Err(invalid_setup(format!("{label} cmPolsMap polsMapId does not match its index")));
+        }
+        if pol.stage == 0 || pol.stage > u64::from(stark_info.n_stages) + 1 {
+            return Err(invalid_setup(format!("{label} cmPolsMap has invalid stage")));
+        }
+        let section_columns = require_map_section(stark_info, &format!("cm{}", pol.stage), label)?;
+        validate_pol_span(pol.stage_pos, pol.dim, section_columns, label)?;
+    }
+
+    let const_pols = stark_info
+        .const_pols_map
+        .as_deref()
+        .ok_or_else(|| invalid_setup(format!("{label} is missing constPolsMap")))?;
+    for (idx, pol) in const_pols.iter().enumerate() {
+        if pol.pols_map_id != idx as u64 {
+            return Err(invalid_setup(format!("{label} constPolsMap polsMapId does not match its index")));
+        }
+        if pol.stage != 0 {
+            return Err(invalid_setup(format!("{label} constPolsMap has invalid stage")));
+        }
+        validate_pol_span(pol.stage_id, pol.dim, stark_info.n_constants, label)?;
+    }
+
+    if stark_info.custom_commits_map.len() != stark_info.custom_commits.len() {
+        return Err(invalid_setup(format!("{label} customCommitsMap size does not match customCommits")));
+    }
+    for (commit_id, maybe_pol_map) in stark_info.custom_commits_map.iter().enumerate() {
+        let section = format!("{}0", stark_info.custom_commits[commit_id].name);
+        let section_columns = require_map_section(stark_info, &section, label)?;
+        let pol_map = maybe_pol_map
+            .as_deref()
+            .ok_or_else(|| invalid_setup(format!("{label} customCommitsMap has a null entry")))?;
+        for (idx, pol) in pol_map.iter().enumerate() {
+            if pol.commit_id != commit_id as u64 || pol.pols_map_id != idx as u64 {
+                return Err(invalid_setup(format!("{label} customCommitsMap metadata does not match its index")));
+            }
+            validate_pol_span(pol.stage_pos, pol.dim, section_columns, label)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_ev_map(stark_info: &StarkInfo, label: &str) -> ProofmanResult<()> {
+    let cm_pols_len = stark_info.cm_pols_map.as_ref().map(|v| v.len()).unwrap_or(0);
+    let const_pols_len = stark_info.const_pols_map.as_ref().map(|v| v.len()).unwrap_or(0);
+    for ev in &stark_info.ev_map {
+        let opening_pos = match ev.opening_pos {
+            Some(pos) => {
+                usize::try_from(pos).map_err(|_| invalid_setup(format!("{label} evMap openingPos is too large")))?
+            }
+            None => stark_info
+                .opening_points
+                .iter()
+                .position(|&point| point == ev.prime)
+                .ok_or_else(|| invalid_setup(format!("{label} evMap prime is not in openingPoints")))?,
+        };
+        if opening_pos >= stark_info.opening_points.len() || stark_info.opening_points[opening_pos] != ev.prime {
+            return Err(invalid_setup(format!("{label} evMap openingPos does not match prime")));
+        }
+
+        match ev.type_ {
+            EvMapEType::Cm => {
+                if ev.id >= cm_pols_len as u64 {
+                    return Err(invalid_setup(format!("{label} evMap committed polynomial id is out of range")));
+                }
+            }
+            EvMapEType::Const => {
+                if ev.id >= const_pols_len as u64 {
+                    return Err(invalid_setup(format!("{label} evMap const polynomial id is out of range")));
+                }
+            }
+            EvMapEType::Custom => {
+                let commit_id = ev
+                    .commit_id
+                    .ok_or_else(|| invalid_setup(format!("{label} evMap custom entry is missing commitId")))?;
+                let commit_idx = usize::try_from(commit_id)
+                    .map_err(|_| invalid_setup(format!("{label} evMap custom commitId is too large")))?;
+                let pol_map = stark_info
+                    .custom_commits_map
+                    .get(commit_idx)
+                    .and_then(|entry| entry.as_ref())
+                    .ok_or_else(|| invalid_setup(format!("{label} evMap custom commitId is out of range")))?;
+                if ev.id >= pol_map.len() as u64 {
+                    return Err(invalid_setup(format!("{label} evMap custom polynomial id is out of range")));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_metadata_map_len<T>(
+    map: Option<&Vec<T>>,
+    key: &str,
+    max_entries: usize,
+    label: &str,
+) -> ProofmanResult<()> {
+    if let Some(map) = map {
+        if map.len() > max_entries {
+            return Err(invalid_setup(format!("{label} {key} exceeds supported length")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_challenges_map(stark_info: &StarkInfo, label: &str) -> ProofmanResult<()> {
+    let challenges = stark_info
+        .challenges_map
+        .as_deref()
+        .ok_or_else(|| invalid_setup(format!("{label} is missing challengesMap")))?;
+    if challenges.is_empty() || challenges.len() > MAX_CHALLENGE_MAP_ENTRIES {
+        return Err(invalid_setup(format!("{label} challengesMap has invalid length")));
+    }
+
+    let mut seen = HashSet::new();
+    let mut xi_count = 0usize;
+    let max_stage = u64::from(stark_info.n_stages) + 3;
+    for challenge in challenges {
+        if challenge.dim != FIELD_EXTENSION {
+            return Err(invalid_setup(format!("{label} challengesMap has invalid dimension")));
+        }
+        if challenge.stage == 0 || challenge.stage > max_stage {
+            return Err(invalid_setup(format!("{label} challengesMap has invalid stage")));
+        }
+        if challenge.stage_id > MAX_CHALLENGE_MAP_ENTRIES as u64 {
+            return Err(invalid_setup(format!("{label} challengesMap stageId exceeds supported range")));
+        }
+        if !seen.insert((challenge.stage, challenge.stage_id)) {
+            return Err(invalid_setup(format!("{label} challengesMap has duplicate stage/stageId")));
+        }
+        if challenge.stage == u64::from(stark_info.n_stages) + 2 && challenge.stage_id == 0 {
+            xi_count += 1;
+        }
+    }
+    if xi_count != 1 {
+        return Err(invalid_setup(format!("{label} must contain exactly one xi challenge")));
+    }
+    Ok(())
+}
+
+pub fn validate_stark_info(stark_info: &StarkInfo, label: &str) -> ProofmanResult<usize> {
+    if stark_info.n_stages != SUPPORTED_STARK_N_STAGES {
+        return Err(invalid_setup(format!(
+            "{label} has unsupported nStages {}; expected {SUPPORTED_STARK_N_STAGES}",
+            stark_info.n_stages
+        )));
+    }
+    let n_bits = stark_info.stark_struct.n_bits;
+    let n_bits_ext = stark_info.stark_struct.n_bits_ext;
+    if n_bits_ext < n_bits {
+        return Err(invalid_setup(format!("{label} has nBitsExt smaller than nBits")));
+    }
+    if n_bits_ext - n_bits > MAX_STARK_BLOWUP_BITS {
+        return Err(invalid_setup(format!("{label} blowup factor exceeds limit")));
+    }
+    if stark_info.stark_struct.n_queries == 0 || stark_info.stark_struct.n_queries > MAX_FRI_QUERIES {
+        return Err(invalid_setup(format!("{label} nQueries exceeds supported limit")));
+    }
+    let extended_domain_size = checked_domain_size(n_bits_ext, label)?;
+    let domain_size = checked_domain_size(n_bits, label)?;
+    validate_opening_points(stark_info, domain_size, extended_domain_size, label)?;
+    let query_constant_values = stark_info
+        .n_constants
+        .checked_mul(stark_info.stark_struct.n_queries)
+        .ok_or_else(|| invalid_setup(format!("{label} query constant value count overflow")))?;
+    if query_constant_values > MAX_QUERY_CONSTANT_VALUES {
+        return Err(invalid_setup(format!("{label} query constant values exceed supported limit")));
+    }
+
+    validate_metadata_map_len(stark_info.publics_map.as_ref(), "publicsMap", MAX_METADATA_MAP_ENTRIES, label)?;
+    validate_metadata_map_len(stark_info.proof_values_map.as_ref(), "proofValuesMap", MAX_METADATA_MAP_ENTRIES, label)?;
+    validate_metadata_map_len(
+        stark_info.airgroupvalues_map.as_ref(),
+        "airgroupValuesMap",
+        MAX_METADATA_MAP_ENTRIES,
+        label,
+    )?;
+    validate_metadata_map_len(stark_info.airvalues_map.as_ref(), "airValuesMap", MAX_METADATA_MAP_ENTRIES, label)?;
+    validate_challenges_map(stark_info, label)?;
+    if stark_info.ev_map.len() > MAX_METADATA_MAP_ENTRIES {
+        return Err(invalid_setup(format!("{label} evMap exceeds supported length")));
+    }
+
+    for (section, &columns) in &stark_info.map_sections_n {
+        if columns > MAX_STARK_COLUMNS {
+            return Err(invalid_setup(format!("{label} section {section} column count exceeds limit")));
+        }
+        checked_word_product(columns, domain_size, &format!("{label} section {section}"))?;
+    }
+    for stage in 1..=(u64::from(stark_info.n_stages) + 1) {
+        let section = format!("cm{stage}");
+        if !stark_info.map_sections_n.contains_key(&section) {
+            return Err(invalid_setup(format!("{label} is missing {section} section")));
+        }
+    }
+    let const_columns = require_map_section(stark_info, "const", label)?;
+    if const_columns != stark_info.n_constants {
+        return Err(invalid_setup(format!("{label} const section does not match nConstants")));
+    }
+    if stark_info.q_dim != FIELD_EXTENSION {
+        return Err(invalid_setup(format!("{label} qDim must match field extension width")));
+    }
+    if stark_info.q_deg == 0 {
+        return Err(invalid_setup(format!("{label} qDeg must be nonzero")));
+    }
+    let blowup = 1u64
+        .checked_shl((n_bits_ext - n_bits) as u32)
+        .ok_or_else(|| invalid_setup(format!("{label} blowup factor is too large")))?;
+    if stark_info.q_deg > blowup {
+        return Err(invalid_setup(format!("{label} qDeg exceeds quotient blowup")));
+    }
+    let expected_q_columns = stark_info
+        .q_deg
+        .checked_mul(stark_info.q_dim)
+        .ok_or_else(|| invalid_setup(format!("{label} quotient column count overflow")))?;
+    if require_map_section(stark_info, "cm3", label)? != expected_q_columns {
+        return Err(invalid_setup(format!("{label} cm3 section does not match qDeg*qDim")));
+    }
+    for custom_commit in &stark_info.custom_commits {
+        if custom_commit.stage_widths.is_empty() {
+            return Err(invalid_setup(format!("{label} custom commit {} has empty stageWidths", custom_commit.name)));
+        }
+        for (idx, &stage_width) in custom_commit.stage_widths.iter().enumerate() {
+            checked_word_product(
+                u64::from(stage_width),
+                domain_size,
+                &format!("{label} custom commit {} stageWidths[{idx}]", custom_commit.name),
+            )?;
+        }
+        let section = format!("{}0", custom_commit.name);
+        let section_columns = stark_info.map_sections_n.get(&section).copied().ok_or_else(|| {
+            invalid_setup(format!("{label} custom commit {} is missing {section} section", custom_commit.name))
+        })?;
+        let expected_columns = u64::from(custom_commit.stage_widths[0]);
+        if section_columns != expected_columns {
+            return Err(invalid_setup(format!(
+                "{label} custom commit {} stageWidths[0] does not match {section} section",
+                custom_commit.name
+            )));
+        }
+    }
+    validate_pol_maps(stark_info, label)?;
+    validate_ev_map(stark_info, label)?;
+    if stark_info.boundaries.is_empty() {
+        return Err(invalid_setup(format!("{label} must contain at least one boundary")));
+    }
+    for boundary in &stark_info.boundaries {
+        match boundary.name.as_str() {
+            "everyRow" | "firstRow" | "lastRow" => {
+                if boundary.offset_min.is_some() || boundary.offset_max.is_some() {
+                    return Err(invalid_setup(format!(
+                        "{label} {} boundary must not carry frame offsets",
+                        boundary.name
+                    )));
+                }
+            }
+            "everyFrame" => {
+                let offset_min = boundary
+                    .offset_min
+                    .ok_or_else(|| invalid_setup(format!("{label} everyFrame boundary is missing offsetMin")))?;
+                let offset_max = boundary
+                    .offset_max
+                    .ok_or_else(|| invalid_setup(format!("{label} everyFrame boundary is missing offsetMax")))?;
+                let roots = offset_min
+                    .checked_add(offset_max)
+                    .ok_or_else(|| invalid_setup(format!("{label} everyFrame boundary offset overflow")))?;
+                if roots > domain_size as u64 {
+                    return Err(invalid_setup(format!("{label} everyFrame boundary offsets exceed trace size")));
+                }
+            }
+            _ => return Err(invalid_setup(format!("{label} unsupported boundary type {}", boundary.name))),
+        }
+    }
+    checked_word_product(stark_info.n_constants, domain_size, label)?;
+    Ok(domain_size)
+}
+
+fn checked_packed_const_words(words_per_row: u64, domain_size: usize, n_constants: u64) -> ProofmanResult<usize> {
+    let packed = checked_word_product(words_per_row, domain_size, "packed const polynomials")?;
+    let n_constants =
+        usize::try_from(n_constants).map_err(|_| invalid_setup("packed const n_constants is too large"))?;
+    let words = packed
+        .checked_add(1)
+        .and_then(|words| words.checked_add(n_constants))
+        .ok_or_else(|| invalid_setup("packed const polynomial size overflow"))?;
+    if words > MAX_STARK_VECTOR_WORDS {
+        return Err(invalid_setup("packed const polynomial size exceeds limit"));
+    }
+    Ok(words)
 }
 
 #[derive(Debug)]
@@ -248,6 +642,7 @@ impl<F: PrimeField64> Setup<F> {
                 read_to_string_limited(Path::new(&stark_info_path), MAX_STARKINFO_JSON_BYTES, "starkinfo")
                     .unwrap_or_else(|err| panic!("{err}"));
             let stark_info = StarkInfo::from_json(&stark_info_json);
+            let domain_size = validate_stark_info(&stark_info, &stark_info_path).unwrap_or_else(|err| panic!("{err}"));
             let recursive = setup_type != &ProofType::Basic;
             let recursive_final = setup_type == &ProofType::RecursiveF;
             let preallocate_const = preallocate && cfg!(feature = "gpu");
@@ -269,9 +664,14 @@ impl<F: PrimeField64> Setup<F> {
             let custom_commits_fixed_buffer_size = get_map_totaln_custom_commits_fixed_c(p_stark_info);
             let proof_size = get_proof_size_c(p_stark_info);
             let pinned_proof_size = get_proof_pinned_size_c(p_stark_info);
-            let const_pols_size = (stark_info.n_constants * (1 << stark_info.stark_struct.n_bits)) as usize;
+            let const_pols_size = checked_word_product(stark_info.n_constants, domain_size, "constant polynomials")
+                .unwrap_or_else(|err| panic!("{err}"));
 
-            let const_tree_size = get_const_tree_size_c(p_stark_info) as usize;
+            let const_tree_size =
+                usize::try_from(get_const_tree_size_c(p_stark_info)).expect("const tree size does not fit in usize");
+            if const_tree_size > MAX_STARK_VECTOR_WORDS {
+                panic!("const tree size exceeds limit");
+            }
 
             let n_operations_quotient = get_operations_quotient_c(expressions_bin, p_stark_info) as u64;
 
@@ -321,7 +721,8 @@ impl<F: PrimeField64> Setup<F> {
                         calculate_words_per_row_c(p_stark_info, &(setup_path.display().to_string() + ".const"))
                     };
                     const_pols_size_packed =
-                        (words_per_row * (1 << stark_info.stark_struct.n_bits) + 1 + stark_info.n_constants) as usize;
+                        checked_packed_const_words(words_per_row, domain_size, stark_info.n_constants)
+                            .unwrap_or_else(|err| panic!("{err}"));
                 }
                 (
                     stark_info,
@@ -530,6 +931,168 @@ impl<F: PrimeField64> Setup<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Boundary, CustomCommits, EvMap, PolMap, PublicValues};
+    use std::collections::HashMap;
+
+    fn minimal_valid_stark_info() -> StarkInfo {
+        let mut map_sections_n = HashMap::new();
+        map_sections_n.insert("const".to_string(), 1);
+        map_sections_n.insert("cm1".to_string(), 1);
+        map_sections_n.insert("cm2".to_string(), 1);
+        map_sections_n.insert("cm3".to_string(), FIELD_EXTENSION);
+
+        let mut stark_info = StarkInfo::default();
+        stark_info.stark_struct.n_bits = 4;
+        stark_info.stark_struct.n_bits_ext = 4;
+        stark_info.stark_struct.n_queries = 1;
+        stark_info.n_stages = SUPPORTED_STARK_N_STAGES;
+        stark_info.n_constants = 1;
+        stark_info.q_deg = 1;
+        stark_info.q_dim = FIELD_EXTENSION;
+        stark_info.opening_points = vec![0];
+        stark_info.boundaries = vec![Boundary { name: "everyRow".to_string(), offset_min: None, offset_max: None }];
+        stark_info.challenges_map = Some(vec![PolMap {
+            name: "std_xi".to_string(),
+            stage: u64::from(SUPPORTED_STARK_N_STAGES) + 2,
+            dim: FIELD_EXTENSION,
+            stage_id: 0,
+            ..PolMap::default()
+        }]);
+        stark_info.const_pols_map =
+            Some(vec![PolMap { name: "const".to_string(), dim: 1, stage_id: 0, pols_map_id: 0, ..PolMap::default() }]);
+        stark_info.cm_pols_map = Some(Vec::new());
+        stark_info.map_sections_n = map_sections_n;
+        stark_info
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_bad_bit_order() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.stark_struct.n_bits = 20;
+        stark_info.stark_struct.n_bits_ext = 19;
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_cpp_unsupported_bit_width() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.stark_struct.n_bits = MAX_SAFE_SHIFT_BITS + 1;
+        stark_info.stark_struct.n_bits_ext = MAX_SAFE_SHIFT_BITS + 1;
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_unsupported_stage_count() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.n_stages = SUPPORTED_STARK_N_STAGES + 1;
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_missing_stage_section() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.map_sections_n.remove("cm3");
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_empty_custom_commit_stage_widths() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.custom_commits.push(CustomCommits {
+            name: "custom".to_string(),
+            stage_widths: Vec::new(),
+            public_values: Vec::<PublicValues>::new(),
+        });
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_custom_commit_section_mismatch() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.map_sections_n.insert("custom0".to_string(), 2);
+        stark_info.custom_commits.push(CustomCommits {
+            name: "custom".to_string(),
+            stage_widths: vec![1],
+            public_values: Vec::<PublicValues>::new(),
+        });
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_accepts_custom_commit_section_match() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.map_sections_n.insert("custom0".to_string(), 1);
+        stark_info.custom_commits.push(CustomCommits {
+            name: "custom".to_string(),
+            stage_widths: vec![1],
+            public_values: Vec::<PublicValues>::new(),
+        });
+        stark_info.custom_commits_map.push(Some(Vec::new()));
+        assert!(validate_stark_info(&stark_info, "ok.starkinfo.json").is_ok());
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_bad_q_dim() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.q_dim = 1;
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_opening_point_out_of_domain() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.opening_points = vec![16];
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_bad_ev_map_id() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.ev_map.push(EvMap {
+            type_: EvMapEType::Const,
+            id: 1,
+            prime: 0,
+            opening_pos: Some(0),
+            ..EvMap::default()
+        });
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_empty_boundaries() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.boundaries.clear();
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_rejects_offsets_on_non_frame_boundary() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.boundaries[0].offset_min = Some(1);
+        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
+        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
+    }
+
+    #[test]
+    fn stark_info_validation_accepts_frame_boundary_offsets() {
+        let mut stark_info = minimal_valid_stark_info();
+        stark_info.boundaries.push(Boundary {
+            name: "everyFrame".to_string(),
+            offset_min: Some(1),
+            offset_max: Some(1),
+        });
+        assert!(validate_stark_info(&stark_info, "ok.starkinfo.json").is_ok());
+    }
 
     #[test]
     fn recursive_library_loading_requires_opt_in_value() {
