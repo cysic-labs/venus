@@ -28,7 +28,11 @@ struct ReleaseEntry {
 }
 
 impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
-    pub fn new(pctx: Arc<ProofCtx<F>>, n_buffers: usize, buffer_size: usize) -> Self {
+    pub fn new(pctx: Arc<ProofCtx<F>>, n_buffers: usize, buffer_size: usize) -> ProofmanResult<Self> {
+        // Witness computation waits on this pool for a buffer, so an empty pool would never hand one out.
+        if n_buffers == 0 {
+            return Err(ProofmanError::InvalidConfiguration("MemoryHandler requires at least one buffer".into()));
+        }
         let (tx_buffer_pool, rx_buffer_pool) = bounded(n_buffers);
         let instance_ids_to_be_released = Arc::new(SegQueue::new());
         let register_buffers = registered_witness_h2d_enabled();
@@ -56,7 +60,7 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
             );
         }
 
-        Self {
+        Ok(Self {
             pctx,
             sender: tx_buffer_pool,
             receiver: rx_buffer_pool,
@@ -64,7 +68,7 @@ impl<F: PrimeField64 + Send + Sync + 'static> MemoryHandler<F> {
             n_buffers,
             buffer_size,
             registered_buffers,
-        }
+        })
     }
 
     pub fn reset(&self) -> ProofmanResult<()> {

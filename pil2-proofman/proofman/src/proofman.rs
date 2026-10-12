@@ -81,6 +81,35 @@ use serde::Serialize;
 
 mod aggregation;
 
+/// Rejects GPU parameters the prover cannot run with: no proof streams, or no witness threads.
+fn validate_gpu_params(gpu_params: &ParamsGPU) -> ProofmanResult<()> {
+    if cfg!(feature = "gpu") {
+        if gpu_params.max_number_streams == 0 {
+            return Err(ProofmanError::InvalidConfiguration("GPU max_number_streams must be greater than zero".into()));
+        }
+        if gpu_params.number_threads_pools_witness == 0 {
+            return Err(ProofmanError::InvalidConfiguration(
+                "GPU number_threads_pools_witness must be greater than zero".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Number of witness buffers: `max_witness_stored` per GPU, or a single one without GPUs.
+fn witness_buffer_count(n_gpus: usize, gpu_params: &ParamsGPU) -> ProofmanResult<usize> {
+    if !cfg!(feature = "gpu") {
+        return Ok(1);
+    }
+    let n_buffers = n_gpus.checked_mul(gpu_params.max_witness_stored).filter(|&n| n as u64 <= MAX_INSTANCES);
+    n_buffers.ok_or_else(|| {
+        ProofmanError::InvalidConfiguration(format!(
+            "{n_gpus} GPUs storing {} witnesses each exceed the {MAX_INSTANCES} witness buffers supported",
+            gpu_params.max_witness_stored
+        ))
+    })
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct WitnessInfo {
     pub witness_time: f32,
@@ -893,9 +922,9 @@ where
 
         let memory_handler = Arc::new(MemoryHandler::new(
             self.pctx.clone(),
-            self.n_gpus * self.gpu_params.max_witness_stored,
+            witness_buffer_count(self.n_gpus, &self.gpu_params)?,
             self.max_witness_trace_size,
-        ));
+        )?);
 
         if !options.minimal_memory {
             self.pctx.set_witness_tx(Some(self.witness_tx.clone()));
@@ -1530,6 +1559,7 @@ where
         let rank_info =
             RankInfo { world_rank: mpi_ctx.rank, local_rank: mpi_ctx.node_rank, n_processes: mpi_ctx.n_processes };
         initialize_logger(verbose_mode, Some(&rank_info));
+        validate_gpu_params(&gpu_params)?;
 
         let (pctx, sctx, setups_vadcop, n_streams_per_gpu, n_recursive_streams_per_gpu, n_gpus) =
             Self::initialize_proofman(
@@ -1548,14 +1578,11 @@ where
 
         timer_stop_and_log_info!(INIT_PROOFMAN);
 
-        let max_witness_stored = match cfg!(feature = "gpu") {
-            true => n_gpus as usize * gpu_params.max_witness_stored,
-            false => 1,
-        };
+        let max_witness_stored = witness_buffer_count(n_gpus as usize, &gpu_params)?;
 
         let max_witness_trace_size = calculate_max_witness_trace_size(&pctx, &sctx, &packed_info, &gpu_params)?;
 
-        let memory_handler = Arc::new(MemoryHandler::new(pctx.clone(), max_witness_stored, max_witness_trace_size));
+        let memory_handler = Arc::new(MemoryHandler::new(pctx.clone(), max_witness_stored, max_witness_trace_size)?);
 
         let n_airgroups = pctx.global_info.air_groups.len();
         let proofs: Arc<Vec<RwLock<Option<Proof<F>>>>> =
