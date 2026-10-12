@@ -1,22 +1,28 @@
-// This example program takes a number `n` as input and computes the SHA-256 hash `n` times sequentially.
+// This example program verifies inner proofs of authorized programs and commits their outputs.
 
 // Mark the main function as the entry point for ZisK
 #![no_main]
 ziskos::entrypoint!(main);
 
+#[path = "../../protocol.rs"]
+mod protocol;
+
 fn main() {
-    let proof1 = ziskos::io::read_proof();
-    let proof2 = ziskos::io::read_proof();
+    // The authorization is an input: it is committed below so the outer verifier can compare it
+    // with keys it trusts.
+    let authorization: protocol::AggregationAuthorization = ziskos::io::read();
 
-    // Verify the first proof
-    let valid_proof1 = ziskos::io::verify_zisk_proof(&proof1);
-    if !valid_proof1 {
-        panic!("Proof 1 verification failed");
-    }
+    let inner_publics = core::array::from_fn(|i| {
+        let proof = ziskos::io::read_proof();
+        let verified = ziskos::io::verify_zisk_proof_for_program(
+            &proof,
+            &authorization.final_setup_vks[i],
+            &authorization.program_vks[i],
+        )
+        .unwrap_or_else(|| panic!("Proof {i} verification or authorization failed"));
+        protocol::decode_inner_publics(verified.public_outputs())
+            .unwrap_or_else(|| panic!("Proof {i} has unexpected trailing public outputs"))
+    });
 
-    // Verify the second proof
-    let valid_proof2 = ziskos::io::verify_zisk_proof(&proof2);
-    if !valid_proof2 {
-        panic!("Proof 2 verification failed");
-    }
+    ziskos::io::commit(&protocol::AggregationStatement { authorization, inner_publics });
 }

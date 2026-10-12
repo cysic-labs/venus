@@ -617,7 +617,8 @@ impl ProverBackend {
                 let mut pubs = program_vk.vk.clone();
                 pubs.extend(publics.public_bytes());
 
-                // Format: [compressed(8)][pubs_len(8)][pubs][proof_bytes][zisk_vk]
+                // Format: [compressed(8)][pubs_len(8)][pubs][proof_bytes][embedded_final_vk]
+                // Verifiers must compare the embedded key with an application-trusted key.
                 let mut proof = Vec::new();
                 proof.extend_from_slice(&(compressed as u64).to_le_bytes());
                 proof.extend_from_slice(&(ZISK_PUBLICS + 4).to_le_bytes());

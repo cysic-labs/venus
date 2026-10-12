@@ -1,26 +1,16 @@
-// This example program takes a number `n` as input and computes the SHA-256 hash `n` times sequentially.
+// This example program iterates a Fibonacci recurrence `n` times and commits the result.
 
 // Mark the main function as the entry point for ZisK
 #![no_main]
 ziskos::entrypoint!(main);
 
+#[path = "../../protocol.rs"]
+mod protocol;
+
 fn main() {
     // Read the input data
     let n: u32 = ziskos::io::read();
 
-    let module = 233;
-
-    ziskos::io::commit(&n);
-    ziskos::io::commit(&module);
-
-    let mut a = 0;
-    let mut b = 1;
-    for _ in 0..n {
-        let mut c = a + b;
-        c %= module;
-        a = b;
-        b = c;
-    }
-
-    ziskos::io::commit(&b);
+    // Commit all outputs at once: every commit writes from the first public output slot.
+    ziskos::io::commit(&protocol::compute_inner_publics(n));
 }

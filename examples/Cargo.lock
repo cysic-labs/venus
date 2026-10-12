@@ -13,6 +13,7 @@ name = "aggregation-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "proofman",
  "serde",
  "sha2",
  "zisk-sdk",
@@ -1265,6 +1266,7 @@ name = "guest"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "serde",
  "ziskos",
 ]
 
@@ -1273,6 +1275,7 @@ name = "guest-agg"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "serde",
  "ziskos",
 ]
 
