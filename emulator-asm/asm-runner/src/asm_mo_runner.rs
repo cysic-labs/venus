@@ -174,7 +174,7 @@ impl AsmRunnerMO {
 
                     let (chunk, mem_ops) = preloaded
                         .output_shmem
-                        .read_chunk(&mut data_ptr, |chunk: &AsmMOChunk| chunk.mem_ops_size)
+                        .read_chunk(&mut data_ptr)
                         .context("Failed to read MO shared memory chunk")?;
 
                     stats_mark!(_stats, &_runner_scope, "MO_CHUNK_DONE", 0);

@@ -26,6 +26,15 @@ pub trait AsmShmemHeader: Debug {
     fn allocated_size(&self) -> u64;
 }
 
+/// Header of a chunk in the assembly emulator output, followed by `payload_len()` `u64` words.
+///
+/// # Safety
+/// Implementors must be `repr(C)` structs made only of integer fields, so that any bytes read
+/// from shared memory form a valid value.
+pub unsafe trait AsmShmemChunk {
+    fn payload_len(&self) -> u64;
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 impl<H: AsmShmemHeader> Drop for AsmSharedMemory<H> {
     fn drop(&mut self) {

@@ -4,7 +4,7 @@ use zisk_common::EmuTrace;
 use zisk_common::EmuTraceStart;
 use zisk_core::{REGS_IN_MAIN_FROM, REGS_IN_MAIN_TO, REGS_IN_MAIN_TOTAL_NUMBER};
 
-use crate::AsmShmemHeader;
+use crate::{AsmShmemChunk, AsmShmemHeader};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -34,6 +34,13 @@ pub struct AsmMTChunk {
     pub end: u64,
     pub steps: u64,
     pub mem_reads_size: u64,
+}
+
+// SAFETY: repr(C) struct of u64 fields.
+unsafe impl AsmShmemChunk for AsmMTChunk {
+    fn payload_len(&self) -> u64 {
+        self.mem_reads_size
+    }
 }
 
 impl AsmMTChunk {

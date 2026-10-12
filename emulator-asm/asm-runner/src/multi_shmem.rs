@@ -1,4 +1,4 @@
-use crate::{shmem_object_size, AsmShmemHeader};
+use crate::{shmem_object_size, AsmShmemChunk, AsmShmemHeader};
 use libc::{
     c_uint, close, mmap, munmap, shm_open, shm_unlink, MAP_FAILED, MAP_SHARED, PROT_READ, S_IRUSR,
     S_IWUSR,
@@ -326,16 +326,12 @@ impl<H: AsmShmemHeader> AsmMultiSharedMemory<H> {
         self.total_mapped_size
     }
 
-    /// Reads the chunk header `T` at `*cursor` and the `payload_len` `u64` words that follow
-    /// it, then advances `*cursor` past both.
+    /// Reads the chunk header `T` at `*cursor` and the `u64` payload that follows it, then
+    /// advances `*cursor` past both.
     ///
     /// Fails instead of reading past `total_mapped_size`, the extent the producer has
     /// advertised and this reader has mapped.
-    pub fn read_chunk<T>(
-        &self,
-        cursor: &mut *const T,
-        payload_len: impl FnOnce(&T) -> u64,
-    ) -> Result<(T, &[u64])> {
+    pub fn read_chunk<T: AsmShmemChunk>(&self, cursor: &mut *const T) -> Result<(T, &[u64])> {
         let base = self.reserved_ptr as usize;
         let end = base + self.total_mapped_size;
         let header_start = *cursor as usize;
@@ -343,18 +339,22 @@ impl<H: AsmShmemHeader> AsmMultiSharedMemory<H> {
             .checked_add(size_of::<T>())
             .filter(|&header_end| header_start >= base && header_end <= end)
             .ok_or_else(|| anyhow!("Chunk header exceeds multi-shmem '{}'", self.base_name))?;
-        // SAFETY: the header lies inside the mapped region checked above.
+        if header_start % align_of::<T>() != 0 || payload_start % align_of::<u64>() != 0 {
+            return Err(anyhow!("Misaligned chunk in multi-shmem '{}'", self.base_name));
+        }
+        // SAFETY: the aligned header lies inside the mapped region, and AsmShmemChunk types are
+        // valid for any bytes.
         let chunk = unsafe { (header_start as *const T).read() };
 
-        let words = payload_len(&chunk);
+        let words = chunk.payload_len();
         let len = usize::try_from(words)
             .ok()
             .filter(|&len| len <= (end - payload_start) / size_of::<u64>())
             .ok_or_else(|| {
                 anyhow!("Chunk payload of {} words exceeds multi-shmem '{}'", words, self.base_name)
             })?;
-        // SAFETY: the payload lies inside the mapped region checked above, which stays mapped
-        // while `self` is borrowed.
+        // SAFETY: the aligned payload lies inside the mapped region, which stays mapped while
+        // `self` is borrowed.
         let payload = unsafe { std::slice::from_raw_parts(payload_start as *const u64, len) };
 
         *cursor = payload.as_ptr_range().end as *const T;

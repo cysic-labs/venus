@@ -150,7 +150,7 @@ impl AsmRunnerMT {
 
                     let (chunk, mem_reads) = preloaded
                         .output_shmem
-                        .read_chunk(&mut data_ptr, |chunk: &AsmMTChunk| chunk.mem_reads_size)
+                        .read_chunk(&mut data_ptr)
                         .context("Failed to read MT shared memory chunk")?;
                     // SAFETY: zero-copy traces borrow the mapping owned by `preloaded`, which
                     // must outlive their use.

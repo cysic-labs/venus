@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::AsmShmemHeader;
+use crate::{AsmShmemChunk, AsmShmemHeader};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -23,4 +23,11 @@ impl AsmShmemHeader for AsmMOHeader {
 pub struct AsmMOChunk {
     pub end: u64,
     pub mem_ops_size: u64,
+}
+
+// SAFETY: repr(C) struct of u64 fields.
+unsafe impl AsmShmemChunk for AsmMOChunk {
+    fn payload_len(&self) -> u64 {
+        self.mem_ops_size
+    }
 }
