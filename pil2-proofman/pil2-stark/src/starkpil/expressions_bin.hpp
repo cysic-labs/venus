@@ -28,12 +28,12 @@ const int N_GLOBAL_SECTIONS = 2;
 
 
 struct HintFieldValue {
-    opType operand;
-    uint64_t id;
-    uint64_t commitId;
-    uint64_t rowOffsetIndex;
-    uint64_t dim;
-    uint64_t value;
+    opType operand = opType::number;
+    uint64_t id = 0;
+    uint64_t commitId = 0;
+    uint64_t rowOffsetIndex = 0;
+    uint64_t dim = 0;
+    uint64_t value = 0;
     string stringValue;
     std::vector<uint64_t> pos;
 };
@@ -145,6 +145,9 @@ public:
     uint64_t getNumberHintIdsByName(std::string name);
 
     void getHintIdsByName(uint64_t* hintIds, std::string name);
+
+    // Checks every expression, constraint and hint operand against the buffers StarkInfo lays out.
+    void validateAgainstStarkInfo(const StarkInfo& starkInfo);
 };
 
 
