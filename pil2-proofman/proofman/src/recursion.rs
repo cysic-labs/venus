@@ -34,6 +34,77 @@ pub type GetWitnessFinalFunc =
 
 pub const N_RECURSIVE_PROOFS_PER_AGGREGATION: usize = 3;
 
+/// Checks that the buffers handed to the recursive prover hold what the setup makes it read and
+/// write: the witness and trace columns, the output proof after `initial_idx`, and the CPU prover
+/// buffers.
+fn validate_recursive_proof_inputs<F: PrimeField64>(
+    setup: &Setup<F>,
+    witness: &Proof<F>,
+    new_proof: &Proof<F>,
+    initial_idx: usize,
+    prover_buffer: &[F],
+    const_pols: &[F],
+    const_tree: &[F],
+) -> ProofmanResult<()> {
+    let too_short = |buffer: &str, expected: usize, got: usize| {
+        ProofmanError::InvalidSetup(format!(
+            "recursive {buffer} too short for {:?} [{}:{}]: expected at least {expected}, got {got}",
+            witness.proof_type, witness.airgroup_id, witness.air_id
+        ))
+    };
+
+    if witness.n_cols as u64 != setup.n_cols {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "recursive witness column count mismatch for {:?} [{}:{}]: expected {}, got {}",
+            witness.proof_type, witness.airgroup_id, witness.air_id, setup.n_cols, witness.n_cols
+        )));
+    }
+
+    let witness_len = recursive_witness_size(setup)? as usize;
+    if witness.circom_witness.len() < witness_len {
+        return Err(too_short("witness", witness_len, witness.circom_witness.len()));
+    }
+
+    let proof_len = initial_idx + setup.proof_size as usize;
+    if new_proof.proof.len() < proof_len {
+        return Err(too_short("output proof", proof_len, new_proof.proof.len()));
+    }
+
+    if prover_buffer.len() < setup.prover_buffer_size as usize {
+        return Err(too_short("prover buffer", setup.prover_buffer_size as usize, prover_buffer.len()));
+    }
+    if cfg!(not(feature = "gpu")) {
+        if const_pols.len() < setup.const_pols_size {
+            return Err(too_short("const pols buffer", setup.const_pols_size, const_pols.len()));
+        }
+        if const_tree.len() < setup.const_tree_size {
+            return Err(too_short("const tree buffer", setup.const_tree_size, const_tree.len()));
+        }
+    }
+
+    Ok(())
+}
+
+/// Number of field elements of a recursive circuit witness: the circom signals followed by the
+/// additions listed in the exec file.
+fn recursive_witness_size<F: PrimeField64>(setup: &Setup<F>) -> ProofmanResult<u64> {
+    let size_witness = setup
+        .size_witness
+        .read()
+        .unwrap()
+        .ok_or_else(|| ProofmanError::InvalidSetup("recursive size_witness is not initialized".to_string()))?;
+    let n_adds = setup
+        .exec_data
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|exec_data| exec_data.first().copied())
+        .ok_or_else(|| ProofmanError::InvalidSetup("recursive exec data is not initialized".to_string()))?;
+    size_witness
+        .checked_add(n_adds)
+        .ok_or_else(|| ProofmanError::InvalidSetup("recursive witness size overflows".to_string()))
+}
+
 static RECURSIVE_TRACE_PINNED_POOL: OnceLock<Mutex<RecursiveTracePinnedPool>> = OnceLock::new();
 
 #[derive(Default)]
@@ -321,7 +392,7 @@ pub fn generate_recursive_proof<F: PrimeField64>(
     pctx: &ProofCtx<F>,
     setups: &SetupsVadcop<F>,
     witness: &Proof<F>,
-    new_proof: &Proof<F>,
+    new_proof: &mut Proof<F>,
     prover_buffer: &[F],
     output_dir_path: &Path,
     const_tree: &[F],
@@ -364,6 +435,17 @@ pub fn generate_recursive_proof<F: PrimeField64>(
 
     let setup = setups.get_setup(airgroup_id, air_id, &witness.proof_type)?;
 
+    let publics_aggregation = n_publics_aggregation(pctx, airgroup_id);
+
+    let initial_idx =
+        if witness.proof_type == ProofType::VadcopFinal || witness.proof_type == ProofType::VadcopFinalCompressed {
+            1 + setup.stark_info.n_publics as usize
+        } else {
+            publics_aggregation
+        };
+
+    validate_recursive_proof_inputs(setup, witness, new_proof, initial_idx, prover_buffer, const_pols, const_tree)?;
+
     let trace_len = setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize;
     let mut trace = RecursiveTraceStorage::<F>::new(trace_len);
 
@@ -384,18 +466,9 @@ pub fn generate_recursive_proof<F: PrimeField64>(
         witness.n_cols as u64,
     );
 
-    let publics_aggregation = n_publics_aggregation(pctx, airgroup_id);
-
-    let initial_idx =
-        if witness.proof_type == ProofType::VadcopFinal || witness.proof_type == ProofType::VadcopFinalCompressed {
-            1 + setup.stark_info.n_publics as usize
-        } else {
-            publics_aggregation
-        };
-
     if witness.proof_type != ProofType::VadcopFinal && witness.proof_type != ProofType::VadcopFinalCompressed {
         add_publics_aggregation_c(
-            new_proof.proof.as_ptr() as *mut u8,
+            new_proof.proof.as_mut_ptr() as *mut u8,
             0,
             publics.as_ptr() as *mut u8,
             publics_aggregation as u64,
@@ -415,7 +488,7 @@ pub fn generate_recursive_proof<F: PrimeField64>(
         const_pols_ptr,
         const_tree_ptr,
         publics.as_ptr() as *mut u8,
-        new_proof.proof[initial_idx..].as_ptr() as *mut u64,
+        new_proof.proof[initial_idx..].as_mut_ptr(),
         &proof_file,
         airgroup_id as u64,
         air_id as u64,
@@ -597,13 +670,13 @@ pub fn aggregate_worker_proofs<F: PrimeField64>(
                             gen_witness_aggregation::<F>(pctx, setups, &proof1, &proof2, &proof3, output_dir_path)?;
                         circom_witness.global_idx = Some(rank);
 
-                        let recursive2_proof = gen_recursive_proof_size::<F>(pctx, setups, &circom_witness)?;
+                        let mut recursive2_proof = gen_recursive_proof_size::<F>(pctx, setups, &circom_witness)?;
 
                         let stream_id = generate_recursive_proof::<F>(
                             pctx,
                             setups,
                             &circom_witness,
-                            &recursive2_proof,
+                            &mut recursive2_proof,
                             prover_buffer,
                             output_dir_path,
                             const_tree,
@@ -717,7 +790,7 @@ pub fn generate_vadcop_final_proof<F: PrimeField64>(
         pctx,
         setups,
         &witness_final_proof,
-        &final_proof,
+        &mut final_proof,
         prover_buffer,
         output_dir_path,
         const_tree,
@@ -769,7 +842,7 @@ pub fn generate_vadcop_final_compressed_proof<F: PrimeField64>(
         pctx,
         setups,
         &witness_final_proof,
-        &final_proof,
+        &mut final_proof,
         prover_buffer,
         output_dir_path,
         const_tree,
@@ -894,11 +967,11 @@ pub fn generate_snark_proof(
 
     timer_start_info!(CALCULATE_FINAL_PROOF);
 
-    let snark_publics: Vec<u8> = vec![0; 32];
-    let snark_publics_ptr = snark_publics.as_ptr() as *mut u8;
+    let mut snark_publics: Vec<u8> = vec![0; 32];
+    let snark_publics_ptr = snark_publics.as_mut_ptr();
 
-    let snark_proof: Vec<u8> = vec![0; 24 * 32];
-    let snark_proof_ptr = snark_proof.as_ptr() as *mut u8;
+    let mut snark_proof: Vec<u8> = vec![0; 24 * 32];
+    let snark_proof_ptr = snark_proof.as_mut_ptr();
 
     tracing::trace!("··· Generating final snark proof");
     gen_final_snark_proof_c(snark_prover, witness.as_ptr() as *mut u8, snark_proof_ptr, snark_publics_ptr);

@@ -47,8 +47,18 @@ pub fn write_custom_commit_trace<F: PrimeField64>(
 ) -> ProofmanResult<Vec<F>> {
     let buffer = custom_trace.get_buffer();
     let arity = merkle_tree_arity;
-    let (n_bits, n_bits_ext) = custom_commit_domain_bits(custom_trace.num_rows(), blowup_factor)?;
-    let n_cols = custom_trace.num_cols() as u64;
+    let num_rows = custom_trace.num_rows();
+    let num_cols = custom_trace.num_cols();
+    let (n_bits, n_bits_ext) = custom_commit_domain_bits(num_rows, blowup_factor)?;
+    // The C writer reads `num_rows * num_cols` field elements from the buffer.
+    let fits = num_cols != 0 && num_rows.checked_mul(num_cols).is_some_and(|len| buffer.len() >= len);
+    if !fits {
+        return Err(ProofmanError::InvalidParameters(format!(
+            "custom commit trace buffer of {} field elements does not hold {num_rows} rows of {num_cols} columns",
+            buffer.len()
+        )));
+    }
+    let n_cols = num_cols as u64;
     let mut root = vec![F::ZERO, F::ZERO, F::ZERO, F::ZERO];
 
     write_custom_commit_c(

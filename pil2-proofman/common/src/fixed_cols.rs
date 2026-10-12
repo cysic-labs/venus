@@ -7,7 +7,7 @@ use proofman_starks_lib_c::{
 };
 use proofman_util::{create_buffer_fast, timer_start_info, timer_stop_and_log_info};
 
-use crate::{Setup, ProofType};
+use crate::{ProofmanError, ProofmanResult, ProofType, Setup};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -53,10 +53,21 @@ pub fn write_fixed_cols_bin<F: PrimeField64>(
     air_name: &str,
     n: u64,
     fixed_cols: &mut [FixedColsInfo<F>],
-) {
+) -> ProofmanResult<()> {
+    // The C writer reads `n` values from every column.
+    for col in fixed_cols.iter() {
+        if (col.values.len() as u64) < n {
+            return Err(ProofmanError::InvalidParameters(format!(
+                "fixed column {} holds {} values, expected at least {n}",
+                col.name,
+                col.values.len()
+            )));
+        }
+    }
     let mut fixed_cols_info_c = FixedColsInfoC::from_fixed_cols_info_vec(fixed_cols);
     let fixed_cols_info_c_ptr = fixed_cols_info_c.as_mut_ptr() as *mut c_void;
     write_fixed_cols_bin_c(bin_file, airgroup_name, air_name, n, fixed_cols.len() as u64, fixed_cols_info_c_ptr);
+    Ok(())
 }
 
 pub fn calculate_fixed_tree<F: PrimeField64>(setup: &Setup<F>) {

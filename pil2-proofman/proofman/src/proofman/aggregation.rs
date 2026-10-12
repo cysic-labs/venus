@@ -413,8 +413,8 @@ where
 
             recursive2_proofs_ongoing_clone.write().unwrap()[id] = Some(new_proof);
 
-            let recursive2_lock = recursive2_proofs_ongoing_clone.read().unwrap();
-            let new_proof_ref = recursive2_lock[id].as_ref().unwrap();
+            let mut recursive2_lock = recursive2_proofs_ongoing_clone.write().unwrap();
+            let new_proof_ref = recursive2_lock[id].as_mut().unwrap();
 
             if let Err(e) = generate_recursive_proof(
                 &pctx_clone,
@@ -526,8 +526,8 @@ where
                 let id = new_proof.global_idx.unwrap();
                 recursive2_proofs_ongoing_clone.write().unwrap()[id] = Some(new_proof);
 
-                let recursive2_lock = recursive2_proofs_ongoing_clone.read().unwrap();
-                let new_proof_ref = recursive2_lock[id].as_ref().unwrap();
+                let mut recursive2_lock = recursive2_proofs_ongoing_clone.write().unwrap();
+                let new_proof_ref = recursive2_lock[id].as_mut().unwrap();
 
                 if let Err(e) = generate_recursive_proof(
                     &pctx_clone,

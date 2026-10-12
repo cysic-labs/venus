@@ -733,15 +733,14 @@ pub fn calculate_max_witness_trace_size<F: PrimeField64>(
         for (air_id, _) in air_group.iter().enumerate() {
             let setup = sctx.get_setup(airgroup_id, air_id)?;
             let n = 1 << setup.stark_info.stark_struct.n_bits;
-            let num_packed_words =
-                packed_info.get(&(airgroup_id, air_id)).map(|info| info.num_packed_words).unwrap_or(0);
+            // Packed words only size the trace of an AIR whose trace is packed.
+            let packed_words =
+                packed_info.get(&(airgroup_id, air_id)).filter(|info| info.is_packed).map(|info| info.num_packed_words);
             let is_packed =
-                cfg!(feature = "gpu") && cfg!(feature = "packed") && gpu_params.pack_trace && num_packed_words > 0;
-            let trace_size = if !is_packed {
-                let n_cols = setup.stark_info.map_sections_n["cm1"];
-                n * n_cols
-            } else {
-                n * num_packed_words
+                cfg!(feature = "gpu") && cfg!(feature = "packed") && gpu_params.pack_trace && packed_words.is_some();
+            let trace_size = match packed_words {
+                Some(num_packed_words) if is_packed => n * num_packed_words,
+                _ => n * setup.stark_info.map_sections_n["cm1"],
             };
 
             max_witness_trace_size = max_witness_trace_size.max(trace_size as usize);
@@ -765,8 +764,21 @@ pub fn load_device_setups<F: PrimeField64>(
             if cfg!(feature = "gpu") {
                 tracing::debug!(airgroup_id, air_id, proof_type, "Loading expressions setup in GPU");
             }
-            let packed_info_air =
-                packed_info.get(&(airgroup_id, air_id)).cloned().unwrap_or_else(|| PackedInfo::new(false, 0, vec![]));
+            let packed_info_air = match packed_info.get(&(airgroup_id, air_id)) {
+                Some(info) => {
+                    // C++ validates the column widths, but reads one width per trace column from
+                    // unpack_info, whose length only Rust knows.
+                    let n_cols = setup.stark_info.map_sections_n["cm1"];
+                    if info.is_packed && info.unpack_info.len() as u64 != n_cols {
+                        return Err(ProofmanError::InvalidSetup(format!(
+                            "Packed info for airgroup_id={airgroup_id}, air_id={air_id} has {} column widths, expected {n_cols}",
+                            info.unpack_info.len()
+                        )));
+                    }
+                    info.clone()
+                }
+                None => PackedInfo::new(false, 0, vec![]),
+            };
             load_device_setup_c(
                 airgroup_id as u64,
                 air_id as u64,

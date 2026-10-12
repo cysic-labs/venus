@@ -78,6 +78,16 @@ fn read_to_string_limited(path: &Path, max_bytes: u64, label: &str) -> ProofmanR
     Ok(contents)
 }
 
+/// Parses a verkey, the Goldilocks Merkle root of the constant tree, which is always 4 field elements.
+fn parse_goldilocks_verkey<F: PrimeField64>(contents: &str) -> ProofmanResult<Vec<F>> {
+    let values: Vec<u64> =
+        serde_json::from_str(contents).map_err(|err| invalid_setup(format!("Failed to parse verkey: {err}")))?;
+    if values.len() != 4 {
+        return Err(invalid_setup(format!("verkey must contain exactly 4 limbs, got {}", values.len())));
+    }
+    Ok(values.into_iter().map(F::from_u64).collect())
+}
+
 fn read_first_u64_limited(path: &Path, label: &str) -> ProofmanResult<u64> {
     let mut file =
         File::open(path).map_err(|err| invalid_setup(format!("Failed to open {label} {}: {err}", path.display())))?;
@@ -682,8 +692,7 @@ impl<F: PrimeField64> Setup<F> {
             } else {
                 let json_str = read_to_string_limited(Path::new(&verkey_file), MAX_VERKEY_JSON_BYTES, "verkey")
                     .unwrap_or_else(|err| panic!("{err}"));
-                let vk: Vec<u64> = serde_json::from_str(&json_str).expect("Unable to parse JSON");
-                vk.iter().map(|&x| F::from_u64(x)).collect::<Vec<F>>()
+                parse_goldilocks_verkey(&json_str).unwrap_or_else(|err| panic!("{err}"))
             };
 
             let n_cols = stark_info.map_sections_n["cm1"];

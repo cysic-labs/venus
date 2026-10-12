@@ -2455,8 +2455,8 @@ where
                 }
 
                 if *new_proof_type == ProofType::Recursive2 {
-                    let recursive2_lock = recursive2_proofs_ongoing_clone.read().unwrap();
-                    let new_proof_ref = recursive2_lock[id].as_ref().unwrap();
+                    let mut recursive2_lock = recursive2_proofs_ongoing_clone.write().unwrap();
+                    let new_proof_ref = recursive2_lock[id].as_mut().unwrap();
 
                     if let Err(e) = generate_recursive_proof(
                         &pctx_clone,
@@ -2474,8 +2474,8 @@ where
                         break;
                     }
                 } else if *new_proof_type == ProofType::Compressor {
-                    let compressor_lock = compressor_proofs_clone[id].read().unwrap();
-                    let new_proof_ref = compressor_lock.as_ref().unwrap();
+                    let mut compressor_lock = compressor_proofs_clone[id].write().unwrap();
+                    let new_proof_ref = compressor_lock.as_mut().unwrap();
                     if let Err(e) = generate_recursive_proof(
                         &pctx_clone,
                         &setups_clone,
@@ -2492,8 +2492,8 @@ where
                         break;
                     }
                 } else {
-                    let recursive1_lock = recursive1_proofs_clone[id].read().unwrap();
-                    let new_proof_ref = recursive1_lock.as_ref().unwrap();
+                    let mut recursive1_lock = recursive1_proofs_clone[id].write().unwrap();
+                    let new_proof_ref = recursive1_lock.as_mut().unwrap();
                     if let Err(e) = generate_recursive_proof(
                         &pctx_clone,
                         &setups_clone,
@@ -3245,14 +3245,19 @@ where
 
         // SAFETY: the prover writes the proof into this buffer before it is read.
         let proof = unsafe { create_buffer_fast(setup.proof_size as usize) };
-        *proofs[instance_id].write().unwrap() =
-            Some(Proof::new(ProofType::Basic, airgroup_id, air_id, Some(instance_id), proof));
+        let proof_buffer = {
+            let mut proof_slot = proofs[instance_id].write().unwrap();
+            proof_slot
+                .insert(Proof::new(ProofType::Basic, airgroup_id, air_id, Some(instance_id), proof))
+                .proof
+                .as_mut_ptr()
+        };
 
         let used_stream_id = gen_proof_c(
             p_setup,
             p_steps_params,
             pctx.get_global_challenge_ptr(),
-            proofs[instance_id].read().unwrap().as_ref().unwrap().proof.as_ptr() as *mut u64,
+            proof_buffer,
             &proof_file,
             airgroup_id as u64,
             air_id as u64,

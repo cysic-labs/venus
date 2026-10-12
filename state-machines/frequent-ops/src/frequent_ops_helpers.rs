@@ -311,7 +311,7 @@ impl FrequentOpsHelpers {
             air_name,
             num_rows as u64,
             &mut [op, a0, a1, b0, b1, c0, c1, flag],
-        );
+        )?;
         println!("OP, A, B, C and FLAG columns written to {output_file}");
 
         Ok(())
