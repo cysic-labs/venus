@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -7,9 +7,11 @@ use anyhow::Result;
 use crate::recursive_setup::r1cs::R1cs;
 
 const MAGIC: &[u8; 8] = b"PIL2RSPD";
-const VERSION: u64 = 3;
+const VERSION: u64 = 5;
 const TEMPLATE_PER_AIR: u64 = 0;
 const RUNTIME_EXTENSION_NONE: u64 = 0;
+const RUNTIME_EXTENSION_SOURCE_ALIASES: u64 = 1;
+const RUNTIME_EXTENSION_SOURCE_ALIASES_AND_IGNORED: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeDescriptor {
@@ -23,6 +25,8 @@ pub struct RuntimeDescriptor {
     pub source_public_prefix_words: u64,
     pub source_sections: Vec<RuntimeSection>,
     pub section_copy_ops: Vec<RuntimeSectionCopyOp>,
+    pub source_alias_checks: Vec<RuntimeSourceAliasCheck>,
+    pub ignored_source_words: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +51,13 @@ pub struct RuntimeSectionCopyOp {
     pub witness_offset_words: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSourceAliasCheck {
+    pub first_source_word: u64,
+    pub aliased_source_word: u64,
+    pub witness_word: u64,
+}
+
 impl RuntimeDescriptor {
     pub fn for_r1cs(r1cs: &R1cs) -> Self {
         let n_publics = u64::from(r1cs.n_outputs + r1cs.n_pub_inputs);
@@ -61,6 +72,8 @@ impl RuntimeDescriptor {
             source_public_prefix_words: u64::from(r1cs.n_vars.saturating_sub(1)),
             source_sections: Vec::new(),
             section_copy_ops: Vec::new(),
+            source_alias_checks: Vec::new(),
+            ignored_source_words: Vec::new(),
         }
     }
 
@@ -69,7 +82,8 @@ impl RuntimeDescriptor {
         input_signal_start: u64,
         input_signal_count: u64,
         signal_replacements: &[(u64, u64)],
-    ) -> Self {
+        non_direct_signal_replacements: &[u64],
+    ) -> Result<Self> {
         let n_publics = u64::from(r1cs.n_outputs + r1cs.n_pub_inputs);
         let wire_map = if r1cs.wire_map.is_empty() {
             (0..u64::from(r1cs.n_vars)).collect::<Vec<_>>()
@@ -82,21 +96,47 @@ impl RuntimeDescriptor {
             .map(|(wire, &signal)| (signal, wire as u64))
             .collect::<HashMap<_, _>>();
         let replacement_map = signal_replacements.iter().copied().collect::<HashMap<_, _>>();
+        let non_direct_replacement_set =
+            non_direct_signal_replacements.iter().copied().collect::<HashSet<_>>();
         let mut section_copy_ops = Vec::new();
+        let mut first_source_by_wire = HashMap::new();
+        let mut source_alias_checks = Vec::new();
+        let mut ignored_source_words = Vec::new();
         for source_offset in 0..input_signal_count {
             let signal = input_signal_start + source_offset;
-            if let Some(wire) = resolve_input_signal_wire(signal, &signal_to_wire, &replacement_map)
-            {
-                section_copy_ops.push(RuntimeSectionCopyOp {
-                    section_index: 0,
-                    section_offset_words: source_offset,
-                    word_len: 1,
-                    witness_offset_words: wire,
-                });
+            let Some(wire) = resolve_input_signal_wire(
+                signal,
+                &signal_to_wire,
+                &replacement_map,
+                &non_direct_replacement_set,
+            )?
+            else {
+                ignored_source_words.push(source_offset);
+                continue;
+            };
+            if wire == 0 {
+                anyhow::bail!(
+                    "Circom main input signal {signal} resolves to constant witness wire 0"
+                );
             }
+            if let Some(&first_source_word) = first_source_by_wire.get(&wire) {
+                source_alias_checks.push(RuntimeSourceAliasCheck {
+                    first_source_word,
+                    aliased_source_word: source_offset,
+                    witness_word: wire,
+                });
+            } else {
+                first_source_by_wire.insert(wire, source_offset);
+            }
+            section_copy_ops.push(RuntimeSectionCopyOp {
+                section_index: 0,
+                section_offset_words: source_offset,
+                word_len: 1,
+                witness_offset_words: wire,
+            });
         }
 
-        Self {
+        Ok(Self {
             template_id: TEMPLATE_PER_AIR,
             size_witness_words: u64::from(r1cs.n_vars),
             n_publics,
@@ -112,7 +152,9 @@ impl RuntimeDescriptor {
                 flags: 0,
             }],
             section_copy_ops,
-        }
+            source_alias_checks,
+            ignored_source_words,
+        })
     }
 }
 
@@ -120,22 +162,23 @@ fn resolve_input_signal_wire(
     signal: u64,
     signal_to_wire: &HashMap<u64, u64>,
     replacement_map: &HashMap<u64, u64>,
-) -> Option<u64> {
+    non_direct_replacement_set: &HashSet<u64>,
+) -> Result<Option<u64>> {
     if let Some(&wire) = signal_to_wire.get(&signal) {
-        return Some(wire);
+        return Ok(Some(wire));
     }
-    let mut current = signal;
-    for _ in 0..32 {
-        let next = *replacement_map.get(&current)?;
-        if let Some(&wire) = signal_to_wire.get(&next) {
-            return Some(wire);
-        }
-        if next == current {
-            return None;
-        }
-        current = next;
+    if non_direct_replacement_set.contains(&signal) {
+        anyhow::bail!("Circom main input signal {signal} has a non-direct simplified binding");
     }
-    None
+    let Some(&replacement) = replacement_map.get(&signal) else {
+        return Ok(None);
+    };
+    if non_direct_replacement_set.contains(&replacement) {
+        anyhow::bail!(
+            "Circom main input signal {signal} resolves through non-direct simplified signal {replacement}"
+        );
+    }
+    Ok(signal_to_wire.get(&replacement).copied())
 }
 
 pub fn write_runtime_dat_file(path: &Path, r1cs: &R1cs) -> Result<()> {
@@ -199,7 +242,29 @@ pub fn runtime_dat_buffer(descriptor: &RuntimeDescriptor) -> Result<Vec<u8>> {
         push_u64(&mut out, copy_op.word_len);
         push_u64(&mut out, copy_op.witness_offset_words);
     }
-    push_u64(&mut out, RUNTIME_EXTENSION_NONE);
+    if descriptor.ignored_source_words.is_empty() && descriptor.source_alias_checks.is_empty() {
+        push_u64(&mut out, RUNTIME_EXTENSION_NONE);
+    } else if descriptor.ignored_source_words.is_empty() {
+        push_u64(&mut out, RUNTIME_EXTENSION_SOURCE_ALIASES);
+        push_u64(&mut out, descriptor.source_alias_checks.len() as u64);
+        for check in &descriptor.source_alias_checks {
+            push_u64(&mut out, check.first_source_word);
+            push_u64(&mut out, check.aliased_source_word);
+            push_u64(&mut out, check.witness_word);
+        }
+    } else {
+        push_u64(&mut out, RUNTIME_EXTENSION_SOURCE_ALIASES_AND_IGNORED);
+        push_u64(&mut out, descriptor.source_alias_checks.len() as u64);
+        for check in &descriptor.source_alias_checks {
+            push_u64(&mut out, check.first_source_word);
+            push_u64(&mut out, check.aliased_source_word);
+            push_u64(&mut out, check.witness_word);
+        }
+        push_u64(&mut out, descriptor.ignored_source_words.len() as u64);
+        for source_word in &descriptor.ignored_source_words {
+            push_u64(&mut out, *source_word);
+        }
+    }
     Ok(out)
 }
 
@@ -297,11 +362,11 @@ mod tests {
     }
 
     #[test]
-    fn maps_circom_main_inputs_to_witness_wires() {
+    fn maps_circom_main_inputs_to_witness_wires() -> Result<()> {
         let mut r1cs = synthetic_r1cs();
         r1cs.n_vars = 5;
         r1cs.wire_map = vec![0, 12, 10, 11, 20];
-        let descriptor = RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[]);
+        let descriptor = RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[], &[])?;
         assert_eq!(descriptor.copy_indices, Vec::<u64>::new());
         assert_eq!(descriptor.source_public_prefix_words, 0);
         assert_eq!(descriptor.source_sections[0].start_word, 0);
@@ -313,18 +378,81 @@ mod tests {
         assert_eq!(descriptor.section_copy_ops[1].witness_offset_words, 3);
         assert_eq!(descriptor.section_copy_ops[2].section_offset_words, 2);
         assert_eq!(descriptor.section_copy_ops[2].witness_offset_words, 1);
+        assert!(descriptor.ignored_source_words.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn maps_simplified_circom_inputs_to_replacement_wires() {
+    fn maps_simplified_circom_inputs_to_replacement_wires() -> Result<()> {
         let mut r1cs = synthetic_r1cs();
         r1cs.n_vars = 6;
         r1cs.wire_map = vec![0, 50, 51, 12, 80, 81];
         let descriptor =
-            RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[(10, 80), (11, 81)]);
+            RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[(10, 80), (11, 81)], &[])?;
         assert_eq!(descriptor.section_copy_ops.len(), 3);
         assert_eq!(descriptor.section_copy_ops[0].witness_offset_words, 4);
         assert_eq!(descriptor.section_copy_ops[1].witness_offset_words, 5);
         assert_eq!(descriptor.section_copy_ops[2].witness_offset_words, 3);
+        assert!(descriptor.source_alias_checks.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn records_simplified_circom_input_aliases() -> Result<()> {
+        let mut r1cs = synthetic_r1cs();
+        r1cs.n_vars = 5;
+        r1cs.wire_map = vec![0, 50, 51, 12, 80];
+        let descriptor =
+            RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[(10, 80), (11, 80)], &[])?;
+
+        assert_eq!(descriptor.section_copy_ops.len(), 3);
+        assert_eq!(descriptor.section_copy_ops[0].witness_offset_words, 4);
+        assert_eq!(descriptor.section_copy_ops[1].witness_offset_words, 4);
+        assert_eq!(descriptor.section_copy_ops[2].witness_offset_words, 3);
+        assert_eq!(
+            descriptor.source_alias_checks,
+            vec![RuntimeSourceAliasCheck {
+                first_source_word: 0,
+                aliased_source_word: 1,
+                witness_word: 4
+            }]
+        );
+
+        let encoded = runtime_dat_buffer(&descriptor)?;
+        assert_eq!(
+            &encoded[encoded.len() - 40..encoded.len() - 32],
+            &RUNTIME_EXTENSION_SOURCE_ALIASES.to_le_bytes()
+        );
+        assert_eq!(&encoded[encoded.len() - 32..encoded.len() - 24], &1u64.to_le_bytes());
+        assert_eq!(&encoded[encoded.len() - 24..encoded.len() - 16], &0u64.to_le_bytes());
+        assert_eq!(&encoded[encoded.len() - 16..encoded.len() - 8], &1u64.to_le_bytes());
+        assert_eq!(&encoded[encoded.len() - 8..], &4u64.to_le_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn records_unused_inputs_and_rejects_unsupported_bindings() -> Result<()> {
+        let mut r1cs = synthetic_r1cs();
+        r1cs.n_vars = 3;
+        r1cs.wire_map = vec![0, 10, 11];
+
+        let descriptor = RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[], &[])?;
+        assert_eq!(descriptor.ignored_source_words, vec![2]);
+        let encoded = runtime_dat_buffer(&descriptor)?;
+        assert_eq!(
+            &encoded[encoded.len() - 32..encoded.len() - 24],
+            &RUNTIME_EXTENSION_SOURCE_ALIASES_AND_IGNORED.to_le_bytes()
+        );
+        assert_eq!(&encoded[encoded.len() - 24..encoded.len() - 16], &0u64.to_le_bytes());
+        assert_eq!(&encoded[encoded.len() - 16..encoded.len() - 8], &1u64.to_le_bytes());
+        assert_eq!(&encoded[encoded.len() - 8..], &2u64.to_le_bytes());
+
+        let err = RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[], &[12]).unwrap_err();
+        assert!(err.to_string().contains("signal 12 has a non-direct simplified binding"));
+
+        let err =
+            RuntimeDescriptor::for_circom_main_inputs(&r1cs, 10, 3, &[(12, 0)], &[]).unwrap_err();
+        assert!(err.to_string().contains("signal 12 resolves to constant witness wire 0"));
+        Ok(())
     }
 }

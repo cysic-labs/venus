@@ -510,7 +510,8 @@ fn compile_and_write_setup(
         metadata.input_signal_start,
         metadata.input_signal_count,
         &metadata.signal_replacements,
-    );
+        &metadata.non_direct_signal_replacements,
+    )?;
     let shape = calculate_layout_shape(&r1cs, kind)?;
     info!(
         "{circuit_name}: {} of {} rows used ({} public rows for {} publics)",

@@ -22,6 +22,7 @@ pub struct CircomR1csMetadata {
     pub input_signal_start: u64,
     pub input_signal_count: u64,
     pub signal_replacements: Vec<(u64, u64)>,
+    pub non_direct_signal_replacements: Vec<u64>,
 }
 
 #[allow(dead_code)]
@@ -99,6 +100,11 @@ fn compile_goldilocks_constraints(config: &CircomR1csConfig) -> Result<(CircomR1
             .signal_replacements()
             .into_iter()
             .map(|(from, to)| (from as u64, to as u64))
+            .collect(),
+        non_direct_signal_replacements: exporter
+            .non_direct_signal_replacements()
+            .into_iter()
+            .map(|signal| signal as u64)
             .collect(),
     };
     Ok((metadata, vcp))
@@ -207,14 +213,102 @@ component main {public [a]} = Main();
 
         let metadata = compile_file_to_r1cs_with_metadata(&input, [dir.clone()], &output)?;
         let r1cs = crate::recursive_setup::r1cs::read_r1cs(&output)?;
-        let descriptor = crate::recursive_setup::runtime::RuntimeDescriptor::for_circom_main_inputs(
-            &r1cs,
-            metadata.input_signal_start,
-            metadata.input_signal_count,
-            &metadata.signal_replacements,
-        );
+        let descriptor =
+            crate::recursive_setup::runtime::RuntimeDescriptor::for_circom_main_inputs(
+                &r1cs,
+                metadata.input_signal_start,
+                metadata.input_signal_count,
+                &metadata.signal_replacements,
+                &metadata.non_direct_signal_replacements,
+            )?;
         assert_eq!(metadata.input_signal_count, 2);
         assert_eq!(descriptor.section_copy_ops.len(), 2);
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn records_unused_private_inputs_as_ignored_sources() -> Result<()> {
+        let dir = std::env::temp_dir()
+            .join(format!("pk_setup_circom_unused_input_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let input = dir.join("unused.circom");
+        let output = dir.join("unused.r1cs");
+        std::fs::write(
+            &input,
+            r#"
+pragma circom 2.1.0;
+
+template Main() {
+    signal input used;
+    signal input unused;
+    signal output y;
+    y <== used * used;
+}
+
+component main = Main();
+"#,
+        )?;
+
+        let metadata = compile_file_to_r1cs_with_metadata(&input, [dir.clone()], &output)?;
+        let r1cs = crate::recursive_setup::r1cs::read_r1cs(&output)?;
+        let descriptor =
+            crate::recursive_setup::runtime::RuntimeDescriptor::for_circom_main_inputs(
+                &r1cs,
+                metadata.input_signal_start,
+                metadata.input_signal_count,
+                &metadata.signal_replacements,
+                &metadata.non_direct_signal_replacements,
+            )?;
+        assert_eq!(metadata.input_signal_count, 2);
+        assert_eq!(descriptor.section_copy_ops.len(), 1);
+        assert_eq!(descriptor.ignored_source_words, vec![1]);
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_constant_private_input_simplifications() -> Result<()> {
+        let dir = std::env::temp_dir()
+            .join(format!("pk_setup_circom_input_binding_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        for (name, relation, expected_error) in [
+            ("constant_one", "a === 1; y <== 1;", "constant witness wire 0"),
+            ("constant_two", "a === 2; y <== 1;", "non-direct simplified binding"),
+        ] {
+            let input = dir.join(format!("{name}.circom"));
+            let output = dir.join(format!("{name}.r1cs"));
+            std::fs::write(
+                &input,
+                format!(
+                    r#"
+pragma circom 2.1.0;
+
+template Main() {{
+    signal input a;
+    signal output y;
+    {relation}
+}}
+
+component main = Main();
+"#
+                ),
+            )?;
+
+            let metadata = compile_file_to_r1cs_with_metadata(&input, [dir.clone()], &output)?;
+            let r1cs = crate::recursive_setup::r1cs::read_r1cs(&output)?;
+            let err = crate::recursive_setup::runtime::RuntimeDescriptor::for_circom_main_inputs(
+                &r1cs,
+                metadata.input_signal_start,
+                metadata.input_signal_count,
+                &metadata.signal_replacements,
+                &metadata.non_direct_signal_replacements,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains(expected_error), "{name}: {err}");
+        }
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())

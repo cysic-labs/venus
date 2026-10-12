@@ -17,27 +17,45 @@ fn log_substitutions(substitutions: &LinkedList<S>, writer: &mut Option<Substitu
     }
 }
 
-fn collect_direct_signal_replacements(substitutions: &LinkedList<S>, replacements: &mut HashMap<usize, usize>) {
+fn collect_direct_signal_replacements(
+    substitutions: &LinkedList<S>,
+    replacements: &mut HashMap<usize, usize>,
+    non_direct_replacements: &mut HashSet<usize>,
+) {
     for substitution in substitutions {
+        let from = *substitution.from();
         let to = substitution.to();
         if to.len() != 1 {
+            replacements.remove(&from);
+            non_direct_replacements.insert(from);
             continue;
         }
         if let Some((&signal, coeff)) = to.iter().next() {
             if coeff.is_one() {
-                replacements.insert(*substitution.from(), signal);
+                if !non_direct_replacements.contains(&from) {
+                    replacements.insert(from, signal);
+                }
+            } else {
+                replacements.remove(&from);
+                non_direct_replacements.insert(from);
             }
         }
     }
 }
 
-fn resolve_signal_replacements(replacements: HashMap<usize, usize>) -> Vec<(usize, usize)> {
+fn resolve_signal_replacements(
+    replacements: HashMap<usize, usize>,
+    non_direct_replacements: &HashSet<usize>,
+) -> Vec<(usize, usize)> {
     let mut resolved = Vec::with_capacity(replacements.len());
     for (&from, &to) in &replacements {
         let mut current = to;
         let mut seen = HashSet::new();
         seen.insert(from);
-        while let Some(&next) = replacements.get(&current) {
+        while !non_direct_replacements.contains(&current) {
+            let Some(&next) = replacements.get(&current) else {
+                break;
+            };
             if !seen.insert(current) {
                 break;
             }
@@ -473,7 +491,9 @@ fn remove_not_relevant(substitutions: &mut SEncoded, relevant: &HashSet<usize>) 
 
 
 // returns the constraints, the assignment of the witness and the number of inputs in the witness
-pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, usize, Vec<(usize, usize)>) {
+pub fn simplification(
+    smp: &mut Simplifier,
+) -> (ConstraintStorage, SignalMap, usize, Vec<(usize, usize)>, Vec<usize>) {
     use super::non_linear_utils::obtain_and_simplify_non_linear;
     use circom_algebra::simplification_utils::build_encoded_fast_substitutions;
     use circom_algebra::simplification_utils::fast_encoded_constraint_substitution;
@@ -499,6 +519,7 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
     let mut no_rounds = smp.no_rounds;
     let remove_unused = true;
     let mut signal_replacements = HashMap::new();
+    let mut non_direct_signal_replacements = HashSet::new();
 
     let relevant_signals = {
         // println!("Creating first relevant set");
@@ -524,7 +545,11 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
             &mut substitution_log,
         );
 
-        collect_direct_signal_replacements(&subs, &mut signal_replacements);
+        collect_direct_signal_replacements(
+            &subs,
+            &mut signal_replacements,
+            &mut non_direct_signal_replacements,
+        );
         LinkedList::append(&mut lconst, &mut cons);
         let mut substitutions = build_encoded_fast_substitutions(subs);
         for constraint in &mut linear {
@@ -551,7 +576,11 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
         let now = SystemTime::now();
         let (subs, mut cons) =
             constant_eq_simplification(cons_equalities, &forbidden, &field, &mut substitution_log);
-        collect_direct_signal_replacements(&subs, &mut signal_replacements);
+        collect_direct_signal_replacements(
+            &subs,
+            &mut signal_replacements,
+            &mut non_direct_signal_replacements,
+        );
         LinkedList::append(&mut lconst, &mut cons);
         let substitutions = build_encoded_fast_substitutions(subs);
         for constraint in &mut linear {
@@ -588,7 +617,11 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
             &field,
             use_old_heuristics,
         );
-        collect_direct_signal_replacements(&subs, &mut signal_replacements);
+        collect_direct_signal_replacements(
+            &subs,
+            &mut signal_replacements,
+            &mut non_direct_signal_replacements,
+        );
         // println!("Building substitution map");
         let now0 = SystemTime::now();
         let mut only_relevant = LinkedList::new();
@@ -760,10 +793,34 @@ pub fn simplification(smp: &mut Simplifier) -> (ConstraintStorage, SignalMap, us
         w.end().unwrap();
     }
     // println!("NO CONSTANTS: {}", constraint_storage.no_constants());
+    let signal_replacements =
+        resolve_signal_replacements(signal_replacements, &non_direct_signal_replacements);
+    let mut non_direct_signal_replacements =
+        non_direct_signal_replacements.into_iter().collect::<Vec<_>>();
+    non_direct_signal_replacements.sort_unstable();
+
     (
         constraint_storage,
         signal_map,
         smp.no_private_inputs - deleted_inputs,
-        resolve_signal_replacements(signal_replacements),
+        signal_replacements,
+        non_direct_signal_replacements,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_signal_replacements;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn direct_replacement_chains_stop_at_non_direct_signals() {
+        let replacements = HashMap::from([(10, 11), (11, 12)]);
+        let non_direct = HashSet::from([11]);
+
+        assert_eq!(
+            resolve_signal_replacements(replacements, &non_direct),
+            vec![(10, 11), (11, 12)]
+        );
+    }
 }

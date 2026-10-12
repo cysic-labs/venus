@@ -12,4 +12,7 @@ pub trait ConstraintExporter {
     fn signal_replacements(&self) -> Vec<(usize, usize)> {
         Vec::new()
     }
+    fn non_direct_signal_replacements(&self) -> Vec<usize> {
+        Vec::new()
+    }
 }

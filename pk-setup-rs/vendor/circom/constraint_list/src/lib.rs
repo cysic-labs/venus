@@ -129,8 +129,13 @@ pub struct Simplifier {
 }
 impl Simplifier {
     pub fn simplify_constraints(mut self) -> ConstraintList {
-        let (portable, map, private_inputs_witness, signal_replacements) =
-            constraint_simplification::simplification(&mut self);
+        let (
+            portable,
+            map,
+            private_inputs_witness,
+            signal_replacements,
+            non_direct_signal_replacements,
+        ) = constraint_simplification::simplification(&mut self);
         ConstraintList {
             field: self.field,
             dag_encoding: self.dag_encoding,
@@ -142,6 +147,7 @@ impl Simplifier {
             constraints: portable,
             signal_map: map,
             signal_replacements,
+            non_direct_signal_replacements,
         }
     }
 
@@ -166,6 +172,7 @@ pub struct ConstraintList {
     //  Signals in [witness_len, Vec::len(&signal_map)) are the ones deleted
     pub signal_map: SignalMap,
     pub signal_replacements: Vec<(usize, usize)>,
+    pub non_direct_signal_replacements: Vec<usize>,
 }
 
 impl ConstraintExporter for ConstraintList {
@@ -183,6 +190,10 @@ impl ConstraintExporter for ConstraintList {
 
     fn signal_replacements(&self) -> Vec<(usize, usize)> {
         self.signal_replacements.clone()
+    }
+
+    fn non_direct_signal_replacements(&self) -> Vec<usize> {
+        self.non_direct_signal_replacements.clone()
     }
 }
 
