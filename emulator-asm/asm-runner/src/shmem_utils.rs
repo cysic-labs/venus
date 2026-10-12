@@ -1,17 +1,8 @@
 use libc::{
-    c_uint, close, mmap, munmap, shm_open, shm_unlink, MAP_FAILED, MAP_SHARED, PROT_READ, S_IRUSR,
-    S_IWUSR,
+    c_uint, close, fstat, mmap, munmap, shm_open, shm_unlink, MAP_FAILED, MAP_SHARED, PROT_READ,
+    S_IRUSR, S_IWUSR,
 };
-use proofman_common::format_bytes;
-use std::{
-    ffi::CString,
-    fmt::Debug,
-    io,
-    os::raw::c_void,
-    ptr,
-    sync::atomic::{fence, Ordering},
-};
-use tracing::info;
+use std::{ffi::CString, fmt::Debug, io, mem::MaybeUninit, os::raw::c_void, ptr};
 
 use anyhow::{anyhow, Result};
 
@@ -82,7 +73,25 @@ impl<H: AsmShmemHeader> AsmSharedMemory<H> {
                 flags |= libc::MAP_LOCKED;
             }
 
+            // Pages past the end of the backing object raise SIGBUS when touched, so every mapping
+            // below must fit in it.
+            let object_size = match shmem_object_size(fd) {
+                Ok(size) => size,
+                Err(err) => {
+                    close(fd);
+                    return Err(anyhow::anyhow!("fstat failed for '{name}': {err}"));
+                }
+            };
+
             let size_header = size_of::<H>();
+            if object_size < size_header {
+                close(fd);
+                return Err(anyhow::anyhow!(
+                    "Shared memory '{name}' is smaller than its header \
+                     ({object_size} < {size_header} bytes)"
+                ));
+            }
+
             let mapped_ptr = mmap(ptr::null_mut(), size_header, PROT_READ, flags, fd, 0);
             if mapped_ptr == MAP_FAILED {
                 let err = io::Error::last_os_error();
@@ -92,27 +101,25 @@ impl<H: AsmShmemHeader> AsmSharedMemory<H> {
                 ));
             }
 
-            // let header = Self::map_header(&self);
             let header = (mapped_ptr as *const H).read();
-            let allocated_size = header.allocated_size() as usize;
-
-            // Ensure the size is valid
-            if allocated_size == 0 {
-                if munmap(mapped_ptr, size_header) != 0 {
-                    let err = io::Error::last_os_error();
-                    return Err(anyhow::anyhow!("munmap failed for '{name}': {err}"));
-                }
-
-                close(fd);
-
-                return Err(anyhow::anyhow!("Shared memory '{}' has zero allocated size", name));
-            }
 
             if munmap(mapped_ptr, size_header) != 0 {
                 let err = io::Error::last_os_error();
                 close(fd);
                 return Err(anyhow::anyhow!("munmap failed for '{name}': {err}"));
             }
+
+            // The producer advertises the size to map; it must cover the header and fit in the
+            // backing object.
+            let allocated_size = header.allocated_size();
+            if allocated_size < size_header as u64 || allocated_size > object_size as u64 {
+                close(fd);
+                return Err(anyhow::anyhow!(
+                    "Shared memory '{name}' allocated size {allocated_size} is outside \
+                     [{size_header}..={object_size}]"
+                ));
+            }
+            let allocated_size = allocated_size as usize;
 
             let mapped_ptr = mmap(ptr::null_mut(), allocated_size, PROT_READ, flags, fd, 0);
 
@@ -132,103 +139,6 @@ impl<H: AsmShmemHeader> AsmSharedMemory<H> {
                 _phantom: std::marker::PhantomData::<H>,
             })
         }
-    }
-
-    pub fn remap(&mut self, new_size: usize) -> Result<()> {
-        if !self.is_mapped() {
-            return Err(anyhow::anyhow!(
-                "Shared memory '{}' is not currently mapped, cannot remap",
-                self.shmem_name
-            ));
-        }
-
-        if new_size == 0 {
-            return Err(anyhow::anyhow!("New size must be greater than zero"));
-        }
-
-        // Use mremap to extend the existing mapping at the same address
-        let new_ptr = self.remap_region(new_size)?;
-
-        // Update the struct with new mapping info
-        self.mapped_ptr = new_ptr;
-        self.mapped_size = new_size;
-
-        Ok(())
-    }
-
-    /// Remaps the shared memory region to a new size.
-    /// # Safety
-    /// The caller must ensure that:
-    /// - `new_size` is the desired new size for the mapping.
-    pub fn remap_region(&self, new_size: usize) -> Result<*mut c_void> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        {
-            let flags = libc::MREMAP_MAYMOVE;
-            let new_ptr =
-                unsafe { libc::mremap(self.mapped_ptr, self.mapped_size, new_size, flags) };
-            if new_ptr == MAP_FAILED {
-                Err(anyhow::anyhow!(
-                    "Failed to remap shared memory '{}' from size {} to {}: {}",
-                    self.shmem_name,
-                    self.mapped_size,
-                    new_size,
-                    io::Error::last_os_error()
-                ))
-            } else {
-                Ok(new_ptr)
-            }
-        }
-
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        {
-            // On macOS / other systems without mremap:
-            // just unmap and remap a fresh region — no data copy.
-            if unsafe { munmap(self.mapped_ptr, self.mapped_size) } != 0 {
-                return Err(anyhow::anyhow!(
-                    "munmap failed for '{}': {}",
-                    self.shmem_name,
-                    io::Error::last_os_error()
-                ));
-            }
-
-            let new_ptr =
-                unsafe { mmap(ptr::null_mut(), new_size, PROT_READ, MAP_SHARED, self._fd, 0) };
-
-            if new_ptr == MAP_FAILED {
-                Err(anyhow::anyhow!(
-                    "mmap failed for '{}': {}",
-                    self.shmem_name,
-                    io::Error::last_os_error()
-                ))
-            } else {
-                Ok(new_ptr)
-            }
-        }
-    }
-
-    pub fn check_size_changed<T>(&mut self, current_read_ptr: &mut *const T) -> Result<bool> {
-        let read_mapped_size = self.map_header().allocated_size();
-
-        if read_mapped_size == self.mapped_size as u64 {
-            return Ok(false);
-        }
-
-        info!(
-            "Remapping shared memory {}: {} => {}",
-            self.shmem_name,
-            format_bytes(self.mapped_size as f64),
-            format_bytes(read_mapped_size as f64)
-        );
-
-        let offset = (*current_read_ptr as usize).wrapping_sub(self.mapped_ptr as usize);
-
-        self.remap(read_mapped_size as usize)?;
-
-        *current_read_ptr = unsafe { self.mapped_ptr.add(offset) as *const T };
-
-        fence(Ordering::Acquire);
-
-        Ok(true)
     }
 
     pub fn unmap(&mut self) -> Result<()> {
@@ -273,6 +183,28 @@ impl<H: AsmShmemHeader> AsmSharedMemory<H> {
         // Skip the header size to get the data pointer
         unsafe { self.mapped_ptr.add(size_of::<H>()) }
     }
+
+    /// Returns the mapped area after the header as whole `u64` words.
+    pub fn data_words(&self) -> &[u64] {
+        if !self.is_mapped() {
+            return &[];
+        }
+        let len = (self.mapped_size - size_of::<H>()) / size_of::<u64>();
+        // SAFETY: open_and_map only maps sizes that cover the header, so these words lie inside
+        // the mapping, which stays alive while `self` is borrowed.
+        unsafe { std::slice::from_raw_parts(self.data_ptr() as *const u64, len) }
+    }
+}
+
+/// Returns the size in bytes of the shared memory object behind `fd`.
+pub(crate) fn shmem_object_size(fd: i32) -> io::Result<usize> {
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    if unsafe { fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstat succeeded, so it initialized `stat`.
+    let size = unsafe { stat.assume_init() }.st_size;
+    usize::try_from(size).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid size"))
 }
 
 pub fn open_shmem(name: &str, flags: i32, mode: u32) -> Result<i32> {

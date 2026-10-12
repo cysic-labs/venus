@@ -145,7 +145,7 @@ impl AsmRunnerMO {
             preloaded
                 .output_shmem
                 .mapped_ptr()
-                .add(preloaded.output_shmem.total_mapped_size() - threshold_bytes)
+                .add(preloaded.output_shmem.total_mapped_size().saturating_sub(threshold_bytes))
                 as *const AsmMOChunk
         };
 
@@ -162,29 +162,28 @@ impl AsmRunnerMO {
                         )?
                     {
                         // Update threshold based on new total mapped size
-                        threshold =
-                            unsafe {
-                                preloaded.output_shmem.mapped_ptr().add(
-                                    preloaded.output_shmem.total_mapped_size() - threshold_bytes,
-                                ) as *const AsmMOChunk
-                            };
+                        threshold = unsafe {
+                            preloaded.output_shmem.mapped_ptr().add(
+                                preloaded
+                                    .output_shmem
+                                    .total_mapped_size()
+                                    .saturating_sub(threshold_bytes),
+                            ) as *const AsmMOChunk
+                        };
                     }
 
-                    let chunk = unsafe { std::ptr::read(data_ptr) };
-
-                    data_ptr = unsafe { data_ptr.add(1) };
+                    let (chunk, mem_ops) = preloaded
+                        .output_shmem
+                        .read_chunk(&mut data_ptr, |chunk: &AsmMOChunk| chunk.mem_ops_size)
+                        .context("Failed to read MO shared memory chunk")?;
 
                     stats_mark!(_stats, &_runner_scope, "MO_CHUNK_DONE", 0);
 
-                    mem_planner.add_chunk(chunk.mem_ops_size, data_ptr as *const c_void);
+                    mem_planner.add_chunk(chunk.mem_ops_size, mem_ops.as_ptr() as *const c_void);
 
                     if chunk.end == 1 {
                         break 0;
                     }
-
-                    data_ptr = unsafe {
-                        (data_ptr as *mut u64).add(chunk.mem_ops_size as usize) as *const AsmMOChunk
-                    };
                 }
                 Err(named_sem::Error::WaitFailed(e))
                     if e.kind() == std::io::ErrorKind::Interrupted =>

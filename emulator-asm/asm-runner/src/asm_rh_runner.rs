@@ -35,13 +35,6 @@ pub struct AsmRunnerRH {
     pub asm_rowh_output: AsmRHData,
 }
 
-impl Drop for AsmRunnerRH {
-    fn drop(&mut self) {
-        // Forget all mem_reads Vec<u64> before unmapping
-        std::mem::forget(std::mem::take(&mut self.asm_rowh_output));
-    }
-}
-
 impl AsmRunnerRH {
     pub fn new(asm_rowh_output: AsmRHData) -> Self {
         AsmRunnerRH { asm_rowh_output }
@@ -95,7 +88,8 @@ impl AsmRunnerRH {
         }
 
         let asm_rowh_output =
-            AsmRHData::from_shared_memory(&asm_shared_memory.as_ref().unwrap().output_shmem);
+            AsmRHData::from_shared_memory(&asm_shared_memory.as_ref().unwrap().output_shmem)
+                .context("Failed to read RH shared memory output")?;
 
         stats_end!(_stats, &_runner_scope);
         Ok(AsmRunnerRH::new(asm_rowh_output))

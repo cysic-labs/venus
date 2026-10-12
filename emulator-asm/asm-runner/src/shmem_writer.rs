@@ -69,6 +69,21 @@ impl SharedMemoryWriter {
         ptr::null_mut()
     }
 
+    /// Checks that `byte_size` bytes starting at `offset` lie inside the shared memory.
+    fn check_range(&self, offset: usize, byte_size: usize) -> Result<()> {
+        match offset.checked_add(byte_size) {
+            Some(end) if end <= self.size => Ok(()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Data range of {byte_size} bytes at offset {offset} exceeds shared memory \
+                     capacity ({}) for '{}'",
+                    self.size, self.name
+                ),
+            )),
+        }
+    }
+
     unsafe fn unmap(&mut self) {
         if munmap(self.ptr as *mut _, self.size) != 0 {
             tracing::error!("munmap failed: {:?}", io::Error::last_os_error());
@@ -93,16 +108,7 @@ impl SharedMemoryWriter {
     /// * `Err` - If data size exceeds shared memory capacity or msync fails
     pub fn write_at<T>(&self, offset: usize, data: &[T]) -> Result<()> {
         let byte_size = std::mem::size_of_val(data);
-
-        if byte_size > self.size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Data size ({} bytes) exceeds shared memory capacity ({}) for '{}'",
-                    byte_size, self.size, self.name
-                ),
-            ));
-        }
+        self.check_range(offset, byte_size)?;
 
         unsafe {
             ptr::copy_nonoverlapping(data.as_ptr() as *const u8, self.ptr.add(offset), byte_size);
@@ -129,16 +135,8 @@ impl SharedMemoryWriter {
     /// * `Err` - If data size exceeds shared memory capacity or msync fails
     pub fn append_input<T>(&mut self, data: &[T]) -> Result<()> {
         let byte_size = std::mem::size_of_val(data);
-
-        if byte_size > self.size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Data size ({} bytes) exceeds shared memory capacity ({}) for '{}'",
-                    byte_size, self.size, self.name
-                ),
-            ));
-        }
+        let offset = unsafe { self.current_ptr.offset_from(self.ptr) } as usize;
+        self.check_range(offset, byte_size)?;
 
         unsafe {
             ptr::copy_nonoverlapping(data.as_ptr() as *const u8, self.current_ptr, byte_size);
@@ -166,6 +164,8 @@ impl SharedMemoryWriter {
     #[inline]
     pub fn write_ring_buffer<T>(&mut self, data: &[T]) -> Result<()> {
         let byte_size = std::mem::size_of_val(data);
+        // Wrapping around once must be enough to fit the data.
+        self.check_range(0, byte_size)?;
 
         let data_ptr = data.as_ptr() as *const u8;
 
@@ -213,16 +213,15 @@ impl SharedMemoryWriter {
     /// # Arguments
     /// * `offset` - Byte offset from the start of shared memory (must be 8-byte aligned)
     ///
-    /// # Safety
-    /// This method assumes that:
-    /// - The shared memory contains at least `offset + 8` bytes of valid data
-    /// - The offset should be aligned to 8 bytes
+    /// # Panics
+    /// If `offset + 8` exceeds the shared memory size. The offset should be aligned to 8 bytes.
     ///
     /// # Returns
     /// * The u64 value read from the specified offset (in native endianness)
     #[inline]
     pub fn read_u64_at(&self, offset: usize) -> u64 {
         debug_assert_eq!(offset % 8, 0, "Offset must be 8-byte aligned");
+        self.check_range(offset, size_of::<u64>()).expect("read_u64_at() out of bounds");
 
         unsafe { (self.ptr.add(offset) as *const u64).read() }
     }
@@ -233,13 +232,12 @@ impl SharedMemoryWriter {
     /// * `offset` - Byte offset from the start of shared memory (must be 8-byte aligned)
     /// * `value` - The u64 value to write
     ///
-    /// # Safety
-    /// This method assumes that:
-    /// - The shared memory contains at least `offset + 8` bytes of valid data
-    /// - The offset is 8-byte aligned for optimal performance
+    /// # Panics
+    /// If `offset + 8` exceeds the shared memory size. The offset should be aligned to 8 bytes.
     #[inline]
     pub fn write_u64_at(&self, offset: usize, value: u64) {
         debug_assert_eq!(offset % 8, 0, "Offset must be 8-byte aligned");
+        self.check_range(offset, size_of::<u64>()).expect("write_u64_at() out of bounds");
 
         unsafe {
             (self.ptr.add(offset) as *mut u64).write(value);

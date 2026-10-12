@@ -1,4 +1,4 @@
-use crate::AsmShmemHeader;
+use crate::{shmem_object_size, AsmShmemHeader};
 use libc::{
     c_uint, close, mmap, munmap, shm_open, shm_unlink, MAP_FAILED, MAP_SHARED, PROT_READ, S_IRUSR,
     S_IWUSR,
@@ -214,6 +214,44 @@ impl<H: AsmShmemHeader> AsmMultiSharedMemory<H> {
                 return Err(anyhow!("shm_unlink('{}') failed: {}", file_name, err));
             }
 
+            // Calculate the offset where this file should be mapped
+            let offset = if file_idx == 0 {
+                0
+            } else {
+                self.initial_size + (file_idx - 1) * self.incremental_size
+            };
+
+            let file_size = if file_idx == 0 { self.initial_size } else { self.incremental_size };
+
+            // The producer decides how many files get mapped: a MAP_FIXED mapping past the
+            // reservation would replace unrelated mappings, and pages past the end of the backing
+            // object raise SIGBUS when touched.
+            if offset + file_size > self.reserved_size {
+                close(fd);
+                return Err(anyhow!(
+                    "Shared memory '{}' does not fit in the {} bytes reserved for '{}'",
+                    file_name,
+                    self.reserved_size,
+                    self.base_name
+                ));
+            }
+            let object_size = match shmem_object_size(fd) {
+                Ok(size) => size,
+                Err(err) => {
+                    close(fd);
+                    return Err(anyhow!("fstat('{}') failed: {}", file_name, err));
+                }
+            };
+            if object_size < file_size {
+                close(fd);
+                return Err(anyhow!(
+                    "Shared memory '{}' is smaller than its mapping ({} < {} bytes)",
+                    file_name,
+                    object_size,
+                    file_size
+                ));
+            }
+
             // For _0, validate that the header has a non-zero allocated size
             if file_idx == 0 {
                 let temp_map = mmap(ptr::null_mut(), size_of::<H>(), PROT_READ, MAP_SHARED, fd, 0);
@@ -232,15 +270,6 @@ impl<H: AsmShmemHeader> AsmMultiSharedMemory<H> {
                     return Err(anyhow!("Shared memory '{}' has zero allocated size", file_name));
                 }
             }
-
-            // Calculate the offset where this file should be mapped
-            let offset = if file_idx == 0 {
-                0
-            } else {
-                self.initial_size + (file_idx - 1) * self.incremental_size
-            };
-
-            let file_size = if file_idx == 0 { self.initial_size } else { self.incremental_size };
 
             let target_addr = self.reserved_ptr.add(offset);
 
@@ -295,6 +324,41 @@ impl<H: AsmShmemHeader> AsmMultiSharedMemory<H> {
     /// Returns the total currently mapped size.
     pub fn total_mapped_size(&self) -> usize {
         self.total_mapped_size
+    }
+
+    /// Reads the chunk header `T` at `*cursor` and the `payload_len` `u64` words that follow
+    /// it, then advances `*cursor` past both.
+    ///
+    /// Fails instead of reading past `total_mapped_size`, the extent the producer has
+    /// advertised and this reader has mapped.
+    pub fn read_chunk<T>(
+        &self,
+        cursor: &mut *const T,
+        payload_len: impl FnOnce(&T) -> u64,
+    ) -> Result<(T, &[u64])> {
+        let base = self.reserved_ptr as usize;
+        let end = base + self.total_mapped_size;
+        let header_start = *cursor as usize;
+        let payload_start = header_start
+            .checked_add(size_of::<T>())
+            .filter(|&header_end| header_start >= base && header_end <= end)
+            .ok_or_else(|| anyhow!("Chunk header exceeds multi-shmem '{}'", self.base_name))?;
+        // SAFETY: the header lies inside the mapped region checked above.
+        let chunk = unsafe { (header_start as *const T).read() };
+
+        let words = payload_len(&chunk);
+        let len = usize::try_from(words)
+            .ok()
+            .filter(|&len| len <= (end - payload_start) / size_of::<u64>())
+            .ok_or_else(|| {
+                anyhow!("Chunk payload of {} words exceeds multi-shmem '{}'", words, self.base_name)
+            })?;
+        // SAFETY: the payload lies inside the mapped region checked above, which stays mapped
+        // while `self` is borrowed.
+        let payload = unsafe { std::slice::from_raw_parts(payload_start as *const u64, len) };
+
+        *cursor = payload.as_ptr_range().end as *const T;
+        Ok((chunk, payload))
     }
 
     /// Returns the number of currently mapped files.

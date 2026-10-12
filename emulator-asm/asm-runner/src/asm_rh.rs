@@ -1,5 +1,7 @@
 use std::fmt::Debug;
 
+use anyhow::{anyhow, Context, Result};
+
 use crate::{AsmSharedMemory, AsmShmemHeader};
 
 #[repr(C)]
@@ -32,32 +34,30 @@ impl AsmRHData {
 }
 
 impl AsmRHData {
-    /// Create an `OutputChunk` from a pointer.
-    ///
-    /// # Safety
-    /// This function is unsafe because it reads from a raw pointer in shared memory.
-    pub fn from_shared_memory(asm_shared_memory: &AsmSharedMemory<AsmRHHeader>) -> AsmRHData {
-        unsafe {
-            let data_ptr = asm_shared_memory.data_ptr() as *mut u64;
-            // BIOS chunk data
-            let bios_data_ptr = data_ptr;
-            let bios_len = std::ptr::read(bios_data_ptr) as usize;
-            let bios_data_ptr = bios_data_ptr.add(1);
-            let bios_inst_count = Vec::from_raw_parts(bios_data_ptr, bios_len, bios_len);
+    /// Copies the ROM histogram out of shared memory: a length-prefixed section of BIOS
+    /// instruction counts followed by a length-prefixed section of program instruction counts.
+    pub fn from_shared_memory(
+        asm_shared_memory: &AsmSharedMemory<AsmRHHeader>,
+    ) -> Result<AsmRHData> {
+        let data = asm_shared_memory.data_words();
+        let (bios_inst_count, data) =
+            split_length_prefixed(data).context("Invalid ROM histogram BIOS section")?;
+        let (prog_inst_count, _) =
+            split_length_prefixed(data).context("Invalid ROM histogram program section")?;
 
-            // Advance pointer after BIOS
-            let prog_data_ptr = bios_data_ptr.add(bios_len);
+        Ok(AsmRHData {
+            steps: asm_shared_memory.map_header().steps,
+            bios_inst_count: bios_inst_count.to_vec(),
+            prog_inst_count: prog_inst_count.to_vec(),
+        })
+    }
+}
 
-            // Program chunk data
-            let prog_len = std::ptr::read(prog_data_ptr) as usize;
-            let prog_data_ptr = prog_data_ptr.add(1);
-            let prog_inst_count = Vec::from_raw_parts(prog_data_ptr, prog_len, prog_len);
-
-            AsmRHData {
-                steps: asm_shared_memory.map_header().steps,
-                bios_inst_count,
-                prog_inst_count,
-            }
-        }
+/// Splits a section prefixed by its `u64` length off the front of `data`.
+fn split_length_prefixed(data: &[u64]) -> Result<(&[u64], &[u64])> {
+    let (&len, rest) = data.split_first().ok_or_else(|| anyhow!("missing section length"))?;
+    match usize::try_from(len) {
+        Ok(len) if len <= rest.len() => Ok(rest.split_at(len)),
+        _ => Err(anyhow!("section length {len} exceeds the {} mapped words", rest.len())),
     }
 }

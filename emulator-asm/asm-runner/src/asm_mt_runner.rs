@@ -116,7 +116,7 @@ impl AsmRunnerMT {
             preloaded
                 .output_shmem
                 .mapped_ptr()
-                .add(preloaded.output_shmem.total_mapped_size() - threshold_bytes)
+                .add(preloaded.output_shmem.total_mapped_size().saturating_sub(threshold_bytes))
                 as *const AsmMTChunk
         };
 
@@ -131,12 +131,6 @@ impl AsmRunnerMT {
                     // Synchronize with memory changes from the C++ side
                     fence(Ordering::Acquire);
 
-                    // Check if we need to remap the shared memory
-                    // preloaded
-                    //     .output_shmem
-                    //     .check_size_changed(&mut data_ptr)
-                    //     .context("Failed to check and remap shared memory for MT trace")?;
-
                     // Check if we need to map additional shared memory files.
                     if data_ptr >= threshold
                         && preloaded.output_shmem.check_size_changed().context(
@@ -144,15 +138,25 @@ impl AsmRunnerMT {
                         )?
                     {
                         // Update threshold based on new total mapped size
-                        threshold =
-                            unsafe {
-                                preloaded.output_shmem.mapped_ptr().add(
-                                    preloaded.output_shmem.total_mapped_size() - threshold_bytes,
-                                ) as *const AsmMTChunk
-                            };
+                        threshold = unsafe {
+                            preloaded.output_shmem.mapped_ptr().add(
+                                preloaded
+                                    .output_shmem
+                                    .total_mapped_size()
+                                    .saturating_sub(threshold_bytes),
+                            ) as *const AsmMTChunk
+                        };
                     }
 
-                    let emu_trace = Arc::new(AsmMTChunk::to_emu_trace(&mut data_ptr));
+                    let (chunk, mem_reads) = preloaded
+                        .output_shmem
+                        .read_chunk(&mut data_ptr, |chunk: &AsmMTChunk| chunk.mem_reads_size)
+                        .context("Failed to read MT shared memory chunk")?;
+                    // SAFETY: zero-copy traces borrow the mapping owned by `preloaded`, which
+                    // must outlive their use.
+                    let mem_reads =
+                        unsafe { std::mem::transmute::<&[u64], &'static [u64]>(mem_reads) };
+                    let emu_trace = Arc::new(chunk.to_emu_trace(mem_reads));
                     let should_exit = emu_trace.end;
 
                     on_chunk(chunk_id.0, emu_trace.clone());

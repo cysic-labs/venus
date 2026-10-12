@@ -37,45 +37,24 @@ pub struct AsmMTChunk {
 }
 
 impl AsmMTChunk {
-    /// Create an `OutputChunk` from a pointer.
-    ///
-    /// # Safety
-    /// This function is unsafe because it reads from a raw pointer in shared memory.
-    pub fn to_emu_trace(mapped_ptr: &mut *const AsmMTChunk) -> EmuTrace {
-        // Read chunk data
-        let chunk = unsafe { std::ptr::read(*mapped_ptr) };
-        *mapped_ptr = unsafe { mapped_ptr.add(1) };
-
-        // Zero-copy: borrow mem_reads directly from shared memory
-        // SAFETY: Caller must ensure shared memory outlives EmuTrace usage
-        let mem_reads_ptr = *mapped_ptr as *const u64;
-        let mem_reads_len = chunk.mem_reads_size as usize;
-        let mem_reads: Cow<'static, [u64]> = Cow::Borrowed(unsafe {
-            std::mem::transmute::<&[u64], &[u64]>(std::slice::from_raw_parts(
-                mem_reads_ptr,
-                mem_reads_len,
-            ))
-        });
-
-        // Advance the pointer after reading memory reads
-        *mapped_ptr = unsafe { (*mapped_ptr as *mut u64).add(mem_reads_len) as *const AsmMTChunk };
-
+    /// Builds the `EmuTrace` of this chunk, borrowing its memory reads from shared memory
+    /// without copying them.
+    pub fn to_emu_trace(&self, mem_reads: &'static [u64]) -> EmuTrace {
         let mut registers = [0u64; REGS_IN_MAIN_TOTAL_NUMBER];
-        registers[REGS_IN_MAIN_FROM..].copy_from_slice(&chunk.registers[..REGS_IN_MAIN_TO]);
+        registers[REGS_IN_MAIN_FROM..].copy_from_slice(&self.registers[..REGS_IN_MAIN_TO]);
 
-        // Return the parsed OutputChunk
         EmuTrace {
             start_state: EmuTraceStart {
-                pc: chunk.pc,
-                sp: chunk.sp,
-                c: chunk.c,
-                step: chunk.step,
+                pc: self.pc,
+                sp: self.sp,
+                c: self.c,
+                step: self.step,
                 regs: registers,
             },
-            last_c: chunk.last_c,
-            end: chunk.end == 1,
-            steps: chunk.steps,
-            mem_reads,
+            last_c: self.last_c,
+            end: self.end == 1,
+            steps: self.steps,
+            mem_reads: Cow::Borrowed(mem_reads),
         }
     }
 }
