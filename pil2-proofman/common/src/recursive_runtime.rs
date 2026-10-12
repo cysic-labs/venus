@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
-use std::fs;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -12,6 +13,7 @@ use crate::{ProofmanError, ProofmanResult};
 const MAGIC: &[u8; 8] = b"PIL2RSPD";
 const GOLDILOCKS_MODULUS: u64 = 0xFFFF_FFFF_0000_0001;
 const GOLDILOCKS_P_MINUS_ONE: u64 = GOLDILOCKS_MODULUS - 1;
+const MAX_RECURSIVE_RUNTIME_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct NativeRecursiveRuntime {
@@ -362,7 +364,22 @@ fn boolean_signal_from_lcs(a: &[NativeRuntimeLcTerm], b: &[NativeRuntimeLcTerm])
 
 impl NativeRecursiveRuntime {
     pub fn from_dat_file(path: &Path) -> ProofmanResult<Self> {
-        let bytes = fs::read(path)?;
+        let file = File::open(path)?;
+        let file_len = file.metadata()?.len();
+        if file_len > MAX_RECURSIVE_RUNTIME_BYTES {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "{} exceeds native recursive runtime size limit",
+                path.display()
+            )));
+        }
+        let mut bytes = Vec::with_capacity(file_len as usize);
+        file.take(MAX_RECURSIVE_RUNTIME_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_RECURSIVE_RUNTIME_BYTES {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "{} exceeds native recursive runtime size limit",
+                path.display()
+            )));
+        }
         if bytes.len() < 64 || &bytes[..8] != MAGIC {
             return Err(ProofmanError::InvalidSetup(format!(
                 "{} is not a native recursive runtime descriptor",
@@ -401,20 +418,26 @@ impl NativeRecursiveRuntime {
             copy_indices.push(read_u64(&bytes, copy_start + index * 8)?);
         }
 
-        let assertion_count = if bytes.len() >= copy_end + 8 { read_u64(&bytes, copy_end)? as usize } else { 0 };
-        let assertions_end = copy_end
-            .checked_add(8)
-            .and_then(|start| start.checked_add(assertion_count.checked_mul(16)?))
-            .unwrap_or(bytes.len());
-        if assertion_count > 0 && assertions_end > bytes.len() {
-            return Err(ProofmanError::InvalidSetup(format!(
-                "{} has a truncated native runtime assertion table",
-                path.display()
-            )));
-        }
+        let (assertion_count, assertion_start, assertions_end) =
+            if copy_end.checked_add(8).is_some_and(|end| end <= bytes.len()) {
+                let assertion_count = read_count(path, &bytes, copy_end, "assertion")?;
+                let assertion_start = copy_end.checked_add(8).ok_or_else(|| {
+                    ProofmanError::InvalidSetup("native runtime assertion table is too large".to_string())
+                })?;
+                let assertions_end = checked_table_end(path, assertion_start, assertion_count, 16, "assertion")?;
+                if assertions_end > bytes.len() {
+                    return Err(ProofmanError::InvalidSetup(format!(
+                        "{} has a truncated native runtime assertion table",
+                        path.display()
+                    )));
+                }
+                (assertion_count, assertion_start, assertions_end)
+            } else {
+                (0, copy_end, copy_end)
+            };
         let mut source_assertions = Vec::with_capacity(assertion_count);
         for index in 0..assertion_count {
-            let offset = copy_end + 8 + index * 16;
+            let offset = assertion_start + index * 16;
             source_assertions.push(NativeRuntimeAssertion {
                 source_word: read_u64(&bytes, offset)?,
                 expected: read_u64(&bytes, offset + 8)?,
@@ -2451,6 +2474,36 @@ fn checked_table_end(path: &Path, start: usize, count: usize, row_len: usize, la
         })
 }
 
+fn read_count(path: &Path, bytes: &[u8], offset: usize, label: &str) -> ProofmanResult<usize> {
+    usize::try_from(read_u64(bytes, offset)?).map_err(|_| {
+        ProofmanError::InvalidSetup(format!("{} has too many native runtime {label} entries", path.display()))
+    })
+}
+
+fn checked_count_body_start(path: &Path, count_offset: usize, label: &str) -> ProofmanResult<usize> {
+    count_offset.checked_add(8).ok_or_else(|| {
+        ProofmanError::InvalidSetup(format!("{} has an overflowing native runtime {label} table", path.display()))
+    })
+}
+
+fn validate_min_encoded_table(
+    path: &Path,
+    bytes: &[u8],
+    start: usize,
+    count: usize,
+    min_row_len: usize,
+    label: &str,
+) -> ProofmanResult<()> {
+    let min_end = checked_table_end(path, start, count, min_row_len, label)?;
+    if min_end > bytes.len() {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "{} has a truncated native runtime {label} table",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn parse_runtime_extension_tag(path: &Path, bytes: &[u8], offset: usize) -> ProofmanResult<usize> {
     let tag = read_u64(bytes, offset)?;
     if tag != 0 {
@@ -2469,8 +2522,10 @@ fn parse_constraints(
     bytes: &[u8],
     constraints_offset: usize,
 ) -> ProofmanResult<(Vec<NativeRuntimeConstraint>, usize)> {
-    let count = read_u64(bytes, constraints_offset)? as usize;
-    let mut offset = constraints_offset + 8;
+    let count = read_count(path, bytes, constraints_offset, "R1CS constraint")?;
+    let mut offset = checked_count_body_start(path, constraints_offset, "R1CS constraint")?;
+    validate_min_encoded_table(path, bytes, offset, count, 24, "R1CS constraint")?;
+
     let mut constraints = Vec::with_capacity(count);
     for _ in 0..count {
         let (a, next) = parse_lc(path, bytes, offset)?;
@@ -2507,8 +2562,10 @@ fn parse_custom_gates(
     custom_gates_offset: usize,
     version: u64,
 ) -> ProofmanResult<Vec<NativeRuntimeCustomGate>> {
-    let count = read_u64(bytes, custom_gates_offset)? as usize;
-    let mut offset = custom_gates_offset + 8;
+    let count = read_count(path, bytes, custom_gates_offset, "custom gate")?;
+    let mut offset = checked_count_body_start(path, custom_gates_offset, "custom gate")?;
+    validate_min_encoded_table(path, bytes, offset, count, if version >= 2 { 24 } else { 16 }, "custom gate")?;
+
     let mut custom_gates = Vec::with_capacity(count);
     for _ in 0..count {
         let kind_id = read_u64(bytes, offset)?;
@@ -2566,7 +2623,9 @@ fn parse_custom_gates(
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> ProofmanResult<u64> {
-    let end = offset + 8;
+    let end = offset
+        .checked_add(8)
+        .ok_or_else(|| ProofmanError::InvalidSetup("native runtime descriptor offset overflows".to_string()))?;
     let chunk = bytes
         .get(offset..end)
         .ok_or_else(|| ProofmanError::InvalidSetup("native runtime descriptor is truncated".to_string()))?;
@@ -2578,6 +2637,30 @@ mod tests {
     use fields::{Field, Goldilocks};
 
     use super::*;
+
+    fn minimal_native_runtime_descriptor_prefix() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&3u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes
+    }
+
+    fn write_temp_descriptor(name: &str, bytes: &[u8]) -> ProofmanResult<std::path::PathBuf> {
+        let path = std::env::temp_dir().join(format!("proofman_native_runtime_test_{}_{}", std::process::id(), name));
+        std::fs::write(&path, bytes)?;
+        Ok(path)
+    }
 
     #[test]
     fn parses_native_runtime_descriptor() -> ProofmanResult<()> {
@@ -2651,6 +2734,58 @@ mod tests {
         assert_eq!(witness[11].as_canonical_u64(), 5100);
 
         std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_truncated_constraint_count_before_allocation() -> ProofmanResult<()> {
+        let mut bytes = minimal_native_runtime_descriptor_prefix();
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        let path = write_temp_descriptor("truncated_constraints.dat", &bytes)?;
+
+        let err = NativeRecursiveRuntime::from_dat_file(&path).unwrap_err();
+        assert!(err.to_string().contains("truncated native runtime R1CS constraint table"));
+
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_truncated_custom_gate_count_before_allocation() -> ProofmanResult<()> {
+        let mut bytes = minimal_native_runtime_descriptor_prefix();
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        let path = write_temp_descriptor("truncated_custom_gates.dat", &bytes)?;
+
+        let err = NativeRecursiveRuntime::from_dat_file(&path).unwrap_err();
+        assert!(err.to_string().contains("truncated native runtime custom gate table"));
+
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_oversized_assertion_count_before_allocation() -> ProofmanResult<()> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&3u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        let path = write_temp_descriptor("oversized_assertions.dat", &bytes)?;
+
+        let err = NativeRecursiveRuntime::from_dat_file(&path).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("native runtime assertion table is too large")
+                || message.contains("too many native runtime assertion entries")
+        );
+
+        std::fs::remove_file(path)?;
         Ok(())
     }
 
