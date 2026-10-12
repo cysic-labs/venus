@@ -1,4 +1,7 @@
+use std::fs::File;
+use std::io::{self, Read};
 use std::mem::MaybeUninit;
+use std::path::Path;
 
 pub fn create_atomic_vec<DT>(size: usize) -> Vec<DT> {
     let mut vec: Vec<MaybeUninit<DT>> = Vec::with_capacity(size);
@@ -106,4 +109,30 @@ pub fn reinterpret_vec<T: Default + Clone, U>(mut v: Vec<T>) -> anyhow::Result<V
 
     std::mem::forget(v);
     Ok(unsafe { Vec::from_raw_parts(ptr, len, cap) })
+}
+
+/// Reads the whole file at `path`, failing with `InvalidData` if it holds more than `max_bytes`.
+///
+/// The size is checked before allocating and enforced again while reading, so a file that grows
+/// in between still cannot exceed the limit.
+pub(crate) fn read_file_limited(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+    let too_large = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} exceeds the size limit of {max_bytes} bytes", path.display()),
+        )
+    };
+
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > max_bytes {
+        return Err(too_large());
+    }
+
+    let mut data = Vec::with_capacity(len as usize);
+    file.take(max_bytes.saturating_add(1)).read_to_end(&mut data)?;
+    if data.len() as u64 > max_bytes {
+        return Err(too_large());
+    }
+    Ok(data)
 }

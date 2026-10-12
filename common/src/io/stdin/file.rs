@@ -3,12 +3,13 @@
 
 use anyhow::Result;
 use serde::{de::DeserializeOwned, Serialize};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use zisk_core::MAX_INPUT_SIZE;
 
-use crate::io::ZiskIO;
+use crate::{io::ZiskIO, read_file_limited};
 
 /// A file-based implementation of ZiskStdin that reads from a file.
 pub struct ZiskFileStdin {
@@ -57,7 +58,8 @@ impl ZiskFileStdin {
 
 impl ZiskIO for ZiskFileStdin {
     fn read_raw_bytes(&self) -> Vec<u8> {
-        fs::read(&self.path).expect("Could not read inputs file")
+        // Raw inputs are loaded into the input memory region, so a larger file can never be used.
+        read_file_limited(&self.path, MAX_INPUT_SIZE).expect("Could not read inputs file")
     }
 
     fn read_bytes(&self) -> Vec<u8> {

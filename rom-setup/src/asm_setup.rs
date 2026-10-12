@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+use zisk_common::{ElfBinaryFromFile, ElfBinaryLike};
 use zisk_core::{is_elf_file, AsmGenerationMethod, Riscv2zisk};
 
 use crate::get_elf_data_hash_from_path;
@@ -190,24 +191,33 @@ pub fn assembly_files_exist(elf: &Path, output_path: &Path, hints: bool) -> Resu
 }
 
 pub fn gen_assembly(
-    _elf: &Path,
+    elf: &Path,
+    output_dir: &Option<PathBuf>,
+    hints: bool,
+    verbose: bool,
+) -> Result<(), anyhow::Error> {
+    gen_assembly_from_elf(&ElfBinaryFromFile::new(elf, hints)?, output_dir, verbose)
+}
+
+/// Generates the assembly setup from an already loaded ELF, so that it is derived from the same
+/// bytes as the rest of the ROM setup.
+pub fn gen_assembly_from_elf(
+    _elf: &impl ElfBinaryLike,
     _output_dir: &Option<PathBuf>,
-    _hints: bool,
     _verbose: bool,
 ) -> Result<(), anyhow::Error> {
     // Assembly setup is not needed on macOS due to the lack of support for assembly generation.
     #[cfg(not(target_os = "macos"))]
     {
         let output_path = crate::get_output_path(_output_dir)?;
-        let elf_data =
-            std::fs::read(_elf).with_context(|| format!("Error reading ELF file: {_elf:?}"))?;
-        let stem = _elf
-            .file_stem()
-            .context("Failed to extract file stem from ELF path")?
-            .to_str()
-            .context("Failed to convert ELF file stem to string")?;
         tracing::info!("Computing assembly setup");
-        generate_assembly(&elf_data, stem, output_path.as_path(), _hints, _verbose)?;
+        generate_assembly(
+            _elf.elf(),
+            _elf.name(),
+            output_path.as_path(),
+            _elf.with_hints(),
+            _verbose,
+        )?;
         tracing::info!("Assembly setup generated at {}", output_path.display());
     }
     Ok(())

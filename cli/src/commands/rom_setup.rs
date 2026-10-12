@@ -7,7 +7,7 @@ use crate::{commands::get_proving_key, ux::print_banner};
 use colored::Colorize;
 use fields::Goldilocks;
 use proofman_common::{MpiCtx, ParamsGPU, ProofCtx, ProofType, SetupCtx, SetupsVadcop};
-use rom_setup::gen_assembly;
+use rom_setup::gen_assembly_from_elf;
 use rom_setup::rom_merkle_setup;
 use std::sync::Arc;
 use zisk_common::ElfBinaryFromFile;
@@ -79,7 +79,7 @@ impl ZiskRomSetup {
         let elf = ElfBinaryFromFile::new(&self.elf, self.hints)?;
         rom_merkle_setup::<Goldilocks>(&pctx, &elf, &self.output_dir)?;
 
-        gen_assembly(&self.elf, &self.output_dir, self.hints, self.verbose > 0)?;
+        gen_assembly_from_elf(&elf, &self.output_dir, self.verbose > 0)?;
 
         println!();
         tracing::info!("{}", "ROM setup successfully completed".bright_green().bold());

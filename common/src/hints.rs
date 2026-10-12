@@ -54,6 +54,10 @@ use std::fmt::Display;
 
 use anyhow::Result;
 
+/// Largest hint payload accepted from a hint stream, in bytes. Partial hints accumulate up to
+/// the declared length, so the header length is bounded before any data is buffered.
+const MAX_HINT_PAYLOAD_BYTES: usize = 0x400000;
+
 // === CONTROL CODES ===
 pub const CTRL_START: u32 = 0x0000;
 pub const CTRL_END: u32 = 0x0001;
@@ -461,6 +465,9 @@ impl PrecompileHint {
     ) -> Result<(PrecompileHintParseResult, usize)> {
         // If we have a partial hint, continue accumulating from it
         if let Some(partial_hint) = partial {
+            if idx > slice.len() {
+                return Err(anyhow::anyhow!("Slice too short or index out of bounds"));
+            }
             let available = slice.len() - idx;
 
             if available >= partial_hint.remaining_u64s {
@@ -507,6 +514,12 @@ impl PrecompileHint {
         // Extract length from lower 32 bits
         let length = header & 0xFFFFFFFF;
         let length_bytes = length as usize;
+        if length_bytes > MAX_HINT_PAYLOAD_BYTES {
+            return Err(anyhow::anyhow!(
+                "Hint payload of {length_bytes} bytes exceeds the limit of \
+                 {MAX_HINT_PAYLOAD_BYTES} bytes"
+            ));
+        }
 
         // Calculate how many u64s are needed to hold length
         let num_u64s = length.div_ceil(8) as usize;

@@ -1,9 +1,13 @@
 use anyhow::Result;
 use std::fmt;
-use std::fs;
 use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
+
+use crate::read_file_limited;
+
+/// Largest ELF file accepted by `ElfBinaryFromFile`.
+const MAX_ELF_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Type representing a chunk identifier.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -281,13 +285,18 @@ pub struct ElfBinaryFromFile {
 
 impl ElfBinaryFromFile {
     pub fn new(elf: &Path, with_hints: bool) -> Result<Self> {
-        let elf_bin = fs::read(elf)
+        let elf_bin = read_file_limited(elf, MAX_ELF_BYTES)
             .map_err(|e| anyhow::anyhow!("Error reading ELF file {}: {}", elf.display(), e))?;
+        let invalid_path = || anyhow::anyhow!("Invalid ELF file path {}", elf.display());
         Ok(Self {
             elf: elf_bin,
-            name: elf.file_stem().unwrap().to_str().unwrap().to_string(),
+            name: elf
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(invalid_path)?
+                .to_string(),
             with_hints,
-            path: Some(elf.to_str().unwrap().to_string()),
+            path: Some(elf.to_str().ok_or_else(invalid_path)?.to_string()),
         })
     }
 }

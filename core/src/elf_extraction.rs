@@ -5,13 +5,15 @@ use elf::{
     endian::AnyEndian,
     ElfBytes,
 };
-use std::{collections::HashMap, error::Error, fs, path::Path};
+use std::{collections::HashMap, error::Error};
 
 use crate::{is_elf_file, RAM_ADDR, RAM_SIZE};
 
 const RAM_START_ADDR: u64 = RAM_ADDR;
 const RAM_END_ADDR: u64 = RAM_ADDR + RAM_SIZE;
-const MAX_ELF_SECTION_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB, arbitrary limit to prevent OOM from malformed ELFs
+// 1 GiB across all loaded sections, arbitrary limit to prevent OOM from malformed ELFs. Section
+// headers may claim large BSS sizes or alias the same file bytes many times.
+const MAX_ELF_LOAD_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Raw bytes of `data` that will live at `addr` once the ROM has booted.
 #[derive(Debug, Clone)]
@@ -51,6 +53,7 @@ pub fn collect_elf_payload_from_bytes(file_data: &[u8]) -> Result<ElfPayload, Bo
     let elf = ElfBytes::<AnyEndian>::minimal_parse(file_data)?;
 
     let mut out = ElfPayload { entry_point: elf.ehdr.e_entry, ..Default::default() };
+    let mut loaded_bytes = 0u64;
 
     // Process all section headers
     if let Some(shdrs) = elf.section_headers() {
@@ -69,6 +72,22 @@ pub fn collect_elf_payload_from_bytes(file_data: &[u8]) -> Result<ElfPayload, Bo
                 continue;
             }
 
+            // Skip section types other than data and BSS (notes, etc.)
+            if sh.sh_type != SHT_PROGBITS && sh.sh_type != SHT_NOBITS {
+                continue;
+            }
+
+            // Bound the total before allocating anything for this section
+            loaded_bytes = loaded_bytes.saturating_add(sh.sh_size);
+            if loaded_bytes > MAX_ELF_LOAD_BYTES {
+                return Err(format!(
+                    "ELF section at 0x{:08x} brings the loaded size above the maximum allowed \
+                     {} bytes.",
+                    sh.sh_addr, MAX_ELF_LOAD_BYTES
+                )
+                .into());
+            }
+
             // Handle different section types
             let data = if sh.sh_type == SHT_PROGBITS {
                 let (raw, _) = elf.section_data(&sh)?;
@@ -78,29 +97,19 @@ pub fn collect_elf_payload_from_bytes(file_data: &[u8]) -> Result<ElfPayload, Bo
                     data.pop();
                 }
                 data
-            } else if sh.sh_type == SHT_NOBITS {
-                // BSS sections - uninitialized data, should be zero-filled
-                // Create a zero-filled vector of the appropriate size
-                let size = sh.sh_size as usize;
-                if size > MAX_ELF_SECTION_SIZE {
-                    return Err(format!(
-                        "ELF section at 0x{:08x} has size {} which exceeds the maximum allowed size of {} bytes.",
-                        sh.sh_addr, size, MAX_ELF_SECTION_SIZE
-                    ).into());
-                }
-                // Align size to 4 bytes
-                let aligned_size = (size + 3) & !3;
-                vec![0u8; aligned_size]
             } else {
-                // Skip other section types (notes, etc.)
-                continue;
+                // BSS sections - uninitialized data, should be zero-filled
+                // Create a zero-filled vector of the appropriate size, aligned to 4 bytes
+                vec![0u8; (sh.sh_size as usize + 3) & !3]
             };
 
             // Categorize the section based on its flags
             let is_exec = (sh.sh_flags & SHF_EXECINSTR as u64) != 0;
             let is_write = (sh.sh_flags & SHF_WRITE as u64) != 0;
-            let in_ram =
-                sh.sh_addr >= RAM_START_ADDR && sh.sh_addr + data.len() as u64 <= RAM_END_ADDR;
+            let end_addr = sh.sh_addr.checked_add(data.len() as u64).ok_or_else(|| {
+                format!("ELF section at 0x{:08x} wraps the address space", sh.sh_addr)
+            })?;
+            let in_ram = sh.sh_addr >= RAM_START_ADDR && end_addr <= RAM_END_ADDR;
 
             if is_exec {
                 // Executable code section
@@ -111,7 +120,6 @@ pub fn collect_elf_payload_from_bytes(file_data: &[u8]) -> Result<ElfPayload, Bo
             } else if is_write {
                 // Writable data outside RAM is an error - it cannot be properly initialized
                 let section_type = if sh.sh_type == SHT_NOBITS { "BSS" } else { "data" };
-                let end_addr = sh.sh_addr + data.len() as u64;
                 return Err(format!(
                     "ELF contains writable {} section at 0x{:08x}-0x{:08x} outside RAM bounds (0x{:08x}-0x{:08x}). \
                     Writable sections must be placed in RAM. Consider adjusting your linker script.",
@@ -163,15 +171,6 @@ pub fn merge_adjacent_ro_sections(sections: &[DataSection]) -> Vec<DataSection> 
     merged.push(current);
 
     merged
-}
-
-/// Get addresses for a list of symbols from an ELF file
-pub fn get_symbol_addresses(
-    elf_path: &Path,
-    symbol_names: &[&str],
-) -> Result<HashMap<String, u64>, Box<dyn Error>> {
-    let file_data = fs::read(elf_path)?;
-    get_symbol_addresses_from_bytes(&file_data, symbol_names)
 }
 
 /// Get addresses for a list of symbols from ELF bytes

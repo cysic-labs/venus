@@ -1,7 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use fields::{Goldilocks, PrimeField64};
 use proofman_common::{
-    write_custom_commit_trace, GlobalInfo, ProofCtx, ProofType, ProofmanResult, StarkInfo,
+    write_custom_commit_trace, GlobalInfo, ProofCtx, ProofType, ProofmanError, ProofmanResult,
+    StarkInfo,
 };
 use sm_rom::RomSM;
 use std::env;
@@ -9,10 +10,13 @@ use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use zisk_common::ElfBinaryLike;
+use zisk_common::{ElfBinaryFromFile, ElfBinaryLike};
 use zisk_pil::{RomRomTrace, PILOUT_HASH};
 
 pub const DEFAULT_CACHE_PATH: &str = ".zisk/cache";
+
+/// Largest ROM blowup factor, as a power of two, accepted from a proving key.
+const MAX_ROM_BLOWUP_BITS: u64 = 32;
 
 /// Gets the user's home directory as specified by the HOME environment variable.
 pub fn get_home_dir() -> String {
@@ -78,12 +82,7 @@ pub fn get_elf_vk(verkey_path: &Path) -> Result<Option<Vec<u8>>> {
 }
 
 pub fn get_elf_data_hash_from_path(elf_path: &Path) -> Result<String> {
-    let elf_data =
-        fs::read(elf_path).with_context(|| format!("Error reading ELF file: {elf_path:?}"))?;
-
-    let hash = blake3::hash(&elf_data).to_hex().to_string();
-
-    Ok(hash)
+    get_elf_data_hash(&ElfBinaryFromFile::new(elf_path, false)?)
 }
 
 pub fn get_elf_data_hash(elf: &impl ElfBinaryLike) -> Result<String> {
@@ -153,8 +152,21 @@ pub fn get_rom_info(proving_key_path: &Path) -> ProofmanResult<RomInfo> {
     let stark_info_json = std::fs::read_to_string(&stark_info_path)
         .unwrap_or_else(|_| panic!("Failed to read file {}", &stark_info_path));
     let stark_info = StarkInfo::from_json(&stark_info_json);
+
+    // The ROM trace size is fixed by the PIL, so the proving key must match it, and the blowup
+    // must be a sane power of two.
+    let n_bits = stark_info.stark_struct.n_bits;
+    let n_bits_ext = stark_info.stark_struct.n_bits_ext;
+    let rom_bits = RomRomTrace::<Goldilocks>::NUM_ROWS.trailing_zeros() as u64;
+    if n_bits != rom_bits || n_bits_ext < n_bits || n_bits_ext - n_bits > MAX_ROM_BLOWUP_BITS {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "{stark_info_path} has nBits {n_bits} and nBitsExt {n_bits_ext}, expected nBits \
+             {rom_bits} and a blowup of at most 2^{MAX_ROM_BLOWUP_BITS}"
+        )));
+    }
+
     Ok(RomInfo {
-        blowup_factor: 1 << (stark_info.stark_struct.n_bits_ext - stark_info.stark_struct.n_bits),
+        blowup_factor: 1 << (n_bits_ext - n_bits),
         merkle_tree_arity: stark_info.stark_struct.merkle_tree_arity,
     })
 }

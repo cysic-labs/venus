@@ -15,9 +15,10 @@ use sha2::{Digest, Sha256};
 
 use anyhow::{Context, Result};
 use asm_runner::{AsmServices, HintsShmem};
+use bincode::Options;
 use executor::AsmResources;
 use proofman::PlanningInfo;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::fs::File;
 use std::{
     cell::Cell,
@@ -31,6 +32,30 @@ use zisk_common::{
     ZiskExecutorSummary, ZiskExecutorTime,
 };
 use zisk_core::ZiskRom;
+
+/// Largest proof file accepted by the proof `load` functions.
+const MAX_PROOF_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Deserializes a proof file written with `bincode::serialize_into`. Deserialization may not
+/// read past the file length, so a corrupt length prefix fails instead of allocating whatever
+/// size it claims.
+fn load_proof_file<T: DeserializeOwned>(path: &Path, label: &str) -> Result<T> {
+    let file = File::open(path)
+        .with_context(|| format!("Failed to open file for loading {label}: {}", path.display()))?;
+    let len = file.metadata()?.len();
+    if len > MAX_PROOF_FILE_BYTES {
+        anyhow::bail!(
+            "{label} file {} exceeds the size limit of {MAX_PROOF_FILE_BYTES} bytes",
+            path.display()
+        );
+    }
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(len)
+        .deserialize_from(file)
+        .with_context(|| format!("Failed to deserialize {label} from {}", path.display()))
+}
 
 pub struct ZiskExecuteResult {
     pub total_duration: Duration,
@@ -308,18 +333,7 @@ impl ZiskVadcopFinalProof {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let file = File::open(path.as_ref()).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!(
-                    "Failed to open file for loading proof: {}: {}",
-                    path.as_ref().display(),
-                    e
-                ),
-            )
-        })?;
-        let proof: ZiskVadcopFinalProof = bincode::deserialize_from(file)?;
-        Ok(proof)
+        Ok(load_proof_file(path.as_ref(), "proof")?)
     }
 }
 
@@ -356,18 +370,7 @@ impl ZiskSnarkProof {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let file = File::open(path.as_ref()).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!(
-                    "Failed to open file for loading SNARK proof: {}: {}",
-                    path.as_ref().display(),
-                    e
-                ),
-            )
-        })?;
-        let proof: ZiskSnarkProof = bincode::deserialize_from(file)?;
-        Ok(proof)
+        Ok(load_proof_file(path.as_ref(), "SNARK proof")?)
     }
 }
 
@@ -590,11 +593,7 @@ impl ZiskProofWithPublicValues {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::open(path.as_ref()).with_context(|| {
-            format!("failed to open file for loading proof: {}", path.as_ref().display())
-        })?;
-        let proof_with_publics: ZiskProofWithPublicValues = bincode::deserialize_from(file)?;
-        Ok(proof_with_publics)
+        load_proof_file(path.as_ref(), "proof")
     }
 
     pub fn get_vadcop_final_proof(&self) -> Result<VadcopFinalProof> {

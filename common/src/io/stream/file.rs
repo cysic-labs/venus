@@ -9,6 +9,9 @@ use super::{StreamRead, StreamWrite};
 
 use anyhow::Result;
 
+/// Largest stream file accepted by `FileStreamReader`, which reads the whole file at once.
+const MAX_STREAM_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 /// A file-based implementation of ZiskStdin that reads from a file.
 pub struct FileStreamReader {
     /// The path to the input file.
@@ -36,6 +39,11 @@ impl StreamRead for FileStreamReader {
         }
 
         let file = File::open(&self.path)?;
+        // Checked here as well as when reading, so oversized files are rejected when the stream
+        // is set up rather than while it is being consumed.
+        if file.metadata()?.len() > MAX_STREAM_FILE_BYTES {
+            return Err(stream_file_too_large(&self.path));
+        }
         self.reader = Some(BufReader::new(file));
         self.has_read = false;
         Ok(())
@@ -62,7 +70,10 @@ impl StreamRead for FileStreamReader {
         })?;
 
         let mut buffer = Vec::new();
-        reader.read_to_end(&mut buffer)?;
+        reader.take(MAX_STREAM_FILE_BYTES + 1).read_to_end(&mut buffer)?;
+        if buffer.len() as u64 > MAX_STREAM_FILE_BYTES {
+            return Err(stream_file_too_large(&self.path));
+        }
 
         Ok(Some(buffer))
     }
@@ -77,6 +88,13 @@ impl StreamRead for FileStreamReader {
     fn is_active(&self) -> bool {
         self.reader.is_some()
     }
+}
+
+fn stream_file_too_large(path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Stream file {} exceeds the size limit of {MAX_STREAM_FILE_BYTES} bytes",
+        path.display()
+    )
 }
 
 /// A file-based implementation of StreamWrite that writes to a file.
