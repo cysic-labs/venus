@@ -165,11 +165,12 @@ pub fn mul_long(
         out[i + len_b] = U256::from_u64s(params_arith.dh);
     }
 
-    if out[len_a + len_b - 1].is_zero() {
-        len_a + len_b - 1
-    } else {
-        len_a + len_b
+    // Drop the leading zero limbs: one at most for non-zero operands, all but one for a zero operand
+    let mut len = len_a + len_b;
+    while len > 1 && out[len - 1].is_zero() {
+        len -= 1;
     }
+    len
 }
 
 /// Multiplies two large numbers and reduces modulo a large modulus

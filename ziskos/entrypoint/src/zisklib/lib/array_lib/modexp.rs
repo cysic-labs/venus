@@ -391,8 +391,9 @@ mod tests {
             // Long modulus, squaring limbs that maximize the carries
             (all_ones(1024), BigUint::from(3u32), all_ones(1100)),
             (all_ones(700), all_ones(65), all_ones(700) - 2u32),
-            // Long modulus reaching zero before the last exponent bit
+            // Long modulus reaching zero before the last exponent bit, with a short or long base
             (two.pow(100), BigUint::from(7u32), two.pow(600)),
+            (two.pow(260), BigUint::from(7u32), two.pow(300)),
         ];
         for (base, exp, modulus) in cases {
             assert_eq!(
