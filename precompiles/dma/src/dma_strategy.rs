@@ -23,8 +23,8 @@ use zisk_common::{BusDeviceMetrics, BusDeviceMode, CheckPoint, ChunkId};
 #[cfg(not(feature = "packed"))]
 use zisk_pil::{
     Dma64AlignedInputCpyTrace, Dma64AlignedMemCpyTrace, Dma64AlignedMemSetTrace,
-    Dma64AlignedMemTrace, Dma64AlignedTrace, DmaInputCpyTrace, DmaMemCpyTrace,
-    DmaPrePostInputCpyTrace, DmaPrePostMemCpyTrace, DmaPrePostTrace, DmaTrace, DmaUnalignedTrace,
+    Dma64AlignedMemTrace, Dma64AlignedTrace, DmaMemCpyTrace, DmaPrePostMemCpyTrace,
+    DmaPrePostTrace, DmaTrace, DmaUnalignedTrace,
 };
 
 #[cfg(feature = "packed")]
@@ -33,24 +33,23 @@ use zisk_pil::{
     Dma64AlignedMemCpyTracePacked as Dma64AlignedMemCpyTrace,
     Dma64AlignedMemSetTracePacked as Dma64AlignedMemSetTrace,
     Dma64AlignedMemTracePacked as Dma64AlignedMemTrace,
-    Dma64AlignedTracePacked as Dma64AlignedTrace, DmaInputCpyTracePacked as DmaInputCpyTrace,
-    DmaMemCpyTracePacked as DmaMemCpyTrace,
-    DmaPrePostInputCpyTracePacked as DmaPrePostInputCpyTrace,
+    Dma64AlignedTracePacked as Dma64AlignedTrace, DmaMemCpyTracePacked as DmaMemCpyTrace,
     DmaPrePostMemCpyTracePacked as DmaPrePostMemCpyTrace, DmaPrePostTracePacked as DmaPrePostTrace,
     DmaTracePacked as DmaTrace, DmaUnalignedTracePacked as DmaUnalignedTrace,
 };
 
+/// Instances of the `Dma` and `DmaPrePost` groups.
+///
+/// memset, memcmp and inputcpy are proven by the full air; memcpy by the memcpy-only air, whose
+/// last partial instance moves to the free tail of the full air when it fits. inputcpy never uses
+/// the inputcpy-only variants: they cannot prove a pre/post row (DmaPrePostInputCpy matches no
+/// DmaPrePostTable row), and they put a different source field in the pre/post bus messages than
+/// the full airs, so an operation split between a variant and a full air cannot be proven either.
 #[derive(Debug, Default, Clone)]
 pub struct DmaInstances {
-    // memcpy: memcpy ==> full
-    // memcmp: full
-    // memset: full
-    // inputcpy: input_cpy ==> full
     pub full: usize,
     pub memcpy: usize,
-    pub inputcpy: usize,
     pub rows_memcpy_to_full: usize,
-    pub rows_inputcpy_to_full: usize,
 }
 
 impl fmt::Display for DmaInstances {
@@ -58,13 +57,8 @@ impl fmt::Display for DmaInstances {
         write!(
             f,
             "  full      {:>3}\n  \
-               memcpy    {:>3} {:>6} → full\n  \
-               inputcpy  {:>3} {:>6} → full\n",
-            self.full,
-            self.memcpy,
-            self.rows_memcpy_to_full,
-            self.inputcpy,
-            self.rows_inputcpy_to_full
+               memcpy    {:>3} {:>6} → full\n",
+            self.full, self.memcpy, self.rows_memcpy_to_full,
         )
     }
 }
@@ -183,75 +177,41 @@ impl<F: PrimeField64> DmaStrategy<F> {
 
     const DMA_ROWS: usize = DmaTrace::<F>::NUM_ROWS;
     const DMA_MEMCPY_ROWS: usize = DmaMemCpyTrace::<F>::NUM_ROWS;
-    const DMA_INPUTCPY_ROWS: usize = DmaInputCpyTrace::<F>::NUM_ROWS;
     const DMA_PRE_POST_ROWS: usize = DmaPrePostTrace::<F>::NUM_ROWS;
     const DMA_PRE_POST_MEMCPY_ROWS: usize = DmaPrePostMemCpyTrace::<F>::NUM_ROWS;
-    const DMA_PRE_POST_INPUTCPY_ROWS: usize = DmaPrePostInputCpyTrace::<F>::NUM_ROWS;
     const DMA_64_ALIGNED_ROWS: usize = Dma64AlignedTrace::<F>::NUM_ROWS;
     const DMA_64_ALIGNED_MEMCPY_ROWS: usize = Dma64AlignedMemCpyTrace::<F>::NUM_ROWS;
     const DMA_64_ALIGNED_MEMSET_ROWS: usize = Dma64AlignedMemSetTrace::<F>::NUM_ROWS;
     const DMA_64_ALIGNED_INPUTCPY_ROWS: usize = Dma64AlignedInputCpyTrace::<F>::NUM_ROWS;
     const DMA_64_ALIGNED_MEM_ROWS: usize = Dma64AlignedMemTrace::<F>::NUM_ROWS;
     const DMA_UNALIGNED_ROWS: usize = DmaUnalignedTrace::<F>::NUM_ROWS;
-    // Dma
-    // DmaMemCpy
-    // DmaInputCpy
+    /// Computes the `Dma` (or `DmaPrePost`) instances, see [`DmaInstances`].
     pub fn calculate_dma_strategy(
         rows: &[usize],
         rows_x_full_instance: usize,
         rows_x_memcpy_instance: usize,
-        rows_x_inputcpy_instance: usize,
         info: &mut DmaInstances,
     ) {
-        let rows_full = rows[DMA_COUNTER_MEMSET] + rows[DMA_COUNTER_MEMCMP];
+        let rows_full =
+            rows[DMA_COUNTER_MEMSET] + rows[DMA_COUNTER_MEMCMP] + rows[DMA_COUNTER_INPUTCPY];
         let rows_memcpy = rows[DMA_COUNTER_MEMCPY];
-        let rows_inputcpy = rows[DMA_COUNTER_INPUTCPY];
 
         info.full = rows_full.div_ceil(rows_x_full_instance);
         info.memcpy = rows_memcpy.div_ceil(rows_x_memcpy_instance);
-        info.inputcpy = rows_inputcpy.div_ceil(rows_x_inputcpy_instance);
 
+        // Free rows in the tail of the last full instance. None when the full rows are an exact
+        // multiple of the capacity (zero included): that last instance is completely used.
         let remain_dma = rows_full % rows_x_full_instance;
-        let available_on_dma =
-            if rows_full == 0 || remain_dma == 0 { 0 } else { rows_x_full_instance - remain_dma };
+        let available_on_dma = if remain_dma == 0 { 0 } else { rows_x_full_instance - remain_dma };
         let remain_dma_memcpy = rows_memcpy % rows_x_memcpy_instance;
-        let remain_dma_inputcpy = rows_inputcpy % rows_x_inputcpy_instance;
-        let remain = remain_dma_memcpy + remain_dma_inputcpy;
 
-        if remain <= available_on_dma {
-            if remain_dma_memcpy > 0 {
-                info.memcpy -= 1;
-                info.rows_memcpy_to_full = remain_dma_memcpy;
-            }
-            if remain_dma_inputcpy > 0 {
-                info.inputcpy -= 1;
-                info.rows_inputcpy_to_full = remain_dma_inputcpy;
-            }
-        } else if remain_dma_memcpy <= available_on_dma {
-            if remain_dma_memcpy > 0 {
-                info.memcpy -= 1;
-                info.rows_memcpy_to_full = remain_dma_memcpy;
-            }
-        } else if remain_dma_inputcpy <= available_on_dma {
-            if remain_dma_inputcpy > 0 {
-                info.inputcpy -= 1;
-                info.rows_inputcpy_to_full = remain_dma_inputcpy;
-            }
-        } else if remain_dma_memcpy > 0
-            && remain_dma_inputcpy > 0
-            && remain <= (available_on_dma + rows_x_full_instance)
-        {
-            // COST(Dma) < COST(DmaMemCpy) + COST(DmaInputCpy)
+        if remain_dma_memcpy > 0 && remain_dma_memcpy <= available_on_dma {
             info.memcpy -= 1;
-            info.inputcpy -= 1;
-            info.full += 1;
             info.rows_memcpy_to_full = remain_dma_memcpy;
-            info.rows_inputcpy_to_full = remain_dma_inputcpy;
         }
     }
-    // DmaPrePost
-    // DmaPrePostMemCpy
-    // DmaPrePostInputCpy
+
+    // Dma64Aligned
     // memcpy: memcpy ==> mem ==> full
     // memcmp: mem ==> full
     // memset: memset ==> mem ==> full
@@ -285,14 +245,12 @@ impl<F: PrimeField64> DmaStrategy<F> {
             &totals.counters[DMA_OFFSET..DMA_OFFSET + DMA_COUNTER_OPS],
             Self::DMA_ROWS,
             Self::DMA_MEMCPY_ROWS,
-            Self::DMA_INPUTCPY_ROWS,
             &mut self.dma,
         );
         Self::calculate_dma_strategy(
             &totals.counters[DMA_PRE_POST_OFFSET..DMA_PRE_POST_OFFSET + DMA_COUNTER_OPS],
             Self::DMA_PRE_POST_ROWS,
             Self::DMA_PRE_POST_MEMCPY_ROWS,
-            Self::DMA_PRE_POST_INPUTCPY_ROWS,
             &mut self.dma_pre_post,
         );
         Self::calculate_dma_64_alignment_strategy(
@@ -303,18 +261,6 @@ impl<F: PrimeField64> DmaStrategy<F> {
             &totals.counters[DMA_UNALIGNED_OFFSET..DMA_UNALIGNED_OFFSET + DMA_COUNTER_OPS],
         );
     }
-    // DmaUnaligned =>
-    // Dma64Aligned => decision by chunk
-    // pub send_memcpy_to_mem: bool,
-    // pub send_memcpy_to_full: bool,
-    // pub send_inputcpy_to_full: bool,
-    // pub send_memset_to_mem: bool,
-    // pub send_memset_to_full: bool,
-    // pub send_mem_to_full: bool,
-    //
-    // pub rows_memcpy_to_full: usize,
-    // pub rows_inputcpy_to_full: usize,
-
     pub fn calculate(
         &mut self,
         counters: Vec<(ChunkId, Box<dyn BusDeviceMetrics>)>,
@@ -335,17 +281,10 @@ impl<F: PrimeField64> DmaStrategy<F> {
             self.dma_pre_post.memcpy,
             Self::DMA_PRE_POST_MEMCPY_ROWS,
         );
-        let mut dma_pre_post_inputcpy = DmaInstancesBuilder::new(
-            "dma_pre_post_inputcpy",
-            self.dma_pre_post.inputcpy,
-            Self::DMA_PRE_POST_INPUTCPY_ROWS,
-        );
 
         let mut dma_full = DmaInstancesBuilder::new("dma_full", self.dma.full, Self::DMA_ROWS);
         let mut dma_memcpy =
             DmaInstancesBuilder::new("dma_memcpy", self.dma.memcpy, Self::DMA_MEMCPY_ROWS);
-        let mut dma_inputcpy =
-            DmaInstancesBuilder::new("dma_inputcpy", self.dma.inputcpy, Self::DMA_INPUTCPY_ROWS);
 
         let mut dma_64_aligned_full = DmaInstancesBuilder::new(
             "dma_64_aligned_full",
@@ -412,24 +351,9 @@ impl<F: PrimeField64> DmaStrategy<F> {
                 dma_memcpy.add_op_rows(*current_chunk, skip, rows, rows, DMA_COUNTER_MEMCPY);
             }
 
-            let mut rows = counters[DMA_OFFSET + DMA_COUNTER_INPUTCPY];
-            let skip = if self.dma.rows_inputcpy_to_full > 0 {
-                let rows_applicable = std::cmp::min(rows, self.dma.rows_inputcpy_to_full);
-                dma_full.add_op_rows(
-                    *current_chunk,
-                    0,
-                    rows_applicable,
-                    rows_applicable,
-                    DMA_COUNTER_INPUTCPY,
-                );
-                rows -= rows_applicable;
-                self.dma.rows_inputcpy_to_full -= rows_applicable;
-                rows_applicable
-            } else {
-                0
-            };
+            let rows = counters[DMA_OFFSET + DMA_COUNTER_INPUTCPY];
             if rows > 0 {
-                dma_inputcpy.add_op_rows(*current_chunk, skip, rows, rows, DMA_COUNTER_INPUTCPY);
+                dma_full.add_op_rows(*current_chunk, 0, rows, rows, DMA_COUNTER_INPUTCPY);
             }
 
             // DMA_PRE_POST
@@ -470,30 +394,9 @@ impl<F: PrimeField64> DmaStrategy<F> {
                 );
             }
 
-            let mut rows = counters[DMA_PRE_POST_OFFSET + DMA_COUNTER_INPUTCPY];
-            let skip = if self.dma_pre_post.rows_inputcpy_to_full > 0 {
-                let rows_applicable = std::cmp::min(rows, self.dma_pre_post.rows_inputcpy_to_full);
-                dma_pre_post_full.add_op_rows(
-                    *current_chunk,
-                    0,
-                    rows_applicable,
-                    rows_applicable,
-                    DMA_COUNTER_INPUTCPY,
-                );
-                rows -= rows_applicable;
-                self.dma_pre_post.rows_inputcpy_to_full -= rows_applicable;
-                rows_applicable
-            } else {
-                0
-            };
+            let rows = counters[DMA_PRE_POST_OFFSET + DMA_COUNTER_INPUTCPY];
             if rows > 0 {
-                dma_pre_post_inputcpy.add_op_rows(
-                    *current_chunk,
-                    skip,
-                    rows,
-                    rows,
-                    DMA_COUNTER_INPUTCPY,
-                );
+                dma_pre_post_full.add_op_rows(*current_chunk, 0, rows, rows, DMA_COUNTER_INPUTCPY);
             }
 
             // DMA_64_ALIGNED
@@ -549,10 +452,8 @@ impl<F: PrimeField64> DmaStrategy<F> {
         let plans = vec![
             (DmaTrace::<F>::AIR_ID, dma_full.get_plan()),
             (DmaMemCpyTrace::<F>::AIR_ID, dma_memcpy.get_plan()),
-            (DmaInputCpyTrace::<F>::AIR_ID, dma_inputcpy.get_plan()),
             (DmaPrePostTrace::<F>::AIR_ID, dma_pre_post_full.get_plan()),
             (DmaPrePostMemCpyTrace::<F>::AIR_ID, dma_pre_post_memcpy.get_plan()),
-            (DmaPrePostInputCpyTrace::<F>::AIR_ID, dma_pre_post_inputcpy.get_plan()),
             (Dma64AlignedTrace::<F>::AIR_ID, dma_64_aligned_full.get_plan()),
             (Dma64AlignedMemSetTrace::<F>::AIR_ID, dma_64_aligned_memset.get_plan()),
             (Dma64AlignedMemCpyTrace::<F>::AIR_ID, dma_64_aligned_memcpy.get_plan()),
@@ -626,7 +527,7 @@ mod tests {
 
     fn calculate(rows: &[usize]) -> DmaInstances {
         let mut info = DmaInstances::default();
-        TestStrategy::calculate_dma_strategy(rows, 8, 4, 4, &mut info);
+        TestStrategy::calculate_dma_strategy(rows, 8, 4, &mut info);
         info
     }
 
@@ -636,31 +537,25 @@ mod tests {
 
         assert_eq!(info.full, 1);
         assert_eq!(info.memcpy, 1);
-        assert_eq!(info.inputcpy, 0);
         assert_eq!(info.rows_memcpy_to_full, 0);
-        assert_eq!(info.rows_inputcpy_to_full, 0);
     }
 
     #[test]
-    fn exact_full_instance_does_not_absorb_inputcpy_remainder() {
+    fn inputcpy_rows_are_proven_by_the_full_air() {
         let info = calculate(&rows(0, 0, 8, 1));
 
-        assert_eq!(info.full, 1);
+        assert_eq!(info.full, 2);
         assert_eq!(info.memcpy, 0);
-        assert_eq!(info.inputcpy, 1);
         assert_eq!(info.rows_memcpy_to_full, 0);
-        assert_eq!(info.rows_inputcpy_to_full, 0);
     }
 
     #[test]
-    fn exact_full_instance_allocates_extra_full_for_two_partial_remainders() {
+    fn inputcpy_tail_leaves_room_for_memcpy_remainder() {
         let info = calculate(&rows(1, 8, 0, 1));
 
         assert_eq!(info.full, 2);
         assert_eq!(info.memcpy, 0);
-        assert_eq!(info.inputcpy, 0);
         assert_eq!(info.rows_memcpy_to_full, 1);
-        assert_eq!(info.rows_inputcpy_to_full, 1);
     }
 
     #[test]
@@ -669,8 +564,6 @@ mod tests {
 
         assert_eq!(info.full, 1);
         assert_eq!(info.memcpy, 0);
-        assert_eq!(info.inputcpy, 0);
         assert_eq!(info.rows_memcpy_to_full, 1);
-        assert_eq!(info.rows_inputcpy_to_full, 0);
     }
 }

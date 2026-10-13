@@ -17,10 +17,10 @@ use crate::{generate_dma_mem_inputs, skip_dma_mem_inputs};
 // The `DmaOpMultiCounter` struct represents a counter that monitors and measures
 // dma specific operation on the data bus.
 //
-// Dma              Full   OnlyMemCpy   OnlyInputCpy
+// Dma              Full   OnlyMemCpy
 // Dma64Aligned     Full4  OnlyMemCpy8  OnlyInputCpy4 OnlyMemSet8 Mem4
 // DmaUnaligned     Full
-// DmaPrePost       Full   OnlyMemCpy   OnlyInputCpy
+// DmaPrePost       Full   OnlyMemCpy
 //
 // MEMCPY + XMEMCPY
 //    dma_memcpy | dma_pre_post_memcpy | dma_unaligned  (unaligned_dst_src)
@@ -32,7 +32,7 @@ use crate::{generate_dma_mem_inputs, skip_dma_mem_inputs};
 //    dma | dma_pre_post | dma_64_aligned_mem  (aligned_dst_src)
 //
 // INPUTCPY
-//    dma_inputcpy | dma_pre_post_inputcpy | dma_64_aligned_inputcpy
+//    dma | dma_pre_post | dma_64_aligned_inputcpy
 //
 // XMEMSET
 //    dma | dma_pre_post | dma_64_aligned_memset

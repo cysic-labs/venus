@@ -6,16 +6,15 @@ use proofman_common::ProofCtx;
 use zisk_common::{BusDeviceMode, ComponentBuilder, Instance, InstanceCtx, Plan, Planner};
 use zisk_pil::{
     Dma64AlignedInputCpyTrace, Dma64AlignedMemCpyTrace, Dma64AlignedMemSetTrace,
-    Dma64AlignedMemTrace, Dma64AlignedTrace, DmaInputCpyTrace, DmaMemCpyTrace,
-    DmaPrePostInputCpyTrace, DmaPrePostMemCpyTrace, DmaPrePostTrace, DmaTrace, DmaUnalignedTrace,
-    ZiskProofValues,
+    Dma64AlignedMemTrace, Dma64AlignedTrace, DmaMemCpyTrace, DmaPrePostMemCpyTrace,
+    DmaPrePostTrace, DmaTrace, DmaUnalignedTrace, ZiskProofValues,
 };
 
 use crate::{
     Dma64AlignedInputCpySM, Dma64AlignedInstance, Dma64AlignedMemCpySM, Dma64AlignedMemSM,
-    Dma64AlignedMemSetSM, Dma64AlignedSM, DmaCounterInputGen, DmaInputCpySM, DmaInstance,
-    DmaMemCpySM, DmaPlanner, DmaPrePostInputCpySM, DmaPrePostInstance, DmaPrePostMemCpySM,
-    DmaPrePostSM, DmaSM, DmaUnalignedInstance, DmaUnalignedSM,
+    Dma64AlignedMemSetSM, Dma64AlignedSM, DmaCounterInputGen, DmaInstance, DmaMemCpySM, DmaPlanner,
+    DmaPrePostInstance, DmaPrePostMemCpySM, DmaPrePostSM, DmaSM, DmaUnalignedInstance,
+    DmaUnalignedSM,
 };
 
 /// The `DmaManager` struct represents the Dma manager,
@@ -25,10 +24,8 @@ pub struct DmaManager<F: PrimeField64> {
     /// Dma state machine
     dma_sm: Arc<DmaSM<F>>,
     dma_memcpy_sm: Arc<DmaMemCpySM<F>>,
-    dma_inputcpy_sm: Arc<DmaInputCpySM<F>>,
     dma_pre_post_sm: Arc<DmaPrePostSM<F>>,
     dma_pre_post_memcpy_sm: Arc<DmaPrePostMemCpySM<F>>,
-    dma_pre_post_inputcpy_sm: Arc<DmaPrePostInputCpySM<F>>,
     dma_64_aligned_sm: Arc<Dma64AlignedSM<F>>,
     dma_64_aligned_mem_sm: Arc<Dma64AlignedMemSM<F>>,
     dma_64_aligned_memcpy_sm: Arc<Dma64AlignedMemCpySM<F>>,
@@ -45,9 +42,7 @@ impl<F: PrimeField64> DmaManager<F> {
     pub fn new(std: Arc<Std<F>>) -> Arc<Self> {
         let dma_sm = DmaSM::new(std.clone());
         let dma_memcpy_sm = DmaMemCpySM::new(std.clone());
-        let dma_inputcpy_sm = DmaInputCpySM::new(std.clone());
         let dma_pre_post_sm = DmaPrePostSM::new(std.clone());
-        let dma_pre_post_inputcpy_sm = DmaPrePostInputCpySM::new(std.clone());
         let dma_pre_post_memcpy_sm = DmaPrePostMemCpySM::new(std.clone());
         let dma_64_aligned_sm = Dma64AlignedSM::new(std.clone());
         let dma_64_aligned_mem_sm = Dma64AlignedMemSM::new(std.clone());
@@ -59,9 +54,7 @@ impl<F: PrimeField64> DmaManager<F> {
         Arc::new(Self {
             dma_sm,
             dma_memcpy_sm,
-            dma_inputcpy_sm,
             dma_pre_post_sm,
-            dma_pre_post_inputcpy_sm,
             dma_pre_post_memcpy_sm,
             dma_64_aligned_sm,
             dma_64_aligned_mem_sm,
@@ -112,18 +105,12 @@ impl<F: PrimeField64> ComponentBuilder<F> for DmaManager<F> {
             DmaMemCpyTrace::<F>::AIR_ID => {
                 Box::new(DmaInstance::new(self.dma_memcpy_sm.clone(), ictx))
             }
-            DmaInputCpyTrace::<F>::AIR_ID => {
-                Box::new(DmaInstance::new(self.dma_inputcpy_sm.clone(), ictx))
-            }
             // DMA pre post instances
             DmaPrePostTrace::<F>::AIR_ID => {
                 Box::new(DmaPrePostInstance::new(self.dma_pre_post_sm.clone(), ictx))
             }
             DmaPrePostMemCpyTrace::<F>::AIR_ID => {
                 Box::new(DmaPrePostInstance::new(self.dma_pre_post_memcpy_sm.clone(), ictx))
-            }
-            DmaPrePostInputCpyTrace::<F>::AIR_ID => {
-                Box::new(DmaPrePostInstance::new(self.dma_pre_post_inputcpy_sm.clone(), ictx))
             }
             // DMA 64 aligned instances
             Dma64AlignedTrace::<F>::AIR_ID => {
