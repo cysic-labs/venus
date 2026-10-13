@@ -62,7 +62,11 @@ pub struct SnarkWrapper<F: PrimeField64> {
     pub d_buffers: Option<*mut c_void>,
     pub reload_fixed_pols_gpu: Option<Arc<AtomicBool>>,
     pub snark_prover: *mut c_void,
-    pub d_buffers_recursivef: *mut c_void,
+    /// Carved from the prover's GPU buffers for the wrapper's lifetime. Null in a standalone
+    /// wrapper, which allocates them per proof and frees them before the PLONK prover allocates
+    /// its own GPU buffer, because both do not fit on one GPU at once.
+    d_buffers_recursivef: *mut c_void,
+    recursivef_verkey: String,
     pub proving_key_path: PathBuf,
     pub protocol: SnarkProtocol,
 }
@@ -122,7 +126,9 @@ impl SnarkProof {
 impl<F: PrimeField64> Drop for SnarkWrapper<F> {
     fn drop(&mut self) {
         free_final_snark_prover_c(self.snark_prover);
-        free_device_buffers_recursivef_c(self.d_buffers_recursivef);
+        if !self.d_buffers_recursivef.is_null() {
+            free_device_buffers_recursivef_c(self.d_buffers_recursivef);
+        }
     }
 }
 
@@ -201,26 +207,15 @@ impl<F: PrimeField64> SnarkWrapper<F> {
         let protocol = SnarkProtocol::from_protocol_id(protocol_id)?;
         timer_stop_and_log_info!(INITIALIZING_FINAL_SNARK_PROVER);
 
-        let d_buffers_vadcop = if let Some(d_buffers) = d_buffers { d_buffers } else { std::ptr::null_mut() };
-
-        let p_setup: *mut c_void = (&setup_recursivef.p_setup).into();
-
         let verkey_path = setup_recursivef.verkey_file.clone();
         let mut contents = String::new();
         let mut file = File::open(verkey_path).unwrap();
         let _ = file.read_to_string(&mut contents).map_err(|err| format!("Failed to read verkey path file: {err}"));
 
-        let verkey_str: String = serde_json::from_str(&contents)
+        let recursivef_verkey: String = serde_json::from_str(&contents)
             .map_err(|err| ProofmanError::InvalidSetup(format!("Failed to parse verkey as string: {}", err)))?;
 
-        let d_buffers_recursivef = gen_device_buffers_recursivef_c(
-            p_setup as *mut u8,
-            setup_recursivef.prover_buffer_size,
-            d_buffers_vadcop as *mut u8,
-            &verkey_str,
-        ) as *mut c_void;
-
-        Ok(Self {
+        let mut wrapper = Self {
             aux_trace,
             setup_recursivef,
             setup_snark_path,
@@ -229,9 +224,24 @@ impl<F: PrimeField64> SnarkWrapper<F> {
             protocol,
             vadcop_final_verkey,
             d_buffers,
-            d_buffers_recursivef,
+            d_buffers_recursivef: std::ptr::null_mut(),
+            recursivef_verkey,
             reload_fixed_pols_gpu,
-        })
+        };
+        if let Some(d_buffers) = d_buffers {
+            wrapper.d_buffers_recursivef = wrapper.gen_device_buffers_recursivef(d_buffers);
+        }
+        Ok(wrapper)
+    }
+
+    fn gen_device_buffers_recursivef(&self, d_buffers_vadcop: *mut c_void) -> *mut c_void {
+        let p_setup: *mut c_void = (&self.setup_recursivef.p_setup).into();
+        gen_device_buffers_recursivef_c(
+            p_setup as *mut u8,
+            self.setup_recursivef.prover_buffer_size,
+            d_buffers_vadcop as *mut u8,
+            &self.recursivef_verkey,
+        ) as *mut c_void
     }
 
     #[allow(clippy::type_complexity)]
@@ -262,6 +272,8 @@ impl<F: PrimeField64> SnarkWrapper<F> {
         }
         let proof = vadcop_proof.proof_with_publics_u64();
 
+        let standalone_buffers_recursivef =
+            self.d_buffers.is_none().then(|| self.gen_device_buffers_recursivef(std::ptr::null_mut()));
         let recursivef_proof = generate_recursivef_proof(
             &self.setup_recursivef,
             &proof,
@@ -269,8 +281,12 @@ impl<F: PrimeField64> SnarkWrapper<F> {
             &self.vadcop_final_verkey,
             output_dir_path,
             self.setup_recursivef.prover_buffer_size as usize * std::mem::size_of::<F>(),
-            self.d_buffers_recursivef,
-        )?;
+            standalone_buffers_recursivef.unwrap_or(self.d_buffers_recursivef),
+        );
+        if let Some(d_buffers_recursivef) = standalone_buffers_recursivef {
+            free_device_buffers_recursivef_c(d_buffers_recursivef);
+        }
+        let recursivef_proof = recursivef_proof?;
 
         timer_start_debug!(GENERATING_SNARK_PROOF);
 

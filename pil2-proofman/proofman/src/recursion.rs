@@ -902,6 +902,37 @@ pub fn generate_recursivef_proof<F: PrimeField64>(
         timer_stop_and_log_debug!(LOAD_FIXED_POLS_RECURSIVEF);
     });
 
+    let p_prove = prove_recursivef(
+        setup,
+        vadcop_proof,
+        prover_buffer,
+        vadcop_final_verkey,
+        output_dir_path,
+        prover_buffer_size,
+        d_buffers_recursivef,
+    );
+
+    // The copy writes into d_buffers_recursivef, so it must finish on every path before the caller may free them.
+    if let Err(e) = load_fixed_pols_handle.join() {
+        tracing::warn!("Fixed pols loading thread panicked: {:?}", e);
+    }
+
+    timer_stop_and_log_info!(GENERATE_RECURSIVEF);
+
+    p_prove
+}
+
+fn prove_recursivef<F: PrimeField64>(
+    setup: &Setup<F>,
+    vadcop_proof: &[u64],
+    prover_buffer: &[F],
+    vadcop_final_verkey: &[u64],
+    output_dir_path: &Path,
+    prover_buffer_size: usize,
+    d_buffers_recursivef: *mut c_void,
+) -> ProofmanResult<*mut c_void> {
+    let p_setup: *mut c_void = (&setup.p_setup).into();
+
     // SAFETY: the committed polynomials are written into the whole trace before it is read.
     let mut trace: Vec<F> =
         unsafe { create_buffer_fast(setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize) };
@@ -961,13 +992,6 @@ pub fn generate_recursivef_proof<F: PrimeField64>(
         d_buffers_recursivef as *mut u8,
     );
     timer_stop_and_log_debug!(GENERATE_RECURSIVEF_PROOF);
-
-    // Join the background thread (should be done by now since proof waited for copy event)
-    if let Err(e) = load_fixed_pols_handle.join() {
-        tracing::warn!("Fixed pols loading thread panicked: {:?}", e);
-    }
-
-    timer_stop_and_log_info!(GENERATE_RECURSIVEF);
 
     Ok(p_prove)
 }
