@@ -43,7 +43,9 @@ pub fn fcall_bin_decomp(
 
         ziskos_fcall!(FCALL_BIN_DECOMP_ID);
 
+        // The length is prover-chosen, so bound it before sizing the destination buffer
         let len_bits = ziskos_fcall_get() as usize;
+        assert!(len_bits <= len_x * 64, "Bit length exceeds the maximum for the given input");
         #[cfg(not(feature = "inputcpy"))]
         {
             let mut bits = vec![0u64; len_bits];

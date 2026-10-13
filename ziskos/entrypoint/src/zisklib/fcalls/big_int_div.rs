@@ -64,14 +64,17 @@ pub fn fcall_division(
 
         ziskos_fcall!(FCALL_BIG_INT_DIV_ID);
 
+        // The lengths are prover-chosen, so bound them before copying into the caller's buffers
         #[cfg(not(feature = "inputcpy"))]
         {
             let len_quo = ziskos_fcall_get() as usize;
+            assert!(len_quo <= quo.len(), "Quotient length exceeds the destination buffer");
             for i in 0..len_quo {
                 quo[i] = ziskos_fcall_get();
             }
 
             let len_rem = ziskos_fcall_get() as usize;
+            assert!(len_rem <= rem.len(), "Remainder length exceeds the destination buffer");
             for i in 0..len_rem {
                 rem[i] = ziskos_fcall_get();
             }
@@ -81,8 +84,11 @@ pub fn fcall_division(
         #[cfg(feature = "inputcpy")]
         {
             let len_quo = ziskos_fcall_get() as usize;
+            assert!(len_quo <= quo.len(), "Quotient length exceeds the destination buffer");
             ziskos_inputcpy!(quo, len_quo * 8);
+
             let len_rem = ziskos_fcall_get() as usize;
+            assert!(len_rem <= rem.len(), "Remainder length exceeds the destination buffer");
             ziskos_inputcpy!(rem, len_rem * 8);
 
             (len_quo, len_rem)
