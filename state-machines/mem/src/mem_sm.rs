@@ -298,6 +298,13 @@ impl<F: PrimeField64> MemModule<F> for MemSM<F> {
         air_values.segment_last_addr = F::from_u32(last_addr);
         air_values.segment_last_step = F::from_u64(last_step);
 
+        // segment_last_step is range checked below 2^38 as a 22-bit and a 16-bit chunk
+        let last_step_chunks = [last_step & ((1 << 22) - 1), last_step >> 22];
+        air_values.last_step_chunks[0] = F::from_u64(last_step_chunks[0]);
+        air_values.last_step_chunks[1] = F::from_u64(last_step_chunks[1]);
+        range_22bits[last_step_chunks[0] as usize] += 1;
+        range_16bits[last_step_chunks[1] as usize] += 1;
+
         air_values.previous_segment_value[0] = F::from_u32(previous_segment.value as u32);
         air_values.previous_segment_value[1] = F::from_u32((previous_segment.value >> 32) as u32);
 

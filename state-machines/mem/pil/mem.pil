@@ -190,14 +190,18 @@ airtemplate Mem(const int N = 2**21, const int id = MEMORY_ID, const int RC = 2,
     // areas. Also for security send is_last_segment to avoid reuse end of last segment as start of
     // new cycle of segments
 
+    // is_first_segment enables the rules of the first row of the memory area (see previous_addr and
+    // the address change of the first row). Only the global constraint proves a tuple with
+    // is_first_segment = 1, so exactly the segment that starts the memory area has it set.
+
     // this constraint "assumes" that previous values of this segment
 
     direct_update_assumes(MEMORY_CONTINUATION_ID,
                   [
                     base_address,               // identify area of memory
                     segment_id,                 // current segment_id
-                                                // proves of last segment
-                    previous_segment_addr,
+                    is_first_segment,           // 1 only when assuming the global initial values
+                    previous_segment_addr,      // proves of last segment
                     previous_segment_step,
                     ...previous_segment_value
                   ]);
@@ -232,8 +236,8 @@ airtemplate Mem(const int N = 2**21, const int id = MEMORY_ID, const int RC = 2,
     direct_update_proves(MEMORY_CONTINUATION_ID,
                   [
                     base_address,               // identify area of memory
-                    segment_id + 1,             // next segment_id, for last segment
-                                                // this value is forced to 0 to match global constraint
+                    segment_id + 1,             // next segment_id, the last segment proves nothing
+                    0,                          // the next segment is never the first one
                     segment_last_addr,          // last addr of segment
                     segment_last_step,          // last step of segment
                     ...segment_last_value
@@ -250,7 +254,13 @@ airtemplate Mem(const int N = 2**21, const int id = MEMORY_ID, const int RC = 2,
     // to prevent redundant constraints.This flag is used to handle cases where a memory area is not
     // used during a given execution.
 
-    direct_global_update_proves(MEMORY_CONTINUATION_ID, [ base_address, 0, internal_base_address, 0, ...zeros], sel: enable_flag);
+    direct_global_update_proves(MEMORY_CONTINUATION_ID, [ base_address,             // area of memory
+                                                          0,                        // segment_id
+                                                          1,                        // is_first_segment
+                                                          internal_base_address,    // previous_segment_addr
+                                                          0,                        // previous_segment_step
+                                                          ...zeros],                // previous_segment_value
+                                                          sel: enable_flag);
 
     // For security, ensure that the first address has the correct value to prevent adding a large
     // number of instances that could cause an "overflow" in the prime field.
@@ -292,6 +302,16 @@ airtemplate Mem(const int N = 2**21, const int id = MEMORY_ID, const int RC = 2,
 
     // Check the order of operations inside segment
 
+    // The first row of the first segment opens a new address group: its address is ordered after
+    // previous_addr and its value starts from scratch (written, or 0 if read). Without it, this row
+    // could continue the group of the global initial values at previous_addr with value 0, which
+    // in the immutable memory is the last word before the area, i.e. a word of another area. The
+    // free input memory is excluded, its first row could be a free read of the base address.
+
+    if (!free_input_mem) {
+        is_first_segment * SEGMENT_L1 * (1 - addr_changes) === 0;
+    }
+
     if (immutable) {
 
         // Immutable means that all operations must produces the same value. In the case of
@@ -317,9 +337,9 @@ airtemplate Mem(const int N = 2**21, const int id = MEMORY_ID, const int RC = 2,
             const expr air.previous_addr = SEGMENT_L1 * (previous_segment_addr - 'addr) + 'addr;
         } else {
 
-            // In the case of immutable, no free-input memory, the first row must be "different" to
-            // force `address_change`. For this reason, we subtract one from `previous_segment_addr`,
-            // which in the first segment is equal to the first address of the memory area.
+            // In the case of immutable, no free-input memory, the first row of the first segment
+            // changes address. To allow it to be the first address of the memory area, we subtract
+            // one from `previous_segment_addr`, which in the first segment is that address.
 
             const expr air.previous_addr = SEGMENT_L1 * (previous_segment_addr - is_first_segment - 'addr) + 'addr;
         }
@@ -341,22 +361,15 @@ airtemplate Mem(const int N = 2**21, const int id = MEMORY_ID, const int RC = 2,
         } else {
             range_check(expression: delta_addr - 1, min: 0, max: 2**24 - 1, sel: addr_changes);
         }
-
-        // If the address does not change, the current address and previous must be the same.
-
-        (1 - addr_changes) * (addr - previous_addr) === 0;
     } else {
 
-        // In this case we don't need to substract one, as happends on immutable memory, because the step of first
-        // previous segment is 0 and first possible step is greater than 0.
+        // Unlike the immutable memory, we don't subtract one: as the first row of the first segment
+        // changes address, the first word of the area can't be accessed. In the RAM area it is the
+        // slot of register x0, which is never accessed.
 
         const expr air.previous_addr = SEGMENT_L1 * (previous_segment_addr - 'addr) + 'addr;
         const expr delta_addr = addr - previous_addr;
 
-        // on first row of first segment could be the same and address_change = 1 because it's as a new addr
-        // SEGMENT_L1 * (x + is_first_segment * SEGMENT_L1) === SEGMENT_L1 * (x + is_first_segment)
-
-        
         if (dual_mem) {
             // The `previous_step` column must match with the `step` from the previous row.
             // - If the previous row was in dual mode, it must match the previous `step_dual`.
@@ -374,15 +387,30 @@ airtemplate Mem(const int N = 2**21, const int id = MEMORY_ID, const int RC = 2,
         col witness bits(16) air.h_increment;
         l_increment + 2**22 * h_increment + 1 === addr_changes * (delta_addr - delta_step) + delta_step;
 
-        is_first_segment * SEGMENT_L1 * (1 - addr_changes) === 0;
-
         // addr_change == 1 => 22 + 16 = 38 bits + 3 => 41 bits => 2 TB (limit address 32 bits)
         // addr_change == 0 => 22 + 16 = 38 bits => 4 slots => 2^36 => 32 GB steps (16K main instances)
-        // 38 bits x 2^22 = 2^60 + 2^32 address = 2^61 secure.
-        // using control in the middle of instance, reduce to 2^60
 
         range_check(expression: l_increment, min: 0, max: 2**22 - 1);
         range_check(expression: h_increment, min: 0, max: 2**16 - 1);
+
+        // The increments bound each step difference, not the step itself. A row outside the bus
+        // (sel = 0) can advance the clock by up to 2^38 as a field relation, and enough of these
+        // rows, chained through several segments, would wrap it around p and order a read after a
+        // later write of the same address. To rule it out, the step handed to the next segment is
+        // range checked below 2^38 (22 + 16 bits), which holds for every memory operation: main
+        // steps are below 2^36, with 4 memory steps each, and the last main step only ends the
+        // execution. So every segment starts its clock below 2^38 (the first one at 0), and its N
+        // rows add at most 2^38 + 2^24 each (with the dual step), staying far below p: inside an
+        // address group the step grows as an integer through all segments.
+
+        assert(N <= 2**24);
+
+        airval last_step_chunks[2];
+
+        segment_last_step === last_step_chunks[0] + 2**22 * last_step_chunks[1];
+
+        range_check(expression: last_step_chunks[0], min: 0, max: 2**22 - 1);
+        range_check(expression: last_step_chunks[1], min: 0, max: 2**16 - 1);
 
         // to avoid intermediate column
         col witness bits(1) air.read_same_addr;
@@ -491,12 +519,6 @@ function precompiled_mem_store(int id = MEMORY_ID, expr addr, expr main_step, ex
 
 function reg_pre_load(int id = MEMORY_ID, expr addr, expr prev_mem_step, expr value[], expr sel = 1, int name = PIOP_NAME_DEFAULT) {
     mem_proves(id, MEMORY_REG_OP, addr, prev_mem_step, value, sel, name: name);
-}
-
-function precompiled_reg_load(int id = MEMORY_ID, expr reg, expr prev_mem_step, expr main_step, expr value[], expr sel = 1, int name = PIOP_NAME_DEFAULT) {
-    mem_proves(id, MEMORY_REG_OP, reg, prev_mem_step, value, sel, name: name);
-    range_check(expression: main_step_to_precompiled_mem_step(main_step) - prev_mem_step, min: 0, max: MAX_RANGE);    
-    mem_assumes(id, MEMORY_REG_OP, reg, main_step_to_precompiled_mem_step(main_step), 8, value, sel, name: name);
 }
 
 function reg_pre_store(int id = MEMORY_ID, expr addr, expr prev_mem_step, expr value[], expr sel = 1, int name = PIOP_NAME_DEFAULT) {

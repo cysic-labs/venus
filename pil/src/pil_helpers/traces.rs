@@ -16,7 +16,7 @@ use std::fmt;
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "e71e29028da5d085d4161a095ba9bec92a09f96cb055376c09598c37ebdd22e8";
+pub const PILOUT_HASH: &str = "b5f668b19050e61d71505d853d28e966800b555069936c5008c1fe2b100bb808";
 
 pub const MERKLE_TREE_ARITY: u64 = 4;
 
@@ -651,7 +651,7 @@ values!(MainAirValues<F> {
 });
 
 values!(MemAirValues<F> {
- segment_id: F, is_first_segment: F, is_last_segment: F, previous_segment_value: [F; 2], previous_segment_step: F, previous_segment_addr: F, segment_last_value: [F; 2], segment_last_step: F, segment_last_addr: F, distance_base: [F; 2], distance_end: [F; 2], im_direct: [FieldExtension<F>; 6],
+ segment_id: F, is_first_segment: F, is_last_segment: F, previous_segment_value: [F; 2], previous_segment_step: F, previous_segment_addr: F, segment_last_value: [F; 2], segment_last_step: F, segment_last_addr: F, distance_base: [F; 2], distance_end: [F; 2], last_step_chunks: [F; 2], im_direct: [FieldExtension<F>; 8],
 });
 
 values!(RomDataAirValues<F> {

@@ -162,8 +162,12 @@ airtemplate MemAlign(const int N = 2**10, const int RC = 2, const int CHUNK_NUM 
     // 3] Prove unaligned memory accesses against the Main component
     col witness bits(1) sel_prove;
 
-    sel_prove * (1 - sel_prove) === 0;
-    sel_prove * sel_assume === 0; // Disjoint selectors
+    // The [V] lines are the only rom lines that neither start a program (reset) nor access an
+    // aligned word (sel_up_to_down, sel_down_to_up), and these flags are bound to the rom, where
+    // they are never both active. So sel_prove is binary, disjoint from sel_assume, and set on
+    // every [V] row: each program proves its unaligned access to main. A program with a silent
+    // [V] row would perform the aligned writes of a store that main never executed.
+    sel_prove === (1 - reset) * (1 - sel_assume);
 
     // Keep the aligned backing accesses at the timestamp of the unaligned
     // operation, with stores at the following memory timestamp. The ROM lookup
