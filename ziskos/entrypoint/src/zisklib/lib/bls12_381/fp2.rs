@@ -6,10 +6,10 @@ use crate::{
         syscall_bls12_381_complex_sub, SyscallBls12_381ComplexAddParams,
         SyscallBls12_381ComplexMulParams, SyscallBls12_381ComplexSubParams, SyscallComplex384,
     },
-    zisklib::{eq, fcall_bls12_381_fp2_inv, fcall_bls12_381_fp2_sqrt, is_zero},
+    zisklib::{eq, fcall_bls12_381_fp2_inv, fcall_bls12_381_fp2_sqrt, is_zero, lt},
 };
 
-use super::constants::{NQR_FP2, P_MINUS_ONE};
+use super::constants::{NQR_FP2, P, P_MINUS_ONE};
 
 /// Helper to convert from array representation to syscall representation
 #[inline]
@@ -177,7 +177,10 @@ pub fn sqrt_fp2_bls12_381(
         hints,
     );
     let is_qr = hint[0] == 1;
-    let sqrt = hint[1..13].try_into().unwrap();
+    let sqrt: [u64; 12] = hint[1..13].try_into().unwrap();
+
+    // The hint is prover-chosen, so reject non-canonical representatives
+    assert!(lt(&sqrt[0..6], &P) && lt(&sqrt[6..12], &P), "Square root is not canonical");
 
     // Compute sqrt * sqrt
     let mul = mul_fp2_bls12_381(
@@ -224,6 +227,9 @@ pub fn inv_fp2_bls12_381(
         #[cfg(feature = "hints")]
         hints,
     );
+
+    // The hint is prover-chosen, so reject non-canonical representatives
+    assert!(lt(&inv[0..6], &P) && lt(&inv[6..12], &P), "Inverse is not canonical");
 
     let product = mul_fp2_bls12_381(
         a,

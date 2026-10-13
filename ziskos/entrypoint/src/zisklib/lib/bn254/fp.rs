@@ -94,6 +94,9 @@ pub fn inv_fp_bn254(x: &[u64; 4], #[cfg(feature = "hints")] hints: &mut Vec<u64>
         hints,
     );
 
+    // The hint is prover-chosen, so reject non-canonical representatives
+    assert!(lt(&inv, &P), "Inverse is not canonical");
+
     // x·y + 0
     let mut params = SyscallArith256ModParams {
         a: x,

@@ -6,10 +6,10 @@ use crate::{
         SyscallBn254ComplexAddParams, SyscallBn254ComplexMulParams, SyscallBn254ComplexSubParams,
         SyscallComplex256,
     },
-    zisklib::{eq, fcall_bn254_fp2_inv},
+    zisklib::{eq, fcall_bn254_fp2_inv, lt},
 };
 
-use super::constants::P_MINUS_ONE;
+use super::constants::{P, P_MINUS_ONE};
 
 /// Addition in the degree 2 extension of the BN254 curve
 #[inline]
@@ -170,6 +170,9 @@ pub fn inv_fp2_bn254(a: &[u64; 8], #[cfg(feature = "hints")] hints: &mut Vec<u64
         #[cfg(feature = "hints")]
         hints,
     );
+
+    // The hint is prover-chosen, so reject non-canonical representatives
+    assert!(lt(&inv[0..4], &P) && lt(&inv[4..8], &P), "Inverse is not canonical");
 
     let mut f1 =
         SyscallComplex256 { x: a[0..4].try_into().unwrap(), y: a[4..8].try_into().unwrap() };

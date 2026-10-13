@@ -2,7 +2,7 @@
 
 use crate::{
     syscalls::{syscall_arith384_mod, SyscallArith384ModParams},
-    zisklib::{eq, fcall_bls12_381_fp_inv, fcall_bls12_381_fp_sqrt},
+    zisklib::{eq, fcall_bls12_381_fp_inv, fcall_bls12_381_fp_sqrt, lt},
 };
 
 use super::constants::{NQR_FP, P, P_MINUS_ONE};
@@ -155,7 +155,10 @@ pub fn sqrt_fp_bls12_381(
         hints,
     );
     let is_qr = hint[0] == 1;
-    let sqrt = hint[1..7].try_into().unwrap();
+    let sqrt: [u64; 6] = hint[1..7].try_into().unwrap();
+
+    // The hint is prover-chosen, so reject non-canonical representatives
+    assert!(lt(&sqrt, &P), "Square root is not canonical");
 
     // Compute sqrt * sqrt
     let mut params = SyscallArith384ModParams {
@@ -205,6 +208,9 @@ pub fn inv_fp_bls12_381(x: &[u64; 6], #[cfg(feature = "hints")] hints: &mut Vec<
         #[cfg(feature = "hints")]
         hints,
     );
+
+    // The hint is prover-chosen, so reject non-canonical representatives
+    assert!(lt(&inv, &P), "Inverse is not canonical");
 
     // x·y + 0
     let mut params = SyscallArith384ModParams {

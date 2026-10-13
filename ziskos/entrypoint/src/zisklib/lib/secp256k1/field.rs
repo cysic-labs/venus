@@ -1,6 +1,6 @@
 use crate::{
     syscalls::{syscall_arith256_mod, SyscallArith256ModParams},
-    zisklib::fcall_secp256k1_fp_sqrt,
+    zisklib::{fcall_secp256k1_fp_sqrt, lt},
 };
 
 use super::constants::{NQR, P};
@@ -64,8 +64,24 @@ pub fn secp256k1_fp_sqrt(
         #[cfg(feature = "hints")]
         hints,
     );
+    secp256k1_validate_fp_sqrt(
+        x,
+        &hint,
+        #[cfg(feature = "hints")]
+        hints,
+    )
+}
+
+fn secp256k1_validate_fp_sqrt(
+    x: &[u64; 4],
+    hint: &[u64; 5],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> ([u64; 4], bool) {
     let is_qr = hint[0] == 1;
-    let sqrt = hint[1..5].try_into().unwrap();
+    let sqrt: [u64; 4] = hint[1..5].try_into().unwrap();
+
+    // A prover controls fcall output. Reject equivalent non-canonical representatives.
+    assert!(lt(&sqrt, &P), "secp256k1 sqrt is not canonical");
 
     // Compute sqrt * sqrt
     let mut params = SyscallArith256ModParams {
@@ -95,5 +111,29 @@ pub fn secp256k1_fp_sqrt(
         );
         assert_eq!(*params.d, nqr);
         (sqrt, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate_sqrt(x: &[u64; 4], hint: &[u64; 5]) -> ([u64; 4], bool) {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        secp256k1_validate_fp_sqrt(
+            x,
+            hint,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        )
+    }
+
+    #[test]
+    fn rejects_noncanonical_sqrt_hint() {
+        let mut p_plus_one = P;
+        p_plus_one[0] += 1;
+        let hint = [1, p_plus_one[0], p_plus_one[1], p_plus_one[2], p_plus_one[3]];
+        assert!(std::panic::catch_unwind(|| validate_sqrt(&[1, 0, 0, 0], &hint)).is_err());
     }
 }
