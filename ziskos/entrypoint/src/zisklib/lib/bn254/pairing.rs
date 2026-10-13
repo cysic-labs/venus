@@ -6,7 +6,7 @@ use super::{
     constants::{G1_IDENTITY, G2_IDENTITY, P},
     curve::{g1_bytes_be_to_u64_le_bn254, is_on_curve_bn254},
     final_exp::final_exp_bn254,
-    miller_loop::{miller_loop_batch_bn254, miller_loop_bn254},
+    miller_loop::miller_loop_batch_bn254,
     twist::{g2_bytes_be_to_u64_le_bn254, is_on_curve_twist_bn254, is_on_subgroup_twist_bn254},
 };
 
@@ -19,46 +19,13 @@ const PAIRING_CHECK_ERR_G2_NOT_IN_FIELD: u8 = 4;
 const PAIRING_CHECK_ERR_G2_NOT_ON_CURVE: u8 = 5;
 const PAIRING_CHECK_ERR_G2_NOT_IN_SUBGROUP: u8 = 6;
 
-/// Optimal Ate Pairing e: G1 x G2 -> GT over the BN254 curve
-/// where G1 = E(Fp)[r] = E(Fp), G2 = E'(Fp2)[r] and GT = μ_r (the r-th roots of unity over Fp12*
-/// the involved curves are E/Fp: y² = x³ + 3 and E'/Fp2: y² = x³ + 3/(9+u)
-///  pairingBN254:
-///          input: P ∈ G1 and Q ∈ G2
-///          output: e(P,Q) ∈ GT
-///
-pub fn pairing_bn254(
-    p: &[u64; 8],
-    q: &[u64; 16],
-    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
-) -> [u64; 48] {
-    // Is p = 𝒪?
-    if *p == G1_IDENTITY || *q == G2_IDENTITY {
-        // e(P, 𝒪) = e(𝒪, Q) = 1;
-        let mut one = [0; 48];
-        one[0] = 1;
-        return one;
-    }
-
-    // Miller loop
-    let miller_loop = miller_loop_bn254(
-        p,
-        q,
-        #[cfg(feature = "hints")]
-        hints,
-    );
-
-    // Final exponentiation
-    final_exp_bn254(
-        &miller_loop,
-        #[cfg(feature = "hints")]
-        hints,
-    )
-}
-
 /// Computes the optimal Ate pairing for a batch of G1 and G2 points over the BN254 curve
 /// and multiplies the results together, i.e.:
 ///     e(P₁, Q₁) · e(P₂, Q₂) · ... · e(Pₙ, Qₙ) ∈ GT
-pub fn pairing_batch_bn254(
+///
+/// The points are not validated: they must have canonical coordinates, be on their curves and,
+/// for G2, be in the subgroup, as checked by [`pairing_check_bn254`]
+pub(crate) fn pairing_batch_bn254(
     g1_points: &[[u64; 8]],
     g2_points: &[[u64; 16]],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -132,45 +99,8 @@ pub fn pairing_check_bn254(
 ) -> Result<bool, u8> {
     assert_eq!(g1_points.len(), g2_points.len(), "Number of G1 and G2 points must be equal");
 
-    // Collect valid pairs
-    let mut g1_valid = Vec::with_capacity(g1_points.len());
-    let mut g2_valid = Vec::with_capacity(g2_points.len());
+    // Validate every point, including those paired with 𝒪
     for (g1, g2) in g1_points.iter().zip(g2_points.iter()) {
-        let g1_is_inf = eq(g1, &G1_IDENTITY);
-        let g2_is_inf = eq(g2, &G2_IDENTITY);
-
-        // If p = 𝒪 or q = 𝒪 => MillerLoop(P, 𝒪) = MillerLoop(𝒪, Q) = 1; we can skip
-        if g2_is_inf {
-            if !g1_is_inf
-                && !is_on_curve_bn254(
-                    g1,
-                    #[cfg(feature = "hints")]
-                    hints,
-                )
-            {
-                return Err(PAIRING_CHECK_ERR_G1_NOT_ON_CURVE);
-            }
-            continue;
-        }
-
-        if g1_is_inf {
-            if !is_on_curve_twist_bn254(
-                g2,
-                #[cfg(feature = "hints")]
-                hints,
-            ) {
-                return Err(PAIRING_CHECK_ERR_G2_NOT_ON_CURVE);
-            }
-            if !is_on_subgroup_twist_bn254(
-                g2,
-                #[cfg(feature = "hints")]
-                hints,
-            ) {
-                return Err(PAIRING_CHECK_ERR_G2_NOT_IN_SUBGROUP);
-            }
-            continue;
-        }
-
         // Validate G1 point field elements
         let x1: [u64; 4] = g1[0..4].try_into().unwrap();
         let y1: [u64; 4] = g1[4..8].try_into().unwrap();
@@ -179,11 +109,13 @@ pub fn pairing_check_bn254(
         }
 
         // Verify G1 point is on curve
-        if !is_on_curve_bn254(
-            g1,
-            #[cfg(feature = "hints")]
-            hints,
-        ) {
+        if !eq(g1, &G1_IDENTITY)
+            && !is_on_curve_bn254(
+                g1,
+                #[cfg(feature = "hints")]
+                hints,
+            )
+        {
             return Err(PAIRING_CHECK_ERR_G1_NOT_ON_CURVE);
         }
 
@@ -196,37 +128,31 @@ pub fn pairing_check_bn254(
             return Err(PAIRING_CHECK_ERR_G2_NOT_IN_FIELD);
         }
 
-        // Verify G2 point is on twist curve
-        if !is_on_curve_twist_bn254(
-            g2,
-            #[cfg(feature = "hints")]
-            hints,
-        ) {
-            return Err(PAIRING_CHECK_ERR_G2_NOT_ON_CURVE);
-        }
+        if !eq(g2, &G2_IDENTITY) {
+            // Verify G2 point is on twist curve
+            if !is_on_curve_twist_bn254(
+                g2,
+                #[cfg(feature = "hints")]
+                hints,
+            ) {
+                return Err(PAIRING_CHECK_ERR_G2_NOT_ON_CURVE);
+            }
 
-        // Verify G2 point is in subgroup
-        if !is_on_subgroup_twist_bn254(
-            g2,
-            #[cfg(feature = "hints")]
-            hints,
-        ) {
-            return Err(PAIRING_CHECK_ERR_G2_NOT_IN_SUBGROUP);
+            // Verify G2 point is in subgroup
+            if !is_on_subgroup_twist_bn254(
+                g2,
+                #[cfg(feature = "hints")]
+                hints,
+            ) {
+                return Err(PAIRING_CHECK_ERR_G2_NOT_IN_SUBGROUP);
+            }
         }
-
-        g1_valid.push(*g1);
-        g2_valid.push(*g2);
     }
 
-    // If all pairs were skipped, result is 1
-    if g1_valid.is_empty() {
-        return Ok(true);
-    }
-
-    // Compute batch pairing and check if result is 1
+    // Compute the batch pairing, which skips the pairs with 𝒪, and check if the result is 1
     Ok(is_one(&pairing_batch_bn254(
-        &g1_valid,
-        &g2_valid,
+        g1_points,
+        g2_points,
         #[cfg(feature = "hints")]
         hints,
     )))
@@ -277,5 +203,67 @@ pub unsafe extern "C" fn bn254_pairing_check_c(
         Ok(true) => PAIRING_CHECK_SUCCESS,
         Ok(false) => PAIRING_CHECK_FAILED,
         Err(code) => code,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const G1_GENERATOR: [u64; 8] = [1, 0, 0, 0, 2, 0, 0, 0];
+    const G2_GENERATOR: [u64; 16] = [
+        0x46debd5cd992f6ed,
+        0x674322d4f75edadd,
+        0x426a00665e5c4479,
+        0x1800deef121f1e76,
+        0x97e485b7aef312c2,
+        0xf1aa493335a9e712,
+        0x7260bfb731fb5d25,
+        0x198e9393920d483a,
+        0x4ce6cc0166fa7daa,
+        0xe3d1e7690c43d37b,
+        0x4aab71808dcb408f,
+        0x12c85ea5db8c6deb,
+        0x55acdadcd122975b,
+        0xbc4b313370b38ef3,
+        0xec9e99ad690c3395,
+        0x090689d0585ff075,
+    ];
+
+    fn check(g1_points: &[[u64; 8]], g2_points: &[[u64; 16]]) -> Result<bool, u8> {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        pairing_check_bn254(
+            g1_points,
+            g2_points,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        )
+    }
+
+    #[test]
+    fn pairing_check_accepts_the_inverse_pair() {
+        let mut neg_g1 = G1_GENERATOR;
+        neg_g1[4..8].copy_from_slice(&[P[0] - 2, P[1], P[2], P[3]]);
+        assert_eq!(check(&[G1_GENERATOR, neg_g1], &[G2_GENERATOR, G2_GENERATOR]), Ok(true));
+        assert_eq!(check(&[G1_GENERATOR], &[G2_GENERATOR]), Ok(false));
+    }
+
+    #[test]
+    fn pairing_check_rejects_non_canonical_points_paired_with_infinity() {
+        // x + p is the same field element as x, but EIP-197 rejects coordinates >= p
+        let mut g1_x_plus_p = G1_GENERATOR;
+        g1_x_plus_p[0..4].copy_from_slice(&[P[0] + 1, P[1], P[2], P[3]]);
+        assert_eq!(check(&[g1_x_plus_p], &[G2_IDENTITY]), Err(PAIRING_CHECK_ERR_G1_NOT_IN_FIELD));
+
+        let mut g2_y_plus_p = G2_GENERATOR;
+        let y_plus_p = (0..4).fold((0u128, [0u64; 4]), |(carry, mut out), i| {
+            let sum = G2_GENERATOR[8 + i] as u128 + P[i] as u128 + carry;
+            out[i] = sum as u64;
+            (sum >> 64, out)
+        });
+        assert_eq!(y_plus_p.0, 0);
+        g2_y_plus_p[8..12].copy_from_slice(&y_plus_p.1);
+        assert_eq!(check(&[G1_IDENTITY], &[g2_y_plus_p]), Err(PAIRING_CHECK_ERR_G2_NOT_IN_FIELD));
     }
 }

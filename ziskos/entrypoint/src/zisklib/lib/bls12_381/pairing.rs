@@ -9,7 +9,7 @@ use super::{
         neg_bls12_381,
     },
     final_exp::final_exp_bls12_381,
-    miller_loop::{miller_loop_batch_bls12_381, miller_loop_bls12_381},
+    miller_loop::miller_loop_batch_bls12_381,
     twist::{
         g2_bytes_be_to_u64_le_bls12_381, is_on_curve_twist_bls12_381,
         is_on_subgroup_twist_bls12_381,
@@ -26,46 +26,13 @@ const PAIRING_CHECK_ERR_G2_NOT_IN_FIELD: u8 = 5;
 const PAIRING_CHECK_ERR_G2_NOT_ON_CURVE: u8 = 6;
 const PAIRING_CHECK_ERR_G2_NOT_IN_SUBGROUP: u8 = 7;
 
-/// Optimal Ate Pairing e: G1 x G2 -> GT over the BLS12-381 curve
-/// where G1 = E(Fp)[r] = E(Fp), G2 = E'(Fp2)[r] and GT = μ_r (the r-th roots of unity over Fp12*)
-/// the involved curves are E/Fp: y² = x³ + 4 and E'/Fp2: y² = x³ + 4·(1+u)
-///  pairingBLS12-381:
-///          input: P ∈ G1 and Q ∈ G2
-///          output: e(P,Q) ∈ GT
-pub fn pairing_bls12_381(
-    p: &[u64; 12],
-    q: &[u64; 24],
-    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
-) -> [u64; 72] {
-    // e(P, 𝒪) = e(𝒪, Q) = 1;
-    if *p == G1_IDENTITY || *q == G2_IDENTITY {
-        let mut one = [0; 72];
-        one[0] = 1;
-        return one;
-    }
-
-    // Miller loop
-    let miller_loop = miller_loop_bls12_381(
-        p,
-        q,
-        #[cfg(feature = "hints")]
-        hints,
-    );
-
-    // Final exponentiation
-    final_exp_bls12_381(
-        &miller_loop,
-        #[cfg(feature = "hints")]
-        hints,
-    )
-}
-
 /// Computes the optimal Ate pairing for a batch of G1 and G2 points over the BLS12-381 curve
 /// and multiplies the results together:
 ///     e(P₁, Q₁) · e(P₂, Q₂) · ... · e(Pₙ, Qₙ) ∈ GT
 ///
-/// Assumes all points are non-infinity and already validated (on curve and in subgroup).
-pub fn pairing_batch_bls12_381(
+/// The points are not validated: they must be non-infinity, have canonical coordinates, be on
+/// their curves and in the subgroups, as checked by [`pairing_check_bls12_381`]
+pub(crate) fn pairing_batch_bls12_381(
     g1_points: &[[u64; 12]],
     g2_points: &[[u64; 24]],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -281,5 +248,35 @@ pub unsafe extern "C" fn bls12_381_pairing_check_c(
         Ok(true) => PAIRING_CHECK_SUCCESS,
         Ok(false) => PAIRING_CHECK_FAILED,
         Err(code) => code,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::constants::{G1_GENERATOR, G2_GENERATOR};
+    use super::*;
+
+    fn check(g1_points: &[[u64; 12]], g2_points: &[[u64; 24]]) -> Result<bool, u8> {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        pairing_check_bls12_381(
+            g1_points,
+            g2_points,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        )
+    }
+
+    #[test]
+    fn pairing_check_accepts_the_inverse_pair() {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        let neg_g1 = neg_bls12_381(
+            &G1_GENERATOR,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        );
+        assert_eq!(check(&[G1_GENERATOR, neg_g1], &[G2_GENERATOR, G2_GENERATOR]), Ok(true));
+        assert_eq!(check(&[G1_GENERATOR], &[G2_GENERATOR]), Ok(false));
     }
 }
