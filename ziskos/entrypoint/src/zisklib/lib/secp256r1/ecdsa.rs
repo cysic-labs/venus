@@ -279,4 +279,17 @@ mod tests {
         assert_eq!(bind(&z_cancel, &r, &neg_s, &G, &IDENTITY), None);
         assert!(!verify(&G, &z_cancel, &r, &s));
     }
+
+    #[test]
+    fn handles_scalars_whose_top_bit_is_bit_zero() {
+        // With z = 0, r = 1 and s = n - 1 every scalar of the checked relation is at most 1
+        let (zero, one) = ([0u64; 4], [1u64, 0, 0, 0]);
+        let n_minus_one = sub(&N, &one);
+        assert!(!verify(&G, &zero, &one, &n_minus_one));
+
+        // With PK = -G, z = 1 and r = 1, R is the identity and is checked with scalars (1, 1, 0)
+        let mut neg_g = G;
+        neg_g[4..8].copy_from_slice(&sub(&P, &G_Y));
+        assert!(!verify(&neg_g, &one, &one, &n_minus_one));
+    }
 }

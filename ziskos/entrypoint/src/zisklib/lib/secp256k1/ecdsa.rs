@@ -558,4 +558,18 @@ mod tests {
         assert_eq!(bind(&z_cancel, &r, &neg_s, &G, &IDENTITY), None);
         assert!(!verify(&G, &z_cancel, &r, &s));
     }
+
+    #[test]
+    fn handles_scalars_whose_top_bit_is_bit_zero() {
+        // With z = 0, r = 1 and s = n - 1 every scalar of the checked relations is at most 1
+        let (zero, one) = ([0u64; 4], [1u64, 0, 0, 0]);
+        let n_minus_one = sub(&N, &one);
+        assert!(!verify(&G, &zero, &one, &n_minus_one));
+
+        // The recovered key is [s/r]R = -R for R = (1, y)
+        let r_point = lift(&one, false).unwrap();
+        let mut neg_r_point = r_point;
+        neg_r_point[4..8].copy_from_slice(&sub(&P, &r_point[4..8].try_into().unwrap()));
+        assert_eq!(recover(&one, &n_minus_one, &zero, 0), Ok(neg_r_point));
+    }
 }

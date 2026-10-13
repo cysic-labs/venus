@@ -265,221 +265,209 @@ pub fn secp256r1_triple_scalar_mul_with_g(
         _ => unreachable!(),
     }
 
-    // Determine starting limb/bit for the loop
-    let mut limb = max_limb;
-    let mut bit = if max_bit == 0 {
-        // If max_bit is 0 then limb > 0; otherwise r,s,t = 1, which is excluded here
-        limb -= 1;
-        63
-    } else {
-        max_bit - 1
-    };
+    // Perform the rest of the loop over the bit positions below the most significant one
+    for pos in (0..max_limb * 64 + max_bit).rev() {
+        let (i, j) = (pos / 64, pos % 64);
+        let r_bit = (r[i] >> j) & 1;
+        let s_bit = (s[i] >> j) & 1;
+        let t_bit = (t[i] >> j) & 1;
 
-    // Perform the rest of the loop
-    for i in (0..=limb).rev() {
-        for j in (0..=bit).rev() {
-            let r_bit = (r[i] >> j) & 1;
-            let s_bit = (s[i] >> j) & 1;
-            let t_bit = (t[i] >> j) & 1;
-
-            // Eight cases based on the bits of r,s and t
-            match (r_bit, s_bit, t_bit) {
-                (0, 0, 0) => {
-                    // If res is 𝒪, do nothing; otherwise, double
-                    if !res_is_infinity {
-                        syscall_secp256r1_dbl(
-                            &mut res,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                    }
+        // Eight cases based on the bits of r,s and t
+        match (r_bit, s_bit, t_bit) {
+            (0, 0, 0) => {
+                // If res is 𝒪, do nothing; otherwise, double
+                if !res_is_infinity {
+                    syscall_secp256r1_dbl(
+                        &mut res,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
                 }
-                (0, 0, 1) => {
-                    // If res is 𝒪, set res = q; otherwise, double res and add q
-                    if res_is_infinity {
-                        res.x = q.x;
-                        res.y = q.y;
-                        res_is_infinity = false;
-                    } else {
-                        syscall_secp256r1_dbl(
-                            &mut res,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                        res_is_infinity = secp256r1_add_non_infinity_points(
-                            &mut res,
-                            &q,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                    }
-
-                    // Update t_rec
-                    t_rec[i] |= 1 << j;
-                }
-                (0, 1, 0) => {
-                    // If res is 𝒪, set res = p; otherwise, double res and add p
-                    if res_is_infinity {
-                        res.x = p.x;
-                        res.y = p.y;
-                        res_is_infinity = false;
-                    } else {
-                        syscall_secp256r1_dbl(
-                            &mut res,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                        res_is_infinity = secp256r1_add_non_infinity_points(
-                            &mut res,
-                            &p,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                    }
-
-                    // Update s_rec
-                    s_rec[i] |= 1 << j;
-                }
-                (0, 1, 1) => {
-                    // If res is 𝒪, set res = p + q if not infinity; otherwise, double res and add (p + q)
-                    if res_is_infinity {
-                        if !pq_is_infinity {
-                            res.x = pq.x;
-                            res.y = pq.y;
-                            res_is_infinity = false;
-                        }
-                    } else {
-                        syscall_secp256r1_dbl(
-                            &mut res,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                        if !pq_is_infinity {
-                            res_is_infinity = secp256r1_add_non_infinity_points(
-                                &mut res,
-                                &pq,
-                                #[cfg(feature = "hints")]
-                                hints,
-                            );
-                        }
-                    }
-
-                    // Update s_rec and t_rec
-                    s_rec[i] |= 1 << j;
-                    t_rec[i] |= 1 << j;
-                }
-                (1, 0, 0) => {
-                    // If res is 𝒪, set res = g; otherwise, double res and add g
-                    if res_is_infinity {
-                        res.x = G_POINT256.x;
-                        res.y = G_POINT256.y;
-                        res_is_infinity = false;
-                    } else {
-                        syscall_secp256r1_dbl(
-                            &mut res,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                        res_is_infinity = secp256r1_add_non_infinity_points(
-                            &mut res,
-                            &G_POINT256,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                    }
-
-                    // Update r_rec
-                    r_rec[i] |= 1 << j;
-                }
-                (1, 0, 1) => {
-                    // If res is 𝒪, set res = g + q if not infinity; otherwise, double res and add (g + q)
-                    if res_is_infinity {
-                        if !gq_is_infinity {
-                            res.x = gq.x;
-                            res.y = gq.y;
-                            res_is_infinity = false;
-                        }
-                    } else {
-                        syscall_secp256r1_dbl(
-                            &mut res,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                        if !gq_is_infinity {
-                            res_is_infinity = secp256r1_add_non_infinity_points(
-                                &mut res,
-                                &gq,
-                                #[cfg(feature = "hints")]
-                                hints,
-                            );
-                        }
-                    }
-
-                    // Update r_rec and t_rec
-                    r_rec[i] |= 1 << j;
-                    t_rec[i] |= 1 << j;
-                }
-                (1, 1, 0) => {
-                    // If res is 𝒪, set res = g + p if not infinity
-                    if res_is_infinity {
-                        if !gp_is_infinity {
-                            res.x = gp.x;
-                            res.y = gp.y;
-                            res_is_infinity = false;
-                        }
-                    } else {
-                        syscall_secp256r1_dbl(
-                            &mut res,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                        if !gp_is_infinity {
-                            res_is_infinity = secp256r1_add_non_infinity_points(
-                                &mut res,
-                                &gp,
-                                #[cfg(feature = "hints")]
-                                hints,
-                            );
-                        }
-                    }
-
-                    // Update r_rec and s_rec
-                    r_rec[i] |= 1 << j;
-                    s_rec[i] |= 1 << j;
-                }
-                (1, 1, 1) => {
-                    // If res is 𝒪, set res = g + p + q if not infinity; otherwise, double res and add (g + p + q)
-                    if res_is_infinity {
-                        if !gpq_is_infinity {
-                            res.x = gpq.x;
-                            res.y = gpq.y;
-                            res_is_infinity = false;
-                        }
-                    } else {
-                        syscall_secp256r1_dbl(
-                            &mut res,
-                            #[cfg(feature = "hints")]
-                            hints,
-                        );
-                        if !gpq_is_infinity {
-                            res_is_infinity = secp256r1_add_non_infinity_points(
-                                &mut res,
-                                &gpq,
-                                #[cfg(feature = "hints")]
-                                hints,
-                            );
-                        }
-                    }
-
-                    // Update r_rec, s_rec and t_rec
-                    r_rec[i] |= 1 << j;
-                    s_rec[i] |= 1 << j;
-                    t_rec[i] |= 1 << j;
-                }
-                _ => unreachable!(),
             }
+            (0, 0, 1) => {
+                // If res is 𝒪, set res = q; otherwise, double res and add q
+                if res_is_infinity {
+                    res.x = q.x;
+                    res.y = q.y;
+                    res_is_infinity = false;
+                } else {
+                    syscall_secp256r1_dbl(
+                        &mut res,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                    res_is_infinity = secp256r1_add_non_infinity_points(
+                        &mut res,
+                        &q,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                }
+
+                // Update t_rec
+                t_rec[i] |= 1 << j;
+            }
+            (0, 1, 0) => {
+                // If res is 𝒪, set res = p; otherwise, double res and add p
+                if res_is_infinity {
+                    res.x = p.x;
+                    res.y = p.y;
+                    res_is_infinity = false;
+                } else {
+                    syscall_secp256r1_dbl(
+                        &mut res,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                    res_is_infinity = secp256r1_add_non_infinity_points(
+                        &mut res,
+                        &p,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                }
+
+                // Update s_rec
+                s_rec[i] |= 1 << j;
+            }
+            (0, 1, 1) => {
+                // If res is 𝒪, set res = p + q if not infinity; otherwise, double res and add (p + q)
+                if res_is_infinity {
+                    if !pq_is_infinity {
+                        res.x = pq.x;
+                        res.y = pq.y;
+                        res_is_infinity = false;
+                    }
+                } else {
+                    syscall_secp256r1_dbl(
+                        &mut res,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                    if !pq_is_infinity {
+                        res_is_infinity = secp256r1_add_non_infinity_points(
+                            &mut res,
+                            &pq,
+                            #[cfg(feature = "hints")]
+                            hints,
+                        );
+                    }
+                }
+
+                // Update s_rec and t_rec
+                s_rec[i] |= 1 << j;
+                t_rec[i] |= 1 << j;
+            }
+            (1, 0, 0) => {
+                // If res is 𝒪, set res = g; otherwise, double res and add g
+                if res_is_infinity {
+                    res.x = G_POINT256.x;
+                    res.y = G_POINT256.y;
+                    res_is_infinity = false;
+                } else {
+                    syscall_secp256r1_dbl(
+                        &mut res,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                    res_is_infinity = secp256r1_add_non_infinity_points(
+                        &mut res,
+                        &G_POINT256,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                }
+
+                // Update r_rec
+                r_rec[i] |= 1 << j;
+            }
+            (1, 0, 1) => {
+                // If res is 𝒪, set res = g + q if not infinity; otherwise, double res and add (g + q)
+                if res_is_infinity {
+                    if !gq_is_infinity {
+                        res.x = gq.x;
+                        res.y = gq.y;
+                        res_is_infinity = false;
+                    }
+                } else {
+                    syscall_secp256r1_dbl(
+                        &mut res,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                    if !gq_is_infinity {
+                        res_is_infinity = secp256r1_add_non_infinity_points(
+                            &mut res,
+                            &gq,
+                            #[cfg(feature = "hints")]
+                            hints,
+                        );
+                    }
+                }
+
+                // Update r_rec and t_rec
+                r_rec[i] |= 1 << j;
+                t_rec[i] |= 1 << j;
+            }
+            (1, 1, 0) => {
+                // If res is 𝒪, set res = g + p if not infinity
+                if res_is_infinity {
+                    if !gp_is_infinity {
+                        res.x = gp.x;
+                        res.y = gp.y;
+                        res_is_infinity = false;
+                    }
+                } else {
+                    syscall_secp256r1_dbl(
+                        &mut res,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                    if !gp_is_infinity {
+                        res_is_infinity = secp256r1_add_non_infinity_points(
+                            &mut res,
+                            &gp,
+                            #[cfg(feature = "hints")]
+                            hints,
+                        );
+                    }
+                }
+
+                // Update r_rec and s_rec
+                r_rec[i] |= 1 << j;
+                s_rec[i] |= 1 << j;
+            }
+            (1, 1, 1) => {
+                // If res is 𝒪, set res = g + p + q if not infinity; otherwise, double res and add (g + p + q)
+                if res_is_infinity {
+                    if !gpq_is_infinity {
+                        res.x = gpq.x;
+                        res.y = gpq.y;
+                        res_is_infinity = false;
+                    }
+                } else {
+                    syscall_secp256r1_dbl(
+                        &mut res,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    );
+                    if !gpq_is_infinity {
+                        res_is_infinity = secp256r1_add_non_infinity_points(
+                            &mut res,
+                            &gpq,
+                            #[cfg(feature = "hints")]
+                            hints,
+                        );
+                    }
+                }
+
+                // Update r_rec, s_rec and t_rec
+                r_rec[i] |= 1 << j;
+                s_rec[i] |= 1 << j;
+                t_rec[i] |= 1 << j;
+            }
+            _ => unreachable!(),
         }
-        bit = 63;
     }
 
     // Check that the recomposed scalars are the same as the received scalars
