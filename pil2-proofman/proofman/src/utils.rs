@@ -380,7 +380,7 @@ pub fn check_const_tree<F: PrimeField64>(setup: &Setup<F>, d_buffers: &Option<*m
         let p_stark_info = setup.p_setup.p_stark_info;
 
         let unified_buffer_gpu =
-            if let Some(d_buffers) = d_buffers { get_unified_buffer_gpu_c(*d_buffers) } else { std::ptr::null_mut() };
+            if let Some(d_buffers) = d_buffers { get_unified_buffer_gpu_c(*d_buffers).0 } else { std::ptr::null_mut() };
 
         if setup.stark_info.stark_struct.verification_hash_type == "GL" {
             if cfg!(feature = "gpu") {

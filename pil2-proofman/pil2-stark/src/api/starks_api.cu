@@ -16,7 +16,7 @@ struct FinalSnarkGPU;
 extern void *initFinalSnarkProverGPU(char* zkeyFile);
 extern void freeFinalSnarkProverGPU(void *snark_prover);
 extern void genFinalSnarkProofGPU(void *proverSnark, void *circomWitnessFinal, uint8_t* proof, uint8_t* publicsSnark);
-extern void preAllocateFinalSnarkProverGPU(void *snark_prover, void* unified_buffer_gpu);
+extern void preAllocateFinalSnarkProverGPU(void *snark_prover, void* unified_buffer_gpu, uint64_t unified_buffer_size);
 extern uint64_t getFinalSnarkProtocolIdGPU(void *snark_prover);
 #ifdef __USE_CUDA__
 #include "verify_constraints.cuh"
@@ -1689,15 +1689,16 @@ uint64_t get_num_gpus() {
     return deviceCount;
 }
 
-void *get_unified_buffer_gpu(void *d_buffers_) {
+void *get_unified_buffer_gpu(void *d_buffers_, uint64_t *unified_buffer_size) {
     int deviceId;
     CHECKCUDAERR(cudaGetDevice(&deviceId));
     cudaSetDevice(deviceId);
 
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
 
-    gl64_t *d_unifiedBuffer = d_buffers->gpuMemoryBuffer[d_buffers->gpus_g2l[deviceId]];
-    return (void *)d_unifiedBuffer;
+    uint32_t gpuLocalId = d_buffers->gpus_g2l[deviceId];
+    *unified_buffer_size = d_buffers->gpuMemoryBufferSize[gpuLocalId];
+    return (void *)d_buffers->gpuMemoryBuffer[gpuLocalId];
 }
 
 uint32_t selectStream(DeviceCommitBuffers* d_buffers, uint64_t airgroupId, uint64_t airId, std::string proofType, bool recursive, bool force_recursive){
@@ -1886,7 +1887,7 @@ void gen_final_snark_proof(void *prover, void *circomWitnessFinal, uint8_t* proo
     genFinalSnarkProofGPU(prover, circomWitnessFinal, proof, publicsSnark);
 }
 
-void pre_allocate_final_snark_prover(void *snark_prover, void* unified_buffer_gpu) {
-    preAllocateFinalSnarkProverGPU(snark_prover, unified_buffer_gpu);
+void pre_allocate_final_snark_prover(void *snark_prover, void* unified_buffer_gpu, uint64_t unified_buffer_size) {
+    preAllocateFinalSnarkProverGPU(snark_prover, unified_buffer_gpu, unified_buffer_size);
 }
 #endif

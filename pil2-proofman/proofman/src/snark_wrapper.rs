@@ -352,16 +352,17 @@ impl<F: PrimeField64> SnarkWrapper<F> {
         // Spawn GPU pre-allocation on a separate thread so it overlaps with CPU witness computation
         let prealloc_handle = {
             let snark_prover = self.snark_prover as usize;
-            let unified_buffer_gpu = if let Some(d_buffers) = self.d_buffers {
+            let (unified_buffer_gpu, unified_buffer_size) = if let Some(d_buffers) = self.d_buffers {
                 get_unified_buffer_gpu_c(d_buffers)
             } else {
-                std::ptr::null_mut()
+                (std::ptr::null_mut(), 0)
             };
             let buffer = unified_buffer_gpu as usize;
             std::thread::spawn(move || {
                 pre_allocate_final_snark_prover_c(
                     snark_prover as *mut std::ffi::c_void,
                     buffer as *mut std::ffi::c_void,
+                    unified_buffer_size,
                 );
             })
         };

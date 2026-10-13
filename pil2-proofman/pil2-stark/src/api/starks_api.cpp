@@ -854,7 +854,8 @@ uint64_t check_device_memory(uint32_t node_rank, uint32_t node_size) { return 0;
 
 uint64_t get_num_gpus(){ return 1;}
 
-void *get_unified_buffer_gpu(void *d_buffers_) {
+void *get_unified_buffer_gpu(void *d_buffers_, uint64_t *unified_buffer_size) {
+    *unified_buffer_size = 0;
     return nullptr;
 }
 
@@ -1003,7 +1004,7 @@ void gen_final_snark_proof(void *prover, void *circomWitnessFinal, uint8_t* proo
     genFinalSnarkProof(prover, circomWitnessFinal, proof, publicsSnark);
 }
 
-void pre_allocate_final_snark_prover(void *snark_prover, void* unified_buffer_gpu) {
+void pre_allocate_final_snark_prover(void *snark_prover, void* unified_buffer_gpu, uint64_t unified_buffer_size) {
     // No-op for CPU
 }
 #endif

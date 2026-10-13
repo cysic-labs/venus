@@ -249,6 +249,7 @@ namespace PlonkGPU
             pinnedD2HStaging = nullptr;
         }
 
+        releaseWitnessAdditionsBuffer();
         if (d_unifiedBuffer) {
             if(isMyDeviceBuffer) {
                 gpu_plonk_cuda_free(d_unifiedBuffer);
@@ -582,12 +583,22 @@ namespace PlonkGPU
     }
 
     template <typename Engine>
-    void PlonkProverGPU<Engine>::preAllocate(void* unified_buffer_gpu)
+    void PlonkProverGPU<Engine>::preAllocate(void* unified_buffer_gpu, uint64_t unified_buffer_size)
     {
         LOG_TRACE("> Pre-allocating GPU static eval buffers (round0)");
         d_unifiedBuffer = unified_buffer_gpu;
+        unifiedBufferCapacity = unified_buffer_size;
         round0();
         preAllocated = true;
+    }
+
+    template <typename Engine>
+    void PlonkProverGPU<Engine>::releaseWitnessAdditionsBuffer()
+    {
+        if (d_witnessAdditionsBuffer) {
+            gpu_plonk_cuda_free(d_witnessAdditionsBuffer);
+            d_witnessAdditionsBuffer = nullptr;
+        }
     }
 
     template <typename Engine>
@@ -815,6 +826,8 @@ namespace PlonkGPU
         ss << "Execution time: " << omp_get_wtime() - startTime << "\n";
         LOG_TRACE(ss);
 
+        releaseWitnessAdditionsBuffer();
+
         std::vector<string> orderedCommitments = {"A", "B", "C", "Z", "T1", "T2", "T3", "Wxi", "Wxiw"};
         std::vector<string> orderedEvaluations = {"eval_a", "eval_b", "eval_c", "eval_s1", "eval_s2", "eval_zw"};
         return {proof->toBytes(orderedCommitments, orderedEvaluations), publicBytes};
@@ -877,35 +890,44 @@ namespace PlonkGPU
         uint64_t auxElems = std::max(auxElemsR3, auxElemsR5);
         uint32_t nDirect = zkey->nVars - zkey->nAdditions;
 
+        uint64_t staticBufferSize = 0;
+        staticBufferSize += 9 * NExtBytes;                       // 9 static eval arrays (S1,S2,S3,L1,QL,QR,QM,QO,QC)
+        staticBufferSize += NExtBytes;                           // PI / T buffer
+        staticBufferSize += NExtBytes;                           // Lag / Tz buffer
+        staticBufferSize += 4 * NBytes;                          // PolCoefA/B/C/Z
+        staticBufferSize += ptauBytes;                           // PTau
+        staticBufferSize = (staticBufferSize + 255) & ~255ULL;   // align Aux to 256 bytes
+        staticBufferSize += auxElems * sizeof(FrElement);        // Aux scratch: max(round3 NTT, round5 affineScan)
+        staticBufferSize += numBlocks4N * sizeof(FrElement);     // omega_4x bases for 4N gate kernels
+        staticBufferSize += 256 * sizeof(FrElement);             // omega_4x tid table (0..255)
+        staticBufferSize += numBlocksN * sizeof(FrElement);      // omega bases for N z_ratios kernel
+        staticBufferSize += 256 * sizeof(FrElement);             // omega tid table (0..255)
+        staticBufferSize += (BLINDINGFACTORSLENGTH_PLONK_GPU + 1) * sizeof(FrElement); // blinding factors b_0..b_11
+        staticBufferSize += 12 * sizeof(FrElement);                                    // Z1[4], Z2[4], Z3[4] for QM+perm+L1
+
+        // GPU additions data - grouped by type for proper alignment (uint32_t at the end)
+        uint64_t witnessAdditionsSize = 0;
+        witnessAdditionsSize += nDirect * sizeof(FrElement);          // primary witnesses
+        witnessAdditionsSize += zkey->nAdditions * sizeof(FrElement); // internal witnesses
+        witnessAdditionsSize += zkey->nAdditions * sizeof(FrElement); // addFactor1
+        witnessAdditionsSize += zkey->nAdditions * sizeof(FrElement); // addFactor2
+        witnessAdditionsSize += zkey->nAdditions * sizeof(uint32_t);  // addSignalId1
+        witnessAdditionsSize += zkey->nAdditions * sizeof(uint32_t);  // addSignalId2
+        witnessAdditionsSize += zkey->nAdditions;                     // additionLevels (uint8_t per addition)
+
         if (!d_unifiedBuffer) {
-
-            uint64_t unifiedBufferSize = 0;
-            unifiedBufferSize += 9 * NExtBytes;                       // 9 static eval arrays (S1,S2,S3,L1,QL,QR,QM,QO,QC)
-            unifiedBufferSize += NExtBytes;                           // PI / T buffer
-            unifiedBufferSize += NExtBytes;                           // Lag / Tz buffer
-            unifiedBufferSize += 4 * NBytes;                          // PolCoefA/B/C/Z
-            unifiedBufferSize += ptauBytes;                           // PTau
-            unifiedBufferSize = (unifiedBufferSize + 255) & ~255ULL;  // align Aux to 256 bytes
-            unifiedBufferSize += auxElems * sizeof(FrElement);        // Aux scratch: max(round3 NTT, round5 affineScan)
-            unifiedBufferSize += numBlocks4N * sizeof(FrElement);     // omega_4x bases for 4N gate kernels
-            unifiedBufferSize += 256 * sizeof(FrElement);             // omega_4x tid table (0..255)
-            unifiedBufferSize += numBlocksN * sizeof(FrElement);      // omega bases for N z_ratios kernel
-            unifiedBufferSize += 256 * sizeof(FrElement);             // omega tid table (0..255)
-            unifiedBufferSize += (BLINDINGFACTORSLENGTH_PLONK_GPU + 1) * sizeof(FrElement); // blinding factors b_0..b_11
-            unifiedBufferSize += 12 * sizeof(FrElement);                                    // Z1[4], Z2[4], Z3[4] for QM+perm+L1
-
-            // GPU additions data - grouped by type for proper alignment (uint32_t at the end)
-            unifiedBufferSize += nDirect * sizeof(FrElement);          // primary witnesses
-            unifiedBufferSize += zkey->nAdditions * sizeof(FrElement); // internal witnesses
-            unifiedBufferSize += zkey->nAdditions * sizeof(FrElement); // addFactor1
-            unifiedBufferSize += zkey->nAdditions * sizeof(FrElement); // addFactor2
-            unifiedBufferSize += zkey->nAdditions * sizeof(uint32_t);  // addSignalId1
-            unifiedBufferSize += zkey->nAdditions * sizeof(uint32_t);  // addSignalId2
-            unifiedBufferSize += zkey->nAdditions;                     // additionLevels (uint8_t per addition)
-
             isMyDeviceBuffer = true;
-            gpu_plonk_cuda_malloc(&d_unifiedBuffer, unifiedBufferSize);
-            //std::cout << "[round0] Unified GPU buffer: " << unifiedBufferSize / (1024.0*1024*1024) << " GiB" << std::endl;
+            unifiedBufferCapacity = staticBufferSize + witnessAdditionsSize;
+            gpu_plonk_cuda_malloc(&d_unifiedBuffer, unifiedBufferCapacity);
+            //std::cout << "[round0] Unified GPU buffer: " << unifiedBufferCapacity / (1024.0*1024*1024) << " GiB" << std::endl;
+        } else if (unifiedBufferCapacity < staticBufferSize) {
+            throw std::runtime_error("The PLONK prover needs " + std::to_string(staticBufferSize) +
+                                     " bytes of the provided GPU buffer for its static buffers, but it holds " +
+                                     std::to_string(unifiedBufferCapacity));
+        } else if (unifiedBufferCapacity < staticBufferSize + witnessAdditionsSize && !d_witnessAdditionsBuffer) {
+            // The provided buffer only holds the static buffers: the witness and additions data get
+            // an allocation of their own, released once the proof is done.
+            gpu_plonk_cuda_malloc(&d_witnessAdditionsBuffer, witnessAdditionsSize);
         }
 
         // Set all pointers as offsets into unified buffer
@@ -927,6 +949,10 @@ namespace PlonkGPU
         d_omegaTidN = base + off;            off += 256 * sizeof(FrElement);
         d_blindings = base + off;            off += (BLINDINGFACTORSLENGTH_PLONK_GPU + 1) * sizeof(FrElement);
         d_zvals = base + off;                off += 12 * sizeof(FrElement);
+        if (d_witnessAdditionsBuffer) {
+            base = (uint8_t*)d_witnessAdditionsBuffer;
+            off = 0;
+        }
         d_witness = base + off;              off += nDirect * sizeof(FrElement);
         d_intWitness = base + off;           off += zkey->nAdditions * sizeof(FrElement);
         d_addFactor1 = base + off;           off += zkey->nAdditions * sizeof(FrElement);

@@ -84,6 +84,9 @@ namespace PlonkGPU {
 
         void* d_unifiedBuffer = nullptr;  // Single GPU allocation for all buffers
         uint64_t unifiedBufferSize = 0;
+        uint64_t unifiedBufferCapacity = 0;        // bytes of a d_unifiedBuffer provided by the caller
+        void* d_witnessAdditionsBuffer = nullptr;  // own allocation of the witness and additions data, when
+                                                   // a provided d_unifiedBuffer only holds the static buffers
 
         // alias for specific regions of d_unifiedBuffer
         void* d_staticEvalsBuffer = nullptr;
@@ -163,7 +166,8 @@ namespace PlonkGPU {
 
         u_int32_t getNPublic() const { return zkey->nPublic; }
 
-        void preAllocate(void* unified_buffer_gpu);
+        void preAllocate(void* unified_buffer_gpu, uint64_t unified_buffer_size);
+        void releaseWitnessAdditionsBuffer();
 
         std::tuple <std::vector<uint8_t>, std::vector<uint8_t>> prove(BinFileUtils::BinFile *fdZkey, BinFileUtils::BinFile *fdWtns);
         std::tuple <std::vector<uint8_t>, std::vector<uint8_t>> prove(BinFileUtils::BinFile *fdZkey, FrElement *wtns, WtnsUtils::Header* wtnsHeader = NULL);

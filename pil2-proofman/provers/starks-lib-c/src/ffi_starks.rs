@@ -1224,8 +1224,12 @@ pub fn free_final_snark_prover_c(snark_prover: *mut c_void) {
 }
 
 #[cfg(not(feature = "no_lib_link"))]
-pub fn pre_allocate_final_snark_prover_c(snark_prover: *mut c_void, unified_buffer_gpu: *mut c_void) {
-    unsafe { pre_allocate_final_snark_prover(snark_prover, unified_buffer_gpu) }
+pub fn pre_allocate_final_snark_prover_c(
+    snark_prover: *mut c_void,
+    unified_buffer_gpu: *mut c_void,
+    unified_buffer_size: u64,
+) {
+    unsafe { pre_allocate_final_snark_prover(snark_prover, unified_buffer_gpu, unified_buffer_size) }
 }
 
 #[cfg(not(feature = "no_lib_link"))]
@@ -1502,8 +1506,11 @@ pub fn get_num_gpus_c() -> u64 {
 }
 
 #[cfg(not(feature = "no_lib_link"))]
-pub fn get_unified_buffer_gpu_c(d_buffers: *mut ::std::os::raw::c_void) -> *mut ::std::os::raw::c_void {
-    unsafe { get_unified_buffer_gpu(d_buffers) }
+/// Returns the prover's unified GPU buffer of the current device and its size in bytes.
+pub fn get_unified_buffer_gpu_c(d_buffers: *mut ::std::os::raw::c_void) -> (*mut ::std::os::raw::c_void, u64) {
+    let mut unified_buffer_size = 0;
+    let unified_buffer = unsafe { get_unified_buffer_gpu(d_buffers, &mut unified_buffer_size) };
+    (unified_buffer, unified_buffer_size)
 }
 
 #[cfg(not(feature = "no_lib_link"))]
@@ -2392,7 +2399,11 @@ pub fn free_final_snark_prover_c(_snark_prover: *mut c_void) {
 }
 
 #[cfg(feature = "no_lib_link")]
-pub fn pre_allocate_final_snark_prover_c(_snark_prover: *mut c_void, _unified_buffer_gpu: *mut c_void) {
+pub fn pre_allocate_final_snark_prover_c(
+    _snark_prover: *mut c_void,
+    _unified_buffer_gpu: *mut c_void,
+    _unified_buffer_size: u64,
+) {
     trace!("··· {}", "pre_allocate_final_snark_prover: This is a mock call because there is no linked library");
 }
 
@@ -2575,13 +2586,13 @@ pub fn get_num_gpus_c() -> u64 {
 }
 
 #[cfg(feature = "no_lib_link")]
-pub fn get_unified_buffer_gpu_c(_d_buffers: *mut ::std::os::raw::c_void) -> *mut ::std::os::raw::c_void {
+pub fn get_unified_buffer_gpu_c(_d_buffers: *mut ::std::os::raw::c_void) -> (*mut ::std::os::raw::c_void, u64) {
     trace!(
         "{}: ··· {}",
         "ffi     ",
         "get_unified_buffer_gpu: This is a mock call because there is a linked library but the function is not implemented"
     );
-    std::ptr::null_mut()
+    (std::ptr::null_mut(), 0)
 }
 
 #[cfg(feature = "no_lib_link")]
