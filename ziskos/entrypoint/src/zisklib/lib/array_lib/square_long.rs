@@ -81,141 +81,63 @@ pub fn square_long(
                 hints,
             );
 
-            // Double the result 2·a[i]·a[j]
+            // Double the result 2·a[i]·a[j] = high·B² + mid·B + low, with high ∈ {0, 1}
 
-            // Start by doubling the lower chunk: 2·l₁ = [1/0]·B + l₂
+            // Start by doubling the lower chunk: 2·l₁ = [1/0]·B + low
+            let mut low_chunk: [u64; 4] = [0, 0, 0, 0];
             let mut dbl_low =
-                SyscallAdd256Params { a: ai_aj.dl, b: ai_aj.dl, cin: 0, c: &mut [0, 0, 0, 0] };
-            let dbl_low_carry = syscall_add256(
+                SyscallAdd256Params { a: ai_aj.dl, b: ai_aj.dl, cin: 0, c: &mut low_chunk };
+            let carry = syscall_add256(
                 &mut dbl_low,
                 #[cfg(feature = "hints")]
                 hints,
             );
 
-            // Next, double the higher chunk: 2·h₁·B = [1/0]·B² + h₂·B
+            // Next, double the higher chunk with the carry: 2·h₁ + [1/0] = high·B + mid
+            let mut mid_chunk: [u64; 4] = [0, 0, 0, 0];
             let mut dbl_high =
-                SyscallAdd256Params { a: ai_aj.dh, b: ai_aj.dh, cin: 0, c: &mut [0, 0, 0, 0] };
-            let dbl_high_carry = syscall_add256(
+                SyscallAdd256Params { a: ai_aj.dh, b: ai_aj.dh, cin: carry, c: &mut mid_chunk };
+            let high_chunk = syscall_add256(
                 &mut dbl_high,
                 #[cfg(feature = "hints")]
                 hints,
             );
 
-            // If there's a carry from doubling the low part, add it to the high part
-            if dbl_low_carry != 0 {
-                let a_in = *dbl_high.c;
+            // Accumulate the chunks into out[i+j], out[i+j+1] and out[i+j+2], chaining the carries
+            let k = i + j;
+            let chunks = [low_chunk, mid_chunk, [high_chunk, 0, 0, 0]];
+            let mut carry = 0;
+            for (offset, chunk) in chunks.iter().enumerate() {
                 let mut add = SyscallAdd256Params {
-                    a: &a_in,
-                    b: U256::ZERO.as_limbs(),
-                    cin: 1,
-                    c: dbl_high.c,
+                    a: out[k + offset].as_limbs(),
+                    b: chunk,
+                    cin: carry,
+                    c: &mut [0, 0, 0, 0],
                 };
-                let _carry = syscall_add256(
+                carry = syscall_add256(
                     &mut add,
                     #[cfg(feature = "hints")]
                     hints,
                 );
-
-                debug_assert!(_carry == 0, "Unexpected carry in intermediate addition");
+                out[k + offset] = U256::from_u64s(add.c);
             }
 
-            // The result is expressed as: dbl_high.dh·B² + dbl_high.dl·B + dbl_low.dl
-
-            // Now update out[i+j], out[i+j+1] and out[i+j+2] with this result
-
-            // Update out[i+j]
-            let mut add_low = SyscallAdd256Params {
-                a: out[i + j].as_limbs(),
-                b: dbl_low.c,
-                cin: 0,
-                c: &mut [0, 0, 0, 0],
-            };
-            let add_low_carry = syscall_add256(
-                &mut add_low,
-                #[cfg(feature = "hints")]
-                hints,
-            );
-            out[i + j] = U256::from_u64s(add_low.c);
-
-            if add_low_carry != 0 {
-                let a_in = out[i + j + 1];
+            // Propagate any remaining carry; the partial sum never exceeds a², so it stays in bounds
+            let mut idx = k + 3;
+            while carry != 0 {
                 let mut add = SyscallAdd256Params {
-                    a: a_in.as_limbs(),
+                    a: out[idx].as_limbs(),
                     b: U256::ZERO.as_limbs(),
-                    cin: 1,
-                    c: out[i + j + 1].as_limbs_mut(),
+                    cin: carry,
+                    c: &mut [0, 0, 0, 0],
                 };
-                let add_carry = syscall_add256(
+                carry = syscall_add256(
                     &mut add,
                     #[cfg(feature = "hints")]
                     hints,
                 );
-
-                if add_carry != 0 {
-                    let a_in = out[i + j + 2];
-                    let mut add2 = SyscallAdd256Params {
-                        a: a_in.as_limbs(),
-                        b: U256::ZERO.as_limbs(),
-                        cin: 1,
-                        c: out[i + j + 2].as_limbs_mut(),
-                    };
-                    let _carry = syscall_add256(
-                        &mut add2,
-                        #[cfg(feature = "hints")]
-                        hints,
-                    );
-
-                    debug_assert!(_carry == 0, "Unexpected carry in intermediate addition");
-                }
-            }
-
-            // Update out[i+j+1]
-            let mut add_mid = SyscallAdd256Params {
-                a: out[i + j + 1].as_limbs(),
-                b: dbl_high.c,
-                cin: 0,
-                c: &mut [0, 0, 0, 0],
-            };
-            let add_mid_carry = syscall_add256(
-                &mut add_mid,
-                #[cfg(feature = "hints")]
-                hints,
-            );
-            out[i + j + 1] = U256::from_u64s(add_mid.c);
-
-            if add_mid_carry != 0 {
-                let a_in = out[i + j + 2];
-                let mut add = SyscallAdd256Params {
-                    a: a_in.as_limbs(),
-                    b: U256::ZERO.as_limbs(),
-                    cin: 1,
-                    c: out[i + j + 2].as_limbs_mut(),
-                };
-                let _carry = syscall_add256(
-                    &mut add,
-                    #[cfg(feature = "hints")]
-                    hints,
-                );
-
-                debug_assert!(_carry == 0, "Unexpected carry in intermediate addition");
-            }
-
-            // Update out[i+j+2]
-            if dbl_high_carry != 0 {
-                let a_in = out[i + j + 2];
-                let mut add = SyscallAdd256Params {
-                    a: a_in.as_limbs(),
-                    b: U256::ZERO.as_limbs(),
-                    cin: 1,
-                    c: out[i + j + 2].as_limbs_mut(),
-                };
-                let _carry = syscall_add256(
-                    &mut add,
-                    #[cfg(feature = "hints")]
-                    hints,
-                );
-
-                debug_assert!(_carry == 0, "Unexpected carry in intermediate addition");
+                out[idx] = U256::from_u64s(add.c);
+                idx += 1;
             }
         }
     }
