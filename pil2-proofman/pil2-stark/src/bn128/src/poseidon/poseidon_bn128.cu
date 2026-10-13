@@ -415,8 +415,10 @@ void PoseidonBN128GPU::merkletreeTiles(FrElement *d_tree, uint64_t *d_input, uin
 
 // Grinding constants for parallel search
 
-#define BN128_GRINDING_LAUNCH_BITS 19
-#define BN128_GRINDING_LAUNCH_BLOCKS_SIZE 512
+// 256 threads keep the register-heavy kernel launchable, and 2^18 nonces per launch keep the grid
+// at the NONCES_LAUNCH_GRID_SIZE blocks the nonce block buffer is sized for.
+#define BN128_GRINDING_LAUNCH_BITS 18
+#define BN128_GRINDING_LAUNCH_BLOCKS_SIZE 256
 #define BN128_GRINDING_LAUNCH_GRID_SIZE \
     (((1ULL << BN128_GRINDING_LAUNCH_BITS) + BN128_GRINDING_LAUNCH_BLOCKS_SIZE - 1) / BN128_GRINDING_LAUNCH_BLOCKS_SIZE)
 
@@ -425,7 +427,7 @@ extern __shared__ uint64_t grinding_shared[];
 
 // Grinding kernel: searches for nonce where hash(state || nonce).v[0] < level
 // Uses t=5 state: [0, state[0], state[1], state[2], nonce]
-__global__ void grinding_kernel_bn128(
+__global__ void __launch_bounds__(BN128_GRINDING_LAUNCH_BLOCKS_SIZE) grinding_kernel_bn128(
     uint64_t *d_nonce,
     uint64_t *d_nonceBlock,
     const FrElementGPU *d_state,

@@ -11,11 +11,11 @@ static constexpr uint32_t MAX_TRANSCRIPT_DEVICES = 32;
 static uint32_t transcriptBN128_initialized_arity_by_device[MAX_TRANSCRIPT_DEVICES] = {};
 static std::mutex transcript_bn128_init_mutex;
 
-// Macro to declare shared memory arrays for FrElement without dynamic initialization warning
-// Uses raw uint32_t storage with reinterpret_cast
+// Macro to declare shared memory arrays for FrElement without dynamic initialization warning.
+// Uses raw uint32_t storage with reinterpret_cast, aligned for the vector accesses FrElement uses.
 #define DECLARE_SHARED_FR_ARRAYS() \
-    __shared__ uint32_t _raw_shared_state[32 * 8]; \
-    __shared__ uint32_t _raw_tmp[32 * 8]; \
+    __shared__ __align__(alignof(PoseidonBN128GPU::FrElement)) uint32_t _raw_shared_state[32 * 8]; \
+    __shared__ __align__(alignof(PoseidonBN128GPU::FrElement)) uint32_t _raw_tmp[32 * 8]; \
     PoseidonBN128GPU::FrElement* shared_state = reinterpret_cast<PoseidonBN128GPU::FrElement*>(_raw_shared_state); \
     PoseidonBN128GPU::FrElement* tmp = reinterpret_cast<PoseidonBN128GPU::FrElement*>(_raw_tmp)
 
