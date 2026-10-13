@@ -16,7 +16,7 @@ use std::fmt;
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "fec6c3a9023a89f50934e237954c9554231afc8a9e9533080ad81a1e067ed295";
+pub const PILOUT_HASH: &str = "27bfa70bbee40007f27d5e6f61ab5b792d122f5c5e334beb980fcb1e4d76dff7";
 
 pub const MERKLE_TREE_ARITY: u64 = 4;
 
@@ -144,7 +144,7 @@ trace_row!(DmaFixedRow<F> {
 pub type DmaFixed<F> = GenericTrace<DmaFixedRow<F>, 2097152, 0, 0>;
 
 trace_row!(DmaTraceRow<F> {
- sel_memcpy:bit, sel_memcmp:bit, sel_memset:bit, fill_byte:u8, sel_extended:bit, sel_inputcpy:bit, h_count:ubit(24), count_lt_256:bit, l_count:ubit(9), count_diff_chunks:[u16; 2], h_dst64:ubit(22), l_dst64:ubit(7), dst_offset:ubit(3), main_step:ubit(36), h_src64:ubit(22), l_src64:ubit(7), src_offset:ubit(3), src_offset_after_pre:ubit(3), src64_inc_by_pre:bit, use_pre:bit, use_loop:bit, use_post:bit, pre_count:ubit(3), l_count64:ubit(9), pre_result_nz:bit, post_result_nz:bit, bus_pre_result:[u32; 2], bus_post_result:[u32; 2], loop_b0:u32, loop_extended_arg:u32, static_count:u32,
+ sel_memcpy:bit, sel_memcmp:bit, sel_memset:bit, fill_byte:u8, sel_extended:bit, sel_inputcpy:bit, h_count:ubit(24), count_lt_256:bit, l_count:ubit(9), count_diff_chunks:[u16; 2], h_dst64:ubit(22), l_dst64:ubit(7), dst_offset:ubit(3), main_step:ubit(36), h_src64:ubit(22), l_src64:ubit(7), src_offset:ubit(3), src_offset_after_pre:ubit(3), src64_inc_by_pre:bit, src_hi:u32, dst_hi:u32, use_pre:bit, use_loop:bit, use_post:bit, pre_count:ubit(3), l_count64:ubit(9), pre_result_nz:bit, post_result_nz:bit, bus_pre_result:[u32; 2], bus_post_result:[u32; 2], loop_b0:u32, loop_extended_arg:u32, static_count:u32,
 });
 pub type DmaTrace<F> = GenericTrace<DmaTraceRow<F>, 2097152, 0, 0>;
 
@@ -158,7 +158,7 @@ trace_row!(DmaMemCpyFixedRow<F> {
 pub type DmaMemCpyFixed<F> = GenericTrace<DmaMemCpyFixedRow<F>, 2097152, 0, 1>;
 
 trace_row!(DmaMemCpyTraceRow<F> {
- sel_memcpy:bit, sel_extended:bit, h_count:ubit(24), count_lt_256:bit, l_count:ubit(9), h_dst64:ubit(22), l_dst64:ubit(7), dst_offset:ubit(3), main_step:ubit(36), h_src64:ubit(22), l_src64:ubit(7), src_offset:ubit(3), src_offset_after_pre:ubit(3), src64_inc_by_pre:bit, use_pre:bit, use_loop:bit, use_post:bit, pre_count:ubit(3), l_count64:ubit(9), loop_b0:u32, loop_extended_arg:u32, static_count:u32,
+ sel_memcpy:bit, sel_extended:bit, h_count:ubit(24), count_lt_256:bit, l_count:ubit(9), h_dst64:ubit(22), l_dst64:ubit(7), dst_offset:ubit(3), main_step:ubit(36), h_src64:ubit(22), l_src64:ubit(7), src_offset:ubit(3), src_offset_after_pre:ubit(3), src64_inc_by_pre:bit, src_hi:u32, dst_hi:u32, use_pre:bit, use_loop:bit, use_post:bit, pre_count:ubit(3), l_count64:ubit(9), loop_b0:u32, loop_extended_arg:u32, static_count:u32,
 });
 pub type DmaMemCpyTrace<F> = GenericTrace<DmaMemCpyTraceRow<F>, 2097152, 0, 1>;
 
@@ -172,7 +172,7 @@ trace_row!(DmaInputCpyFixedRow<F> {
 pub type DmaInputCpyFixed<F> = GenericTrace<DmaInputCpyFixedRow<F>, 2097152, 0, 2>;
 
 trace_row!(DmaInputCpyTraceRow<F> {
- sel_extended:bit, sel_inputcpy:bit, h_count:ubit(24), count_lt_256:bit, l_count:ubit(9), h_dst64:ubit(22), l_dst64:ubit(7), dst_offset:ubit(3), main_step:ubit(36), use_pre:bit, use_loop:bit, use_post:bit, pre_count:ubit(3), l_count64:ubit(9), loop_b0:u32, static_count:u32,
+ sel_extended:bit, sel_inputcpy:bit, h_count:ubit(24), count_lt_256:bit, l_count:ubit(9), h_dst64:ubit(22), l_dst64:ubit(7), dst_offset:ubit(3), main_step:ubit(36), dst_hi:u32, use_pre:bit, use_loop:bit, use_post:bit, pre_count:ubit(3), l_count64:ubit(9), loop_b0:u32, static_count:u32,
 });
 pub type DmaInputCpyTrace<F> = GenericTrace<DmaInputCpyTraceRow<F>, 2097152, 0, 2>;
 
@@ -829,18 +829,18 @@ values!(VirtualTable1AirGroupValues<F> {
 pub const PACKED_INFO: &[(usize, usize, PackedInfoConst)] = &[
     (0, 0, PackedInfoConst {
         is_packed: true,
-        num_packed_words: 7,
-        unpack_info: &[1, 1, 1, 8, 1, 1, 24, 1, 9, 16, 16, 22, 7, 3, 36, 22, 7, 3, 3, 1, 1, 1, 1, 3, 9, 1, 1, 32, 32, 32, 32, 32, 32, 32],
+        num_packed_words: 8,
+        unpack_info: &[1, 1, 1, 8, 1, 1, 24, 1, 9, 16, 16, 22, 7, 3, 36, 22, 7, 3, 3, 1, 32, 32, 1, 1, 1, 3, 9, 1, 1, 32, 32, 32, 32, 32, 32, 32],
     }),
     (0, 1, PackedInfoConst {
         is_packed: true,
-        num_packed_words: 4,
-        unpack_info: &[1, 1, 24, 1, 9, 22, 7, 3, 36, 22, 7, 3, 3, 1, 1, 1, 1, 3, 9, 32, 32, 32],
+        num_packed_words: 5,
+        unpack_info: &[1, 1, 24, 1, 9, 22, 7, 3, 36, 22, 7, 3, 3, 1, 32, 32, 1, 1, 1, 3, 9, 32, 32, 32],
     }),
     (0, 2, PackedInfoConst {
         is_packed: true,
-        num_packed_words: 3,
-        unpack_info: &[1, 1, 24, 1, 9, 22, 7, 3, 36, 1, 1, 1, 3, 9, 32, 32],
+        num_packed_words: 4,
+        unpack_info: &[1, 1, 24, 1, 9, 22, 7, 3, 36, 32, 1, 1, 1, 3, 9, 32, 32],
     }),
     (0, 3, PackedInfoConst {
         is_packed: true,
