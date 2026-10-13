@@ -4,6 +4,7 @@
 
 use crate::{read_input, set_output};
 use serde::{de::DeserializeOwned, Serialize};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Read a deserializable object from the input stream.
 ///
@@ -59,25 +60,39 @@ pub fn read_proof() -> Box<[u8]> {
 }
 
 /// Commit a serializable value to public outputs.
-/// The value is serialized with bincode and written as 32-bit chunks.
+/// The value is serialized with bincode and appended to the output byte stream.
 pub fn commit<T: Serialize>(value: &T) {
     let bytes = bincode::serialize(value).expect("Serialization failed");
     write(&bytes);
 }
 
-/// Write raw bytes to public outputs.
-/// Bytes are written as 32-bit little-endian values.
-pub fn write(buf: &[u8]) {
-    let chunks = buf.len().div_ceil(4);
+/// Bytes of a public output slot.
+const OUTPUT_SLOT_BYTES: usize = std::mem::size_of::<u32>();
 
-    for i in 0..chunks {
-        let start = i * 4;
-        let end = (start + 4).min(buf.len());
-        let mut bytes = [0u8; 4];
-        bytes[..end - start].copy_from_slice(&buf[start..end]);
-        let val = u32::from_le_bytes(bytes);
-        set_output(i, val);
+/// Bytes written to the public outputs so far.
+static OUTPUT_LEN: AtomicUsize = AtomicUsize::new(0);
+/// The bytes of the last output slot while it is partially written.
+static OUTPUT_PARTIAL_SLOT: AtomicU32 = AtomicU32::new(0);
+
+/// Append raw bytes to public outputs.
+/// The outputs hold one byte stream as 32-bit little-endian values: successive calls append to it,
+/// a call ending inside a slot leaves the rest of the slot zero until the next call fills it.
+pub fn write(buf: &[u8]) {
+    let start = OUTPUT_LEN.load(Ordering::Relaxed);
+    let end = start + buf.len();
+    let mut slot = OUTPUT_PARTIAL_SLOT.load(Ordering::Relaxed).to_le_bytes();
+    for (pos, &byte) in (start..end).zip(buf) {
+        slot[pos % OUTPUT_SLOT_BYTES] = byte;
+        let slot_full = (pos + 1) % OUTPUT_SLOT_BYTES == 0;
+        if slot_full || pos + 1 == end {
+            set_output(pos / OUTPUT_SLOT_BYTES, u32::from_le_bytes(slot));
+        }
+        if slot_full {
+            slot = [0; OUTPUT_SLOT_BYTES];
+        }
     }
+    OUTPUT_LEN.store(end, Ordering::Relaxed);
+    OUTPUT_PARTIAL_SLOT.store(u32::from_le_bytes(slot), Ordering::Relaxed);
 }
 
 pub const VADCOP_FINAL_VK_BYTES: usize = 32;
