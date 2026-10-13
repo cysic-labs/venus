@@ -63,34 +63,62 @@ bool is_power_of_two (uint64_t number)
 /* MAX STEPS */
 /*************/
 
-// Sets the maximum number of steps provided by the client in the request
-void set_max_steps (uint64_t new_max_steps)
+// Sets the maximum number of steps provided by the client in the request; returns false, leaving
+// it unchanged, if it is not a power of two or exceeds MAX_STEPS
+bool set_max_steps (uint64_t new_max_steps)
 {
-    if (!is_power_of_two(new_max_steps))
+    if (!is_power_of_two(new_max_steps) || (new_max_steps > MAX_STEPS))
     {
-        printf("ERROR: set_max_steps() got a new max steps = %lu that is not a power of two\n", new_max_steps);
+        printf("ERROR: set_max_steps() got an invalid max steps = %lu\n", new_max_steps);
         fflush(stdout);
         fflush(stderr);
-        exit(-1);
+        return false;
     }
     max_steps = new_max_steps;
+    return true;
 }
 
 /**************/
 /* CHUNK SIZE */
 /**************/
 
-void set_chunk_size (uint64_t new_chunk_size)
+// Sets the chunk size provided by the client in the request; returns false, leaving it unchanged,
+// if it is not a power of two or exceeds CHUNK_SIZE, the largest chunk the trace capacity checks
+// account for
+bool set_chunk_size (uint64_t new_chunk_size)
 {
-    if (!is_power_of_two(new_chunk_size))
+    if (!is_power_of_two(new_chunk_size) || (new_chunk_size > CHUNK_SIZE))
     {
-        printf("ERROR: set_chunk_size() got a new chunk size = %lu that is not a power of two\n", new_chunk_size);
+        printf("ERROR: set_chunk_size() got an invalid chunk size = %lu\n", new_chunk_size);
         fflush(stdout);
         fflush(stderr);
-        exit(-1);
+        return false;
     }
     chunk_size = new_chunk_size;
     trace_address_threshold = TRACE_ADDR + trace_size - MAX_CHUNK_TRACE_SIZE;
+    return true;
+}
+
+/************************/
+/* CHUNK PLAYER ADDRESS */
+/************************/
+
+// Sets the address of the minimal trace chunk to replay provided by the client in the request;
+// returns false, leaving it unchanged, if the chunk header does not lie inside the mapped minimal
+// trace
+bool set_chunk_player_address (uint64_t new_chunk_player_address)
+{
+    const uint64_t chunk_header_size = 41 * 8;
+    if ((new_chunk_player_address < TRACE_ADDR) ||
+        (new_chunk_player_address - TRACE_ADDR > chunk_player_mt_size - chunk_header_size))
+    {
+        printf("ERROR: set_chunk_player_address() got an invalid chunk address = 0x%lx\n", new_chunk_player_address);
+        fflush(stdout);
+        fflush(stderr);
+        return false;
+    }
+    chunk_player_address = new_chunk_player_address;
+    return true;
 }
 
 //#define USE_FILE_LOCK
@@ -228,7 +256,7 @@ int main(int argc, char *argv[])
 
     struct sockaddr_in address;
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY; // Listen on all interfaces
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // Listen only to local clients
     address.sin_port = htons(port);
 
     // Bind socket to port
@@ -345,11 +373,8 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
                     if (verbose) printf("%s MINIMAL TRACE received\n", log_name);
 #endif
-                    if (gen_method == MinimalTrace)
+                    if ((gen_method == MinimalTrace) && set_max_steps(request[1]) && set_chunk_size(request[2]))
                     {
-                        set_max_steps(request[1]);
-                        set_chunk_size(request[2]);
-
                         server_run();
 
                         server_reset_fast();
@@ -377,16 +402,14 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
                     if (verbose) printf("%s ROM HISTOGRAM received\n", log_name);
 #endif
-                    if (gen_method == RomHistogram)
+                    if ((gen_method == RomHistogram) && set_max_steps(request[1]))
                     {
-                        set_max_steps(request[1]);
-
                         server_run();
 
                         server_reset_fast();
 
                         response[0] = TYPE_RH_RESPONSE;
-                        response[1] = MEM_END ? 0 : 1;
+                        response[1] = (MEM_END && !MEM_ERROR) ? 0 : 1;
                         response[2] = trace_size;
                         response[3] = trace_used_size;
                         response[4] = 0;
@@ -408,17 +431,14 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
                     if (verbose) printf("%s MEMORY OPERATIONS received\n", log_name);
 #endif
-                    if (gen_method == MemOp)
+                    if ((gen_method == MemOp) && set_max_steps(request[1]) && set_chunk_size(request[2]))
                     {
-                        set_max_steps(request[1]);
-                        set_chunk_size(request[2]);
-
                         server_run();
 
                         server_reset_fast();
 
                         response[0] = TYPE_MO_RESPONSE;
-                        response[1] = MEM_END ? 0 : 1;
+                        response[1] = (MEM_END && !MEM_ERROR) ? 0 : 1;
                         response[2] = trace_size;
                         response[3] = trace_used_size;
                         response[4] = 0;
@@ -440,17 +460,14 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
                     if (verbose) printf("%s MAIN TRACE received\n", log_name);
 #endif
-                    if (gen_method == MainTrace)
+                    if ((gen_method == MainTrace) && set_max_steps(request[1]) && set_chunk_size(request[2]))
                     {
-                        set_max_steps(request[1]);
-                        set_chunk_size(request[2]);
-
                         server_run();
 
                         server_reset_fast();
 
                         response[0] = TYPE_MA_RESPONSE;
-                        response[1] = MEM_END ? 0 : 1;
+                        response[1] = (MEM_END && !MEM_ERROR) ? 0 : 1;
                         response[2] = trace_size;
                         response[3] = trace_used_size;
                         response[4] = 0;
@@ -472,11 +489,8 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
                     if (verbose) printf("%s COLLECT MEMORY received\n", log_name);
 #endif
-                    if (gen_method == ChunkPlayerMTCollectMem)
+                    if ((gen_method == ChunkPlayerMTCollectMem) && set_max_steps(request[1]) && set_chunk_size(request[2]) && set_chunk_player_address(request[3]))
                     {
-                        set_max_steps(request[1]);
-                        set_chunk_size(request[2]);
-                        chunk_player_address = request[3];
                         uint64_t * pChunk = (uint64_t *)chunk_player_address;
                         print_pc_counter = pChunk[3];
 
@@ -507,17 +521,14 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
                     if (verbose) printf("%s FAST received\n", log_name);
 #endif
-                    if (gen_method == Fast)
+                    if ((gen_method == Fast) && set_max_steps(request[1]) && set_chunk_size(request[2]))
                     {
-                        set_max_steps(request[1]);
-                        set_chunk_size(request[2]);
-
                         server_run();
 
                         server_reset_fast();
 
                         response[0] = TYPE_FA_RESPONSE;
-                        response[1] = MEM_END ? 0 : 1;
+                        response[1] = (MEM_END && !MEM_ERROR) ? 0 : 1;
                         response[2] = 0;
                         response[3] = 0;
                         response[4] = 0;
@@ -539,17 +550,14 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
                     if (verbose) printf("%s MEMORY READS received\n", log_name);
 #endif
-                    if (gen_method == MemReads)
+                    if ((gen_method == MemReads) && set_max_steps(request[1]) && set_chunk_size(request[2]))
                     {
-                        set_max_steps(request[1]);
-                        set_chunk_size(request[2]);
-
                         server_run();
 
                         server_reset_fast();
 
                         response[0] = TYPE_MR_RESPONSE;
-                        response[1] = MEM_END ? 0 : 1;
+                        response[1] = (MEM_END && !MEM_ERROR) ? 0 : 1;
                         response[2] = trace_size;
                         response[3] = trace_used_size;
                         response[4] = 0;
@@ -571,11 +579,8 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
                     if (verbose) printf("%s COLLECT MAIN received\n", log_name);
 #endif
-                    if (gen_method == ChunkPlayerMemReadsCollectMain)
+                    if ((gen_method == ChunkPlayerMemReadsCollectMain) && set_max_steps(request[1]) && set_chunk_size(request[2]) && set_chunk_player_address(request[3]))
                     {
-                        set_max_steps(request[1]);
-                        set_chunk_size(request[2]);
-                        chunk_player_address = request[3];
                         uint64_t * pChunk = (uint64_t *)chunk_player_address;
                         print_pc_counter = pChunk[3];
 
@@ -618,7 +623,12 @@ int main(int argc, char *argv[])
                     printf("%s ERROR: Invalid request id=%lu\n", log_name, request[0]);
                     fflush(stdout);
                     fflush(stderr);
-                    exit(-1);                
+                    response[0] = request[0] + 1;
+                    response[1] = 1;
+                    response[2] = 0;
+                    response[3] = 0;
+                    response[4] = 0;
+                    break;
                 }
             }
 

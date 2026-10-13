@@ -747,7 +747,7 @@ void server_run (void)
     }
     if (MEM_ERROR)
     {
-        printf("Emulation ended with error code %lu\n", MEM_ERROR);
+        printf("Emulation ended with error code %lu at pc 0x%lx\n", MEM_ERROR, MEM_ERROR_PC);
         fflush(stdout);
         fflush(stderr);
     }

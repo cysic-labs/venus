@@ -209,7 +209,13 @@ impl AsmRunnerMO {
             .map_err(|_| AsmRunError::JoinPanic)?
             .map_err(AsmRunError::ServiceError)?;
 
-        assert_eq!(response.result, 0);
+        if response.result != 0 {
+            return Err(AsmRunError::ServiceError(anyhow::anyhow!(
+                "emulation failed with result {}",
+                response.result
+            )))
+            .context("Child process returned error");
+        }
         assert!(response.trace_len > 0);
         assert!(response.trace_len <= response.allocated_len);
 

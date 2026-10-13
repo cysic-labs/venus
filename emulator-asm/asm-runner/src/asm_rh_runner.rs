@@ -59,7 +59,7 @@ impl AsmRunnerRH {
             .map_err(|e| AsmRunError::SemaphoreError(sem_chunk_done_name.clone(), e))?;
 
         let asm_services = AsmServices::new(world_rank, local_rank, base_port);
-        asm_services.send_rom_histogram_request(max_steps)?;
+        let response = asm_services.send_rom_histogram_request(max_steps)?;
 
         loop {
             match sem_chunk_done.timed_wait(SEM_CHUNK_DONE_WAIT_DURATION) {
@@ -80,6 +80,14 @@ impl AsmRunnerRH {
                         .context("Child process returned error");
                 }
             }
+        }
+
+        if response.result != 0 {
+            return Err(AsmRunError::ServiceError(anyhow::anyhow!(
+                "emulation failed with result {}",
+                response.result
+            )))
+            .context("Child process returned error");
         }
 
         if asm_shared_memory.is_none() {

@@ -24,6 +24,7 @@ uint64_t get_precompile_results(void);
 extern uint64_t MEM_STEP; // Current step, i.e. number of executed instructions, updated by assembly at every step or at the end of every chunk, depending on the generation method
 extern uint64_t MEM_END; // Indicates the end of execution
 extern uint64_t MEM_ERROR; // Indicates an error during execution
+extern uint64_t MEM_ERROR_PC; // Guest pc at which the error in MEM_ERROR was raised
 extern uint64_t MEM_TRACE_ADDRESS; // Address of the trace memory
 extern uint64_t MEM_CHUNK_ADDRESS; // Address of the current chunk
 extern uint64_t MEM_CHUNK_START_STEP; // Step at which the current chunk started
