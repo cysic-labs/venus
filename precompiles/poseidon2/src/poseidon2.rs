@@ -6,6 +6,7 @@ use fields::{
 };
 use rayon::prelude::*;
 
+use pil_std_lib::Std;
 use proofman_common::{AirInstance, FromTrace, ProofmanResult};
 use proofman_util::{timer_start_trace, timer_stop_and_log_trace};
 #[cfg(not(feature = "packed"))]
@@ -27,38 +28,58 @@ use super::Poseidon2Input;
 
 /// The `Poseidon2SM` struct encapsulates the logic of the Poseidon2 State Machine.
 pub struct Poseidon2SM<F: PrimeField64> {
+    /// Reference to the PIL2 standard library.
+    pub std: Arc<Std<F>>,
+
     /// Number of available poseidon2s in the trace.
     pub num_available_poseidon2s: usize,
-    _phantom: std::marker::PhantomData<F>,
+
+    /// Range check ID of the 16-bit state limbs.
+    range_id: usize,
 }
 
 pub const CLOCKS: usize = 14;
+
+/// Clock whose state is written to memory: its limbs are range checked and canonical.
+const OUTPUT_CLOCK: usize = CLOCKS - 1;
+
+/// Largest 32-bit value, the high half that forces a zero low half on a canonical element.
+const MASK_32: u64 = 0xFFFF_FFFF;
+
+/// 16-bit limbs of a state element, least-significant first, as laid out in the `chunks` columns.
+fn limbs(value: u64) -> [u16; 4] {
+    [value as u16, (value >> 16) as u16, (value >> 32) as u16, (value >> 48) as u16]
+}
 
 impl<F: PrimeField64> Poseidon2SM<F> {
     /// Creates a new Poseidon2 State Machine instance.
     ///
     /// # Returns
     /// A new `Poseidon2SM` instance.
-    pub fn new() -> Arc<Self> {
+    pub fn new(std: Arc<Std<F>>) -> Arc<Self> {
         // Compute some useful values
         let num_available_poseidon2s = Poseidon2TraceType::<F>::NUM_ROWS / CLOCKS - 1;
 
-        Arc::new(Self { num_available_poseidon2s, _phantom: std::marker::PhantomData })
+        let range_id = std.get_range_id(0, (1 << 16) - 1, None).expect("Failed to get range ID");
+
+        Arc::new(Self { std, num_available_poseidon2s, range_id })
     }
 
     /// Processes a slice of operation data, updating the trace and multiplicities.
     ///
     /// # Arguments
     /// * `trace` - A mutable reference to the Poseidon2 trace.
-    /// * `num_circuits` - The number of circuits to process.
     /// * `input` - The operation data to process.
-    /// * `multiplicity` - A mutable slice to update with multiplicities for the operation.
+    /// * `is_active` - Whether the rows belong to a real operation (`in_use` set).
+    /// * `range_checks` - Multiplicities of the 16-bit range checks, only checked on the output
+    ///   clock of active operations.
     #[inline(always)]
     pub fn process_input(
         &self,
         trace: &mut [Poseidon2TraceRowType<F>],
         input: &Poseidon2Input,
         is_active: bool,
+        range_checks: &mut [u32],
     ) {
         // Fill the states
         let mut round_states = [[0u64; 16]; CLOCKS];
@@ -112,13 +133,26 @@ impl<F: PrimeField64> Poseidon2SM<F> {
 
         for r in 0..CLOCKS {
             for (i, &state) in round_states[r].iter().enumerate() {
-                trace[r].set_chunks(i, 0, state as u32);
-                trace[r].set_chunks(i, 1, (state >> 32) as u32);
+                for (k, limb) in limbs(state).into_iter().enumerate() {
+                    trace[r].set_chunks(i, k, limb);
+                }
             }
         }
 
         if !is_active {
             return;
+        }
+
+        // Output row: range check the limbs and set the inverse of MASK_32 - hi used by the
+        // canonical encoding check (hi == MASK_32 forces lo == 0, so any value is fine then)
+        for (i, &state) in round_states[OUTPUT_CLOCK].iter().enumerate() {
+            for limb in limbs(state) {
+                range_checks[limb as usize] += 1;
+            }
+            let t = F::from_u64(MASK_32 - (state >> 32));
+            if t != F::ZERO {
+                trace[OUTPUT_CLOCK].set_t_inv(i, t.inverse().as_canonical_u64());
+            }
         }
 
         // Fill step and addr
@@ -184,12 +218,30 @@ impl<F: PrimeField64> Poseidon2SM<F> {
             }
         }
 
-        // Fill the trace
-        par_traces.into_par_iter().enumerate().for_each(|(index, trace)| {
-            let input_index = inputs_indexes[index];
-            let input = &inputs[input_index.0][input_index.1];
-            self.process_input(trace, input, true);
-        });
+        // Fill the trace and collect the range checks of the output limbs
+        let range_checks = par_traces
+            .into_par_iter()
+            .enumerate()
+            .fold(
+                || vec![0u32; 1 << 16],
+                |mut range_checks, (index, trace)| {
+                    let input_index = inputs_indexes[index];
+                    let input = &inputs[input_index.0][input_index.1];
+                    self.process_input(trace, input, true, &mut range_checks);
+                    range_checks
+                },
+            )
+            .reduce(
+                || vec![0u32; 1 << 16],
+                |mut acc, range_checks| {
+                    for (acc, value) in acc.iter_mut().zip(range_checks) {
+                        *acc += value;
+                    }
+                    acc
+                },
+            );
+
+        self.std.range_checks(self.range_id, range_checks);
 
         timer_stop_and_log_trace!(POSEIDON2_TRACE);
 
@@ -210,6 +262,7 @@ impl<F: PrimeField64> Poseidon2SM<F> {
                 first,
                 &Poseidon2Input { state: [0; 16], step_main: 0, addr_main: 0 },
                 false,
+                &mut [],
             );
 
             rest.par_iter_mut().for_each(|chunk| {

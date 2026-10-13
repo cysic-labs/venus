@@ -16,7 +16,7 @@ use std::fmt;
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "4324aefa77affbc9be44a2b94b9197f559790171e8a38f062aa7669b1a3d956b";
+pub const PILOUT_HASH: &str = "fec6c3a9023a89f50934e237954c9554231afc8a9e9533080ad81a1e067ed295";
 
 pub const MERKLE_TREE_ARITY: u64 = 4;
 
@@ -561,7 +561,7 @@ trace_row!(Poseidon2FixedRow<F> {
 pub type Poseidon2Fixed<F> = GenericTrace<Poseidon2FixedRow<F>, 131072, 0, 30>;
 
 trace_row!(Poseidon2TraceRow<F> {
- in_use_clk_0:bit, in_use:bit, chunks:[[u32; 2]; 16], step_addr:ubit(40),
+ in_use_clk_0:bit, in_use:bit, chunks:[[u16; 4]; 16], step_addr:ubit(40), t_inv:[u64; 16],
 });
 pub type Poseidon2Trace<F> = GenericTrace<Poseidon2TraceRow<F>, 131072, 0, 30>;
 
@@ -974,8 +974,8 @@ pub const PACKED_INFO: &[(usize, usize, PackedInfoConst)] = &[
     }),
     (0, 30, PackedInfoConst {
         is_packed: true,
-        num_packed_words: 17,
-        unpack_info: &[1, 1, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 40],
+        num_packed_words: 33,
+        unpack_info: &[1, 1, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 40, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64],
     }),
     (0, 31, PackedInfoConst {
         is_packed: true,

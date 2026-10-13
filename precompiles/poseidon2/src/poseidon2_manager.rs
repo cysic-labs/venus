@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use fields::PrimeField64;
+use pil_std_lib::Std;
 use zisk_common::{BusDeviceMode, ComponentBuilder, Instance, InstanceCtx, InstanceInfo, Planner};
 use zisk_core::ZiskOperationType;
 use zisk_pil::Poseidon2Trace;
@@ -20,8 +21,8 @@ impl<F: PrimeField64> Poseidon2Manager<F> {
     ///
     /// # Returns
     /// An `Arc`-wrapped instance of `Poseidon2Manager`.
-    pub fn new() -> Arc<Self> {
-        let poseidon2_sm = Poseidon2SM::new();
+    pub fn new(std: Arc<Std<F>>) -> Arc<Self> {
+        let poseidon2_sm = Poseidon2SM::new(std);
 
         Arc::new(Self { poseidon2_sm })
     }
