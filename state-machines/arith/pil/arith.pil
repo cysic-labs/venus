@@ -106,10 +106,24 @@ airtemplate Arith(const int N = 2**18) {
         sum_all_as = sum_all_as + a[i];
     }
 
+    expr sum_all_cs = 0;
+    for (int i = 0; i < length(c); ++i) {
+        sum_all_cs = sum_all_cs + c[i];
+    }
+
     expr sum_all_ds = 0;
     for (int i = 0; i < length(d); ++i) {
         sum_all_ds = sum_all_ds + d[i];
     }
+
+    // The chunk equations only bind absolute values (|a| * |b| = |c + 2^64 * d| when multiplying,
+    // |a| * |b| + |d| = |c| when dividing), so the sign flags must be bound to each other below.
+    // All chunks are range checked to 16 bits, so a zero sum of chunks means a zero value.
+
+    // In signed multiplication, the product is negative exactly when the operand signs differ,
+    // unless it is zero. As fab = 1 - 2 * (na xor nb), the factor (1 - fab - 2 * np) is non-zero
+    // exactly when np disagrees with the operand signs, which only a zero product may do.
+    (1 - div) * (1 - fab - 2 * np) * (sum_all_cs + sum_all_ds) === 0;
 
     // In signed division, if dividend and divisor signs differ, a non-negative
     // quotient is valid only when the quotient is exactly zero.

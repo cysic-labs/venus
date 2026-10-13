@@ -16,7 +16,7 @@ use std::fmt;
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "b5f668b19050e61d71505d853d28e966800b555069936c5008c1fe2b100bb808";
+pub const PILOUT_HASH: &str = "4a76bfb2bc0d8716bf0b4f6ff8f93556b44fb48d1858f10c621562ab9d2bd521";
 
 pub const MERKLE_TREE_ARITY: u64 = 4;
 
@@ -449,7 +449,7 @@ trace_row!(BinaryFixedRow<F> {
 pub type BinaryFixed<F> = GenericTrace<BinaryFixedRow<F>, 4194304, 0, 22>;
 
 trace_row!(BinaryTraceRow<F> {
- b_op:ubit(7), free_in_a:[u8; 8], free_in_b:[u8; 8], free_in_c:[u8; 8], carry:[bit; 8], mode32:bit, result_is_a:bit, use_first_byte:bit, c_is_signed:bit, b_op_or_sext:ubit(10), mode32_and_c_is_signed:bit,
+ b_op:ubit(7), free_in_a:[u8; 8], free_in_b:[u8; 8], free_in_c:[u8; 8], carry:[ubit(2); 8], mode32:bit, result_is_a:bit, use_first_byte:bit, c_is_signed:bit, b_op_or_sext:ubit(10), mode32_and_c_is_signed:bit,
 });
 pub type BinaryTrace<F> = GenericTrace<BinaryTraceRow<F>, 4194304, 0, 22>;
 
@@ -595,12 +595,12 @@ pub type SpecifiedRangesTrace<F> = GenericTrace<SpecifiedRangesTraceRow<F>, 1048
 
 
 trace_row!(VirtualTable0FixedRow<F> {
- UID: [F; 8], column: [F; 43], __L1__: F,
+ UID: [F; 9], column: [F; 50], __L1__: F,
 });
 pub type VirtualTable0Fixed<F> = GenericTrace<VirtualTable0FixedRow<F>, 2097152, 0, 33>;
 
 trace_row!(VirtualTable0TraceRow<F> {
- multiplicity:[F; 8],
+ multiplicity:[F; 9],
 });
 pub type VirtualTable0Trace<F> = GenericTrace<VirtualTable0TraceRow<F>, 2097152, 0, 33>;
 
@@ -935,7 +935,7 @@ pub const PACKED_INFO: &[(usize, usize, PackedInfoConst)] = &[
     (0, 22, PackedInfoConst {
         is_packed: true,
         num_packed_words: 4,
-        unpack_info: &[7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 10, 1],
+        unpack_info: &[7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 10, 1],
     }),
     (0, 23, PackedInfoConst {
         is_packed: true,

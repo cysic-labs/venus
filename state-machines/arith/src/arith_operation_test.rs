@@ -303,6 +303,14 @@ fn chunk_equations_can_be_satisfied(aop: &ArithOperation) -> bool {
     chunks[7] + carry[6] == 0
 }
 
+/// (1 - div) * (1 - fab - 2 * np) * (sum_all_cs + sum_all_ds) === 0
+fn product_sign_guard_holds(aop: &ArithOperation) -> bool {
+    let sign_mismatch = !aop.div && aop.np != (aop.na != aop.nb);
+    let sum_all_cds = aop.c.iter().chain(aop.d.iter()).sum::<u64>();
+
+    !sign_mismatch || sum_all_cds == 0
+}
+
 fn signed_remainder_sign_guard_holds(aop: &ArithOperation) -> bool {
     let zero_remainder_candidate = aop.div && aop.np && !aop.nr;
     let sum_all_ds = aop.d.iter().sum::<u64>();
@@ -413,6 +421,55 @@ fn signed_remw_negative_dividend_zero_remainder_still_allowed() {
         aop.div_overflow,
     );
     assert!(row < arith_table_data::ROWS);
+}
+
+#[test]
+fn signed_product_sign_mutations_need_product_sign_guard() {
+    // The chunk equations only prove |a| * |b| = |c + 2^64 * d|, with np choosing the sign of the
+    // product representation. Replay the signed multiplications with every np the table offers
+    // for the operand signs: a mutation accepted by the chunk equations and the d[3] sign range
+    // check that yields a wrong result must violate the product sign guard.
+    let magnitude = |x: u64, negative: bool| if negative { x.wrapping_neg() } else { x };
+    let chunks = |x: u64| [x & 0xFFFF, (x >> 16) & 0xFFFF, (x >> 32) & 0xFFFF, x >> 48];
+    let mut blocked = 0;
+    for op in [ZiskOp::Mulsuh.code(), ZiskOp::Mul.code(), ZiskOp::Mulh.code()] {
+        for a in ALL_VALUES {
+            for b in ALL_VALUES {
+                let (expected, _) = ArithOperationTest::calculate_emulator_res(op, a, b);
+                for [row_op, flags, _, _] in arith_table_data::ARITH_TABLE {
+                    let mut aop = ArithOperation::new();
+                    aop.calculate(op, a, b);
+                    if row_op != op as u16
+                        || (flags & 4 != 0) != aop.na
+                        || (flags & 8 != 0) != aop.nb
+                    {
+                        continue;
+                    }
+                    aop.np = flags & 16 != 0;
+                    let product = magnitude(a, aop.na) as u128 * magnitude(b, aop.nb) as u128;
+                    let representation = if aop.np { product.wrapping_neg() } else { product };
+                    let (low, high) = (representation as u64, (representation >> 64) as u64);
+                    aop.c = chunks(low);
+                    aop.d = chunks(high);
+                    if (aop.d[3] >= 0x8000) != aop.np || !chunk_equations_can_be_satisfied(&aop) {
+                        continue;
+                    }
+
+                    let result = if aop.main_mul { low } else { high };
+                    if result != expected {
+                        assert!(
+                            !product_sign_guard_holds(&aop),
+                            "op 0x{op:x} a 0x{a:x} b 0x{b:x} np {}: wrong result 0x{result:x} \
+                             accepted without a product sign guard failure",
+                            aop.np
+                        );
+                        blocked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(blocked > 0);
 }
 
 #[test]
