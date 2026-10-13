@@ -69,7 +69,7 @@ impl<F: PrimeField64> MemSM<F> {
         for i in 0..num_rows {
             let addr = trace[i].addr.as_canonical_u64() * 8;
             let step = trace[i].step.as_canonical_u64();
-            let main_step = MemHelpers::mem_step_to_main_step(step);
+            let main_step = if step == 0 { 0 } else { MemHelpers::mem_step_to_main_step(step) };
             let op = if trace[i].wr.is_zero() { 'R' } else { 'W' };
             let values =
                 [trace[i].value[0].as_canonical_u64(), trace[i].value[1].as_canonical_u64()];
