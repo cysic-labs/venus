@@ -249,6 +249,11 @@ void genProof_gpu(SetupCtx& setupCtx, gl64_t *d_aux_trace, gl64_t *d_const_pols,
             a += 3;
         }
     }
+    // The airgroup values enter the quotient check, so bind them right after the stage-2 root and
+    // air values. The buffer is packed in map order: one element per stage-1 value, three otherwise.
+    if (setupCtx.starkInfo.airgroupValuesSize > 0) {
+        d_transcript->put(h_params.airgroupValues, setupCtx.starkInfo.airgroupValuesSize, stream);
+    }
     TimerStopGPU(timer, STARK_COMMIT_STAGE_2);
     TimerStartGPU(timer, STARK_STEP_Q);
     for (uint64_t i = 0; i < setupCtx.starkInfo.challengesMap.size(); i++)

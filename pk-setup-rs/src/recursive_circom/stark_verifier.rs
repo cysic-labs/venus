@@ -435,6 +435,9 @@ pub fn render_stark_verifier_template(
     if !stark_info.air_values_map.is_empty() {
         transcript_inputs.push("airvalues".to_string());
     }
+    if !stark_info.airgroup_values_map.is_empty() {
+        transcript_inputs.push("airgroupvalues".to_string());
+    }
     for stage in 2..=stark_info.n_stages {
         transcript_inputs.push(format!("root{stage}"));
     }

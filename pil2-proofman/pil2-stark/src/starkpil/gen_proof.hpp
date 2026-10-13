@@ -151,6 +151,9 @@ void genProof(SetupCtx& setupCtx, uint64_t airgroupId, uint64_t airId, uint64_t 
             a += 3;
         }
     }
+    // The airgroup values enter the quotient check, so bind them right after the stage-2 root and
+    // air values. The buffer is packed in map order: one element per stage-1 value, three otherwise.
+    starks.addTranscript(transcript, params.airgroupValues, setupCtx.starkInfo.airgroupValuesSize);
 
     TimerStopAndLog(STARK_STEP_2);
 

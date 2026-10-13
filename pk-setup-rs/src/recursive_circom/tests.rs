@@ -175,6 +175,67 @@ fn renders_transcript_hash_and_query_bits() {
 }
 
 #[test]
+fn transcript_binds_airgroup_values_after_stage2_root() {
+    let mut stark = sample_stark_info();
+    stark.n_stages = 2;
+    stark.challenges_map =
+        vec![CircomChallengeMap { name: "std_alpha".to_string(), stage: 2, dim: 3, stage_id: 0 }];
+    stark.air_values_map = vec![
+        CircomNamedMap { name: "base".to_string(), stage: 1 },
+        CircomNamedMap { name: "ext".to_string(), stage: 2 },
+    ];
+    stark.airgroup_values_map = vec![
+        CircomNamedMap { name: "base_result".to_string(), stage: 1 },
+        CircomNamedMap { name: "gsum_result".to_string(), stage: 2 },
+    ];
+    stark.map_sections_n.insert("cm3".to_string(), 3);
+    let options = StarkVerifierOptions { input_challenges: true, ..Default::default() };
+
+    // challengeQ must be drawn after the stage-2 root, the stage-2 air values and every airgroup
+    // value, in the order the provers absorb them; a stage-1 airgroup value is one base field
+    // element whose other limbs are pinned to zero.
+    let transcript = render_transcript_template(&stark, options);
+    let absorbed = main_transcript_absorptions(&transcript);
+    assert_eq!(absorbed[0], ["globalChallenge[0]", "globalChallenge[1]", "globalChallenge[2]"]);
+    assert_eq!(
+        absorbed[1],
+        [
+            "root2[0]",
+            "root2[1]",
+            "root2[2]",
+            "root2[3]",
+            "airValues[1][0]",
+            "airValues[1][1]",
+            "airValues[1][2]",
+            "airgroupvalues[0][0]",
+            "airgroupvalues[1][0]",
+            "airgroupvalues[1][1]",
+            "airgroupvalues[1][2]",
+        ]
+    );
+    assert_eq!(absorbed[2], ["root3[0]", "root3[1]", "root3[2]", "root3[3]"]);
+    assert!(transcript.contains("enable * airgroupvalues[0][1] === 0;"));
+    assert!(transcript.contains("enable * airgroupvalues[0][2] === 0;"));
+    assert!(!transcript.contains("airgroupvalues[1][1] === 0;"));
+
+    // The verifier passes its inputs in the declaration order of the transcript template.
+    assert_order(
+        &transcript,
+        &[
+            "signal input globalChallenge[3];",
+            "signal input airValues[2][3];",
+            "signal input airgroupvalues[2][3];",
+            "signal input root2[4];",
+            "signal input root3[4];",
+        ],
+    );
+    let verifier = render_stark_verifier_template(&[1, 2, 3, 4], &stark, options);
+    assert!(
+        verifier.contains("Transcript0()(globalChallenge,airvalues,airgroupvalues,root2,root3,")
+    );
+}
+
+#[test]
 fn renders_verifier_evaluation_and_fri_pol_templates() {
     let mut stark = sample_stark_info();
     stark.challenges_map =
@@ -679,6 +740,21 @@ fn assert_order(out: &str, needles: &[&str]) {
         );
         previous = idx;
     }
+}
+
+/// Inputs of each permutation of the main transcript, in order, without the zero padding added
+/// when a challenge is drawn.
+fn main_transcript_absorptions(template: &str) -> Vec<Vec<&str>> {
+    template
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("signal transcriptHash_"))
+        .filter(|hash| hash.starts_with(|c: char| c.is_ascii_digit()))
+        .map(|hash| {
+            let (_, inputs) = hash.split_once("([").expect("permutation inputs");
+            let (inputs, _) = inputs.split_once("], [").expect("permutation state");
+            inputs.split(',').filter(|input| *input != "0").collect()
+        })
+        .collect()
 }
 
 fn recursive1_template(out: &str) -> &str {

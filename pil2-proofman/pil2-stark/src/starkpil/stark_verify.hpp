@@ -48,10 +48,20 @@ bool starkVerify(json jproof, StarkInfo& starkInfo, ExpressionsBin& expressionsB
         }
     }
 
+    // The proof carries three limbs per airgroup value while the provers keep them packed: a
+    // stage-1 value is a base field element, so only its first limb is kept and the others must be zero.
     Goldilocks::Element airgroupValues[starkInfo.airgroupValuesSize];
+    uint64_t g = 0;
     for(uint64_t i = 0; i < starkInfo.airgroupValuesMap.size() ; ++i) {
+        uint64_t width = starkInfo.airgroupValuesMap[i].stage == 1 ? 1 : FIELD_EXTENSION;
         for(uint64_t j = 0; j < FIELD_EXTENSION; ++j) {
-            airgroupValues[i*FIELD_EXTENSION + j] = Goldilocks::fromString(jproof["airgroupvalues"][i][j]);
+            Goldilocks::Element value = Goldilocks::fromString(jproof["airgroupvalues"][i][j]);
+            if(j < width) {
+                airgroupValues[g++] = value;
+            } else if(!Goldilocks::isZero(value)) {
+                zklog.error("starkVerify: stage-1 airgroup value " + to_string(i) + " has a non-zero extension limb");
+                return false;
+            }
         }
     }
 
@@ -125,6 +135,12 @@ bool starkVerify(json jproof, StarkInfo& starkInfo, ExpressionsBin& expressionsB
                 }
                 p += 3;
             }
+        }
+
+        // The airgroup values enter the quotient check: the provers bind the packed buffer right
+        // after the stage-2 root and air values.
+        if(s == 2) {
+            transcript.put(airgroupValues, starkInfo.airgroupValuesSize);
         }
 
         // TODO: ADD PROOF VALUES ??

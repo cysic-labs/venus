@@ -74,6 +74,16 @@ pub fn render_transcript_template(
         );
         out.push('\n');
     }
+    if !stark_info.airgroup_values_map.is_empty() {
+        line(
+            &mut out,
+            format_args!(
+                "    signal input airgroupvalues[{}][3];",
+                stark_info.airgroup_values_map.len()
+            ),
+        );
+        out.push('\n');
+    }
     for stage in 2..=stark_info.n_stages {
         line(&mut out, format_args!("    signal input root{stage}[4];"));
     }
@@ -154,6 +164,21 @@ pub fn render_transcript_template(
         for (idx, air_value) in stark_info.air_values_map.iter().enumerate() {
             if air_value.stage == stage as u64 {
                 transcript.put(&format!("airValues[{idx}]"), Some(3));
+            }
+        }
+        // The airgroup values enter the quotient check, so they are bound right after the
+        // stage-2 root and air values, as the provers do. A stage-1 value is a base field
+        // element: only its first limb is absorbed and the other two must be zero.
+        if stage == 2 {
+            for (idx, airgroup_value) in stark_info.airgroup_values_map.iter().enumerate() {
+                let value = format!("airgroupvalues[{idx}]");
+                if airgroup_value.stage == 1 {
+                    transcript.put(&value, Some(1));
+                    transcript.code.push(format!("enable * {value}[1] === 0;"));
+                    transcript.code.push(format!("enable * {value}[2] === 0;"));
+                } else {
+                    transcript.put(&value, Some(3));
+                }
             }
         }
     }
