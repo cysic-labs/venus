@@ -210,8 +210,23 @@ airtemplate Blake2br(const int N = 2**20) {
     const expr perm_active_expr = clock_set(in_use, start: 0, end: CLOCKS - NUM_G_FUNCTIONS, step: 2, skip: 1);
     perm_active <== perm_active_expr;
 
-    permutation_assumes(opid: BLAKE2BR_PERMUTATION_ID, expressions: [MSG_IDX, m[0], m[1]], sel: perm_active);
-    permutation_proves(opid: BLAKE2BR_PERMUTATION_ID, expressions: [sigma_idx, ms[0], ms[1]], sel: perm_active);
+    // Operation step and address
+    col witness bits(40) step_addr;
+
+    const int STEP_MAIN = 0;
+    const int ADDR_OP = STEP_MAIN + 1;
+
+    // The permutation is a single multiset over all the calls of all the instances, so each entry
+    // carries its call: op_step is the main step of the call (distinct per call, the operation bus
+    // ties it to one main instruction) on the perm_active clocks, and 16 * op_step + index, with the
+    // message index in [0, 16), keeps the entries of different calls apart. Untagged, two calls
+    // could swap their ms words.
+    col witness bits(40) op_step;
+    const expr op_step_expr = clock_shift(step_addr, STEP_MAIN, start: 0, end: CLOCKS - NUM_G_FUNCTIONS, step: 2, skip: 1);
+    op_step <== op_step_expr;
+
+    permutation_assumes(opid: BLAKE2BR_PERMUTATION_ID, expressions: [MSG_IDX + 16 * op_step, m[0], m[1]], sel: perm_active);
+    permutation_proves(opid: BLAKE2BR_PERMUTATION_ID, expressions: [sigma_idx + 16 * op_step, ms[0], ms[1]], sel: perm_active);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // G-FUNCTION STATE VARIABLES
@@ -373,10 +388,6 @@ airtemplate Blake2br(const int N = 2**20) {
     //   - addr_input is read from addr_op + 16
     //   - Both must match the actual memory addresses used
 
-    col witness bits(40) step_addr;
-
-    const int STEP_MAIN = 0;
-    const int ADDR_OP = STEP_MAIN + 1;
     const int ADDR_STATE = ADDR_OP + 1;
     const int ADDR_INPUT = ADDR_STATE + 1;
     const int ADDR_IND_0 = ADDR_INPUT + 1;
