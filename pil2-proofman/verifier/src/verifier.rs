@@ -1,9 +1,14 @@
+use std::borrow::Cow;
+
 use fields::{
     intt_tiny, verify_fold, verify_mt, partial_merkle_tree, CubicExtensionField, Field, Goldilocks, Transcript,
     Poseidon2Constants, Poseidon4, Poseidon16, poseidon2_hash, PrimeField64,
 };
-use bytemuck::cast_slice;
+use bytemuck::try_cast_slice;
 use rayon::prelude::*;
+
+/// Field elements in a Merkle node, and so in a root or a verification key.
+const HASH_SIZE: usize = 4;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -37,6 +42,201 @@ pub struct VerifierInfo {
     pub pow_bits: u64,
 }
 
+/// Reads little-endian words that must all be canonical Goldilocks elements, so that a proof has a
+/// single encoding. Input that is not 8-byte aligned is copied.
+fn field_words(bytes: &[u8]) -> Option<Cow<'_, [u64]>> {
+    let words = match try_cast_slice::<u8, u64>(bytes) {
+        Ok(words) => Cow::Borrowed(words),
+        Err(_) => {
+            let words = bytes.chunks_exact(8);
+            if !words.remainder().is_empty() {
+                return None;
+            }
+            Cow::Owned(
+                words
+                    .map(|word| {
+                        let mut le_bytes = [0u8; 8];
+                        le_bytes.copy_from_slice(word);
+                        u64::from_le_bytes(le_bytes)
+                    })
+                    .collect(),
+            )
+        }
+    };
+    words.iter().all(|&word| word < Goldilocks::ORDER_U64).then_some(words)
+}
+
+/// Hands out the words of a proof in the order the prover serialized them.
+struct ProofReader<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> ProofReader<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u64]> {
+        let (taken, rest) = self.words.split_at_checked(n)?;
+        self.words = rest;
+        Some(taken)
+    }
+
+    fn word(&mut self) -> Option<u64> {
+        let (&word, rest) = self.words.split_first()?;
+        self.words = rest;
+        Some(word)
+    }
+
+    fn elements(&mut self, n: usize) -> Option<Vec<Goldilocks>> {
+        Some(self.take(n)?.iter().map(|&word| Goldilocks::new(word)).collect())
+    }
+
+    fn cubic_elements(&mut self, n: usize) -> Option<Vec<CubicExtensionField<Goldilocks>>> {
+        let words = self.take(n * 3)?;
+        Some(
+            words
+                .chunks_exact(3)
+                .map(|v| CubicExtensionField {
+                    value: [Goldilocks::new(v[0]), Goldilocks::new(v[1]), Goldilocks::new(v[2])],
+                })
+                .collect(),
+        )
+    }
+
+    fn hash(&mut self) -> Option<[Goldilocks; HASH_SIZE]> {
+        Some(self.take(HASH_SIZE)?.first_chunk::<HASH_SIZE>()?.map(Goldilocks::new))
+    }
+
+    /// A Merkle path: `levels` groups of `width` sibling elements.
+    fn merkle_path(&mut self, levels: usize, width: usize) -> Option<Vec<Vec<Goldilocks>>> {
+        (0..levels).map(|_| self.elements(width)).collect()
+    }
+}
+
+/// The contents of a STARK proof, indexed the way the verifier consumes them.
+struct StarkProof {
+    publics: Vec<Goldilocks>,
+    roots: Vec<[Goldilocks; HASH_SIZE]>,
+    evals: Vec<CubicExtensionField<Goldilocks>>,
+    /// Per query, the values opened from the fixed tree and then from each stage tree.
+    s0_vals: Vec<Vec<Vec<Goldilocks>>>,
+    /// Per query, the Merkle paths of those openings.
+    s0_siblings: Vec<Vec<Vec<Vec<Goldilocks>>>>,
+    /// The last-level nodes of the fixed tree and then of each stage tree.
+    s0_last_levels: Vec<Vec<Goldilocks>>,
+    roots_fri: Vec<[Goldilocks; HASH_SIZE]>,
+    /// Per query, the values opened from each FRI folding tree.
+    vals_fri: Vec<Vec<Vec<Goldilocks>>>,
+    siblings_fri: Vec<Vec<Vec<Vec<Goldilocks>>>>,
+    last_levels_fri: Vec<Vec<Goldilocks>>,
+    final_pol: Vec<CubicExtensionField<Goldilocks>>,
+    nonce: Goldilocks,
+}
+
+impl StarkProof {
+    /// Splits `words` into the elements of a proof shaped by `verifier_info`. Fails unless the
+    /// words are exactly a proof with the number of publics the AIR binds.
+    fn parse(words: &[u64], verifier_info: &VerifierInfo) -> Option<Self> {
+        fn per_query<T>(n_queries: usize, n_trees: usize) -> Vec<Vec<T>> {
+            (0..n_queries).map(|_| Vec::with_capacity(n_trees)).collect()
+        }
+
+        let mut reader = ProofReader { words };
+
+        let n_publics = reader.word()?;
+        if n_publics != verifier_info.n_publics {
+            return None;
+        }
+        let publics = reader.elements(n_publics as usize)?;
+
+        let n_stage_trees = verifier_info.n_stages as usize + 1;
+        let roots = (0..n_stage_trees).map(|_| reader.hash()).collect::<Option<Vec<_>>>()?;
+        let evals = reader.cubic_elements(verifier_info.n_evals as usize)?;
+
+        let n_queries = verifier_info.n_fri_queries as usize;
+        let log_arity = (verifier_info.arity as f64).log2();
+        let llv = verifier_info.last_level_verification;
+        let path_levels = |bits: u64| ((bits as f64 / log_arity).ceil() as usize).checked_sub(llv as usize);
+        let sibling_width = (verifier_info.arity as usize - 1) * HASH_SIZE;
+        let last_level_len = verifier_info.arity.pow(llv as u32) as usize * HASH_SIZE;
+
+        // The fixed tree, then one tree per stage: the values opened by every query, their paths
+        // and the tree's last level.
+        let s0_levels = path_levels(verifier_info.n_bits_ext)?;
+        let mut s0_vals = per_query(n_queries, n_stage_trees + 1);
+        let mut s0_siblings = per_query(n_queries, n_stage_trees + 1);
+        let mut s0_last_levels = Vec::with_capacity(n_stage_trees + 1);
+        let stage_widths = verifier_info.num_vals.get(..n_stage_trees)?;
+        for &width in std::iter::once(&verifier_info.n_constants).chain(stage_widths) {
+            for vals in &mut s0_vals {
+                vals.push(reader.elements(width as usize)?);
+            }
+            for siblings in &mut s0_siblings {
+                siblings.push(reader.merkle_path(s0_levels, sibling_width)?);
+            }
+            if llv > 0 {
+                s0_last_levels.push(reader.elements(last_level_len)?);
+            }
+        }
+
+        // One tree per folding step, laid out the same way.
+        let fri_steps = verifier_info.fri_steps.get(..verifier_info.n_fri_steps as usize)?;
+        let n_fri_trees = fri_steps.len().saturating_sub(1);
+        let roots_fri = (0..n_fri_trees).map(|_| reader.hash()).collect::<Option<Vec<_>>>()?;
+        let mut vals_fri = per_query(n_queries, n_fri_trees);
+        let mut siblings_fri = per_query(n_queries, n_fri_trees);
+        let mut last_levels_fri = Vec::with_capacity(n_fri_trees);
+        for step in fri_steps.windows(2) {
+            let group_size = (1usize << (step[0] - step[1])) * 3;
+            for vals in &mut vals_fri {
+                vals.push(reader.elements(group_size)?);
+            }
+            let levels = path_levels(step[1])?;
+            for siblings in &mut siblings_fri {
+                siblings.push(reader.merkle_path(levels, sibling_width)?);
+            }
+            if llv > 0 {
+                last_levels_fri.push(reader.elements(last_level_len)?);
+            }
+        }
+
+        let final_pol = reader.cubic_elements(1usize << fri_steps.last()?)?;
+        let nonce = Goldilocks::new(reader.word()?);
+
+        reader.words.is_empty().then_some(Self {
+            publics,
+            roots,
+            evals,
+            s0_vals,
+            s0_siblings,
+            s0_last_levels,
+            roots_fri,
+            vals_fri,
+            siblings_fri,
+            last_levels_fri,
+            final_pol,
+            nonce,
+        })
+    }
+}
+
+/// Recomputes the root of a tree with `n_leaves` leaves from its last-level nodes. A proof reserves
+/// `arity^last_level_verification` node slots, and the ones the tree does not fill must be zero so
+/// that the proof has a single encoding.
+fn last_level_root<C: Poseidon2Constants<W>, const W: usize>(
+    last_level: &[Goldilocks],
+    n_leaves: u64,
+    verifier_info: &VerifierInfo,
+) -> Option<[Goldilocks; HASH_SIZE]> {
+    let max_nodes = verifier_info.arity.pow(verifier_info.last_level_verification as u32);
+    let mut n_nodes = n_leaves;
+    while n_nodes > max_nodes {
+        n_nodes = n_nodes.div_ceil(verifier_info.arity);
+    }
+    let (nodes, unused) = last_level.split_at(n_nodes as usize * HASH_SIZE);
+    if unused.iter().any(|value| *value != Goldilocks::ZERO) {
+        return None;
+    }
+    Some(partial_merkle_tree::<Goldilocks, C, W>(nodes, n_nodes, verifier_info.arity))
+}
+
 #[allow(clippy::type_complexity)]
 pub fn stark_verify<C: Poseidon2Constants<W>, const W: usize>(
     proof: &[u8],
@@ -55,211 +255,32 @@ pub fn stark_verify<C: Poseidon2Constants<W>, const W: usize>(
         &[CubicExtensionField<Goldilocks>],
     ) -> CubicExtensionField<Goldilocks>,
 ) -> bool {
-    let proof = cast_slice::<u8, u64>(proof);
-    let vk = cast_slice::<u8, u64>(vk);
-
-    let n_siblings: u64 = ((verifier_info.n_bits_ext as f64 / (verifier_info.arity as f64).log2()).ceil()) as u64
-        - verifier_info.last_level_verification;
-    let n_siblings_per_level = (verifier_info.arity - 1) * 4;
-
-    let root_c = [Goldilocks::new(vk[0]), Goldilocks::new(vk[1]), Goldilocks::new(vk[2]), Goldilocks::new(vk[3])];
-
-    let mut p = 0;
-
-    let n_publics = proof[p as usize];
-    p += 1;
-    if n_publics != verifier_info.n_publics {
+    let Some(root_c) = field_words(vk).and_then(|vk| <[u64; HASH_SIZE]>::try_from(&*vk).ok()) else {
+        tracing::error!("Verification key is not {} canonical field elements", HASH_SIZE);
         return false;
-    }
+    };
+    let root_c = root_c.map(Goldilocks::new);
 
-    let mut publics = Vec::with_capacity(n_publics as usize);
-    for _ in 0..n_publics {
-        publics.push(Goldilocks::new(proof[p as usize]));
-        p += 1;
-    }
-
-    let mut roots = Vec::with_capacity(verifier_info.n_stages as usize + 1);
-    for _ in 0..verifier_info.n_stages + 1 {
-        let mut root = [Goldilocks::ZERO; 4];
-        for r in &mut root {
-            *r = Goldilocks::new(proof[p as usize]);
-            p += 1;
-        }
-        roots.push(root);
-    }
-
-    let mut evals = Vec::with_capacity(verifier_info.n_evals as usize);
-    for _ in 0..verifier_info.n_evals {
-        let eval = CubicExtensionField {
-            value: [
-                Goldilocks::new(proof[p as usize]),
-                Goldilocks::new(proof[p as usize + 1]),
-                Goldilocks::new(proof[p as usize + 2]),
-            ],
-        };
-        p += 3;
-        evals.push(eval);
-    }
+    let Some(StarkProof {
+        publics,
+        roots,
+        evals,
+        s0_vals,
+        s0_siblings,
+        s0_last_levels,
+        roots_fri,
+        vals_fri,
+        siblings_fri,
+        last_levels_fri,
+        final_pol,
+        nonce,
+    }) = field_words(proof).and_then(|words| StarkProof::parse(&words, verifier_info))
+    else {
+        tracing::error!("Proof is not a canonical encoding of a proof for this verifier");
+        return false;
+    };
 
     let n_queries = verifier_info.n_fri_queries as usize;
-    let n_stages_plus_2 = verifier_info.n_stages as usize + 2;
-    let n_sibs = n_siblings as usize;
-    let n_sibs_per_lvl = n_siblings_per_level as usize;
-
-    let mut s0_vals: Vec<Vec<Vec<Goldilocks>>> = Vec::with_capacity(n_queries);
-    let mut s0_siblings: Vec<Vec<Vec<Vec<Goldilocks>>>> = Vec::with_capacity(n_queries);
-    let mut s0_last_levels: Vec<Vec<Goldilocks>> = Vec::with_capacity(n_stages_plus_2);
-
-    for _q in 0..n_queries {
-        let mut query_vals = Vec::with_capacity(n_stages_plus_2);
-        let mut vals = Vec::with_capacity(verifier_info.n_constants as usize);
-        for _ in 0..verifier_info.n_constants {
-            vals.push(Goldilocks::new(proof[p as usize]));
-            p += 1;
-        }
-        query_vals.push(vals);
-        s0_vals.push(query_vals);
-    }
-
-    for _q in 0..n_queries {
-        let mut query_siblings = Vec::with_capacity(n_stages_plus_2);
-        let mut siblings = Vec::with_capacity(n_sibs);
-        for _ in 0..n_sibs {
-            let mut sibling = Vec::with_capacity(n_sibs_per_lvl);
-            for _ in 0..n_sibs_per_lvl {
-                sibling.push(Goldilocks::new(proof[p as usize]));
-                p += 1;
-            }
-            siblings.push(sibling);
-        }
-        query_siblings.push(siblings);
-        s0_siblings.push(query_siblings);
-    }
-
-    let num_nodes_level = verifier_info.arity.pow(verifier_info.last_level_verification as u32) * 4;
-    let num_nodes_lvl = num_nodes_level as usize;
-
-    if verifier_info.last_level_verification > 0 {
-        let mut last_level_nodes = Vec::with_capacity(num_nodes_lvl);
-        for _ in 0..num_nodes_level {
-            last_level_nodes.push(Goldilocks::new(proof[p as usize]));
-            p += 1;
-        }
-        s0_last_levels.push(last_level_nodes);
-    }
-
-    for i in 0..verifier_info.n_stages + 1 {
-        let num_vals_i = verifier_info.num_vals[i as usize] as usize;
-
-        for query_vals in s0_vals.iter_mut() {
-            let mut vals = Vec::with_capacity(num_vals_i);
-            for _ in 0..num_vals_i {
-                vals.push(Goldilocks::new(proof[p as usize]));
-                p += 1;
-            }
-            query_vals.push(vals);
-        }
-
-        for query_siblings in s0_siblings.iter_mut() {
-            let mut siblings = Vec::with_capacity(n_sibs);
-            for _ in 0..n_sibs {
-                let mut sibling = Vec::with_capacity(n_sibs_per_lvl);
-                for _ in 0..n_sibs_per_lvl {
-                    sibling.push(Goldilocks::new(proof[p as usize]));
-                    p += 1;
-                }
-                siblings.push(sibling);
-            }
-            query_siblings.push(siblings);
-        }
-
-        if verifier_info.last_level_verification > 0 {
-            let mut last_level_nodes = Vec::with_capacity(num_nodes_lvl);
-            for _ in 0..num_nodes_level {
-                last_level_nodes.push(Goldilocks::new(proof[p as usize]));
-                p += 1;
-            }
-            s0_last_levels.push(last_level_nodes);
-        }
-    }
-
-    let n_fri_steps_minus_1 = (verifier_info.n_fri_steps - 1) as usize;
-    let mut roots_fri = Vec::with_capacity(n_fri_steps_minus_1);
-    for _ in 1..verifier_info.n_fri_steps {
-        let mut root = [Goldilocks::ZERO; 4];
-        for r in &mut root {
-            *r = Goldilocks::new(proof[p as usize]);
-            p += 1;
-        }
-        roots_fri.push(root);
-    }
-
-    let mut siblings_fri: Vec<Vec<Vec<Vec<Goldilocks>>>> =
-        (0..n_queries).map(|_| Vec::with_capacity(n_fri_steps_minus_1)).collect();
-    let mut vals_fri: Vec<Vec<Vec<Goldilocks>>> =
-        (0..n_queries).map(|_| Vec::with_capacity(n_fri_steps_minus_1)).collect();
-    let mut last_levels_fri: Vec<Vec<Goldilocks>> = Vec::with_capacity(n_fri_steps_minus_1);
-
-    let log_arity = (verifier_info.arity as f64).log2();
-    let n_siblings_per_level_fri = ((verifier_info.arity - 1) * 4) as usize;
-
-    for i in 1..verifier_info.n_fri_steps {
-        let vals_size =
-            ((1 << (verifier_info.fri_steps[(i - 1) as usize] - verifier_info.fri_steps[i as usize])) * 3) as usize;
-
-        for val_fri in vals_fri.iter_mut().take(n_queries) {
-            let mut vals = Vec::with_capacity(vals_size);
-            for _ in 0..vals_size {
-                vals.push(Goldilocks::new(proof[p as usize]));
-                p += 1;
-            }
-            val_fri.push(vals);
-        }
-
-        let n_siblings_fri = ((verifier_info.fri_steps[i as usize] as f64 / log_arity).ceil()) as usize
-            - verifier_info.last_level_verification as usize;
-
-        for query_siblings in siblings_fri.iter_mut() {
-            let mut siblings = Vec::with_capacity(n_siblings_fri);
-            for _ in 0..n_siblings_fri {
-                let mut sibling = Vec::with_capacity(n_siblings_per_level_fri);
-                for _ in 0..n_siblings_per_level_fri {
-                    sibling.push(Goldilocks::new(proof[p as usize]));
-                    p += 1;
-                }
-                siblings.push(sibling);
-            }
-            query_siblings.push(siblings);
-        }
-
-        if verifier_info.last_level_verification > 0 {
-            let mut last_level_nodes = Vec::with_capacity(num_nodes_lvl);
-            for _ in 0..num_nodes_level {
-                last_level_nodes.push(Goldilocks::new(proof[p as usize]));
-                p += 1;
-            }
-            last_levels_fri.push(last_level_nodes);
-        }
-    }
-
-    let final_pol_capacity = 1usize << verifier_info.fri_steps[(verifier_info.n_fri_steps - 1) as usize];
-    let mut final_pol = Vec::with_capacity(final_pol_capacity);
-    for _ in 0..final_pol_capacity {
-        let pol = CubicExtensionField {
-            value: [
-                Goldilocks::new(proof[p as usize]),
-                Goldilocks::new(proof[p as usize + 1]),
-                Goldilocks::new(proof[p as usize + 2]),
-            ],
-        };
-        p += 3;
-        final_pol.push(pol);
-    }
-
-    let nonce = Goldilocks::new(proof[p as usize]);
-    p += 1;
-
-    debug_assert!(p == proof.len() as u64, "Proof length mismatch: expected {}, got {}", p, proof.len());
 
     let mut challenges = vec![
         CubicExtensionField { value: [Goldilocks::ZERO, Goldilocks::ZERO, Goldilocks::ZERO] };
@@ -267,11 +288,10 @@ pub fn stark_verify<C: Poseidon2Constants<W>, const W: usize>(
     ];
 
     let mut xdivxsub: Vec<Vec<CubicExtensionField<Goldilocks>>> = Vec::with_capacity(n_queries);
-    let mut zi = Vec::with_capacity(verifier_info.boundaries.len() + 1);
 
     let mut transcript: Transcript<Goldilocks, Poseidon16, 16> = Transcript::new();
     transcript.put(&root_c);
-    if n_publics > 0 {
+    if !publics.is_empty() {
         if !verifier_info.hash_commits {
             transcript.put(&publics);
         } else {
@@ -332,8 +352,19 @@ pub fn stark_verify<C: Poseidon2Constants<W>, const W: usize>(
         }
     }
 
-    transcript.get_field(&mut challenges[c].value);
+    // The grinding hash and the query indices are read from the last challenge slot, which must be
+    // the slot the transcript writes next: otherwise the queries would come from a zero challenge
+    // the prover can predict.
     let last_challenge_index = challenges.len() - 1;
+    if c != last_challenge_index {
+        tracing::error!(
+            "verifier_info is inconsistent: the transcript writes {} challenges but {} are declared",
+            c + 1,
+            challenges.len()
+        );
+        return false;
+    }
+    transcript.get_field(&mut challenges[c].value);
     let pow_hash = poseidon2_hash::<Goldilocks, Poseidon4, 4>(&[
         challenges[last_challenge_index].value[0],
         challenges[last_challenge_index].value[1],
@@ -378,17 +409,13 @@ pub fn stark_verify<C: Poseidon2Constants<W>, const W: usize>(
 
     let x_n = xi_challenge.pow(1 << verifier_info.n_bits);
 
-    let z_n = x_n - Goldilocks::ONE;
-    let z_n_inv = z_n.inverse();
-    zi.push(z_n_inv);
-    for boundary in &verifier_info.boundaries {
-        if boundary.name == "everyRow" {
-            continue;
-        }
-
-        // Handling for boundaries other than "everyRow" is intentionally deferred.
-        // If support for additional boundary types is required, implement logic here.
+    // Only the everyRow zerofier is computed.
+    if verifier_info.boundaries.iter().any(|boundary| boundary.name != "everyRow") {
+        tracing::error!("verifier_info declares a boundary other than everyRow");
+        return false;
     }
+    let z_n = x_n - Goldilocks::ONE;
+    let zi = [z_n.inverse()];
 
     let mut final_pol_vals: Vec<Goldilocks> = Vec::with_capacity(final_pol.len() * 3);
     for pol in &final_pol {
@@ -496,50 +523,22 @@ pub fn stark_verify<C: Poseidon2Constants<W>, const W: usize>(
     }
 
     if verifier_info.last_level_verification > 0 {
-        let mut num_nodes_level = 1 << verifier_info.n_bits_ext;
-        while num_nodes_level > verifier_info.arity.pow(verifier_info.last_level_verification as u32) {
-            num_nodes_level = num_nodes_level.div_ceil(verifier_info.arity);
+        let n_leaves = 1 << verifier_info.n_bits_ext;
+        if last_level_root::<C, W>(&s0_last_levels[0], n_leaves, verifier_info) != Some(root_c) {
+            tracing::error!("Stage fixed Merkle tree root recomputation failed");
+            return false;
         }
-
-        for s in 0..verifier_info.n_stages + 1 {
-            let computed_root = partial_merkle_tree::<Goldilocks, C, W>(
-                &s0_last_levels[s as usize + 1],
-                num_nodes_level,
-                verifier_info.arity,
-            );
-            for i in 0..4 {
-                if computed_root[i] != roots[s as usize][i] {
-                    tracing::error!("Stage {} Merkle tree root recomputation failed", s + 1);
-                    return false;
-                }
-            }
-        }
-
-        let computed_root_c =
-            partial_merkle_tree::<Goldilocks, C, W>(&s0_last_levels[0], num_nodes_level, verifier_info.arity);
-
-        for i in 0..4 {
-            if computed_root_c[i] != root_c[i] {
-                tracing::error!("Stage fixed Merkle tree root recomputation failed");
+        for (s, root) in roots.iter().enumerate() {
+            if last_level_root::<C, W>(&s0_last_levels[s + 1], n_leaves, verifier_info).as_ref() != Some(root) {
+                tracing::error!("Stage {} Merkle tree root recomputation failed", s + 1);
                 return false;
             }
         }
-
-        for s in 0..(verifier_info.n_fri_steps - 1) {
-            let mut num_nodes_level = 1 << verifier_info.fri_steps[s as usize + 1];
-            while num_nodes_level > verifier_info.arity.pow(verifier_info.last_level_verification as u32) {
-                num_nodes_level = num_nodes_level.div_ceil(verifier_info.arity);
-            }
-            let computed_root = partial_merkle_tree::<Goldilocks, C, W>(
-                &last_levels_fri[s as usize],
-                num_nodes_level,
-                verifier_info.arity,
-            );
-            for i in 0..4 {
-                if computed_root[i] != roots_fri[s as usize][i] {
-                    tracing::error!("Stage {} FRI Merkle tree root recomputation failed", s + 1);
-                    return false;
-                }
+        for (s, root) in roots_fri.iter().enumerate() {
+            let n_leaves = 1 << verifier_info.fri_steps[s + 1];
+            if last_level_root::<C, W>(&last_levels_fri[s], n_leaves, verifier_info).as_ref() != Some(root) {
+                tracing::error!("Stage {} FRI Merkle tree root recomputation failed", s + 1);
+                return false;
             }
         }
     }
@@ -560,12 +559,20 @@ pub fn stark_verify<C: Poseidon2Constants<W>, const W: usize>(
     tracing::debug!("Quotient polynomial verification passed");
 
     tracing::debug!("Verifying final polynomial");
-    let final_pol_size = 1 << verifier_info.fri_steps[(verifier_info.n_fri_steps - 1) as usize];
-    intt_tiny(&mut final_pol_vals, verifier_info.fri_steps[(verifier_info.n_fri_steps - 1) as usize] as usize, 3);
-    let init = 1
-        << (verifier_info.fri_steps[(verifier_info.n_fri_steps - 1) as usize]
-            .wrapping_sub(verifier_info.n_bits_ext - verifier_info.n_bits));
-    for i in init..final_pol_size as usize {
+    let terminal_bits = verifier_info.fri_steps[(verifier_info.n_fri_steps - 1) as usize];
+    intt_tiny(&mut final_pol_vals, terminal_bits as usize, 3);
+    // The terminal layer holds 2^terminal_bits evaluations at the committed rate, so the polynomial
+    // must have degree below 2^(terminal_bits - blowup bits). This check is what bounds the degree
+    // FRI proves, so a terminal layer smaller than the blowup is refused rather than skipped.
+    let Some(degree_bits) = terminal_bits.checked_sub(verifier_info.n_bits_ext - verifier_info.n_bits) else {
+        tracing::error!(
+            "FRI terminal layer 2^{} is smaller than the blowup 2^{}",
+            terminal_bits,
+            verifier_info.n_bits_ext - verifier_info.n_bits
+        );
+        return false;
+    };
+    for i in (1usize << degree_bits)..final_pol.len() {
         for j in 0..3usize {
             if final_pol_vals[i * 3 + j] != Goldilocks::ZERO {
                 tracing::error!("Final polynomial has non-zero value at index {}: {:?}", i, final_pol_vals[i * 3 + j]);
@@ -577,4 +584,103 @@ pub fn stark_verify<C: Poseidon2Constants<W>, const W: usize>(
     tracing::debug!("Proof verification succeeded");
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fields::Poseidon8;
+
+    fn zero_q_verify(
+        _challenges: &[CubicExtensionField<Goldilocks>],
+        _evals: &[CubicExtensionField<Goldilocks>],
+        _publics: &[Goldilocks],
+        _zi: &[CubicExtensionField<Goldilocks>],
+    ) -> CubicExtensionField<Goldilocks> {
+        CubicExtensionField { value: [Goldilocks::ZERO; 3] }
+    }
+
+    fn zero_query_verify(
+        _challenges: &[CubicExtensionField<Goldilocks>],
+        _evals: &[CubicExtensionField<Goldilocks>],
+        _vals: &[Vec<Goldilocks>],
+        _xdivxsub: &[CubicExtensionField<Goldilocks>],
+    ) -> CubicExtensionField<Goldilocks> {
+        CubicExtensionField { value: [Goldilocks::ZERO; 3] }
+    }
+
+    /// A shape small enough to lay out its proof by hand. The proof is 94 words: the public count
+    /// and 1 public, 3 stage roots (12), 1 evaluation (3), 4 query trees of 1 value, a 1-level
+    /// path (4) and a last level (8) each (52), 1 FRI root (4), 1 FRI tree of a 6-value group and a
+    /// last level (14), the final polynomial (6) and the nonce.
+    fn tiny_info() -> VerifierInfo {
+        VerifierInfo {
+            n_stages: 2,
+            n_publics: 1,
+            n_constants: 1,
+            n_evals: 1,
+            n_bits: 1,
+            n_bits_ext: 2,
+            arity: 2,
+            n_fri_queries: 1,
+            n_fri_steps: 2,
+            n_challenges: 6,
+            n_challenges_total: 9,
+            fri_steps: vec![2, 1],
+            hash_commits: false,
+            num_vals: vec![1, 1, 1],
+            opening_points: vec![0],
+            boundaries: vec![Boundary { name: "everyRow".to_string(), offset_min: None, offset_max: None }],
+            q_deg: 1,
+            q_index: 0,
+            last_level_verification: 1,
+            pow_bits: 1,
+        }
+    }
+
+    const TINY_PROOF_WORDS: usize = 94;
+
+    fn verify(proof: &[u8], vk: &[u8], info: &VerifierInfo) -> bool {
+        stark_verify::<Poseidon8, 8>(proof, vk, info, zero_q_verify, zero_query_verify)
+    }
+
+    fn to_bytes(words: &[u64]) -> Vec<u8> {
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn malformed_proofs_are_rejected_without_panicking() {
+        let info = tiny_info();
+        let mut words = vec![0u64; TINY_PROOF_WORDS];
+        words[0] = info.n_publics;
+        let vk = to_bytes(&[0; HASH_SIZE]);
+
+        // Only a proof of exactly the shape's length, with the AIR's public count, parses.
+        assert!(StarkProof::parse(&words, &info).is_some());
+        assert!(StarkProof::parse(&words[..TINY_PROOF_WORDS - 1], &info).is_none());
+        assert!(StarkProof::parse(&[words.as_slice(), &[0]].concat(), &info).is_none());
+        let mut wrong_count = words.clone();
+        wrong_count[0] += 1;
+        assert!(StarkProof::parse(&wrong_count, &info).is_none());
+
+        // Words decode at any alignment, but only whole and canonical ones.
+        let bytes = to_bytes(&words);
+        let mut shifted = vec![0u8; bytes.len() + 1];
+        shifted[1..].copy_from_slice(&bytes);
+        assert_eq!(field_words(&shifted[1..]).as_deref(), Some(words.as_slice()));
+        assert!(field_words(&shifted[1..bytes.len()]).is_none());
+        let mut non_canonical = words.clone();
+        non_canonical[TINY_PROOF_WORDS - 1] = Goldilocks::ORDER_U64;
+        assert!(field_words(&to_bytes(&non_canonical)).is_none());
+
+        // Neither any prefix nor an extension of a proof, at any alignment, nor a malformed key
+        // makes verification panic.
+        for len in 0..=bytes.len() {
+            assert!(!verify(&bytes[..len], &vk, &info));
+            assert!(!verify(&shifted[1..len + 1], &vk, &info));
+        }
+        assert!(!verify(&[bytes.as_slice(), &[0; 8]].concat(), &vk, &info));
+        assert!(!verify(&bytes, &vk[..HASH_SIZE * 8 - 1], &info));
+        assert!(!verify(&bytes, &[vk.as_slice(), &[0; 8]].concat(), &info));
+    }
 }

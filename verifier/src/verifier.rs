@@ -2,24 +2,15 @@ use proofman_verifier::{verify_vadcop_final_bytes, verify_vadcop_final_compresse
 
 pub fn verify_vadcop_final_proof(zisk_proof: &[u8], vadcop_final_vk: &[u8]) -> bool {
     // Format: [compressed(8)][pubs_len(8)][pubs][proof_bytes]
+    let Some((compressed, vadcop_proof)) = zisk_proof.split_first_chunk::<8>() else {
+        return false;
+    };
 
-    // Read compressed flag (8 bytes, u64 little-endian)
-    let compressed = u64::from_le_bytes([
-        zisk_proof[0],
-        zisk_proof[1],
-        zisk_proof[2],
-        zisk_proof[3],
-        zisk_proof[4],
-        zisk_proof[5],
-        zisk_proof[6],
-        zisk_proof[7],
-    ]) == 1;
-
-    let vadcop_proof = &zisk_proof[8..];
-
-    if compressed {
-        verify_vadcop_final_compressed_bytes(vadcop_proof, vadcop_final_vk)
-    } else {
-        verify_vadcop_final_bytes(vadcop_proof, vadcop_final_vk)
+    // The compressed flag is a little-endian u64 that must be exactly 0 or 1, so that a proof has a
+    // single encoding.
+    match u64::from_le_bytes(*compressed) {
+        0 => verify_vadcop_final_bytes(vadcop_proof, vadcop_final_vk),
+        1 => verify_vadcop_final_compressed_bytes(vadcop_proof, vadcop_final_vk),
+        _ => false,
     }
 }
