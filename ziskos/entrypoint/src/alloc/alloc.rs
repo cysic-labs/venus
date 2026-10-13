@@ -34,13 +34,15 @@ pub unsafe fn inline_bump_alloc_aligned(bytes: usize, align: usize) -> *mut u8 {
     // SAFETY: Single threaded, so nothing else can touch this while we're working.
     let mut heap_pos = unsafe { HEAP_POS };
 
+    // The additions are checked: a wrapped heap_pos would pass the limit check below and
+    // hand out memory that is already in use
     let offset = heap_pos & (align - 1);
     if offset != 0 {
-        heap_pos += align - offset;
+        heap_pos = heap_pos.checked_add(align - offset).expect("Heap alignment overflow");
     }
 
     let ptr = heap_pos as *mut u8;
-    heap_pos += bytes;
+    heap_pos = heap_pos.checked_add(bytes).expect("Heap allocation size overflow");
 
     // Check to make sure heap doesn't collide with SYSTEM memory.
     if HEAP_TOP < heap_pos {
