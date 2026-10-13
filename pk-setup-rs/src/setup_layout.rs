@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use num_bigint::BigUint;
 use pilout_crate::pilout::Air;
 use pilout_crate::pilout_proxy::PilOutProxy;
@@ -13,7 +13,6 @@ use proofman_starks_lib_c::{
 use serde::Serialize;
 use tracing::info;
 
-use crate::fixed_gen;
 use crate::pil_info::binfile::{write_expressions_bin_file, write_verifier_expressions_bin_file};
 use crate::pil_info::codegen::generate_pil_code;
 use crate::pil_info::stark::{build_air_stark_draft, AirInput};
@@ -69,7 +68,7 @@ pub fn write_basic_air_layout(
 #[allow(clippy::too_many_arguments)]
 fn write_basic_air(
     proving_key_dir: &Path,
-    _fixed_dir: &Path,
+    fixed_dir: &Path,
     pilout_name: &str,
     airgroup_id: usize,
     airgroup_name: &str,
@@ -94,11 +93,9 @@ fn write_basic_air(
     fs::create_dir_all(&files_dir)
         .with_context(|| format!("failed to create {}", files_dir.display()))?;
 
-    let const_dst = files_dir.join(format!("{air_name}.const"));
-    fixed_gen::write_air_const(&const_dst, airgroup_id, air_id, air, all_symbols, all_hints)
-        .with_context(|| format!("failed to generate {}", const_dst.display()))?;
-
     let num_rows = air.num_rows.with_context(|| format!("air {air_name} is missing numRows"))?;
+    copy_air_fixed(fixed_dir, air_name, num_rows, air.fixed_cols.len(), &files_dir)?;
+
     let n_bits = checked_log2(num_rows)
         .with_context(|| format!("air {air_name} numRows={num_rows} is not a power of two"))?;
     let air_settings = settings.for_air(air_name);
@@ -171,6 +168,40 @@ fn write_basic_air(
     write_const_root_files(&files_dir.join(air_name), &draft.stark_info.stark_struct)?;
     info!("prepared basic AIR layout for {airgroup_name}/{air_name}");
 
+    Ok(())
+}
+
+/// The fixed columns of a basic AIR are those the PIL compiler evaluated (`make compile-pil`
+/// writes them to `<fixed_dir>/<air>.fixed` in the row-major layout of `<air>.const`), so the
+/// tables in the PIL sources are their only definition.
+fn copy_air_fixed(
+    fixed_dir: &Path,
+    air_name: &str,
+    num_rows: u32,
+    num_fixed_cols: usize,
+    files_dir: &Path,
+) -> Result<()> {
+    let fixed_src = fixed_dir.join(format!("{air_name}.fixed"));
+    let size = fs::metadata(&fixed_src)
+        .with_context(|| {
+            format!(
+                "fixed columns of {air_name} not found at {}; run `make compile-pil`",
+                fixed_src.display()
+            )
+        })?
+        .len();
+    let expected = num_rows as u64 * num_fixed_cols as u64 * 8;
+    if size != expected {
+        bail!(
+            "{} has {size} bytes but {air_name} has {num_rows} rows and {num_fixed_cols} fixed \
+             columns ({expected} bytes); recompile the PIL with `make compile-pil`",
+            fixed_src.display()
+        );
+    }
+    let const_dst = files_dir.join(format!("{air_name}.const"));
+    fs::copy(&fixed_src, &const_dst).with_context(|| {
+        format!("failed to copy {} to {}", fixed_src.display(), const_dst.display())
+    })?;
     Ok(())
 }
 

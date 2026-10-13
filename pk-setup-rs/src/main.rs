@@ -3,8 +3,6 @@ extern crate mpi as _;
 
 mod circom_assets;
 mod circom_compile;
-mod fixed_gen;
-mod frops;
 mod pil_info;
 mod pilout_info;
 mod recursive_circom;
@@ -42,7 +40,7 @@ struct Args {
     #[arg(short = 's', long, default_value = "state-machines/starkstructs.json")]
     starkstructs: PathBuf,
 
-    /// Fixed columns directory used by the legacy setup.
+    /// Fixed columns evaluated by the PIL compiler (`make compile-pil`).
     #[arg(short = 'u', long, default_value = "tmp/fixed")]
     fixed_dir: PathBuf,
 
