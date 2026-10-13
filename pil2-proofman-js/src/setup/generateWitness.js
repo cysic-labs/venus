@@ -76,8 +76,6 @@ async function generateWitnessFinalSnarkLibrary(buildDir, filesDir, template, na
                 const proc = spawn('make', args, { stdio: ['ignore', out, err] });
                 proc.on('close', code => code === 0 ? resolve() : reject(new Error(`make failed with code ${code}`)));
             });
-        } catch (err) {
-            console.error("Error during the witness library generation process:", err);
         } finally {
             try {
                 pendingTasks.splice(pendingTasks.indexOf(randomString), 1);
@@ -87,9 +85,10 @@ async function generateWitnessFinalSnarkLibrary(buildDir, filesDir, template, na
             }
         }
         console.log('Final Snark Witness library generation completed.');
-
     } catch (err) {
+        // A missing or stale final witness library must fail the setup, not only be logged.
         console.error('Error running witness library generation:', err);
+        throw err;
     }
 }
 
@@ -114,16 +113,12 @@ module.exports.witnessLibraryGenerationAwait = async function witnessLibraryGene
 
 
 module.exports.runFinalSnarkWitnessLibraryGenerationAwait = async function runFinalSnarkWitnessLibraryGenerationAwait(buildDir, filesDir, template, nameFilename) {
-    try {
-        await generateWitnessFinalSnarkLibrary(buildDir, filesDir, template, nameFilename);
-        console.log('Witness library generation completed.');
+    await generateWitnessFinalSnarkLibrary(buildDir, filesDir, template, nameFilename);
+    console.log('Witness library generation completed.');
 
-        while (pendingTasks.length > 0) {
-            console.log(`Waiting for ${pendingTasks.length} witness libraries to be calculated...`);
-            await new Promise(resolve => setTimeout(resolve, 10000)); // Adjust the delay as needed
-        }
-    } catch (err) {
-        console.error('Error running witness library generation:', err);
+    while (pendingTasks.length > 0) {
+        console.log(`Waiting for ${pendingTasks.length} witness libraries to be calculated...`);
+        await new Promise(resolve => setTimeout(resolve, 10000)); // Adjust the delay as needed
     }
 }
 
