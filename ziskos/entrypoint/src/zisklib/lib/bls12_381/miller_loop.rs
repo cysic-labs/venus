@@ -1,7 +1,7 @@
 //! Miller loop for BLS12-381
 
 use crate::zisklib::{
-    eq, fcall_bls12_381_twist_add_line_coeffs, fcall_bls12_381_twist_dbl_line_coeffs,
+    eq, fcall_bls12_381_twist_add_line_coeffs, fcall_bls12_381_twist_dbl_line_coeffs, is_zero,
 };
 
 use super::{
@@ -344,6 +344,11 @@ fn is_line_twist_bls12_381(
     mu: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> bool {
+    // The chord (𝜆,𝜇) is uniquely determined only when the two points have distinct x
+    if eq(&q1[0..12], &q2[0..12]) {
+        return false;
+    }
+
     line_check_twist_bls12_381(
         q1,
         lambda,
@@ -367,6 +372,14 @@ fn is_tangent_twist_bls12_381(
     mu: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> bool {
+    let x: &[u64; 12] = q[0..12].try_into().unwrap();
+    let y: &[u64; 12] = q[12..24].try_into().unwrap();
+
+    // The tangent (𝜆,𝜇) is uniquely determined only when y != 0
+    if is_zero(y) {
+        return false;
+    }
+
     // Check the line passes through q
     let curve_check = line_check_twist_bls12_381(
         q,
@@ -377,8 +390,6 @@ fn is_tangent_twist_bls12_381(
     );
 
     // Check the line is tangent at q by checking that 2𝜆y = 3x²
-    let x: &[u64; 12] = q[0..12].try_into().unwrap();
-    let y: &[u64; 12] = q[12..24].try_into().unwrap();
     let mut lhs = mul_fp2_bls12_381(
         lambda,
         y,
