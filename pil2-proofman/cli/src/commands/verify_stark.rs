@@ -48,6 +48,12 @@ impl VerifyStark {
             Err("Stark proof was not verified".into())
         } else {
             tracing::info!("    {}", "\u{2713} Stark proof was verified".bright_green().bold());
+            let publics = proof
+                .get_public_bytes()
+                .chunks_exact(8)
+                .map(|public| u64::from_le_bytes(public.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            tracing::info!("    publics: {publics:?}");
             Ok(())
         }
     }

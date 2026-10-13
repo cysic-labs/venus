@@ -6,8 +6,8 @@ use fields::Goldilocks;
 use std::path::PathBuf;
 
 use crate::ux::{print_banner, print_banner_command, print_banner_field};
-use proofman::SnarkWrapper;
-use zisk_sdk::ZiskProofWithPublicValues;
+use proofman::{SnarkProtocol, SnarkWrapper};
+use zisk_sdk::{ZiskProof, ZiskProofWithPublicValues};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -58,18 +58,27 @@ impl ZiskProveSnark {
 
         let snark_proof =
             snark_wrapper.generate_final_snark_proof(&proof, Some(self.output_dir.clone()))?;
-        snark_proof.save(self.output_dir.join("final_snark_proof.bin")).map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to save final SNARK proof to output dir {}: {}",
-                self.output_dir.join("final_snark_proof.bin").display(),
-                e
-            )
+
+        // Saved like `prove --snark` saves it, with the statement it proves, for `verify-snark`.
+        let snark_zisk_proof = match SnarkProtocol::from_protocol_id(snark_proof.protocol_id)? {
+            SnarkProtocol::Plonk => ZiskProof::Plonk(snark_proof.proof_bytes),
+            SnarkProtocol::Fflonk => ZiskProof::Fflonk(snark_proof.proof_bytes),
+        };
+        let proof_with_publics = ZiskProofWithPublicValues::new(
+            snark_zisk_proof,
+            zisk_proof.get_publics().clone(),
+            zisk_proof.get_program_vk().clone(),
+        );
+        let output_path = self.output_dir.join("final_snark_proof.bin");
+        proof_with_publics.save(&output_path).map_err(|e| {
+            anyhow::anyhow!("Failed to save final SNARK proof to {}: {}", output_path.display(), e)
         })?;
         println!(
-            "{} Final SNARK proof generated. Proof: {:?}, Publics: {:?}",
+            "{} Final SNARK proof saved to {}. Program VK: {}, outputs: {}",
             "Info:".bright_blue().bold(),
-            snark_proof.proof_bytes,
-            snark_proof.public_bytes
+            output_path.display(),
+            proof_with_publics.get_program_vk(),
+            proof_with_publics.get_publics()
         );
         Ok(())
     }

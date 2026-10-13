@@ -247,6 +247,42 @@ impl ZiskProgramVK {
     }
 }
 
+/// Shown as its four little-endian u64 words, `[w0, w1, w2, w3]`, the form `rom-setup` logs.
+impl std::fmt::Display for ZiskProgramVK {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let words = self
+            .vk
+            .chunks_exact(8)
+            .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        write!(f, "{words:?}")
+    }
+}
+
+/// Parses the form `Display` shows, with or without the brackets.
+impl std::str::FromStr for ZiskProgramVK {
+    type Err = anyhow::Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let words = text
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|word| {
+                word.trim()
+                    .parse::<u64>()
+                    .with_context(|| format!("invalid program VK word {word:?}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let n_words = ZISK_PROGRAM_VK_BYTES / 8;
+        if words.len() != n_words {
+            anyhow::bail!("a program VK has {n_words} words, got {}", words.len());
+        }
+        Ok(Self { vk: words.iter().flat_map(|word| word.to_le_bytes()).collect() })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProofOpts {
     pub aggregation: bool,
@@ -634,6 +670,13 @@ impl ZiskPublics {
         }
         bytes.extend(&suffix);
         Ok(bytes)
+    }
+}
+
+/// Shown as the hex of the output bytes the program committed.
+impl std::fmt::Display for ZiskPublics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.data.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
     }
 }
 
