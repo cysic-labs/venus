@@ -58,6 +58,11 @@ struct Args {
     #[arg(long)]
     no_recursive: bool,
 
+    /// Instead of the proving key, generate the SNARK wrapper's recursivef STARK into
+    /// <build-dir>/provingKeySnark from the vadcop_final setup of the existing proving key.
+    #[arg(long)]
+    snark: bool,
+
     /// Verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -91,6 +96,14 @@ fn run() -> Result<()> {
     let pilout_path = resolve_path(&root, &args.airout);
     let starkstructs_path = resolve_path(&root, &args.starkstructs);
     let proving_key_dir = build_dir.join("provingKey");
+
+    if args.snark {
+        return recursive_generation::write_recursivef_artifacts(
+            &build_dir,
+            &proving_key_dir,
+            &build_dir.join("provingKeySnark"),
+        );
+    }
 
     prepare_directories(&build_dir, &fixed_dir, &proof_dir, &proving_key_dir)?;
     let pilout_path = resolve_airout(&pilout_path)?;

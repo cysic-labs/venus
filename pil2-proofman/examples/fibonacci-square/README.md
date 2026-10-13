@@ -83,19 +83,14 @@ node ../pil2-proofman-js/src/main_setup.js \
      -b ./examples/fibonacci-square/build -r -u ./examples/fibonacci-square/build/fixed
 ```
 
-Additionally, to run the snark setup:
+Additionally, to run the snark setup, first generate the `recursivef` STARK with the native setup and then the final SNARK over it:
 
 ```bash
+cargo run --manifest-path ../pk-setup-rs/Cargo.toml --release --bin generate-key-rs -- \
+     --root . --build-dir ./examples/fibonacci-square/build --snark
 node ../pil2-proofman-js/src/main_setup_snark.js \
-     -b ./examples/fibonacci-square/build -t ./pil2-components/lib/std/pil \
+     -b ./examples/fibonacci-square/build \
      -n plonk -p examples/fibonacci-square/src/publics_info.json -w <powers_of_tau>
-```
-
-If only wants to generate the recursive final for debugging purposes, run:
-
-```bash
-node ../pil2-proofman-js/src/main_setup_snark.js \
-     -b ./examples/fibonacci-square/build -t ./pil2-components/lib/std/pil -o
 ```
 
 To run the aggregated proof, need to add -r to the previous command

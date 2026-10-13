@@ -25,7 +25,8 @@ use stark_verifier::*;
 use transcript::*;
 pub use wrappers::{
     render_compressor_circom, render_final_circom, render_final_compressed_circom,
-    render_recursive1_circom, render_recursive2_circom, render_stark_verifier_circom,
+    render_recursive1_circom, render_recursive2_circom, render_recursivef_circom,
+    render_stark_verifier_circom,
 };
 
 const MIN_CHUNK_SIZE: usize = 1000;

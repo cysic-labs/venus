@@ -3,11 +3,12 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use num_bigint::BigUint;
 use pilout_crate::pilout::Air;
 use pilout_crate::pilout_proxy::PilOutProxy;
 use proofman_starks_lib_c::{
-    calculate_const_tree_c, get_const_size_c, get_const_tree_size_c, load_const_pols_c,
-    stark_info_free_c, stark_info_new_c,
+    calculate_const_tree_bn128_c, calculate_const_tree_c, get_const_size_c, get_const_tree_size_c,
+    load_const_pols_c, stark_info_free_c, stark_info_new_c,
 };
 use serde::Serialize;
 use tracing::info;
@@ -167,13 +168,15 @@ fn write_basic_air(
     let verifier_bin_path = files_dir.join(format!("{air_name}.verifier.bin"));
     write_verifier_expressions_bin_file(&verifier_bin_path, &draft.stark_info, &verifier_info)
         .with_context(|| format!("failed to write {}", verifier_bin_path.display()))?;
-    write_const_root_files(&files_dir.join(air_name))?;
+    write_const_root_files(&files_dir.join(air_name), &draft.stark_info.stark_struct)?;
     info!("prepared basic AIR layout for {airgroup_name}/{air_name}");
 
     Ok(())
 }
 
-pub(crate) fn write_const_root_files(setup_path: &Path) -> Result<()> {
+/// Writes `<setup>.verkey.json` with the root of the constant polynomial Merkle tree: four
+/// Goldilocks limbs (plus `<setup>.verkey.bin`) for GL trees, a decimal BN254 scalar for BN128 trees.
+pub(crate) fn write_const_root_files(setup_path: &Path, stark_struct: &StarkStruct) -> Result<()> {
     let stark_info_path = format!("{}.starkinfo.json", setup_path.display());
     let const_path = format!("{}.const", setup_path.display());
     let verkey_json_path = format!("{}.verkey.json", setup_path.display());
@@ -199,28 +202,56 @@ pub(crate) fn write_const_root_files(setup_path: &Path) -> Result<()> {
         );
 
         let mut const_tree = vec![0u64; const_tree_size];
-        calculate_const_tree_c(
-            p_stark_info,
-            const_pols.as_mut_ptr() as *mut u8,
-            const_tree.as_mut_ptr() as *mut u8,
-            std::ptr::null_mut(),
-        );
+        match stark_struct.verification_hash_type.as_str() {
+            "BN128" => {
+                calculate_const_tree_bn128_c(
+                    p_stark_info,
+                    const_pols.as_mut_ptr() as *mut u8,
+                    const_tree.as_mut_ptr() as *mut u8,
+                );
+                let root = bn128_montgomery_to_decimal(&const_tree[const_tree_size - 4..]);
+                fs::write(&verkey_json_path, serde_json::to_string(&root)?)
+                    .with_context(|| format!("failed to write {verkey_json_path}"))?;
+            }
+            _ => {
+                calculate_const_tree_c(
+                    p_stark_info,
+                    const_pols.as_mut_ptr() as *mut u8,
+                    const_tree.as_mut_ptr() as *mut u8,
+                    std::ptr::null_mut(),
+                );
+                let root = &const_tree[const_tree_size - 4..const_tree_size];
+                fs::write(&verkey_json_path, serde_json::to_string_pretty(root)?)
+                    .with_context(|| format!("failed to write {verkey_json_path}"))?;
 
-        let root = &const_tree[const_tree_size - 4..const_tree_size];
-        fs::write(&verkey_json_path, serde_json::to_string_pretty(root)?)
-            .with_context(|| format!("failed to write {verkey_json_path}"))?;
-
-        let mut file = fs::File::create(&verkey_bin_path)
-            .with_context(|| format!("failed to create {verkey_bin_path}"))?;
-        for value in root {
-            file.write_all(&value.to_le_bytes())
-                .with_context(|| format!("failed to write {verkey_bin_path}"))?;
+                let mut file = fs::File::create(&verkey_bin_path)
+                    .with_context(|| format!("failed to create {verkey_bin_path}"))?;
+                for value in root {
+                    file.write_all(&value.to_le_bytes())
+                        .with_context(|| format!("failed to write {verkey_bin_path}"))?;
+                }
+            }
         }
         Ok(())
     })();
 
     stark_info_free_c(p_stark_info);
     result
+}
+
+/// BN254 scalar field modulus, the field of the BN128 Poseidon Merkle tree nodes.
+const BN254_SCALAR_MODULUS: &str =
+    "21888242871839275222246405745257275088548364400416034343698204186575808495617";
+
+/// Converts a BN254 scalar stored as four little-endian limbs in Montgomery form (R = 2^256), as
+/// the C++ RawFr keeps tree nodes, to its decimal representation.
+fn bn128_montgomery_to_decimal(limbs: &[u64]) -> String {
+    let modulus: BigUint = BN254_SCALAR_MODULUS.parse().expect("valid BN254 modulus");
+    let montgomery = BigUint::from_slice(
+        &limbs.iter().flat_map(|limb| [*limb as u32, (*limb >> 32) as u32]).collect::<Vec<_>>(),
+    );
+    let r_inverse = (BigUint::from(1u32) << 256u32).modpow(&(&modulus - 2u32), &modulus);
+    ((montgomery * r_inverse) % modulus).to_string()
 }
 
 fn checked_log2(value: u32) -> Option<u64> {

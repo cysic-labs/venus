@@ -413,6 +413,51 @@ pub fn render_final_compressed_circom(
     out
 }
 
+/// Main circuit of the SNARK wrapper's `recursivef` STARK: verifies a vadcop_final proof and
+/// exposes the vadcop_final verification key `rootC` and publics as its own publics, which the
+/// final SNARK hashes. `rootC` is pinned to `vadcop_final_root`, so only proofs of that
+/// vadcop_final setup are accepted whatever key a caller hashes on chain.
+pub fn render_recursivef_circom(
+    stark_info: &CircomStarkInfo,
+    verifier_filename: &str,
+    n_publics: usize,
+    vadcop_final_root: &[u64],
+) -> String {
+    let mut out = String::new();
+    line(&mut out, format_args!("pragma circom 2.1.0;"));
+    line(&mut out, format_args!("pragma custom_templates;"));
+    out.push('\n');
+    line(&mut out, format_args!("include \"{verifier_filename}\";"));
+    out.push('\n');
+    line(&mut out, format_args!("template Main() {{"));
+    line(&mut out, format_args!("    signal input rootC[4];"));
+    out.push('\n');
+    out.push_str(&render_define_stark_inputs(
+        stark_info,
+        "",
+        n_publics,
+        StarkInputOptions { add_publics: true, ..Default::default() },
+    ));
+    out.push('\n');
+    out.push_str(&render_assign_stark_inputs(
+        "sV",
+        stark_info,
+        "",
+        n_publics,
+        StarkInputOptions { add_publics: true, final_verifier: true, ..Default::default() },
+    ));
+    out.push('\n');
+    line(&mut out, format_args!("    sV.rootC <== rootC;"));
+    line(&mut out, format_args!("    var vadcopFinalRoot[4] = [{}];", join_u64(vadcop_final_root)));
+    line(&mut out, format_args!("    for (var i = 0; i < 4; i++) {{"));
+    line(&mut out, format_args!("        rootC[i] === vadcopFinalRoot[i];"));
+    line(&mut out, format_args!("    }}"));
+    line(&mut out, format_args!("}}"));
+    out.push('\n');
+    line(&mut out, format_args!("component main {{public [ rootC, publics ]}}= Main();"));
+    out
+}
+
 #[allow(dead_code)]
 pub fn render_final_circom(
     stark_infos: &[CircomStarkInfo],

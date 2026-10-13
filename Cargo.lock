@@ -3215,6 +3215,7 @@ dependencies = [
  "constraint_writers",
  "fields",
  "mpi",
+ "num-bigint",
  "parser",
  "pilout",
  "program_structure",

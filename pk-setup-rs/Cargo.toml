@@ -19,6 +19,7 @@ constraint_generation = { path = "vendor/circom/constraint_generation" }
 constraint_writers = { path = "vendor/circom/constraint_writers" }
 fields = { workspace = true }
 mpi = { workspace = true }
+num-bigint = { workspace = true }
 parser = { path = "vendor/circom/parser" }
 pilout-crate = { package = "pilout", path = "../pil2-proofman/pilout" }
 program_structure = { path = "vendor/circom/program_structure" }

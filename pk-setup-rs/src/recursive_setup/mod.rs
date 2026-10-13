@@ -233,7 +233,7 @@ fn write_air_setup_files(
         &verifier_info,
     )
     .with_context(|| format!("failed to write {}.verifier.bin", setup_path.display()))?;
-    write_const_root_files(setup_path)?;
+    write_const_root_files(setup_path, &config.stark_struct)?;
 
     let manifest = RecursiveSetupManifest {
         airgroup_id: config.airgroup_id,

@@ -50,7 +50,7 @@ CARGO_BUILD_RUSTFLAGS ?= -C target-cpu=native
 PROVE_ENV ?= CUDA_MODULE_LOADING=EAGER CUDA_DEVICE_MAX_CONNECTIONS=32 RAYON_NUM_THREADS=16 VENUS_ROWMAJOR_REG=1 VENUS_ROWMAJOR_TPB=256 VENUS_WEIGHTED_PROOF_ORDER=1 VENUS_MAIN_FRI_STATIC=1 VENUS_COMPRESSOR_FIRST_ORDER=1 VENUS_BASIC_PRELOAD_AIR_IDS=12,22 VENUS_EXPR_MAX_BLOCKS=288 VENUS_FRI_MAX_BLOCKS=512 VENUS_WEIGHT_Q_OPS=14 VENUS_REGISTER_WITNESS_H2D=1 VENUS_DIRECT_REGISTERED_H2D=1 VENUS_PINNED_CHUNK_MB=128 VENUS_REUSE_CUSTOM_FIXED=1 VENUS_RECURSIVE_WITNESS_WORKERS=20 VENUS_CONTRIBUTION_WORKERS=12 VENUS_SKIP_NATIVE_RECURSIVE_VERIFY=1 VENUS_RECURSIVE_TRACE_PINNED_POOL=1 VENUS_RECURSIVE_TRACE_PINNED_POOL_LIMIT=32 VENUS_COMPRESSOR_PRELOAD_AIR_IDS=28,26 VENUS_CONST_TREE_HOST_CACHE_MB=12288 VENUS_CONST_TREE_HOST_CACHE_FILTER=recursive1/,/air/ VENUS_CONST_TREE_HOST_CACHE_MIN_USES=2 VENUS_CONST_TREE_HOST_CACHE_ASYNC_H2D=1 VENUS_CONST_TREE_HOST_CACHE_SETUP_PREWARM=1 VENUS_CONST_TREE_HOST_CACHE_SETUP_PREWARM_LIST=tools/consttree-prewarm-zisk-large.txt VENUS_CONST_TREE_HOST_CACHE_SETUP_PREWARM_MODE=sync
 
 .PHONY: all setup build install-toolchain check-key compile-pil generate-rust-verifiers check-rust-verifiers generate-key generate-key-rs \
-        build-guest build-guest-native generate-hints rom-setup compile-key prove verify clean purge help
+        generate-snark-key build-guest build-guest-native generate-hints rom-setup compile-key prove verify clean purge help
 
 all: setup prove verify
 
@@ -126,6 +126,18 @@ check-rust-verifiers: check-key
 		fi; \
 	done
 
+# The SNARK wrapper for on-chain verification, in $(BUILD_DIR)/provingKeySnark: the recursivef STARK
+# from the native setup and the final PLONK or fflonk SNARK over it from pil2-proofman-js. PTAU must
+# be a powers-of-tau file large enough for the final circuit.
+SNARK ?= plonk
+generate-snark-key: check-key
+	@if [ -z "$(PTAU)" ]; then echo "set PTAU=<powers of tau file>"; exit 1; fi
+	cargo run --release -p pk-setup-rs --bin generate-key-rs -- \
+		--root "$(ROOT)" --build-dir "$(BUILD_DIR)" --snark
+	npm install --prefix "$(ROOT)/pil2-proofman-js"
+	$(NODE) "$(ROOT)/pil2-proofman-js/src/main_setup_snark.js" -b "$(BUILD_DIR)" \
+		-p "$(ROOT)/state-machines/publics.json" -w "$(PTAU)" -n "$(SNARK)"
+
 build-guest: install-toolchain
 	cd "$(GUEST_DIR)" && "$(CARGO_ZISK_BIN)" build --release
 
@@ -174,6 +186,7 @@ help:
 	@echo "  make generate-key-rs"
 	@echo "  make compile-pil"
 	@echo "  make generate-rust-verifiers"
+	@echo "  make generate-snark-key PTAU=/path/to/powersOfTau.ptau [SNARK=plonk|fflonk]"
 	@echo "  make prove"
 	@echo "  make verify"
 	@echo ""
