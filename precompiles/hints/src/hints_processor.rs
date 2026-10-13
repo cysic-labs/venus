@@ -21,6 +21,10 @@ use zisk_distributed_common::{JobPhase, StreamMessage};
 
 use crate::hint_handlers::HintHandlers;
 
+/// Most hints dispatched and not yet drained to the sink. `process_hints` blocks at this many, so a
+/// hint stream faster than the sink cannot grow the reorder buffer and the pool queue unboundedly.
+const MAX_PENDING_HINTS: usize = 1024;
+
 /// Ordered result buffer with drain state.
 ///
 /// This structure maintains a VecDeque that holds processed results in order,
@@ -404,6 +408,15 @@ impl<S: StreamSink> HintsProcessor<S> {
             // Atomically reserve slot - use Relaxed for seq since mutex provides ordering
             let seq_id = {
                 let mut queue = self.state.queue.lock().unwrap();
+
+                // Backpressure: wait until the drainer frees a slot
+                while queue.buffer.len() >= MAX_PENDING_HINTS {
+                    if self.state.error_flag.load(Ordering::Acquire) {
+                        return Err(anyhow::anyhow!("Processing stopped due to previous error"));
+                    }
+                    queue = self.state.drain_signal.wait(queue).unwrap();
+                }
+
                 let seq = self.state.next_seq.fetch_add(1, Ordering::Relaxed);
 
                 // Handle pass-through hints immediately
@@ -585,6 +598,8 @@ impl<S: StreamSink> HintsProcessor<S> {
                         // Submit to sink
                         if let Err(e) = hints_sink.submit(&data_to_submit) {
                             eprintln!("Error submitting to sink: {}", e);
+                            // Flag the error under the lock, so that no waiter misses the wakeup
+                            let _queue = state.queue.lock().unwrap();
                             state.error_flag.store(true, Ordering::Release);
                             state.drain_signal.notify_all();
                             return;
@@ -1043,6 +1058,74 @@ mod tests {
         // Wait should detect the error from drainer thread
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(p.state.error_flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_stalled_sink_blocks_producer_at_pending_limit() {
+        use std::time::{Duration, Instant};
+
+        // Sink that blocks every submission until it is opened
+        struct GatedSink {
+            open: Mutex<bool>,
+            opened: Condvar,
+            received: AtomicUsize,
+        }
+
+        impl StreamSink for GatedSink {
+            fn submit(&self, _processed: &[u64]) -> Result<()> {
+                let mut open = self.open.lock().unwrap();
+                while !*open {
+                    open = self.opened.wait(open).unwrap();
+                }
+                self.received.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        let sink = Arc::new(GatedSink {
+            open: Mutex::new(false),
+            opened: Condvar::new(),
+            received: AtomicUsize::new(0),
+        });
+        let p = Arc::new(
+            HintsProcessor::builder(Arc::clone(&sink), None::<Arc<NullHints>>)
+                .num_threads(2)
+                .build()
+                .unwrap(),
+        );
+
+        let num_hints = 2 * MAX_PENDING_HINTS;
+        let mut data = Vec::with_capacity(2 * num_hints);
+        for i in 0..num_hints {
+            data.push(make_header(TEST_PASSTHROUGH_HINT, 8));
+            data.push(i as u64);
+        }
+        let producer = {
+            let p = Arc::clone(&p);
+            std::thread::spawn(move || p.process_hints(&data, false))
+        };
+
+        // With the sink stalled, the producer fills the buffer up to the limit and then waits
+        let start = Instant::now();
+        while p.state.queue.lock().unwrap().buffer.len() < MAX_PENDING_HINTS
+            && start.elapsed() < Duration::from_secs(10)
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        let pending = p.state.queue.lock().unwrap().buffer.len();
+        let producer_blocked = !producer.is_finished();
+
+        // Open the sink before asserting, so that a failure cannot leave the drainer blocked
+        *sink.open.lock().unwrap() = true;
+        sink.opened.notify_all();
+        assert_eq!(pending, MAX_PENDING_HINTS);
+        assert!(producer_blocked);
+
+        // Once the sink accepts data, every hint is drained
+        producer.join().unwrap().unwrap();
+        p.wait_for_completion().unwrap();
+        assert_eq!(sink.received.load(Ordering::Relaxed), num_hints);
     }
 
     // Builder tests

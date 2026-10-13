@@ -1,7 +1,7 @@
 use anyhow::Result;
 use cargo_zisk::commands::get_proving_key;
 use proofman::{AggProofs, AggProofsRegister, ContributionsInfo};
-use rom_setup::{get_elf_data_hash, DEFAULT_CACHE_PATH};
+use rom_setup::{assembly_file_paths, get_elf_data_hash, DEFAULT_CACHE_PATH};
 use std::fs;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -164,15 +164,10 @@ impl ProverConfig {
 
             let hash = get_elf_data_hash(&elf)
                 .map_err(|e| anyhow::anyhow!("Error computing ELF hash: {}", e))?;
-            let stem = if prover_service_config.hints {
-                format!("{stem}-hints")
-            } else {
-                stem.to_string()
-            };
-            let new_filename = format!("{stem}-{hash}-mt.bin");
-            let asm_rom_filename = format!("{stem}-{hash}-rh.bin");
-            asm_rom = Some(default_cache_path.join(asm_rom_filename));
-            prover_service_config.asm = Some(default_cache_path.join(new_filename));
+            let [asm_mt_path, asm_rh_path, _] =
+                assembly_file_paths(&default_cache_path, stem, &hash, prover_service_config.hints);
+            asm_rom = Some(asm_rh_path);
+            prover_service_config.asm = Some(asm_mt_path);
         }
         if let Some(asm_path) = &prover_service_config.asm {
             if !asm_path.exists() {

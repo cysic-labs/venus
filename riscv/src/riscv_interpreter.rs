@@ -38,37 +38,14 @@ pub fn riscv_interpreter(rom_address: u64, code: &[u16]) -> Vec<RiscvInstruction
         let inst = code[code_index];
         code_index += 1;
 
-        // Manage instructions that are zero
-        // As per spec, they can only be 32 bits nop instructions
-        // In case of 16 zero bits, they are used by some compilers (e.g. Go Lang compiler) to halt
-        // the system with an error
+        // A 16-bit instruction with all bits zero is permanently reserved as an illegal
+        // instruction, so we must HALT. Some compilers (e.g. Go Lang compiler) use it to halt the
+        // system with an error.
         if inst == 0 {
-            // println!("riscv_interpreter() found inst=0 at position s={} (index in u32 array)", s);
-            if code_index == code_len {
-                // This is the last 16 bits in the code buffer, so this must be a 16-bits invalid
-                // instruction, so we must HALT
-                insts.push(RiscvInstruction::c_halt(
-                    0,
-                    rom_address + (instruction_code_index * 2) as u64,
-                ));
-                break;
-            }
-            let inst = code[code_index];
-            if inst == 0 {
-                // Both 16 bits instructions are zero, so this is a 32-bits nop
-                code_index += 1;
-                insts.push(RiscvInstruction::nop(
-                    0,
-                    rom_address + (instruction_code_index * 2) as u64,
-                ));
-            } else {
-                // The first 16 bits are zero, but the second 16 bits are not zero, so this is a
-                // 16-bits invalid instruction, so we must HALT
-                insts.push(RiscvInstruction::c_halt(
-                    0,
-                    rom_address + (instruction_code_index * 2) as u64,
-                ));
-            }
+            insts.push(RiscvInstruction::c_halt(
+                0,
+                rom_address + (instruction_code_index * 2) as u64,
+            ));
             continue;
         }
 
@@ -232,7 +209,7 @@ fn riscv_get_instruction_32(inst: u32, root_address: u64, code_index: usize) -> 
         i.rs2 = (inst & 0x1F00000) >> 20;
         i.funct5 = (inst & 0xF8000000) >> 27;
         i.aq = (inst & 0x4000000) >> 26;
-        i.rl = (inst & 0x2000000) >> 24;
+        i.rl = (inst & 0x2000000) >> 25;
     } else if i.t == *"C" {
         i.funct3 = (inst & 0x7000) >> 12;
         if i.funct3 == 0 {
@@ -258,14 +235,12 @@ fn riscv_get_instruction_32(inst: u32, root_address: u64, code_index: usize) -> 
     } else if i.t == *"F" {
         i.funct3 = (inst & 0x7000) >> 12;
         if i.funct3 == 0 {
-            if (inst & 0xF00F8F80) != 0 {
-                //panic!("Invalid F funct3=0 inst=0x{inst:x} at index={code_index} addr=0x{rom_address:x}");
-                i.inst = "reserved".to_string();
-            } else {
-                i.pred = (inst & 0x0F000000) >> 24;
-                i.succ = (inst & 0x00F00000) >> 20;
-                i.inst = "fence".to_string();
-            }
+            // Per the unprivileged spec, base implementations shall ignore the FENCE rs1 and rd
+            // fields and treat reserved fm/pred/succ configurations as a regular FENCE (fm=0000),
+            // e.g. FENCE.TSO
+            i.pred = (inst & 0x0F000000) >> 24;
+            i.succ = (inst & 0x00F00000) >> 20;
+            i.inst = "fence".to_string();
         } else if i.funct3 == 1 {
             if (inst & 0xFFFF8F80) != 0 {
                 //panic!("Invalid F funct3=1 inst=0x{inst:x} at index={code_index} addr=0x{rom_address:x}");
@@ -375,18 +350,19 @@ fn riscv_get_instruction_16(inst: u16, root_address: u64, code_index: usize) -> 
                 // );
                 i.inst = "c.reserved".to_string();
             }
-        } else if inst_name == "c.ldsp" {
+        } else if inst_name == "c.ldsp" || inst_name == "c.fldsp" {
             let imm5 = ((inst >> 12) & 0x1) as u32;
             let imm4_3 = ((inst >> 5) & 0x3) as u32;
             let imm8_6 = ((inst >> 2) & 0x7) as u32;
             i.imm = ((imm8_6 << 6) | (imm5 << 5) | (imm4_3 << 3)) as i32;
-            if i.rd == 0 {
+            // c.ldsp is reserved for x0, while c.fldsp can load f0
+            if i.rd == 0 && inst_name == "c.ldsp" {
                 // panic!(
                 //     "Invalid use of rd=0 in c.ldsp at index={code_index} addr=0x{rom_address:x}"
                 // );
                 i.inst = "c.reserved".to_string();
             }
-            i.rs1 = 2; // x2 is always the base pointer for LDSP instructions
+            i.rs1 = 2; // x2 is always the base pointer for LDSP/FLDSP instructions
         } else if inst_name == "c.lwsp" {
             let imm5 = ((inst >> 12) & 0x1) as u32;
             let imm4_2 = ((inst >> 4) & 0x7) as u32;

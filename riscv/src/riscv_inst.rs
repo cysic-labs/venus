@@ -64,21 +64,6 @@ pub struct RiscvInstruction {
 }
 
 impl RiscvInstruction {
-    /// Creates a NOP instruction (ADDI x0, x0, 0)
-    pub fn nop(rvinst: u32, rom_address: u64) -> Self {
-        Self {
-            rvinst,
-            rom_address,
-            t: "I".to_string(),
-            inst: "addi".to_string(),
-            rd: 0,
-            rs1: 0,
-            rs2: 0,
-            imm: 0,
-            ..Default::default()
-        }
-    }
-
     /// Creates a HALT instruction
     pub fn c_halt(rvinst: u32, rom_address: u64) -> Self {
         Self {

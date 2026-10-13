@@ -12,16 +12,20 @@ use std::sync::{atomic::AtomicU64, Arc, Mutex};
 
 use crate::{RomInstance, RomPlanner};
 use asm_runner::{AsmRHData, AsmRunnerRH};
-use fields::PrimeField64;
+use fields::{Goldilocks, PrimeField64};
 use itertools::Itertools;
 use proofman_common::{AirInstance, FromTrace, ProofmanResult};
 use zisk_common::{
     create_atomic_vec, ComponentBuilder, CounterStats, Instance, InstanceCtx, Planner,
 };
 use zisk_core::{
-    zisk_ops::ZiskOp, Riscv2zisk, ZiskRom, ROM_ADDR, ROM_ADDR_MAX, ROM_ENTRY, ROM_EXIT, SRC_IMM,
+    zisk_ops::ZiskOp, Riscv2zisk, ZiskRom, ROM_ADDR, ROM_ADDR_MAX, ROM_ENTRY, ROM_EXIT,
+    ROM_MAX_INSTRUCTIONS, SRC_IMM,
 };
 use zisk_pil::{MainTrace, RomRomTrace, RomRomTraceRow, RomTrace};
+
+// The transpiler bounds every ROM by ROM_MAX_INSTRUCTIONS, one per row of the ROM custom trace
+const _: () = assert!(RomRomTrace::<Goldilocks>::NUM_ROWS == ROM_MAX_INSTRUCTIONS);
 
 /// The `RomSM` struct represents the ROM State Machine
 pub struct RomSM {
@@ -264,17 +268,8 @@ impl RomSM {
         // Create an instance of the RISCV -> ZisK program converter
         let riscv2zisk = Riscv2zisk::new(elf);
 
-        // Convert program to rom
+        // Convert program to rom, which holds at most ROM_MAX_INSTRUCTIONS, i.e. one per trace row
         let rom = riscv2zisk.run().expect("RomSM::prover() failed converting elf to rom");
-
-        let rom_len = rom.insts.len();
-        let air_rom_len = RomTrace::<F>::NUM_ROWS;
-        if rom_len > air_rom_len {
-            panic!(
-                "Error: The generated ROM has {} instructions, which exceeds the maximum supported by the Zisk PIL ROM trace ({} instructions).  Please review zisk.pil and increase the ROM trace size accordingly.",
-                rom_len, air_rom_len
-            );
-        }
 
         Self::compute_trace_rom(&rom, rom_custom_trace);
     }

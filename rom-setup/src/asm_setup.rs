@@ -150,6 +150,37 @@ pub fn resolve_emulator_asm() -> Result<PathBuf> {
     Ok(emulator_asm_path)
 }
 
+/// Whether `c` can be part of a file name handed to `make` without being interpreted by `make`,
+/// which expands `$` references in variable values, or by the shell that runs its recipes.
+fn is_make_safe_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
+}
+
+/// Returns `path` as a string that `make` and its recipe shell take literally.
+fn make_safe_path(path: &Path) -> Result<&str> {
+    path.to_str()
+        .filter(|path| path.chars().all(|c| c == '/' || is_make_safe_char(c)))
+        .with_context(|| {
+            format!("Path {} contains characters that make would interpret", path.display())
+        })
+}
+
+/// Paths of the assembly emulator binaries of an ELF in `output_path`, for the minimal trace, the
+/// ROM histogram and the memory operations, in this order. They are built with `make`, so every
+/// character of the ELF name that `make` could interpret is replaced by `_`.
+pub fn assembly_file_paths(
+    output_path: &Path,
+    elf_name: &str,
+    elf_hash: &str,
+    hints: bool,
+) -> [PathBuf; 3] {
+    let name: String =
+        elf_name.chars().map(|c| if is_make_safe_char(c) { c } else { '_' }).collect();
+    let hints = if hints { "-hints" } else { "" };
+    ["mt", "rh", "mo"]
+        .map(|trace| output_path.join(format!("{name}{hints}-{elf_hash}-{trace}.bin")))
+}
+
 /// Get the paths to all assembly binary files for a given ELF and output path
 pub fn get_assembly_file_paths(
     elf: &Path,
@@ -163,25 +194,8 @@ pub fn get_assembly_file_paths(
         .context("Failed to extract file stem from ELF path")?
         .to_str()
         .context("Failed to convert ELF file stem to string")?;
-    let stem = if hints { format!("{stem}-hints") } else { stem.to_string() };
-    let new_filename = format!("{stem}-{elf_hash}.tmp");
-    let base_path = output_path.join(new_filename);
-    let file_stem = base_path
-        .file_stem()
-        .context("Failed to extract file stem from base path")?
-        .to_str()
-        .context("Failed to convert file stem to string")?;
 
-    let bin_mt_file = format!("{file_stem}-mt.bin");
-    let bin_mt_file = base_path.with_file_name(bin_mt_file);
-
-    let bin_rh_file = format!("{file_stem}-rh.bin");
-    let bin_rh_file = base_path.with_file_name(bin_rh_file);
-
-    let bin_mo_file = format!("{file_stem}-mo.bin");
-    let bin_mo_file = base_path.with_file_name(bin_mo_file);
-
-    Ok(vec![bin_mt_file, bin_rh_file, bin_mo_file])
+    Ok(assembly_file_paths(output_path, stem, &elf_hash, hints).to_vec())
 }
 
 /// Check if all assembly binary files exist for a given ELF and output path
@@ -236,23 +250,11 @@ pub fn generate_assembly(
         anyhow::bail!("ROM file is not a valid ELF file");
     }
 
-    let stem = if hints { format!("{elf_name}-hints") } else { elf_name.to_string() };
-    let new_filename = format!("{stem}-{elf_hash}.tmp");
-    let base_path = output_path.join(new_filename);
-    let file_stem = base_path
-        .file_stem()
-        .context("Failed to extract file stem from base path")?
-        .to_str()
-        .context("Failed to convert file stem to string")?;
+    let [bin_mt_file, bin_rh_file, bin_mo_file] =
+        assembly_file_paths(output_path, elf_name, &elf_hash, hints);
 
-    let bin_mt_file = format!("{file_stem}-mt.bin");
-    let bin_mt_file = base_path.with_file_name(bin_mt_file);
-
-    let bin_rh_file = format!("{file_stem}-rh.bin");
-    let bin_rh_file = base_path.with_file_name(bin_rh_file);
-
-    let bin_mo_file = format!("{file_stem}-mo.bin");
-    let bin_mo_file = base_path.with_file_name(bin_mo_file);
+    // The file names are make-safe by construction, but the output directory is chosen by the user
+    make_safe_path(output_path)?;
 
     let emulator_asm_path = resolve_emulator_asm()?;
 
@@ -267,8 +269,7 @@ pub fn generate_assembly(
         let asm_file = file.with_extension("asm");
         // Convert the ELF file to Zisk format and generates an assembly file
         let rv2zk = Riscv2zisk::new(elf);
-        let asm_file_str =
-            asm_file.to_str().context("Failed to convert asm_file path to string")?;
+        let asm_file_str = make_safe_path(&asm_file)?;
         rv2zk
             .runfile(asm_file_str.to_string(), gen_method, false, false, hints)
             .map_err(|e| anyhow::anyhow!("Error converting ELF to assembly: {}", e))?;
@@ -286,7 +287,7 @@ pub fn generate_assembly(
             anyhow::bail!("'make clean' failed with exit code: {:?}", status.code());
         }
 
-        let out_file_str = file.to_str().context("Failed to convert output file path to string")?;
+        let out_file_str = make_safe_path(&file)?;
 
         let status = Command::new("make")
             .arg(format!("EMU_PATH={}", asm_file_str))

@@ -75,24 +75,30 @@ fn read_field_bytes<'a>(data: &'a [u64], pos: &mut usize) -> anyhow::Result<(&'a
     };
 
     // Make sure we have at least 8 bytes for the length header
-    if *pos + 8 > byte_data.len() {
+    let len_end =
+        pos.checked_add(8).ok_or_else(|| anyhow::anyhow!("MODEXP hint length offset overflow"))?;
+    if len_end > byte_data.len() {
         anyhow::bail!("MODEXP hint data too short to read length");
     }
 
     // Read length as native-endian u64
-    let len_bytes =
-        u64::from_ne_bytes(byte_data[*pos..*pos + 8].try_into().expect("slice length checked"))
-            as usize;
-    *pos += 8;
+    let len_u64 =
+        u64::from_ne_bytes(byte_data[*pos..len_end].try_into().expect("slice length checked"));
+    let len_bytes = usize::try_from(len_u64)
+        .map_err(|_| anyhow::anyhow!("MODEXP field length does not fit in usize"))?;
+    *pos = len_end;
 
     // Ensure there are enough bytes for the field
-    if *pos + len_bytes > byte_data.len() {
+    let field_end = pos
+        .checked_add(len_bytes)
+        .ok_or_else(|| anyhow::anyhow!("MODEXP field length overflow"))?;
+    if field_end > byte_data.len() {
         anyhow::bail!("MODEXP hint data too short for field");
     }
 
     // Get the slice
-    let field = &byte_data[*pos..*pos + len_bytes];
-    *pos += len_bytes;
+    let field = &byte_data[*pos..field_end];
+    *pos = field_end;
 
     Ok((field, len_bytes))
 }

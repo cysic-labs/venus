@@ -44,6 +44,7 @@ tokio = { version = "1", features = ["full"] }
 indicatif = "0.17.8"
 futures = { workspace = true }
 yansi = "1.0.1"
+tempfile = "3.27"
 
 # Distributed mode (mpi) is only supported on Linux x86_64
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]

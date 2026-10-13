@@ -12,7 +12,12 @@ pub fn modexp_hint(data: &[u64]) -> Result<Vec<u64>> {
 
     // Verify the data length matches: 3 length prefixes (8 bytes each) + field data,
     // converted to u64 words (rounded up for alignment).
-    let expected_words = (24 + base_len + exp_len + modulus_len).div_ceil(8);
+    let expected_bytes = 24usize
+        .checked_add(base_len)
+        .and_then(|len| len.checked_add(exp_len))
+        .and_then(|len| len.checked_add(modulus_len))
+        .ok_or_else(|| anyhow::anyhow!("MODEXP hint data length overflow"))?;
+    let expected_words = expected_bytes.div_ceil(8);
     if expected_words != data.len() {
         anyhow::bail!(
             "MODEXP hint data length mismatch: expected {} words, got {} words",
@@ -37,4 +42,14 @@ pub fn modexp_hint(data: &[u64]) -> Result<Vec<u64>> {
     }
 
     Ok(hints)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::modexp_hint;
+
+    #[test]
+    fn rejects_field_length_larger_than_payload() {
+        assert!(modexp_hint(&[u64::MAX]).is_err());
+    }
 }

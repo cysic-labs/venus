@@ -659,6 +659,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "target-lexicon",
+ "tempfile",
  "tokio",
  "tracing",
  "vergen-git2",

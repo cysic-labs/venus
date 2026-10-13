@@ -9,7 +9,7 @@ use proofman_common::{
     initialize_logger, json_to_debug_instances_map, DebugInfo, ProofCtx, ProofmanResult,
     VerboseMode,
 };
-use rom_setup::{get_elf_data_hash, rom_merkle_setup};
+use rom_setup::rom_merkle_setup;
 use zisk_common::ElfBinaryLike;
 
 /// Gets the user's home directory as specified by the HOME environment variable.
@@ -92,15 +92,6 @@ pub fn get_custom_commits_map<F: PrimeField64>(
 ) -> Result<HashMap<String, PathBuf>> {
     let (rom_bin_path, _) = ensure_custom_commits(pctx, elf)?;
     Ok(HashMap::from([("rom".to_string(), rom_bin_path)]))
-}
-
-pub fn get_asm_paths(elf: &impl ElfBinaryLike) -> Result<(String, String)> {
-    let stem = elf.name();
-    let stem = if elf.with_hints() { format!("{stem}-hints") } else { stem.to_string() };
-    let hash =
-        get_elf_data_hash(elf).map_err(|e| anyhow::anyhow!("Error computing ELF hash: {}", e))?;
-
-    Ok((format!("{stem}-{hash}-mt.bin"), format!("{stem}-{hash}-rh.bin")))
 }
 
 pub fn check_paths_exist(path: &PathBuf) -> Result<()> {

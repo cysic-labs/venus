@@ -129,10 +129,12 @@ pub const ROM_ENTRY: u64 = 0x1000;
 pub const ROM_EXIT: u64 = 0x1004;
 /// First program ROM instruction address, i.e. first RISC-V transpiled instruction
 pub const ROM_ADDR: u64 = 0x80000000;
+/// Size of the program ROM address window, which holds all the transpiled RISC-V code
+pub const ROM_SIZE: u64 = 0x08000000; // 128M
 /// Maximum program ROM instruction address
-pub const ROM_ADDR_MAX: u64 = ROM_ADDR + 0x08000000 - 1; // 128M
+pub const ROM_ADDR_MAX: u64 = ROM_ADDR + ROM_SIZE - 1;
 /// First float library ROM instruction address
-pub const FLOAT_LIB_ROM_ADDR: u64 = ROM_ADDR + 0x08000000 - 0x100000; // 1M before ROM_ADDR_MAX = 0x87F00000
+pub const FLOAT_LIB_ROM_ADDR: u64 = ROM_ADDR + ROM_SIZE - 0x100000; // 1M before ROM_ADDR_MAX = 0x87F00000
 /// First float library RAM address
 pub const FLOAT_LIB_RAM_ADDR: u64 = 0xc0000000 - 0x10000; // 0xbfff0000
 /// Float library stack pointer address
@@ -400,7 +402,7 @@ impl Mem {
         // Calculate how aligned this operation is
         let addr_req_1 = addr & 0xFFFF_FFFF_FFFF_FFF8; // Aligned address of the first 8-bytes chunk
         let addr_req_2 = (addr + width - 1) & 0xFFFF_FFFF_FFFF_FFF8; // Aligned address of the second 8-bytes chunk, if needed
-        let is_full_aligned = ((addr & 0x03) == 0) && (width == 8);
+        let is_full_aligned = Self::is_full_aligned(addr, width);
         let is_single_not_aligned = !is_full_aligned && (addr_req_1 == addr_req_2);
         let is_double_not_aligned = !is_full_aligned && !is_single_not_aligned;
 
@@ -648,7 +650,7 @@ impl Mem {
         // Calculate how aligned this operation is
         let addr_req_1 = addr & 0xFFFF_FFFF_FFFF_FFF8; // Aligned address of the first 8-bytes chunk
         let addr_req_2 = (addr + width - 1) & 0xFFFF_FFFF_FFFF_FFF8; // Aligned address of the second 8-bytes chunk, if needed
-        let is_full_aligned = ((addr & 0x03) == 0) && (width == 8);
+        let is_full_aligned = Self::is_full_aligned(addr, width);
         let is_single_not_aligned = !is_full_aligned && (addr_req_1 == addr_req_2);
         let is_double_not_aligned = !is_full_aligned && !is_single_not_aligned;
 
@@ -730,7 +732,7 @@ impl Mem {
     /// Returns true if the address and width are fully aligned
     #[inline(always)]
     pub fn is_full_aligned(address: u64, width: u64) -> bool {
-        ((address & 0x03) == 0) && (width == 8)
+        ((address & 0x07) == 0) && (width == 8)
     }
 
     /// Returns true if the address and width are single non aligned

@@ -1,19 +1,28 @@
 //! ELF file extraction utilities for separating ELF parsing from ZiskRom population
 
 use elf::{
-    abi::{SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHT_NOBITS, SHT_PROGBITS},
+    abi::{
+        SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHT_FINI_ARRAY, SHT_INIT_ARRAY, SHT_NOBITS,
+        SHT_PREINIT_ARRAY, SHT_PROGBITS,
+    },
     endian::AnyEndian,
     ElfBytes,
 };
 use std::{collections::HashMap, error::Error};
 
-use crate::{is_elf_file, RAM_ADDR, RAM_SIZE};
+use crate::{is_elf_file, RAM_ADDR, RAM_SIZE, ROM_ADDR, ROM_MAX_INSTRUCTIONS, ROM_SIZE};
 
 const RAM_START_ADDR: u64 = RAM_ADDR;
 const RAM_END_ADDR: u64 = RAM_ADDR + RAM_SIZE;
-// 1 GiB across all loaded sections, arbitrary limit to prevent OOM from malformed ELFs. Section
-// headers may claim large BSS sizes or alias the same file bytes many times.
-const MAX_ELF_LOAD_BYTES: u64 = 1024 * 1024 * 1024;
+const ROM_END_ADDR: u64 = ROM_ADDR + ROM_SIZE;
+
+/// Every 4 bytes of code transpile to at least one ROM instruction.
+const CODE_BYTES_PER_ROM_INSTRUCTION: u64 = 4;
+/// The BIOS initializes data in memory 8 bytes per ROM instruction.
+const DATA_BYTES_PER_ROM_INSTRUCTION: u64 = 8;
+/// Largest span of the code of one ELF: as much code as a full ROM holds. The instruction lookup
+/// tables are dense over the code addresses, so this keeps sparse code from inflating them.
+const MAX_CODE_SPAN: u64 = ROM_MAX_INSTRUCTIONS as u64 * CODE_BYTES_PER_ROM_INSTRUCTION;
 
 /// Raw bytes of `data` that will live at `addr` once the ROM has booted.
 #[derive(Debug, Clone)]
@@ -36,6 +45,10 @@ pub struct ElfPayload {
 }
 
 /// Extracts the relevant sections from ELF file bytes for `ZiskRom`
+///
+/// Code must lie in the ROM window and span at most `MAX_CODE_SPAN` bytes, and all the sections
+/// together must fit in a ROM; both are checked from the section headers, before any section is
+/// copied or transpiled.
 pub fn collect_elf_payload_from_bytes(file_data: &[u8]) -> Result<ElfPayload, Box<dyn Error>> {
     // Validate it's an ELF file
     match is_elf_file(file_data) {
@@ -53,7 +66,13 @@ pub fn collect_elf_payload_from_bytes(file_data: &[u8]) -> Result<ElfPayload, Bo
     let elf = ElfBytes::<AnyEndian>::minimal_parse(file_data)?;
 
     let mut out = ElfPayload { entry_point: elf.ehdr.e_entry, ..Default::default() };
-    let mut loaded_bytes = 0u64;
+
+    // Lower bound of the ROM instructions needed by the sections accepted so far
+    let mut rom_instructions = 0u64;
+
+    // Address range covered by the code
+    let mut code_start = u64::MAX;
+    let mut code_end = 0u64;
 
     // Process all section headers
     if let Some(shdrs) = elf.section_headers() {
@@ -72,44 +91,69 @@ pub fn collect_elf_payload_from_bytes(file_data: &[u8]) -> Result<ElfPayload, Bo
                 continue;
             }
 
-            // Skip section types other than data and BSS (notes, etc.)
-            if sh.sh_type != SHT_PROGBITS && sh.sh_type != SHT_NOBITS {
-                continue;
+            // Data and BSS are loaded; other section types (notes, etc.) are skipped. The arrays of
+            // static constructors and destructors hold file-backed data like PROGBITS; they are
+            // writable only to allow dynamic relocations, so in a static image they are constants.
+            let (file_bytes, is_pointer_array) = match sh.sh_type {
+                SHT_PROGBITS => (Some(elf.section_data(&sh)?.0), false),
+                SHT_INIT_ARRAY | SHT_FINI_ARRAY | SHT_PREINIT_ARRAY => {
+                    (Some(elf.section_data(&sh)?.0), true)
+                }
+                SHT_NOBITS => (None, false),
+                _ => continue,
+            };
+
+            // Word-align by padding with zeros: trimming would drop the last bytes of the section
+            let size = file_bytes.map_or(sh.sh_size, |bytes| bytes.len() as u64);
+            let size = size
+                .checked_next_multiple_of(4)
+                .ok_or_else(|| format!("ELF section at 0x{:08x} is too large", sh.sh_addr))?;
+            let end_addr = sh.sh_addr.checked_add(size).ok_or_else(|| {
+                format!("ELF section at 0x{:08x} wraps the address space", sh.sh_addr)
+            })?;
+
+            // Categorize the section based on its flags
+            let is_exec = (sh.sh_flags & SHF_EXECINSTR as u64) != 0;
+            let is_write = (sh.sh_flags & SHF_WRITE as u64) != 0 && !is_pointer_array;
+            let in_ram = sh.sh_addr >= RAM_START_ADDR && end_addr <= RAM_END_ADDR;
+
+            if is_exec && size > 0 {
+                // Code must lie in the ROM window: below it is the BIOS, above it the RAM
+                if sh.sh_addr < ROM_ADDR || end_addr > ROM_END_ADDR {
+                    return Err(format!(
+                        "ELF executable section at 0x{:08x}-0x{:08x} is outside the ROM \
+                         (0x{:08x}-0x{:08x}).",
+                        sh.sh_addr, end_addr, ROM_ADDR, ROM_END_ADDR
+                    )
+                    .into());
+                }
+                code_start = code_start.min(sh.sh_addr);
+                code_end = code_end.max(end_addr);
+                if code_end - code_start > MAX_CODE_SPAN {
+                    return Err(format!(
+                        "ELF code spans 0x{code_start:08x}-0x{code_end:08x}, more than the \
+                         {MAX_CODE_SPAN} bytes of code a ROM can hold."
+                    )
+                    .into());
+                }
             }
 
-            // Bound the total before allocating anything for this section
-            loaded_bytes = loaded_bytes.saturating_add(sh.sh_size);
-            if loaded_bytes > MAX_ELF_LOAD_BYTES {
+            // Enforce the ROM size before copying or transpiling anything of this section
+            rom_instructions += if is_exec {
+                size / CODE_BYTES_PER_ROM_INSTRUCTION
+            } else {
+                size.div_ceil(DATA_BYTES_PER_ROM_INSTRUCTION)
+            };
+            if rom_instructions > ROM_MAX_INSTRUCTIONS as u64 {
                 return Err(format!(
-                    "ELF section at 0x{:08x} brings the loaded size above the maximum allowed \
-                     {} bytes.",
-                    sh.sh_addr, MAX_ELF_LOAD_BYTES
+                    "ELF section at 0x{:08x} brings the ROM above the maximum of {} instructions.",
+                    sh.sh_addr, ROM_MAX_INSTRUCTIONS
                 )
                 .into());
             }
 
-            // Handle different section types
-            let data = if sh.sh_type == SHT_PROGBITS {
-                let (raw, _) = elf.section_data(&sh)?;
-                let mut data = raw.to_vec();
-                // Word-align by trimming
-                while data.len() % 4 != 0 {
-                    data.pop();
-                }
-                data
-            } else {
-                // BSS sections - uninitialized data, should be zero-filled
-                // Create a zero-filled vector of the appropriate size, aligned to 4 bytes
-                vec![0u8; (sh.sh_size as usize + 3) & !3]
-            };
-
-            // Categorize the section based on its flags
-            let is_exec = (sh.sh_flags & SHF_EXECINSTR as u64) != 0;
-            let is_write = (sh.sh_flags & SHF_WRITE as u64) != 0;
-            let end_addr = sh.sh_addr.checked_add(data.len() as u64).ok_or_else(|| {
-                format!("ELF section at 0x{:08x} wraps the address space", sh.sh_addr)
-            })?;
-            let in_ram = sh.sh_addr >= RAM_START_ADDR && end_addr <= RAM_END_ADDR;
+            let mut data = file_bytes.map_or_else(Vec::new, <[u8]>::to_vec);
+            data.resize(size as usize, 0);
 
             if is_exec {
                 // Executable code section

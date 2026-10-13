@@ -23,19 +23,24 @@ pub struct BuildToolchainCmd {
 impl BuildToolchainCmd {
     pub fn run(&self) -> Result<()> {
         println!("Building toolchain...");
+
+        // Private working directory (owner-only, unpredictable name): fixed paths in the shared
+        // temporary directory could be created beforehand, or as symlinks, by another local user
+        let work_dir = tempfile::Builder::new()
+            .prefix("zisk-toolchain-")
+            .tempdir()
+            .context("while creating the toolchain working directory")?;
+
         // Get environment variables.
         let build_dir = std::env::var("ZISK_BUILD_DIR");
+        let cloned = build_dir.is_err();
         let rust_dir = match build_dir {
             Ok(build_dir) => {
                 println!("Detected ZISK_BUILD_DIR, skipping cloning rust.");
                 PathBuf::from(build_dir).join("rust")
             }
             Err(_) => {
-                let temp_dir = std::env::temp_dir();
-                let dir = temp_dir.join("zisk-rust");
-                if dir.exists() {
-                    std::fs::remove_dir_all(&dir)?;
-                }
+                let dir = work_dir.path().join("rust");
 
                 println!("No ZISK_BUILD_DIR detected, cloning rust.");
                 let repo_url = "https://github.com/0xPolygonHermez/rust";
@@ -55,9 +60,8 @@ impl BuildToolchainCmd {
                         "--depth=1",
                         "--single-branch",
                         &format!("--branch={}", git_ref),
-                        "zisk-rust",
                     ])
-                    .current_dir(&temp_dir)
+                    .arg(&dir)
                     .run()?;
                 Command::new("git").args(["reset", "--hard"]).current_dir(&dir).run()?;
 
@@ -113,14 +117,12 @@ impl BuildToolchainCmd {
 
         // Work around target sanity check added in
         // rust-lang/rust@09c076810cb7649e5817f316215010d49e78e8d7.
-        let temp_dir = std::env::temp_dir().join("rustc-targets");
-        if !temp_dir.exists() {
-            std::fs::create_dir_all(&temp_dir)
-                .with_context(|| format!("while creating directory {temp_dir:?}"))?;
-        }
+        let target_spec_dir = work_dir.path().join("rustc-targets");
+        std::fs::create_dir(&target_spec_dir)
+            .with_context(|| format!("while creating directory {target_spec_dir:?}"))?;
 
-        std::fs::File::create(temp_dir.join("riscv64ima-zisk-zkvm-elf.json")).with_context(
-            || format!("while creating file {temp_dir:?}/riscv64ima-zisk-zkvm-elf.json"),
+        std::fs::File::create(target_spec_dir.join("riscv64ima-zisk-zkvm-elf.json")).with_context(
+            || format!("while creating file {target_spec_dir:?}/riscv64ima-zisk-zkvm-elf.json"),
         )?;
 
         // Note: LLVM patches are applied automatically by the bootstrap system
@@ -129,7 +131,7 @@ impl BuildToolchainCmd {
 
         // Build the toolchain.
         Command::new("python3")
-            .env("RUST_TARGET_PATH", &temp_dir)
+            .env("RUST_TARGET_PATH", &target_spec_dir)
             .env("CARGO_TARGET_RISCV64IMA_ZISK_ZKVM_ELF_RUSTFLAGS", "-Cpasses=lower-atomic")
             .args([
                 "x.py",
@@ -194,6 +196,12 @@ impl BuildToolchainCmd {
             .run()
             .with_context(|| format!("while compressing the toolchain to {tar_gz_path}"))?;
         println!("Successfully compressed the toolchain to {tar_gz_path}.");
+
+        // rustup links the toolchain in place, so a toolchain built from the clone keeps it
+        if cloned {
+            let kept_dir = work_dir.keep();
+            println!("Kept the toolchain sources and build at {}.", kept_dir.display());
+        }
 
         Ok(())
     }

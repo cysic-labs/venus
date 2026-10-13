@@ -8,6 +8,7 @@ use crate::{
     },
     riscv2zisk_context::{add_entry_exit_jmp, add_zisk_code, add_zisk_init_data},
     AsmGenerationMethod, RoData, ZiskInst, ZiskRom, ZiskRom2Asm, ROM_ADDR, ROM_ADDR_MAX, ROM_ENTRY,
+    ROM_MAX_INSTRUCTIONS,
 };
 use rayon::prelude::*;
 use std::{error::Error, path::Path};
@@ -56,6 +57,16 @@ pub fn elf2rom(elf: &[u8]) -> Result<ZiskRom, Box<dyn Error>> {
         if i == 1 {
             add_entry_exit_jmp(&mut rom, payload.entry_point);
         }
+    }
+
+    // Code can transpile to several instructions per RISC-V instruction, so the exact ROM size is
+    // only known now, before the lookup arrays are allocated
+    if rom.insts.len() > ROM_MAX_INSTRUCTIONS {
+        return Err(format!(
+            "The ROM has {} instructions, more than the maximum of {ROM_MAX_INSTRUCTIONS}",
+            rom.insts.len()
+        )
+        .into());
     }
 
     // Preprocess the ROM (experimental)

@@ -241,7 +241,7 @@ pub mod ziskos {
           // set the stack pointer
           "la sp, _init_stack_top",
 
-          // "tail-call" to {entry}
+          // Call into Rust. `_zisk_main` returns the exit code in a0.
           "call {_zisk_main}",
           "csrr t0, marchid",
           //"li   t1, {_ARCH_ID_ZISK}",
@@ -256,7 +256,8 @@ pub mod ziskos {
           "sw t1, 0(t0)",
           "j 2f",
 
-          // Zisk exit
+          // Zisk exit: syscall 93 (exit) takes the exit code in a0, already set by `_zisk_main`.
+          // The BIOS ends any exit code other than 0 as a failed execution.
           "1: li   a7, 93",
           "ecall",
 
@@ -277,8 +278,10 @@ pub mod ziskos {
         getrandom::register_custom_getrandom!(zkvm_getrandom);
     }
 
+    /// Runs the guest entry point and returns its exit code: 0, since the entry point returns
+    /// `()` and a failure traps (e.g. a panic aborts) instead of returning.
     #[no_mangle]
-    unsafe extern "C" fn _zisk_main() {
+    unsafe extern "C" fn _zisk_main() -> i32 {
         {
             extern "C" {
                 fn main();
@@ -298,7 +301,8 @@ pub mod ziskos {
             ))]
             crate::alloc::init_sys_alloc();
 
-            main()
+            main();
+            0
         }
     }
 

@@ -47,7 +47,8 @@ const CSR_PRECOMPILED: [&str; 26] = [
     "blake2",
 ];
 const CSR_PRECOMPILED_ADDR_START: u32 = 0x800;
-const CSR_PRECOMPILED_ADDR_END: u32 = CSR_PRECOMPILED_ADDR_START + CSR_PRECOMPILED.len() as u32;
+const CSR_PRECOMPILED_ADDR_END_EXCLUSIVE: u32 =
+    CSR_PRECOMPILED_ADDR_START + CSR_PRECOMPILED.len() as u32;
 const CSR_DMA_PRECOMPILED_ADDR_START: u32 = 0x813;
 const CSR_DMA_PRECOMPILED_ADDR_END: u32 = 0x816;
 const CSR_PRECOMPILED_ADD256: u32 = CSR_PRECOMPILED_ADDR_START + 17;
@@ -230,7 +231,15 @@ impl Riscv2ZiskContext<'_> {
 
             // I.6 Privileged & System Instructions (Part of I Base)
             "ecall" => self.ecall(riscv_instruction),
-            "ebreak" => self.nop(riscv_instruction, 4),
+            // ebreak raises a breakpoint exception, so the execution fails there. GCC emits it for
+            // __builtin_trap, which C's abort() reaches.
+            "ebreak" => self.halt_with_error(riscv_instruction, 4),
+            // A write to a read-only CSR is an illegal instruction, so the execution fails there.
+            // `unimp` (`csrrw x0, cycle, x0`) is one: compilers emit it for every trap
+            // (core::intrinsics::abort, Rust's __rust_abort, llvm.trap).
+            _ if writes_read_only_csr(riscv_instruction) => {
+                self.halt_with_error(riscv_instruction, 4)
+            }
             "csrrw" => self.csrrw(riscv_instruction),
             "csrrs" => self.csrrs(riscv_instruction, next_instructions),
             "csrrc" => self.csrrc(riscv_instruction),
@@ -348,7 +357,7 @@ impl Riscv2ZiskContext<'_> {
             "c.sd" | "c.sdsp" => self.store_op(riscv_instruction, "copyb", 8, 2),
 
             // C.I.6.Privileged & System Instructions
-            "c.ebreak" => self.nop(riscv_instruction, 2),
+            "c.ebreak" => self.halt_with_error(riscv_instruction, 2),
 
             // C.D: Double-Precision Floating-Point:
             "c.fld" => self.load_op(riscv_instruction, "copyb", 8, 2),
@@ -1342,7 +1351,7 @@ impl Riscv2ZiskContext<'_> {
             let mut zib = ZiskInstBuilder::new_from_riscv(rom_address, i.inst.clone());
             zib.src_b("reg", i.rs1 as u64, false);
 
-            if (CSR_PRECOMPILED_ADDR_START..=CSR_PRECOMPILED_ADDR_END).contains(&i.csr) {
+            if (CSR_PRECOMPILED_ADDR_START..CSR_PRECOMPILED_ADDR_END_EXCLUSIVE).contains(&i.csr) {
                 let precompiled = CSR_PRECOMPILED[(i.csr - CSR_PRECOMPILED_ADDR_START) as usize];
                 zib.src_a("imm", 0, false);
                 zib.op(precompiled).unwrap();
@@ -1505,7 +1514,7 @@ impl Riscv2ZiskContext<'_> {
                 }
                 {
                     let mut zib = ZiskInstBuilder::new(rom_address);
-                    zib.src_a("mem", 0, false);
+                    zib.src_a("imm", 0, false);
                     zib.src_b("reg", 33, false);
                     zib.op("copyb").unwrap();
                     zib.store("reg", i.rd as i64, false, false);
@@ -1550,7 +1559,7 @@ impl Riscv2ZiskContext<'_> {
         } else {
             {
                 let mut zib = ZiskInstBuilder::new_from_riscv(rom_address, i.inst.clone());
-                zib.src_a("mem", 0, false);
+                zib.src_a("imm", 0, false);
                 zib.src_b("mem", CSR_ADDR + (i.csr * 8) as u64, false);
                 zib.op("copyb").unwrap();
                 zib.store("reg", i.rd as i64, false, false);
@@ -1617,7 +1626,7 @@ impl Riscv2ZiskContext<'_> {
                 zib.src_a("imm", 0, false);
                 zib.src_b("imm", i.imme as u64, false);
                 zib.op("copyb").unwrap();
-                zib.store("mem", CSR_ADDR as i64 + (i.csr + 8) as i64, false, false);
+                zib.store("mem", CSR_ADDR as i64 + (i.csr * 8) as i64, false, false);
                 zib.verbose(&format!(
                     "{} r{}, 0x{:x}, 0x{:x} #rd = 0",
                     i.inst, i.rd, i.csr, i.imme
@@ -1629,7 +1638,7 @@ impl Riscv2ZiskContext<'_> {
         } else {
             {
                 let mut zib = ZiskInstBuilder::new_from_riscv(rom_address, i.inst.clone());
-                zib.src_a("mem", 0, false);
+                zib.src_a("imm", 0, false);
                 zib.src_b("mem", CSR_ADDR + (i.csr * 8) as u64, false);
                 zib.op("copyb").unwrap();
                 zib.store("reg", i.rd as i64, false, false);
@@ -1644,7 +1653,7 @@ impl Riscv2ZiskContext<'_> {
             }
             {
                 let mut zib = ZiskInstBuilder::new(rom_address);
-                zib.src_a("mem", 0, false);
+                zib.src_a("imm", 0, false);
                 zib.src_b("imm", i.imme as u64, false);
                 zib.op("copyb").unwrap();
                 zib.store("mem", CSR_ADDR as i64 + (i.csr * 8) as i64, false, false);
@@ -1716,7 +1725,7 @@ impl Riscv2ZiskContext<'_> {
         } else {
             {
                 let mut zib = ZiskInstBuilder::new_from_riscv(rom_address, i.inst.clone());
-                zib.src_a("mem", 0, false);
+                zib.src_a("imm", 0, false);
                 zib.src_b("mem", CSR_ADDR + (i.csr * 8) as u64, false);
                 zib.op("copyb").unwrap();
                 zib.store("reg", i.rd as i64, false, false);
@@ -1801,7 +1810,7 @@ impl Riscv2ZiskContext<'_> {
         } else {
             {
                 let mut zib = ZiskInstBuilder::new_from_riscv(rom_address, i.inst.clone());
-                zib.src_a("mem", 0, false);
+                zib.src_a("imm", 0, false);
                 zib.src_b("mem", CSR_ADDR + (i.csr * 8) as u64, false);
                 zib.op("copyb").unwrap();
                 zib.store("reg", i.rd as i64, false, false);
@@ -2045,6 +2054,20 @@ impl Riscv2ZiskContext<'_> {
         );
     }
 } // impl Riscv2ZiskContext
+
+/// Whether `i` is a CSR instruction that writes a read-only CSR (address bits 11:10 = 0b11), which
+/// RISC-V defines as an illegal instruction. CSRRW/CSRRWI always write; CSRRS/CSRRC write only when
+/// rs1 != x0, and CSRRSI/CSRRCI only when uimm != 0, so a plain read of a read-only CSR, such as
+/// marchid or the fcall result 0xFFE, stays legal.
+fn writes_read_only_csr(i: &RiscvInstruction) -> bool {
+    let writes = match i.inst.as_str() {
+        "csrrw" | "csrrwi" => true,
+        "csrrs" | "csrrc" => i.rs1 != 0,
+        "csrrsi" | "csrrci" => i.imme != 0,
+        _ => false,
+    };
+    writes && (i.csr >> 10) & 0b11 == 0b11
+}
 
 /// Converts a buffer with RISC-V data into a vector of Zisk instructions, using the
 /// Riscv2ZiskContext to perform the instruction transpilation
@@ -2442,14 +2465,14 @@ pub fn add_entry_exit_jmp(rom: &mut ZiskRom, addr: u64) {
     // This code is executed when the program makes an ecall (system call).
     // The pc is set to this address, and after the system call, it returns to the pc next to the
     // one that made the ecall
-    // If register a7==CAUSE_EXIT, then execute the next instruction to end the program;
-    // otherwise jump to the one after the next one
+    // If register a7==CAUSE_EXIT, jump to the exit code check (:0040); otherwise return to the
+    // caller (:003c)
     let mut zib = ZiskInstBuilder::new(rom.next_init_inst_addr);
     zib.src_a("reg", 17, false);
     zib.src_b("imm", CAUSE_EXIT, false);
     zib.op("eq").unwrap();
-    zib.j(-36, 4);
-    zib.verbose(&format!("beq r17, {CAUSE_EXIT} # Check if is exit, jump to output, then end"));
+    zib.j(8, 4);
+    zib.verbose(&format!("beq r17, {CAUSE_EXIT} # Check if is exit, jump to the exit code check"));
     zib.build();
     rom.insts.insert(rom.next_init_inst_addr, zib);
     rom.next_init_inst_addr += 4;
@@ -2463,6 +2486,32 @@ pub fn add_entry_exit_jmp(rom: &mut ZiskRom, addr: u64) {
     zib.set_pc();
     zib.j(0, 4);
     zib.verbose("ret");
+    zib.build();
+    rom.insts.insert(rom.next_init_inst_addr, zib);
+    rom.next_init_inst_addr += 4;
+
+    // :0040
+    // Exit: the exit code is in a0 (register #10). 0 means success: publish the output and end
+    // (:0014); anything else is a failed execution (:0044), which must not be proven
+    let mut zib = ZiskInstBuilder::new(rom.next_init_inst_addr);
+    zib.src_a("reg", 10, false);
+    zib.src_b("imm", 0, false);
+    zib.op("eq").unwrap();
+    zib.j(-44, 4);
+    zib.verbose("beq r10, 0 # Exit code 0: jump to output, then end");
+    zib.build();
+    rom.insts.insert(rom.next_init_inst_addr, zib);
+    rom.next_init_inst_addr += 4;
+
+    // :0044
+    // Nonzero exit code: end the execution with an error
+    let mut zib = ZiskInstBuilder::new(rom.next_init_inst_addr);
+    zib.src_a("imm", 0, false);
+    zib.src_b("imm", 0, false);
+    zib.op("halt").unwrap();
+    zib.j(0, 0);
+    zib.end();
+    zib.verbose("halt # Nonzero exit code: failed execution");
     zib.build();
     rom.insts.insert(rom.next_init_inst_addr, zib);
     rom.next_init_inst_addr += 4;

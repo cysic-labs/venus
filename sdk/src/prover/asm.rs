@@ -1,4 +1,3 @@
-use crate::get_asm_paths;
 use crate::{
     check_paths_exist, ensure_custom_commits,
     prover::{ProverBackend, ProverEngine, ZiskBackend},
@@ -14,7 +13,9 @@ use proofman::{
 };
 use proofman_common::{initialize_logger, ParamsGPU, ProofOptions, RankInfo, RowInfo, VerboseMode};
 use proofman_util::{timer_start_info, timer_stop_and_log_info};
-use rom_setup::{generate_assembly, get_output_path, DEFAULT_CACHE_PATH};
+use rom_setup::{
+    assembly_file_paths, generate_assembly, get_elf_data_hash, get_output_path, DEFAULT_CACHE_PATH,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -135,10 +136,9 @@ impl ProverEngine for AsmProver {
             .map_err(|e| anyhow::anyhow!("Failed to read HOME environment variable: {e}"))?
             .join(DEFAULT_CACHE_PATH);
 
-        let (asm_mt_filename, asm_rh_filename) = get_asm_paths(elf)?;
-
-        let asm_mt_path = default_cache_path.join(asm_mt_filename);
-        let asm_rh_path = default_cache_path.join(asm_rh_filename);
+        let elf_hash = get_elf_data_hash(elf)?;
+        let [asm_mt_path, asm_rh_path, _] =
+            assembly_file_paths(&default_cache_path, elf.name(), &elf_hash, elf.with_hints());
 
         if check_paths_exist(&asm_mt_path).is_err() || check_paths_exist(&asm_rh_path).is_err() {
             if self.core_prover.asm_info.no_auto_setup {
