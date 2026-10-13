@@ -1,13 +1,13 @@
 // Auto-generated expression evaluator - matches load__() semantics exactly
 // Q expressions: domainExtended=true always, type 1 goes through aux_trace
 
-// Fingerprint: 22e7bf00  nOps=142 nTemp1=1 nTemp3=5
-#define GENERATED_EVAL_NOPS_22e7bf00 142
-#define GENERATED_EVAL_NTEMP1_22e7bf00 1
-#define GENERATED_EVAL_NTEMP3_22e7bf00 5
+// Fingerprint: 0cf8f8d5  nOps=163 nTemp1=1 nTemp3=5
+#define GENERATED_EVAL_NOPS_0cf8f8d5 163
+#define GENERATED_EVAL_NTEMP1_0cf8f8d5 1
+#define GENERATED_EVAL_NTEMP3_0cf8f8d5 5
 
 template<bool IsCyclic>
-__device__ __forceinline__ void eval_expr_22e7bf00(
+__device__ __forceinline__ void eval_expr_0cf8f8d5(
     const StepsParams* __restrict__ dParams,
     const DeviceArguments* __restrict__ dArgs,
     const ExpsArguments* __restrict__ dExpsArgs,
@@ -67,10 +67,10 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     gl64_t s0_0_0 = *(gl64_t*)&expressions_params[13][0];
     gl64_t s0_0_1 = *(gl64_t*)&expressions_params[13][0+1];
     gl64_t s0_0_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t s1_0 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 11, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 11, domainSize, nCols_0)];
+    gl64_t s1_0 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 12, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 12, domainSize, nCols_0)];
     tmp3_0 = s0_0_0 * s1_0; tmp3_1 = s0_0_1 * s1_0; tmp3_2 = s0_0_2 * s1_0;
     // Op 1: dim3x1 add
-    gl64_t s1_1 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 10, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 10, domainSize, nCols_0)];
+    gl64_t s1_1 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 11, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 11, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_1; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 2: dim3x3 mul
     gl64_t s1_2_0 = *(gl64_t*)&expressions_params[13][0];
@@ -98,10 +98,10 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     gl64_t s0_5_0 = *(gl64_t*)&expressions_params[13][0];
     gl64_t s0_5_1 = *(gl64_t*)&expressions_params[13][0+1];
     gl64_t s0_5_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t s1_5 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 15, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 15, domainSize, nCols_0)];
+    gl64_t s1_5 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 16, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 16, domainSize, nCols_0)];
     tmp3_0 = s0_5_0 * s1_5; tmp3_1 = s0_5_1 * s1_5; tmp3_2 = s0_5_2 * s1_5;
     // Op 6: dim3x1 add
-    gl64_t s1_6 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 14, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 14, domainSize, nCols_0)];
+    gl64_t s1_6 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 15, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 15, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_6; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 7: dim3x3 mul
     gl64_t s1_7_0 = *(gl64_t*)&expressions_params[13][0];
@@ -118,7 +118,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA7 + kC7) - kE7) - kE7) - kD7);
     tmp3_2 = kB7 - kG7;
     // Op 8: dim3x1 add
-    gl64_t s1_8 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 13, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 13, domainSize, nCols_0)];
+    gl64_t s1_8 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 14, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 14, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_8; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 9: dim3x3 mul
     gl64_t s1_9_0 = *(gl64_t*)&expressions_params[13][0];
@@ -135,7 +135,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA9 + kC9) - kE9) - kE9) - kD9);
     tmp3_2 = kB9 - kG9;
     // Op 10: dim3x1 add
-    gl64_t s1_10 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 12, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 12, domainSize, nCols_0)];
+    gl64_t s1_10 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 13, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 13, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_10; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 11: dim3x3 mul
     gl64_t s1_11_0 = *(gl64_t*)&expressions_params[13][0];
@@ -222,10 +222,10 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     gl64_t s0_23_0 = *(gl64_t*)&expressions_params[13][0];
     gl64_t s0_23_1 = *(gl64_t*)&expressions_params[13][0+1];
     gl64_t s0_23_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t s1_23 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 22, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 22, domainSize, nCols_0)];
+    gl64_t s1_23 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 23, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 23, domainSize, nCols_0)];
     tmp3_0 = s0_23_0 * s1_23; tmp3_1 = s0_23_1 * s1_23; tmp3_2 = s0_23_2 * s1_23;
     // Op 24: dim3x1 add
-    gl64_t s1_24 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 21, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 21, domainSize, nCols_0)];
+    gl64_t s1_24 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 22, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 22, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_24; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 25: dim3x3 mul
     gl64_t s1_25_0 = *(gl64_t*)&expressions_params[13][0];
@@ -242,7 +242,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA25 + kC25) - kE25) - kE25) - kD25);
     tmp3_2 = kB25 - kG25;
     // Op 26: dim3x1 add
-    gl64_t s1_26 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 20, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 20, domainSize, nCols_0)];
+    gl64_t s1_26 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 21, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 21, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_26; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 27: dim3x3 mul
     gl64_t s1_27_0 = *(gl64_t*)&expressions_params[13][0];
@@ -259,7 +259,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA27 + kC27) - kE27) - kE27) - kD27);
     tmp3_2 = kB27 - kG27;
     // Op 28: dim3x1 add
-    gl64_t s1_28 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 19, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 19, domainSize, nCols_0)];
+    gl64_t s1_28 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 20, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 20, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_28; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 29: dim3x3 mul
     gl64_t s1_29_0 = *(gl64_t*)&expressions_params[13][0];
@@ -276,7 +276,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA29 + kC29) - kE29) - kE29) - kD29);
     tmp3_2 = kB29 - kG29;
     // Op 30: dim3x1 add
-    gl64_t s1_30 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 18, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 18, domainSize, nCols_0)];
+    gl64_t s1_30 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 19, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 19, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_30; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 31: dim3x3 mul
     gl64_t s1_31_0 = *(gl64_t*)&expressions_params[13][0];
@@ -293,7 +293,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA31 + kC31) - kE31) - kE31) - kD31);
     tmp3_2 = kB31 - kG31;
     // Op 32: dim3x1 add
-    gl64_t s1_32 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 17, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 17, domainSize, nCols_0)];
+    gl64_t s1_32 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 18, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 18, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_32; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 33: dim3x3 mul
     gl64_t s1_33_0 = *(gl64_t*)&expressions_params[13][0];
@@ -310,7 +310,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA33 + kC33) - kE33) - kE33) - kD33);
     tmp3_2 = kB33 - kG33;
     // Op 34: dim3x1 add
-    gl64_t s1_34 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 16, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 16, domainSize, nCols_0)];
+    gl64_t s1_34 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 17, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 17, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_34; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 35: dim3x3 mul
     gl64_t s1_35_0 = *(gl64_t*)&expressions_params[13][0];
@@ -338,10 +338,10 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     gl64_t s0_38_0 = *(gl64_t*)&expressions_params[13][0];
     gl64_t s0_38_1 = *(gl64_t*)&expressions_params[13][0+1];
     gl64_t s0_38_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t s1_38 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 29, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 29, domainSize, nCols_0)];
+    gl64_t s1_38 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 30, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 30, domainSize, nCols_0)];
     tmp3_0 = s0_38_0 * s1_38; tmp3_1 = s0_38_1 * s1_38; tmp3_2 = s0_38_2 * s1_38;
     // Op 39: dim3x1 add
-    gl64_t s1_39 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 28, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 28, domainSize, nCols_0)];
+    gl64_t s1_39 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 29, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 29, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_39; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 40: dim3x3 mul
     gl64_t s1_40_0 = *(gl64_t*)&expressions_params[13][0];
@@ -358,7 +358,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA40 + kC40) - kE40) - kE40) - kD40);
     tmp3_2 = kB40 - kG40;
     // Op 41: dim3x1 add
-    gl64_t s1_41 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 27, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 27, domainSize, nCols_0)];
+    gl64_t s1_41 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 28, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 28, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_41; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 42: dim3x3 mul
     gl64_t s1_42_0 = *(gl64_t*)&expressions_params[13][0];
@@ -375,7 +375,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA42 + kC42) - kE42) - kE42) - kD42);
     tmp3_2 = kB42 - kG42;
     // Op 43: dim3x1 add
-    gl64_t s1_43 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 26, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 26, domainSize, nCols_0)];
+    gl64_t s1_43 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 27, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 27, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_43; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 44: dim3x3 mul
     gl64_t s1_44_0 = *(gl64_t*)&expressions_params[13][0];
@@ -392,7 +392,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA44 + kC44) - kE44) - kE44) - kD44);
     tmp3_2 = kB44 - kG44;
     // Op 45: dim3x1 add
-    gl64_t s1_45 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 25, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 25, domainSize, nCols_0)];
+    gl64_t s1_45 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 26, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 26, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_45; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 46: dim3x3 mul
     gl64_t s1_46_0 = *(gl64_t*)&expressions_params[13][0];
@@ -409,7 +409,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA46 + kC46) - kE46) - kE46) - kD46);
     tmp3_2 = kB46 - kG46;
     // Op 47: dim3x1 add
-    gl64_t s1_47 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 24, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 24, domainSize, nCols_0)];
+    gl64_t s1_47 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 25, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 25, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_47; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 48: dim3x3 mul
     gl64_t s1_48_0 = *(gl64_t*)&expressions_params[13][0];
@@ -426,7 +426,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA48 + kC48) - kE48) - kE48) - kD48);
     tmp3_2 = kB48 - kG48;
     // Op 49: dim3x1 add
-    gl64_t s1_49 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 23, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 23, domainSize, nCols_0)];
+    gl64_t s1_49 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 24, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 24, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_49; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 50: dim3x3 mul
     gl64_t s1_50_0 = *(gl64_t*)&expressions_params[13][0];
@@ -515,10 +515,10 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     gl64_t s0_63_0 = *(gl64_t*)&expressions_params[13][0];
     gl64_t s0_63_1 = *(gl64_t*)&expressions_params[13][0+1];
     gl64_t s0_63_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t s1_63 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 36, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 36, domainSize, nCols_0)];
+    gl64_t s1_63 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 37, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 37, domainSize, nCols_0)];
     tmp3_0 = s0_63_0 * s1_63; tmp3_1 = s0_63_1 * s1_63; tmp3_2 = s0_63_2 * s1_63;
     // Op 64: dim3x1 add
-    gl64_t s1_64 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 35, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 35, domainSize, nCols_0)];
+    gl64_t s1_64 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 36, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 36, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_64; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 65: dim3x3 mul
     gl64_t s1_65_0 = *(gl64_t*)&expressions_params[13][0];
@@ -535,7 +535,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA65 + kC65) - kE65) - kE65) - kD65);
     tmp3_2 = kB65 - kG65;
     // Op 66: dim3x1 add
-    gl64_t s1_66 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 34, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 34, domainSize, nCols_0)];
+    gl64_t s1_66 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 35, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 35, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_66; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 67: dim3x3 mul
     gl64_t s1_67_0 = *(gl64_t*)&expressions_params[13][0];
@@ -552,7 +552,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA67 + kC67) - kE67) - kE67) - kD67);
     tmp3_2 = kB67 - kG67;
     // Op 68: dim3x1 add
-    gl64_t s1_68 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 33, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 33, domainSize, nCols_0)];
+    gl64_t s1_68 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 34, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 34, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_68; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 69: dim3x3 mul
     gl64_t s1_69_0 = *(gl64_t*)&expressions_params[13][0];
@@ -569,7 +569,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA69 + kC69) - kE69) - kE69) - kD69);
     tmp3_2 = kB69 - kG69;
     // Op 70: dim3x1 add
-    gl64_t s1_70 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 32, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 32, domainSize, nCols_0)];
+    gl64_t s1_70 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 33, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 33, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_70; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 71: dim3x3 mul
     gl64_t s1_71_0 = *(gl64_t*)&expressions_params[13][0];
@@ -586,7 +586,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA71 + kC71) - kE71) - kE71) - kD71);
     tmp3_2 = kB71 - kG71;
     // Op 72: dim3x1 add
-    gl64_t s1_72 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 31, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 31, domainSize, nCols_0)];
+    gl64_t s1_72 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 32, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 32, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_72; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 73: dim3x3 mul
     gl64_t s1_73_0 = *(gl64_t*)&expressions_params[13][0];
@@ -603,7 +603,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA73 + kC73) - kE73) - kE73) - kD73);
     tmp3_2 = kB73 - kG73;
     // Op 74: dim3x1 add
-    gl64_t s1_74 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 30, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 30, domainSize, nCols_0)];
+    gl64_t s1_74 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 31, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 31, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_74; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 75: dim3x3 mul
     gl64_t s1_75_0 = *(gl64_t*)&expressions_params[13][0];
@@ -631,10 +631,10 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     gl64_t s0_78_0 = *(gl64_t*)&expressions_params[13][0];
     gl64_t s0_78_1 = *(gl64_t*)&expressions_params[13][0+1];
     gl64_t s0_78_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t s1_78 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 43, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 43, domainSize, nCols_0)];
+    gl64_t s1_78 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 44, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 44, domainSize, nCols_0)];
     tmp3_0 = s0_78_0 * s1_78; tmp3_1 = s0_78_1 * s1_78; tmp3_2 = s0_78_2 * s1_78;
     // Op 79: dim3x1 add
-    gl64_t s1_79 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 42, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 42, domainSize, nCols_0)];
+    gl64_t s1_79 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 43, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 43, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_79; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 80: dim3x3 mul
     gl64_t s1_80_0 = *(gl64_t*)&expressions_params[13][0];
@@ -651,7 +651,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA80 + kC80) - kE80) - kE80) - kD80);
     tmp3_2 = kB80 - kG80;
     // Op 81: dim3x1 add
-    gl64_t s1_81 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 41, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 41, domainSize, nCols_0)];
+    gl64_t s1_81 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 42, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 42, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_81; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 82: dim3x3 mul
     gl64_t s1_82_0 = *(gl64_t*)&expressions_params[13][0];
@@ -668,7 +668,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA82 + kC82) - kE82) - kE82) - kD82);
     tmp3_2 = kB82 - kG82;
     // Op 83: dim3x1 add
-    gl64_t s1_83 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 40, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 40, domainSize, nCols_0)];
+    gl64_t s1_83 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 41, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 41, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_83; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 84: dim3x3 mul
     gl64_t s1_84_0 = *(gl64_t*)&expressions_params[13][0];
@@ -685,7 +685,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA84 + kC84) - kE84) - kE84) - kD84);
     tmp3_2 = kB84 - kG84;
     // Op 85: dim3x1 add
-    gl64_t s1_85 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 39, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 39, domainSize, nCols_0)];
+    gl64_t s1_85 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 40, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 40, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_85; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 86: dim3x3 mul
     gl64_t s1_86_0 = *(gl64_t*)&expressions_params[13][0];
@@ -702,7 +702,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA86 + kC86) - kE86) - kE86) - kD86);
     tmp3_2 = kB86 - kG86;
     // Op 87: dim3x1 add
-    gl64_t s1_87 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 38, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 38, domainSize, nCols_0)];
+    gl64_t s1_87 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 39, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 39, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_87; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 88: dim3x3 mul
     gl64_t s1_88_0 = *(gl64_t*)&expressions_params[13][0];
@@ -719,7 +719,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA88 + kC88) - kE88) - kE88) - kD88);
     tmp3_2 = kB88 - kG88;
     // Op 89: dim3x1 add
-    gl64_t s1_89 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 37, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 37, domainSize, nCols_0)];
+    gl64_t s1_89 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 38, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 38, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_89; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 90: dim3x3 mul
     gl64_t s1_90_0 = *(gl64_t*)&expressions_params[13][0];
@@ -802,17 +802,17 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     gl64_t kE102 = tmp3_1 * s1_102_1;
     gl64_t kF102 = tmp3_2 * s1_102_2;
     gl64_t kG102 = kD102 - kE102;
-    tmp3_6 = (kC102 + kG102) - kF102;
-    tmp3_7 = ((((kA102 + kC102) - kE102) - kE102) - kD102);
-    tmp3_8 = kB102 - kG102;
+    tmp3_12 = (kC102 + kG102) - kF102;
+    tmp3_13 = ((((kA102 + kC102) - kE102) - kE102) - kD102);
+    tmp3_14 = kB102 - kG102;
     // Op 103: dim3x1 mul
     gl64_t s0_103_0 = *(gl64_t*)&expressions_params[13][0];
     gl64_t s0_103_1 = *(gl64_t*)&expressions_params[13][0+1];
     gl64_t s0_103_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t s1_103 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 50, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 50, domainSize, nCols_0)];
+    gl64_t s1_103 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 51, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 51, domainSize, nCols_0)];
     tmp3_0 = s0_103_0 * s1_103; tmp3_1 = s0_103_1 * s1_103; tmp3_2 = s0_103_2 * s1_103;
     // Op 104: dim3x1 add
-    gl64_t s1_104 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 49, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 49, domainSize, nCols_0)];
+    gl64_t s1_104 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 50, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 50, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_104; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 105: dim3x3 mul
     gl64_t s1_105_0 = *(gl64_t*)&expressions_params[13][0];
@@ -829,7 +829,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA105 + kC105) - kE105) - kE105) - kD105);
     tmp3_2 = kB105 - kG105;
     // Op 106: dim3x1 add
-    gl64_t s1_106 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 48, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 48, domainSize, nCols_0)];
+    gl64_t s1_106 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 49, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 49, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_106; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 107: dim3x3 mul
     gl64_t s1_107_0 = *(gl64_t*)&expressions_params[13][0];
@@ -846,7 +846,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA107 + kC107) - kE107) - kE107) - kD107);
     tmp3_2 = kB107 - kG107;
     // Op 108: dim3x1 add
-    gl64_t s1_108 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 47, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 47, domainSize, nCols_0)];
+    gl64_t s1_108 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 48, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 48, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_108; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 109: dim3x3 mul
     gl64_t s1_109_0 = *(gl64_t*)&expressions_params[13][0];
@@ -863,7 +863,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA109 + kC109) - kE109) - kE109) - kD109);
     tmp3_2 = kB109 - kG109;
     // Op 110: dim3x1 add
-    gl64_t s1_110 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 46, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 46, domainSize, nCols_0)];
+    gl64_t s1_110 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 47, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 47, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_110; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 111: dim3x3 mul
     gl64_t s1_111_0 = *(gl64_t*)&expressions_params[13][0];
@@ -880,7 +880,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA111 + kC111) - kE111) - kE111) - kD111);
     tmp3_2 = kB111 - kG111;
     // Op 112: dim3x1 add
-    gl64_t s1_112 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 45, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 45, domainSize, nCols_0)];
+    gl64_t s1_112 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 46, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 46, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_112; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 113: dim3x3 mul
     gl64_t s1_113_0 = *(gl64_t*)&expressions_params[13][0];
@@ -897,7 +897,7 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_1 = ((((kA113 + kC113) - kE113) - kE113) - kD113);
     tmp3_2 = kB113 - kG113;
     // Op 114: dim3x1 add
-    gl64_t s1_114 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 44, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 44, domainSize, nCols_0)];
+    gl64_t s1_114 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 45, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 45, domainSize, nCols_0)];
     tmp3_0 = tmp3_0 + s1_114; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 115: dim3x3 mul
     gl64_t s1_115_0 = *(gl64_t*)&expressions_params[13][0];
@@ -915,162 +915,306 @@ __device__ __forceinline__ void eval_expr_22e7bf00(
     tmp3_2 = kB115 - kG115;
     // Op 116: dim3x1 add
     gl64_t s1_116 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 7, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 7, domainSize, nCols_0)];
-    tmp3_0 = tmp3_0 + s1_116; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    tmp3_9 = tmp3_0 + s1_116; tmp3_10 = tmp3_1; tmp3_11 = tmp3_2;
     // Op 117: dim3x3 add
     gl64_t s1_117_0 = *(gl64_t*)&expressions_params[13][3];
     gl64_t s1_117_1 = *(gl64_t*)&expressions_params[13][3+1];
     gl64_t s1_117_2 = *(gl64_t*)&expressions_params[13][3+2];
-    tmp3_0 = tmp3_0 + s1_117_0; tmp3_1 = tmp3_1 + s1_117_1; tmp3_2 = tmp3_2 + s1_117_2;
-    // Op 118: dim3x3 mul
-    uint64_t s0_118_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 12, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 12, domainSize, nCols_2));
-    gl64_t s0_118_0 = *(gl64_t*)&dParams->aux_trace[s0_118_pos];
-    gl64_t s0_118_1 = *(gl64_t*)&dParams->aux_trace[s0_118_pos + TILE_HEIGHT];
-    gl64_t s0_118_2 = *(gl64_t*)&dParams->aux_trace[s0_118_pos + 2*TILE_HEIGHT];
-    gl64_t kA118 = (s0_118_0 + s0_118_1) * (tmp3_0 + tmp3_1);
-    gl64_t kB118 = (s0_118_0 + s0_118_2) * (tmp3_0 + tmp3_2);
-    gl64_t kC118 = (s0_118_1 + s0_118_2) * (tmp3_1 + tmp3_2);
-    gl64_t kD118 = s0_118_0 * tmp3_0;
-    gl64_t kE118 = s0_118_1 * tmp3_1;
-    gl64_t kF118 = s0_118_2 * tmp3_2;
-    gl64_t kG118 = kD118 - kE118;
-    tmp3_0 = (kC118 + kG118) - kF118;
-    tmp3_1 = ((((kA118 + kC118) - kE118) - kE118) - kD118);
-    tmp3_2 = kB118 - kG118;
-    // Op 119: dim3x1 sub
-    gl64_t s1_119 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 7, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 7, domainSize, nCols_1))];
-    tmp3_0 = tmp3_0 - s1_119; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 120: dim3x3 add
-    tmp3_0 = tmp3_6 + tmp3_0; tmp3_1 = tmp3_7 + tmp3_1; tmp3_2 = tmp3_8 + tmp3_2;
-    // Op 121: dim3x3 mul
-    gl64_t s1_121_0 = *(gl64_t*)&expressions_params[13][6];
-    gl64_t s1_121_1 = *(gl64_t*)&expressions_params[13][6+1];
-    gl64_t s1_121_2 = *(gl64_t*)&expressions_params[13][6+2];
-    gl64_t kA121 = (tmp3_0 + tmp3_1) * (s1_121_0 + s1_121_1);
-    gl64_t kB121 = (tmp3_0 + tmp3_2) * (s1_121_0 + s1_121_2);
-    gl64_t kC121 = (tmp3_1 + tmp3_2) * (s1_121_1 + s1_121_2);
-    gl64_t kD121 = tmp3_0 * s1_121_0;
-    gl64_t kE121 = tmp3_1 * s1_121_1;
-    gl64_t kF121 = tmp3_2 * s1_121_2;
-    gl64_t kG121 = kD121 - kE121;
-    tmp3_3 = (kC121 + kG121) - kF121;
-    tmp3_4 = ((((kA121 + kC121) - kE121) - kE121) - kD121);
-    tmp3_5 = kB121 - kG121;
-    // Op 122: dim1x1 sub_swap
-    gl64_t s0_122 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 51, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 51, domainSize, nCols_0)];
-    gl64_t s1_122 = *(gl64_t*)&expressions_params[9][0];
-    tmp1_0 = s1_122 - s0_122;
-    // Op 123: dim3x1 mul
-    uint64_t s0_123_pos = dExpsArgs->mapOffsetsExps[2] + (false ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_2) : getBufferOffset(logicalRow_0, 0, domainSize, nCols_2));
-    gl64_t s0_123_0 = *(gl64_t*)&dParams->aux_trace[s0_123_pos];
-    gl64_t s0_123_1 = *(gl64_t*)&dParams->aux_trace[s0_123_pos + TILE_HEIGHT];
-    gl64_t s0_123_2 = *(gl64_t*)&dParams->aux_trace[s0_123_pos + 2*TILE_HEIGHT];
-    tmp3_0 = s0_123_0 * tmp1_0; tmp3_1 = s0_123_1 * tmp1_0; tmp3_2 = s0_123_2 * tmp1_0;
-    // Op 124: dim3x3 sub
-    uint64_t s0_124_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_2));
-    gl64_t s0_124_0 = *(gl64_t*)&dParams->aux_trace[s0_124_pos];
-    gl64_t s0_124_1 = *(gl64_t*)&dParams->aux_trace[s0_124_pos + TILE_HEIGHT];
-    gl64_t s0_124_2 = *(gl64_t*)&dParams->aux_trace[s0_124_pos + 2*TILE_HEIGHT];
-    tmp3_6 = s0_124_0 - tmp3_0; tmp3_7 = s0_124_1 - tmp3_1; tmp3_8 = s0_124_2 - tmp3_2;
-    // Op 125: dim3x3 add
-    gl64_t s0_125_0 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3+0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 3+0, domainSize, nCols_2))];
-    gl64_t s0_125_1 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3+1, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 3+1, domainSize, nCols_2))];
-    gl64_t s0_125_2 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3+2, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 3+2, domainSize, nCols_2))];
-    gl64_t s1_125_0 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 6+0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 6+0, domainSize, nCols_2))];
-    gl64_t s1_125_1 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 6+1, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 6+1, domainSize, nCols_2))];
-    gl64_t s1_125_2 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 6+2, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 6+2, domainSize, nCols_2))];
-    tmp3_0 = s0_125_0 + s1_125_0; tmp3_1 = s0_125_1 + s1_125_1; tmp3_2 = s0_125_2 + s1_125_2;
-    // Op 126: dim3x3 add
-    uint64_t s0_126_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 9, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 9, domainSize, nCols_2));
-    gl64_t s0_126_0 = *(gl64_t*)&dParams->aux_trace[s0_126_pos];
-    gl64_t s0_126_1 = *(gl64_t*)&dParams->aux_trace[s0_126_pos + TILE_HEIGHT];
-    gl64_t s0_126_2 = *(gl64_t*)&dParams->aux_trace[s0_126_pos + 2*TILE_HEIGHT];
-    tmp3_0 = s0_126_0 + tmp3_0; tmp3_1 = s0_126_1 + tmp3_1; tmp3_2 = s0_126_2 + tmp3_2;
-    // Op 127: dim3x3 add
-    uint64_t s0_127_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 12, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 12, domainSize, nCols_2));
-    gl64_t s0_127_0 = *(gl64_t*)&dParams->aux_trace[s0_127_pos];
-    gl64_t s0_127_1 = *(gl64_t*)&dParams->aux_trace[s0_127_pos + TILE_HEIGHT];
-    gl64_t s0_127_2 = *(gl64_t*)&dParams->aux_trace[s0_127_pos + 2*TILE_HEIGHT];
-    tmp3_0 = s0_127_0 + tmp3_0; tmp3_1 = s0_127_1 + tmp3_1; tmp3_2 = s0_127_2 + tmp3_2;
-    // Op 128: dim3x3 sub
-    tmp3_6 = tmp3_6 - tmp3_0; tmp3_7 = tmp3_7 - tmp3_1; tmp3_8 = tmp3_8 - tmp3_2;
-    // Op 129: dim3x1 mul
-    gl64_t s0_129_0 = *(gl64_t*)&expressions_params[13][0];
-    gl64_t s0_129_1 = *(gl64_t*)&expressions_params[13][0+1];
-    gl64_t s0_129_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t s1_129 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 9, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 9, domainSize, nCols_0)];
-    tmp3_0 = s0_129_0 * s1_129; tmp3_1 = s0_129_1 * s1_129; tmp3_2 = s0_129_2 * s1_129;
-    // Op 130: dim3x1 add
-    gl64_t s1_130 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 8, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 8, domainSize, nCols_0)];
-    tmp3_0 = tmp3_0 + s1_130; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 131: dim3x3 mul
-    gl64_t s1_131_0 = *(gl64_t*)&expressions_params[13][0];
-    gl64_t s1_131_1 = *(gl64_t*)&expressions_params[13][0+1];
-    gl64_t s1_131_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t kA131 = (tmp3_0 + tmp3_1) * (s1_131_0 + s1_131_1);
-    gl64_t kB131 = (tmp3_0 + tmp3_2) * (s1_131_0 + s1_131_2);
-    gl64_t kC131 = (tmp3_1 + tmp3_2) * (s1_131_1 + s1_131_2);
-    gl64_t kD131 = tmp3_0 * s1_131_0;
-    gl64_t kE131 = tmp3_1 * s1_131_1;
-    gl64_t kF131 = tmp3_2 * s1_131_2;
-    gl64_t kG131 = kD131 - kE131;
-    tmp3_0 = (kC131 + kG131) - kF131;
-    tmp3_1 = ((((kA131 + kC131) - kE131) - kE131) - kD131);
-    tmp3_2 = kB131 - kG131;
-    // Op 132: dim3x1 add
-    gl64_t s1_132 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_0)];
-    tmp3_0 = tmp3_0 + s1_132; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 133: dim3x3 add
-    gl64_t s1_133_0 = *(gl64_t*)&expressions_params[13][3];
-    gl64_t s1_133_1 = *(gl64_t*)&expressions_params[13][3+1];
-    gl64_t s1_133_2 = *(gl64_t*)&expressions_params[13][3+2];
-    tmp3_0 = tmp3_0 + s1_133_0; tmp3_1 = tmp3_1 + s1_133_1; tmp3_2 = tmp3_2 + s1_133_2;
+    tmp3_6 = tmp3_9 + s1_117_0; tmp3_7 = tmp3_10 + s1_117_1; tmp3_8 = tmp3_11 + s1_117_2;
+    // Op 118: dim3x1 mul
+    gl64_t s0_118_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s0_118_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s0_118_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t s1_118 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 58, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 58, domainSize, nCols_0)];
+    tmp3_0 = s0_118_0 * s1_118; tmp3_1 = s0_118_1 * s1_118; tmp3_2 = s0_118_2 * s1_118;
+    // Op 119: dim3x1 add
+    gl64_t s1_119 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 57, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 57, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 + s1_119; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 120: dim3x3 mul
+    gl64_t s1_120_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_120_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_120_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA120 = (tmp3_0 + tmp3_1) * (s1_120_0 + s1_120_1);
+    gl64_t kB120 = (tmp3_0 + tmp3_2) * (s1_120_0 + s1_120_2);
+    gl64_t kC120 = (tmp3_1 + tmp3_2) * (s1_120_1 + s1_120_2);
+    gl64_t kD120 = tmp3_0 * s1_120_0;
+    gl64_t kE120 = tmp3_1 * s1_120_1;
+    gl64_t kF120 = tmp3_2 * s1_120_2;
+    gl64_t kG120 = kD120 - kE120;
+    tmp3_0 = (kC120 + kG120) - kF120;
+    tmp3_1 = ((((kA120 + kC120) - kE120) - kE120) - kD120);
+    tmp3_2 = kB120 - kG120;
+    // Op 121: dim3x1 add
+    gl64_t s1_121 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 56, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 56, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 + s1_121; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 122: dim3x3 mul
+    gl64_t s1_122_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_122_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_122_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA122 = (tmp3_0 + tmp3_1) * (s1_122_0 + s1_122_1);
+    gl64_t kB122 = (tmp3_0 + tmp3_2) * (s1_122_0 + s1_122_2);
+    gl64_t kC122 = (tmp3_1 + tmp3_2) * (s1_122_1 + s1_122_2);
+    gl64_t kD122 = tmp3_0 * s1_122_0;
+    gl64_t kE122 = tmp3_1 * s1_122_1;
+    gl64_t kF122 = tmp3_2 * s1_122_2;
+    gl64_t kG122 = kD122 - kE122;
+    tmp3_0 = (kC122 + kG122) - kF122;
+    tmp3_1 = ((((kA122 + kC122) - kE122) - kE122) - kD122);
+    tmp3_2 = kB122 - kG122;
+    // Op 123: dim3x1 add
+    gl64_t s1_123 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 55, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 55, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 + s1_123; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 124: dim3x3 mul
+    gl64_t s1_124_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_124_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_124_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA124 = (tmp3_0 + tmp3_1) * (s1_124_0 + s1_124_1);
+    gl64_t kB124 = (tmp3_0 + tmp3_2) * (s1_124_0 + s1_124_2);
+    gl64_t kC124 = (tmp3_1 + tmp3_2) * (s1_124_1 + s1_124_2);
+    gl64_t kD124 = tmp3_0 * s1_124_0;
+    gl64_t kE124 = tmp3_1 * s1_124_1;
+    gl64_t kF124 = tmp3_2 * s1_124_2;
+    gl64_t kG124 = kD124 - kE124;
+    tmp3_0 = (kC124 + kG124) - kF124;
+    tmp3_1 = ((((kA124 + kC124) - kE124) - kE124) - kD124);
+    tmp3_2 = kB124 - kG124;
+    // Op 125: dim3x1 add
+    gl64_t s1_125 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 54, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 54, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 + s1_125; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 126: dim3x3 mul
+    gl64_t s1_126_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_126_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_126_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA126 = (tmp3_0 + tmp3_1) * (s1_126_0 + s1_126_1);
+    gl64_t kB126 = (tmp3_0 + tmp3_2) * (s1_126_0 + s1_126_2);
+    gl64_t kC126 = (tmp3_1 + tmp3_2) * (s1_126_1 + s1_126_2);
+    gl64_t kD126 = tmp3_0 * s1_126_0;
+    gl64_t kE126 = tmp3_1 * s1_126_1;
+    gl64_t kF126 = tmp3_2 * s1_126_2;
+    gl64_t kG126 = kD126 - kE126;
+    tmp3_0 = (kC126 + kG126) - kF126;
+    tmp3_1 = ((((kA126 + kC126) - kE126) - kE126) - kD126);
+    tmp3_2 = kB126 - kG126;
+    // Op 127: dim3x1 add
+    gl64_t s1_127 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 53, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 53, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 + s1_127; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 128: dim3x3 mul
+    gl64_t s1_128_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_128_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_128_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA128 = (tmp3_0 + tmp3_1) * (s1_128_0 + s1_128_1);
+    gl64_t kB128 = (tmp3_0 + tmp3_2) * (s1_128_0 + s1_128_2);
+    gl64_t kC128 = (tmp3_1 + tmp3_2) * (s1_128_1 + s1_128_2);
+    gl64_t kD128 = tmp3_0 * s1_128_0;
+    gl64_t kE128 = tmp3_1 * s1_128_1;
+    gl64_t kF128 = tmp3_2 * s1_128_2;
+    gl64_t kG128 = kD128 - kE128;
+    tmp3_0 = (kC128 + kG128) - kF128;
+    tmp3_1 = ((((kA128 + kC128) - kE128) - kE128) - kD128);
+    tmp3_2 = kB128 - kG128;
+    // Op 129: dim3x1 add
+    gl64_t s1_129 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 52, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 52, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 + s1_129; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 130: dim3x3 mul
+    gl64_t s1_130_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_130_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_130_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA130 = (tmp3_0 + tmp3_1) * (s1_130_0 + s1_130_1);
+    gl64_t kB130 = (tmp3_0 + tmp3_2) * (s1_130_0 + s1_130_2);
+    gl64_t kC130 = (tmp3_1 + tmp3_2) * (s1_130_1 + s1_130_2);
+    gl64_t kD130 = tmp3_0 * s1_130_0;
+    gl64_t kE130 = tmp3_1 * s1_130_1;
+    gl64_t kF130 = tmp3_2 * s1_130_2;
+    gl64_t kG130 = kD130 - kE130;
+    tmp3_0 = (kC130 + kG130) - kF130;
+    tmp3_1 = ((((kA130 + kC130) - kE130) - kE130) - kD130);
+    tmp3_2 = kB130 - kG130;
+    // Op 131: dim3x1 add
+    gl64_t s1_131 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 8, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 8, domainSize, nCols_0)];
+    tmp3_3 = tmp3_0 + s1_131; tmp3_4 = tmp3_1; tmp3_5 = tmp3_2;
+    // Op 132: dim3x3 add
+    gl64_t s1_132_0 = *(gl64_t*)&expressions_params[13][3];
+    gl64_t s1_132_1 = *(gl64_t*)&expressions_params[13][3+1];
+    gl64_t s1_132_2 = *(gl64_t*)&expressions_params[13][3+2];
+    tmp3_0 = tmp3_3 + s1_132_0; tmp3_1 = tmp3_4 + s1_132_1; tmp3_2 = tmp3_5 + s1_132_2;
+    // Op 133: dim3x3 mul
+    gl64_t kA133 = (tmp3_6 + tmp3_7) * (tmp3_0 + tmp3_1);
+    gl64_t kB133 = (tmp3_6 + tmp3_8) * (tmp3_0 + tmp3_2);
+    gl64_t kC133 = (tmp3_7 + tmp3_8) * (tmp3_1 + tmp3_2);
+    gl64_t kD133 = tmp3_6 * tmp3_0;
+    gl64_t kE133 = tmp3_7 * tmp3_1;
+    gl64_t kF133 = tmp3_8 * tmp3_2;
+    gl64_t kG133 = kD133 - kE133;
+    tmp3_0 = (kC133 + kG133) - kF133;
+    tmp3_1 = ((((kA133 + kC133) - kE133) - kE133) - kD133);
+    tmp3_2 = kB133 - kG133;
     // Op 134: dim3x3 mul
-    gl64_t kA134 = (tmp3_6 + tmp3_7) * (tmp3_0 + tmp3_1);
-    gl64_t kB134 = (tmp3_6 + tmp3_8) * (tmp3_0 + tmp3_2);
-    gl64_t kC134 = (tmp3_7 + tmp3_8) * (tmp3_1 + tmp3_2);
-    gl64_t kD134 = tmp3_6 * tmp3_0;
-    gl64_t kE134 = tmp3_7 * tmp3_1;
-    gl64_t kF134 = tmp3_8 * tmp3_2;
+    uint64_t s0_134_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 12, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 12, domainSize, nCols_2));
+    gl64_t s0_134_0 = *(gl64_t*)&dParams->aux_trace[s0_134_pos];
+    gl64_t s0_134_1 = *(gl64_t*)&dParams->aux_trace[s0_134_pos + TILE_HEIGHT];
+    gl64_t s0_134_2 = *(gl64_t*)&dParams->aux_trace[s0_134_pos + 2*TILE_HEIGHT];
+    gl64_t kA134 = (s0_134_0 + s0_134_1) * (tmp3_0 + tmp3_1);
+    gl64_t kB134 = (s0_134_0 + s0_134_2) * (tmp3_0 + tmp3_2);
+    gl64_t kC134 = (s0_134_1 + s0_134_2) * (tmp3_1 + tmp3_2);
+    gl64_t kD134 = s0_134_0 * tmp3_0;
+    gl64_t kE134 = s0_134_1 * tmp3_1;
+    gl64_t kF134 = s0_134_2 * tmp3_2;
     gl64_t kG134 = kD134 - kE134;
     tmp3_0 = (kC134 + kG134) - kF134;
     tmp3_1 = ((((kA134 + kC134) - kE134) - kE134) - kD134);
     tmp3_2 = kB134 - kG134;
-    // Op 135: dim3x1 sub
-    gl64_t s1_135 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_1))];
-    tmp3_0 = tmp3_0 - s1_135; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 136: dim3x3 add
+    // Op 135: dim3x3 add
+    gl64_t s1_135_0 = *(gl64_t*)&expressions_params[13][3];
+    gl64_t s1_135_1 = *(gl64_t*)&expressions_params[13][3+1];
+    gl64_t s1_135_2 = *(gl64_t*)&expressions_params[13][3+2];
+    tmp3_3 = tmp3_3 + s1_135_0; tmp3_4 = tmp3_4 + s1_135_1; tmp3_5 = tmp3_5 + s1_135_2;
+    // Op 136: dim3x1 mul
+    gl64_t s1_136 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 7, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 7, domainSize, nCols_1))];
+    tmp3_3 = tmp3_3 * s1_136; tmp3_4 = tmp3_4 * s1_136; tmp3_5 = tmp3_5 * s1_136;
+    // Op 137: dim3x3 add
+    gl64_t s1_137_0 = *(gl64_t*)&expressions_params[13][3];
+    gl64_t s1_137_1 = *(gl64_t*)&expressions_params[13][3+1];
+    gl64_t s1_137_2 = *(gl64_t*)&expressions_params[13][3+2];
+    tmp3_9 = tmp3_9 + s1_137_0; tmp3_10 = tmp3_10 + s1_137_1; tmp3_11 = tmp3_11 + s1_137_2;
+    // Op 138: dim3x1 mul
+    gl64_t s1_138 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 8, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 8, domainSize, nCols_1))];
+    tmp3_9 = tmp3_9 * s1_138; tmp3_10 = tmp3_10 * s1_138; tmp3_11 = tmp3_11 * s1_138;
+    // Op 139: dim3x3 add
+    tmp3_3 = tmp3_3 + tmp3_9; tmp3_4 = tmp3_4 + tmp3_10; tmp3_5 = tmp3_5 + tmp3_11;
+    // Op 140: dim3x3 sub
+    tmp3_0 = tmp3_0 - tmp3_3; tmp3_1 = tmp3_1 - tmp3_4; tmp3_2 = tmp3_2 - tmp3_5;
+    // Op 141: dim3x3 add
+    tmp3_0 = tmp3_12 + tmp3_0; tmp3_1 = tmp3_13 + tmp3_1; tmp3_2 = tmp3_14 + tmp3_2;
+    // Op 142: dim3x3 mul
+    gl64_t s1_142_0 = *(gl64_t*)&expressions_params[13][6];
+    gl64_t s1_142_1 = *(gl64_t*)&expressions_params[13][6+1];
+    gl64_t s1_142_2 = *(gl64_t*)&expressions_params[13][6+2];
+    gl64_t kA142 = (tmp3_0 + tmp3_1) * (s1_142_0 + s1_142_1);
+    gl64_t kB142 = (tmp3_0 + tmp3_2) * (s1_142_0 + s1_142_2);
+    gl64_t kC142 = (tmp3_1 + tmp3_2) * (s1_142_1 + s1_142_2);
+    gl64_t kD142 = tmp3_0 * s1_142_0;
+    gl64_t kE142 = tmp3_1 * s1_142_1;
+    gl64_t kF142 = tmp3_2 * s1_142_2;
+    gl64_t kG142 = kD142 - kE142;
+    tmp3_3 = (kC142 + kG142) - kF142;
+    tmp3_4 = ((((kA142 + kC142) - kE142) - kE142) - kD142);
+    tmp3_5 = kB142 - kG142;
+    // Op 143: dim1x1 sub_swap
+    gl64_t s0_143 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 59, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 59, domainSize, nCols_0)];
+    gl64_t s1_143 = *(gl64_t*)&expressions_params[9][0];
+    tmp1_0 = s1_143 - s0_143;
+    // Op 144: dim3x1 mul
+    uint64_t s0_144_pos = dExpsArgs->mapOffsetsExps[2] + (false ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_2) : getBufferOffset(logicalRow_0, 0, domainSize, nCols_2));
+    gl64_t s0_144_0 = *(gl64_t*)&dParams->aux_trace[s0_144_pos];
+    gl64_t s0_144_1 = *(gl64_t*)&dParams->aux_trace[s0_144_pos + TILE_HEIGHT];
+    gl64_t s0_144_2 = *(gl64_t*)&dParams->aux_trace[s0_144_pos + 2*TILE_HEIGHT];
+    tmp3_0 = s0_144_0 * tmp1_0; tmp3_1 = s0_144_1 * tmp1_0; tmp3_2 = s0_144_2 * tmp1_0;
+    // Op 145: dim3x3 sub
+    uint64_t s0_145_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_2));
+    gl64_t s0_145_0 = *(gl64_t*)&dParams->aux_trace[s0_145_pos];
+    gl64_t s0_145_1 = *(gl64_t*)&dParams->aux_trace[s0_145_pos + TILE_HEIGHT];
+    gl64_t s0_145_2 = *(gl64_t*)&dParams->aux_trace[s0_145_pos + 2*TILE_HEIGHT];
+    tmp3_12 = s0_145_0 - tmp3_0; tmp3_13 = s0_145_1 - tmp3_1; tmp3_14 = s0_145_2 - tmp3_2;
+    // Op 146: dim3x3 add
+    gl64_t s0_146_0 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3+0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 3+0, domainSize, nCols_2))];
+    gl64_t s0_146_1 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3+1, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 3+1, domainSize, nCols_2))];
+    gl64_t s0_146_2 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3+2, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 3+2, domainSize, nCols_2))];
+    gl64_t s1_146_0 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 6+0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 6+0, domainSize, nCols_2))];
+    gl64_t s1_146_1 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 6+1, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 6+1, domainSize, nCols_2))];
+    gl64_t s1_146_2 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 6+2, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 6+2, domainSize, nCols_2))];
+    tmp3_0 = s0_146_0 + s1_146_0; tmp3_1 = s0_146_1 + s1_146_1; tmp3_2 = s0_146_2 + s1_146_2;
+    // Op 147: dim3x3 add
+    uint64_t s0_147_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 9, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 9, domainSize, nCols_2));
+    gl64_t s0_147_0 = *(gl64_t*)&dParams->aux_trace[s0_147_pos];
+    gl64_t s0_147_1 = *(gl64_t*)&dParams->aux_trace[s0_147_pos + TILE_HEIGHT];
+    gl64_t s0_147_2 = *(gl64_t*)&dParams->aux_trace[s0_147_pos + 2*TILE_HEIGHT];
+    tmp3_0 = s0_147_0 + tmp3_0; tmp3_1 = s0_147_1 + tmp3_1; tmp3_2 = s0_147_2 + tmp3_2;
+    // Op 148: dim3x3 add
+    uint64_t s0_148_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 12, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 12, domainSize, nCols_2));
+    gl64_t s0_148_0 = *(gl64_t*)&dParams->aux_trace[s0_148_pos];
+    gl64_t s0_148_1 = *(gl64_t*)&dParams->aux_trace[s0_148_pos + TILE_HEIGHT];
+    gl64_t s0_148_2 = *(gl64_t*)&dParams->aux_trace[s0_148_pos + 2*TILE_HEIGHT];
+    tmp3_0 = s0_148_0 + tmp3_0; tmp3_1 = s0_148_1 + tmp3_1; tmp3_2 = s0_148_2 + tmp3_2;
+    // Op 149: dim3x3 sub
+    tmp3_12 = tmp3_12 - tmp3_0; tmp3_13 = tmp3_13 - tmp3_1; tmp3_14 = tmp3_14 - tmp3_2;
+    // Op 150: dim3x1 mul
+    gl64_t s0_150_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s0_150_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s0_150_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t s1_150 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 10, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 10, domainSize, nCols_0)];
+    tmp3_0 = s0_150_0 * s1_150; tmp3_1 = s0_150_1 * s1_150; tmp3_2 = s0_150_2 * s1_150;
+    // Op 151: dim3x1 add
+    gl64_t s1_151 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 9, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 9, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 + s1_151; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 152: dim3x3 mul
+    gl64_t s1_152_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_152_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_152_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA152 = (tmp3_0 + tmp3_1) * (s1_152_0 + s1_152_1);
+    gl64_t kB152 = (tmp3_0 + tmp3_2) * (s1_152_0 + s1_152_2);
+    gl64_t kC152 = (tmp3_1 + tmp3_2) * (s1_152_1 + s1_152_2);
+    gl64_t kD152 = tmp3_0 * s1_152_0;
+    gl64_t kE152 = tmp3_1 * s1_152_1;
+    gl64_t kF152 = tmp3_2 * s1_152_2;
+    gl64_t kG152 = kD152 - kE152;
+    tmp3_0 = (kC152 + kG152) - kF152;
+    tmp3_1 = ((((kA152 + kC152) - kE152) - kE152) - kD152);
+    tmp3_2 = kB152 - kG152;
+    // Op 153: dim3x1 add
+    gl64_t s1_153 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 + s1_153; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 154: dim3x3 add
+    gl64_t s1_154_0 = *(gl64_t*)&expressions_params[13][3];
+    gl64_t s1_154_1 = *(gl64_t*)&expressions_params[13][3+1];
+    gl64_t s1_154_2 = *(gl64_t*)&expressions_params[13][3+2];
+    tmp3_0 = tmp3_0 + s1_154_0; tmp3_1 = tmp3_1 + s1_154_1; tmp3_2 = tmp3_2 + s1_154_2;
+    // Op 155: dim3x3 mul
+    gl64_t kA155 = (tmp3_12 + tmp3_13) * (tmp3_0 + tmp3_1);
+    gl64_t kB155 = (tmp3_12 + tmp3_14) * (tmp3_0 + tmp3_2);
+    gl64_t kC155 = (tmp3_13 + tmp3_14) * (tmp3_1 + tmp3_2);
+    gl64_t kD155 = tmp3_12 * tmp3_0;
+    gl64_t kE155 = tmp3_13 * tmp3_1;
+    gl64_t kF155 = tmp3_14 * tmp3_2;
+    gl64_t kG155 = kD155 - kE155;
+    tmp3_0 = (kC155 + kG155) - kF155;
+    tmp3_1 = ((((kA155 + kC155) - kE155) - kE155) - kD155);
+    tmp3_2 = kB155 - kG155;
+    // Op 156: dim3x1 sub
+    gl64_t s1_156 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_1))];
+    tmp3_0 = tmp3_0 - s1_156; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 157: dim3x3 add
     tmp3_0 = tmp3_3 + tmp3_0; tmp3_1 = tmp3_4 + tmp3_1; tmp3_2 = tmp3_5 + tmp3_2;
-    // Op 137: dim3x3 mul
-    gl64_t s1_137_0 = *(gl64_t*)&expressions_params[13][6];
-    gl64_t s1_137_1 = *(gl64_t*)&expressions_params[13][6+1];
-    gl64_t s1_137_2 = *(gl64_t*)&expressions_params[13][6+2];
-    gl64_t kA137 = (tmp3_0 + tmp3_1) * (s1_137_0 + s1_137_1);
-    gl64_t kB137 = (tmp3_0 + tmp3_2) * (s1_137_0 + s1_137_2);
-    gl64_t kC137 = (tmp3_1 + tmp3_2) * (s1_137_1 + s1_137_2);
-    gl64_t kD137 = tmp3_0 * s1_137_0;
-    gl64_t kE137 = tmp3_1 * s1_137_1;
-    gl64_t kF137 = tmp3_2 * s1_137_2;
-    gl64_t kG137 = kD137 - kE137;
-    tmp3_3 = (kC137 + kG137) - kF137;
-    tmp3_4 = ((((kA137 + kC137) - kE137) - kE137) - kD137);
-    tmp3_5 = kB137 - kG137;
-    // Op 138: dim3x3 sub_swap
-    uint64_t s0_138_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_2));
-    gl64_t s0_138_0 = *(gl64_t*)&dParams->aux_trace[s0_138_pos];
-    gl64_t s0_138_1 = *(gl64_t*)&dParams->aux_trace[s0_138_pos + TILE_HEIGHT];
-    gl64_t s0_138_2 = *(gl64_t*)&dParams->aux_trace[s0_138_pos + 2*TILE_HEIGHT];
-    gl64_t s1_138_0 = *(gl64_t*)&expressions_params[12][0];
-    gl64_t s1_138_1 = *(gl64_t*)&expressions_params[12][0+1];
-    gl64_t s1_138_2 = *(gl64_t*)&expressions_params[12][0+2];
-    tmp3_0 = s1_138_0 - s0_138_0; tmp3_1 = s1_138_1 - s0_138_1; tmp3_2 = s1_138_2 - s0_138_2;
-    // Op 139: dim3x1 mul
-    gl64_t s1_139 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[false ? getBufferOffset_pack256(chunkBase, 51, domainSize, nCols_0) : getBufferOffset(logicalRow_2, 51, domainSize, nCols_0)];
-    tmp3_0 = tmp3_0 * s1_139; tmp3_1 = tmp3_1 * s1_139; tmp3_2 = tmp3_2 * s1_139;
-    // Op 140: dim3x3 add
+    // Op 158: dim3x3 mul
+    gl64_t s1_158_0 = *(gl64_t*)&expressions_params[13][6];
+    gl64_t s1_158_1 = *(gl64_t*)&expressions_params[13][6+1];
+    gl64_t s1_158_2 = *(gl64_t*)&expressions_params[13][6+2];
+    gl64_t kA158 = (tmp3_0 + tmp3_1) * (s1_158_0 + s1_158_1);
+    gl64_t kB158 = (tmp3_0 + tmp3_2) * (s1_158_0 + s1_158_2);
+    gl64_t kC158 = (tmp3_1 + tmp3_2) * (s1_158_1 + s1_158_2);
+    gl64_t kD158 = tmp3_0 * s1_158_0;
+    gl64_t kE158 = tmp3_1 * s1_158_1;
+    gl64_t kF158 = tmp3_2 * s1_158_2;
+    gl64_t kG158 = kD158 - kE158;
+    tmp3_3 = (kC158 + kG158) - kF158;
+    tmp3_4 = ((((kA158 + kC158) - kE158) - kE158) - kD158);
+    tmp3_5 = kB158 - kG158;
+    // Op 159: dim3x3 sub_swap
+    uint64_t s0_159_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_2));
+    gl64_t s0_159_0 = *(gl64_t*)&dParams->aux_trace[s0_159_pos];
+    gl64_t s0_159_1 = *(gl64_t*)&dParams->aux_trace[s0_159_pos + TILE_HEIGHT];
+    gl64_t s0_159_2 = *(gl64_t*)&dParams->aux_trace[s0_159_pos + 2*TILE_HEIGHT];
+    gl64_t s1_159_0 = *(gl64_t*)&expressions_params[12][0];
+    gl64_t s1_159_1 = *(gl64_t*)&expressions_params[12][0+1];
+    gl64_t s1_159_2 = *(gl64_t*)&expressions_params[12][0+2];
+    tmp3_0 = s1_159_0 - s0_159_0; tmp3_1 = s1_159_1 - s0_159_1; tmp3_2 = s1_159_2 - s0_159_2;
+    // Op 160: dim3x1 mul
+    gl64_t s1_160 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[false ? getBufferOffset_pack256(chunkBase, 59, domainSize, nCols_0) : getBufferOffset(logicalRow_2, 59, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 * s1_160; tmp3_1 = tmp3_1 * s1_160; tmp3_2 = tmp3_2 * s1_160;
+    // Op 161: dim3x3 add
     tmp3_0 = tmp3_3 + tmp3_0; tmp3_1 = tmp3_4 + tmp3_1; tmp3_2 = tmp3_5 + tmp3_2;
-    // Op 141: dim3x1 mul
-    gl64_t s1_141 = *(gl64_t*)&dParams->aux_trace[dArgs->zi_offset + (1 - 1) * domainSize + row + threadIdx.x];
-    tmp3_0 = tmp3_0 * s1_141; tmp3_1 = tmp3_1 * s1_141; tmp3_2 = tmp3_2 * s1_141;
+    // Op 162: dim3x1 mul
+    gl64_t s1_162 = *(gl64_t*)&dParams->aux_trace[dArgs->zi_offset + (1 - 1) * domainSize + row + threadIdx.x];
+    tmp3_0 = tmp3_0 * s1_162; tmp3_1 = tmp3_1 * s1_162; tmp3_2 = tmp3_2 * s1_162;
 
     // Write final result to shared memory and store to output
     *(gl64_t*)&expressions_params[bufferCommitsSize + 1][0 * blockDim.x + threadIdx.x] = tmp3_0;

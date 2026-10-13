@@ -1,11 +1,11 @@
 // Auto-generated kernel declarations for host-side dispatch
 // Each kernel is compiled in its own .cu file for optimal register allocation
 
-// expId=1048 nOps=827 nTemp1=5 nTemp3=5
-__global__ void computeExpression_gen_1048_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
-
 // expId=1056 nOps=775 nTemp1=4 nTemp3=5
 __global__ void computeExpression_gen_1056_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+
+// expId=1063 nOps=842 nTemp1=5 nTemp3=5
+__global__ void computeExpression_gen_1063_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
 // expId=136 nOps=96 nTemp1=3 nTemp3=5
 __global__ void computeExpression_gen_136_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
@@ -16,26 +16,29 @@ __global__ void computeExpression_gen_1638_(StepsParams *d_params, DeviceArgumen
 // expId=186 nOps=146 nTemp1=4 nTemp3=5
 __global__ void computeExpression_gen_186_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
-// expId=212 nOps=171 nTemp1=3 nTemp3=3
-__global__ void computeExpression_gen_212_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+// expId=216 nOps=174 nTemp1=3 nTemp3=3
+__global__ void computeExpression_gen_216_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
-// expId=239 nOps=142 nTemp1=1 nTemp3=5
-__global__ void computeExpression_gen_239_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+// expId=261 nOps=205 nTemp1=5 nTemp3=5
+__global__ void computeExpression_gen_261_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
 // expId=265 nOps=206 nTemp1=5 nTemp3=5
 __global__ void computeExpression_gen_265_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
-// expId=2755 nOps=2017 nTemp1=5 nTemp3=5
-__global__ void computeExpression_gen_2755_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+// expId=275 nOps=163 nTemp1=1 nTemp3=5
+__global__ void computeExpression_gen_275_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+
+// expId=2758 nOps=2020 nTemp1=5 nTemp3=5
+__global__ void computeExpression_gen_2758_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
 // expId=302 nOps=184 nTemp1=1 nTemp3=5
 __global__ void computeExpression_gen_302_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
-// expId=319 nOps=245 nTemp1=5 nTemp3=5
-__global__ void computeExpression_gen_319_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+// expId=318 nOps=243 nTemp1=5 nTemp3=5
+__global__ void computeExpression_gen_318_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
-// expId=347 nOps=274 nTemp1=5 nTemp3=5
-__global__ void computeExpression_gen_347_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+// expId=380 nOps=298 nTemp1=5 nTemp3=5
+__global__ void computeExpression_gen_380_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
 // expId=4209 nOps=4210 nTemp1=55 nTemp3=5
 __global__ void computeExpression_gen_4209_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
@@ -58,11 +61,11 @@ __global__ void computeExpression_gen_5091_(StepsParams *d_params, DeviceArgumen
 // expId=51 nOps=36 nTemp1=1 nTemp3=2
 __global__ void computeExpression_gen_51_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
-// expId=614 nOps=523 nTemp1=4 nTemp3=5
-__global__ void computeExpression_gen_614_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+// expId=613 nOps=522 nTemp1=4 nTemp3=5
+__global__ void computeExpression_gen_613_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
-// expId=640 nOps=494 nTemp1=8 nTemp3=5
-__global__ void computeExpression_gen_640_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+// expId=662 nOps=511 nTemp1=9 nTemp3=5
+__global__ void computeExpression_gen_662_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
 
 // expId=716 nOps=514 nTemp1=5 nTemp3=5
 __global__ void computeExpression_gen_716_(StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
@@ -181,12 +184,12 @@ inline bool dispatchGeneratedKernel(uint64_t expId, const ParserParams &parserPa
     const int64_t *nextStrides, uint32_t nOpenings, dim3 nBlocks, dim3 nThreads, size_t sharedMem, cudaStream_t stream,
     StepsParams *d_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams) {
     switch (expId) {
-    case 1048:
-        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 1048, 827, 6616, 5, 5, 3, 0xca71e3c41721c1dcULL, 3, 0xec07e25ade40a49bULL)) return false;
-        computeExpression_gen_1048_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 1056:
         if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 1056, 775, 6200, 4, 5, 3, 0x68d8519a93fd451fULL, 3, 0xec07e25ade40a49bULL)) return false;
         computeExpression_gen_1056_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
+    case 1063:
+        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 1063, 842, 6736, 5, 5, 3, 0x028afd4bd69163beULL, 3, 0xec07e25ade40a49bULL)) return false;
+        computeExpression_gen_1063_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 136:
         if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 136, 96, 768, 3, 5, 3, 0x58bc23aeaa174017ULL, 3, 0xec07e25ade40a49bULL)) return false;
         computeExpression_gen_136_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
@@ -196,27 +199,30 @@ inline bool dispatchGeneratedKernel(uint64_t expId, const ParserParams &parserPa
     case 186:
         if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 186, 146, 1168, 4, 5, 3, 0xd87bccdbd44d939bULL, 3, 0xec07e25ade40a49bULL)) return false;
         computeExpression_gen_186_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
-    case 212:
-        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 212, 171, 1368, 3, 3, 3, 0x1c61e35bf8f12ec0ULL, 3, 0xec07e25ade40a49bULL)) return false;
-        computeExpression_gen_212_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
-    case 239:
-        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 239, 142, 1136, 1, 5, 3, 0xd90ac10c6e72c314ULL, 3, 0xec07e25ade40a49bULL)) return false;
-        computeExpression_gen_239_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
+    case 216:
+        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 216, 174, 1392, 3, 3, 3, 0x7d80ef0b6b3c5503ULL, 3, 0xec07e25ade40a49bULL)) return false;
+        computeExpression_gen_216_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
+    case 261:
+        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 261, 205, 1640, 5, 5, 3, 0x89f3e9c18b48f116ULL, 3, 0xec07e25ade40a49bULL)) return false;
+        computeExpression_gen_261_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 265:
         if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 265, 206, 1648, 5, 5, 3, 0x7f0c77649ec13c9dULL, 3, 0xec07e25ade40a49bULL)) return false;
         computeExpression_gen_265_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
-    case 2755:
-        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 2755, 2017, 16136, 5, 5, 3, 0xfaa6d8fe101c8785ULL, 3, 0xec07e25ade40a49bULL)) return false;
-        computeExpression_gen_2755_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
+    case 275:
+        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 275, 163, 1304, 1, 5, 3, 0x6738038da605a10aULL, 3, 0xec07e25ade40a49bULL)) return false;
+        computeExpression_gen_275_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
+    case 2758:
+        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 2758, 2020, 16160, 5, 5, 3, 0x97fc85cb549a9361ULL, 3, 0xec07e25ade40a49bULL)) return false;
+        computeExpression_gen_2758_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 302:
         if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 302, 184, 1472, 1, 5, 3, 0xc2ac2fbaa6e4216dULL, 3, 0xec07e25ade40a49bULL)) return false;
         computeExpression_gen_302_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
-    case 319:
-        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 319, 245, 1960, 5, 5, 3, 0x3b92f0c21a61f3f2ULL, 3, 0xec07e25ade40a49bULL)) return false;
-        computeExpression_gen_319_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
-    case 347:
-        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 347, 274, 2192, 5, 5, 3, 0xffa0b144cb1cd6d0ULL, 3, 0xec07e25ade40a49bULL)) return false;
-        computeExpression_gen_347_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
+    case 318:
+        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 318, 243, 1944, 5, 5, 3, 0x5a510da49927de2aULL, 3, 0xec07e25ade40a49bULL)) return false;
+        computeExpression_gen_318_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
+    case 380:
+        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 380, 298, 2384, 5, 5, 3, 0x45c051c127cd982aULL, 3, 0xec07e25ade40a49bULL)) return false;
+        computeExpression_gen_380_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 4209:
         if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 4209, 4210, 33680, 55, 5, 3, 0xaadb31e1389e1d39ULL, 4, 0x28798443ac9dd317ULL)) return false;
         computeExpression_gen_4209_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
@@ -238,12 +244,12 @@ inline bool dispatchGeneratedKernel(uint64_t expId, const ParserParams &parserPa
     case 51:
         if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 51, 36, 288, 1, 2, 3, 0x3c37df41bb764ae2ULL, 3, 0xec07e25ade40a49bULL)) return false;
         computeExpression_gen_51_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
-    case 614:
-        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 614, 523, 4184, 4, 5, 3, 0xcfe233a7c24dd144ULL, 3, 0xec07e25ade40a49bULL)) return false;
-        computeExpression_gen_614_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
-    case 640:
-        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 640, 494, 3952, 8, 5, 3, 0x9843db8919afcf4dULL, 3, 0xec07e25ade40a49bULL)) return false;
-        computeExpression_gen_640_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
+    case 613:
+        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 613, 522, 4176, 4, 5, 3, 0xa662b5557e3fb6d0ULL, 3, 0xec07e25ade40a49bULL)) return false;
+        computeExpression_gen_613_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
+    case 662:
+        if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 662, 511, 4088, 9, 5, 3, 0x70aff8336d26eba5ULL, 3, 0xec07e25ade40a49bULL)) return false;
+        computeExpression_gen_662_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;
     case 716:
         if (!venusGeneratedExprMatches(parserParams, ops, args, nextStrides, nOpenings, 716, 514, 4112, 5, 5, 3, 0xa875b81df3c68282ULL, 3, 0xec07e25ade40a49bULL)) return false;
         computeExpression_gen_716_<<<nBlocks, nThreads, sharedMem, stream>>>(d_params, d_deviceArgs, d_expsArgs, d_destParams); return true;

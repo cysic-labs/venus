@@ -1,13 +1,13 @@
 // Auto-generated expression evaluator - matches load__() semantics exactly
 // Q expressions: domainExtended=true always, type 1 goes through aux_trace
 
-// Fingerprint: 13b25f36  nOps=171 nTemp1=3 nTemp3=3
-#define GENERATED_EVAL_NOPS_13b25f36 171
-#define GENERATED_EVAL_NTEMP1_13b25f36 3
-#define GENERATED_EVAL_NTEMP3_13b25f36 3
+// Fingerprint: e85745d0  nOps=174 nTemp1=3 nTemp3=3
+#define GENERATED_EVAL_NOPS_e85745d0 174
+#define GENERATED_EVAL_NTEMP1_e85745d0 3
+#define GENERATED_EVAL_NTEMP3_e85745d0 3
 
 template<bool IsCyclic>
-__device__ __forceinline__ void eval_expr_13b25f36(
+__device__ __forceinline__ void eval_expr_e85745d0(
     const StepsParams* __restrict__ dParams,
     const DeviceArguments* __restrict__ dArgs,
     const ExpsArguments* __restrict__ dExpsArgs,
@@ -304,53 +304,54 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     tmp3_0 = (kC43 + kG43) - kF43;
     tmp3_1 = ((((kA43 + kC43) - kE43) - kE43) - kD43);
     tmp3_2 = kB43 - kG43;
-    // Op 44: dim1x1 sub_swap
-    gl64_t s0_44 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 3, domainSize, nCols_1))];
-    gl64_t s1_44 = *(gl64_t*)&expressions_params[9][0];
-    tmp1_1 = s1_44 - s0_44;
-    // Op 45: dim1x1 sub
-    gl64_t s0_45 = *(gl64_t*)&expressions_params[10][6];
-    gl64_t s1_45 = *(gl64_t*)&expressions_params[10][1];
-    tmp1_0 = s0_45 - s1_45;
-    // Op 46: dim1x1 sub_swap
-    gl64_t s0_46 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (false ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_1) : getBufferOffset(logicalRow_0, 0, domainSize, nCols_1))];
-    tmp1_0 = tmp1_0 - s0_46;
-    // Op 47: dim1x1 mul
-    gl64_t s0_47 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_0)];
-    tmp1_0 = s0_47 * tmp1_0;
-    // Op 48: dim1x1 add
-    gl64_t s0_48 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (false ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_1) : getBufferOffset(logicalRow_0, 0, domainSize, nCols_1))];
-    tmp1_2 = s0_48 + tmp1_0;
-    // Op 49: dim1x1 sub
-    gl64_t s0_49 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_1))];
-    tmp1_0 = s0_49 - tmp1_2;
-    // Op 50: dim1x1 mul
-    tmp1_0 = tmp1_1 * tmp1_0;
-    // Op 51: dim3x1 add
+    // Op 44: dim1x1 mul
+    gl64_t s0_44 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_0)];
+    gl64_t s1_44 = *(gl64_t*)&expressions_params[10][1];
+    tmp1_0 = s0_44 * s1_44;
+    // Op 45: dim1x1 sub_swap
+    gl64_t s0_45 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 3, domainSize, nCols_1))];
+    gl64_t s1_45 = *(gl64_t*)&expressions_params[9][0];
+    tmp1_1 = s1_45 - s0_45;
+    // Op 46: dim1x1 mul
+    tmp1_0 = tmp1_0 * tmp1_1;
+    // Op 47: dim3x1 add
     tmp3_0 = tmp3_0 + tmp1_0; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 52: dim3x3 mul
-    gl64_t s1_52_0 = *(gl64_t*)&expressions_params[13][6];
-    gl64_t s1_52_1 = *(gl64_t*)&expressions_params[13][6+1];
-    gl64_t s1_52_2 = *(gl64_t*)&expressions_params[13][6+2];
-    gl64_t kA52 = (tmp3_0 + tmp3_1) * (s1_52_0 + s1_52_1);
-    gl64_t kB52 = (tmp3_0 + tmp3_2) * (s1_52_0 + s1_52_2);
-    gl64_t kC52 = (tmp3_1 + tmp3_2) * (s1_52_1 + s1_52_2);
-    gl64_t kD52 = tmp3_0 * s1_52_0;
-    gl64_t kE52 = tmp3_1 * s1_52_1;
-    gl64_t kF52 = tmp3_2 * s1_52_2;
-    gl64_t kG52 = kD52 - kE52;
-    tmp3_0 = (kC52 + kG52) - kF52;
-    tmp3_1 = ((((kA52 + kC52) - kE52) - kE52) - kD52);
-    tmp3_2 = kB52 - kG52;
-    // Op 53: dim1x1 sub_swap
-    gl64_t s0_53 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 3, domainSize, nCols_1))];
-    gl64_t s1_53 = *(gl64_t*)&expressions_params[9][0];
-    tmp1_0 = s1_53 - s0_53;
+    // Op 48: dim3x3 mul
+    gl64_t s1_48_0 = *(gl64_t*)&expressions_params[13][6];
+    gl64_t s1_48_1 = *(gl64_t*)&expressions_params[13][6+1];
+    gl64_t s1_48_2 = *(gl64_t*)&expressions_params[13][6+2];
+    gl64_t kA48 = (tmp3_0 + tmp3_1) * (s1_48_0 + s1_48_1);
+    gl64_t kB48 = (tmp3_0 + tmp3_2) * (s1_48_0 + s1_48_2);
+    gl64_t kC48 = (tmp3_1 + tmp3_2) * (s1_48_1 + s1_48_2);
+    gl64_t kD48 = tmp3_0 * s1_48_0;
+    gl64_t kE48 = tmp3_1 * s1_48_1;
+    gl64_t kF48 = tmp3_2 * s1_48_2;
+    gl64_t kG48 = kD48 - kE48;
+    tmp3_0 = (kC48 + kG48) - kF48;
+    tmp3_1 = ((((kA48 + kC48) - kE48) - kE48) - kD48);
+    tmp3_2 = kB48 - kG48;
+    // Op 49: dim1x1 sub_swap
+    gl64_t s0_49 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 3, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 3, domainSize, nCols_1))];
+    gl64_t s1_49 = *(gl64_t*)&expressions_params[9][0];
+    tmp1_1 = s1_49 - s0_49;
+    // Op 50: dim1x1 sub
+    gl64_t s0_50 = *(gl64_t*)&expressions_params[10][6];
+    gl64_t s1_50 = *(gl64_t*)&expressions_params[10][1];
+    tmp1_0 = s0_50 - s1_50;
+    // Op 51: dim1x1 sub_swap
+    gl64_t s0_51 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (false ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_1) : getBufferOffset(logicalRow_0, 0, domainSize, nCols_1))];
+    tmp1_0 = tmp1_0 - s0_51;
+    // Op 52: dim1x1 mul
+    gl64_t s0_52 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_0) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_0)];
+    tmp1_0 = s0_52 * tmp1_0;
+    // Op 53: dim1x1 add
+    gl64_t s0_53 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (false ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_1) : getBufferOffset(logicalRow_0, 0, domainSize, nCols_1))];
+    tmp1_2 = s0_53 + tmp1_0;
     // Op 54: dim1x1 sub
     gl64_t s0_54 = *(gl64_t*)&dParams->aux_trace[dExpsArgs->mapOffsetsExps[1] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_1) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_1))];
-    tmp1_1 = s0_54 - tmp1_2;
+    tmp1_0 = s0_54 - tmp1_2;
     // Op 55: dim1x1 mul
-    tmp1_0 = tmp1_0 * tmp1_1;
+    tmp1_0 = tmp1_1 * tmp1_0;
     // Op 56: dim3x1 add
     tmp3_0 = tmp3_0 + tmp1_0; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 57: dim3x3 mul
@@ -733,7 +734,7 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     tmp3_1 = ((((kA117 + kC117) - kE117) - kE117) - kD117);
     tmp3_2 = kB117 - kG117;
     // Op 118: dim3x1 add
-    gl64_t s1_118 = *(gl64_t*)&expressions_params[10][0];
+    gl64_t s1_118 = *(gl64_t*)&expressions_params[10][1];
     tmp3_0 = tmp3_0 + s1_118; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 119: dim3x3 mul
     gl64_t s1_119_0 = *(gl64_t*)&expressions_params[13][0];
@@ -750,7 +751,7 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     tmp3_1 = ((((kA119 + kC119) - kE119) - kE119) - kD119);
     tmp3_2 = kB119 - kG119;
     // Op 120: dim3x1 add
-    gl64_t s1_120 = *(gl64_t*)&expressions_params[9][4];
+    gl64_t s1_120 = *(gl64_t*)&expressions_params[10][0];
     tmp3_0 = tmp3_0 + s1_120; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 121: dim3x3 mul
     gl64_t s1_121_0 = *(gl64_t*)&expressions_params[13][0];
@@ -767,71 +768,71 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     tmp3_1 = ((((kA121 + kC121) - kE121) - kE121) - kD121);
     tmp3_2 = kB121 - kG121;
     // Op 122: dim3x1 add
-    gl64_t s1_122 = *(gl64_t*)&expressions_params[9][5];
+    gl64_t s1_122 = *(gl64_t*)&expressions_params[9][4];
     tmp3_0 = tmp3_0 + s1_122; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 123: dim3x3 add
-    gl64_t s1_123_0 = *(gl64_t*)&expressions_params[13][3];
-    gl64_t s1_123_1 = *(gl64_t*)&expressions_params[13][3+1];
-    gl64_t s1_123_2 = *(gl64_t*)&expressions_params[13][3+2];
-    tmp3_0 = tmp3_0 + s1_123_0; tmp3_1 = tmp3_1 + s1_123_1; tmp3_2 = tmp3_2 + s1_123_2;
-    // Op 124: dim3x3 mul
-    gl64_t s1_124_0 = *(gl64_t*)&expressions_params[10][11];
-    gl64_t s1_124_1 = *(gl64_t*)&expressions_params[10][11+1];
-    gl64_t s1_124_2 = *(gl64_t*)&expressions_params[10][11+2];
-    gl64_t kA124 = (tmp3_0 + tmp3_1) * (s1_124_0 + s1_124_1);
-    gl64_t kB124 = (tmp3_0 + tmp3_2) * (s1_124_0 + s1_124_2);
-    gl64_t kC124 = (tmp3_1 + tmp3_2) * (s1_124_1 + s1_124_2);
-    gl64_t kD124 = tmp3_0 * s1_124_0;
-    gl64_t kE124 = tmp3_1 * s1_124_1;
-    gl64_t kF124 = tmp3_2 * s1_124_2;
-    gl64_t kG124 = kD124 - kE124;
-    tmp3_0 = (kC124 + kG124) - kF124;
-    tmp3_1 = ((((kA124 + kC124) - kE124) - kE124) - kD124);
-    tmp3_2 = kB124 - kG124;
-    // Op 125: dim3x1 add
-    gl64_t s1_125 = *(gl64_t*)&expressions_params[9][0];
-    tmp3_0 = tmp3_0 + s1_125; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 126: dim3x3 add
+    // Op 123: dim3x3 mul
+    gl64_t s1_123_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_123_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_123_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA123 = (tmp3_0 + tmp3_1) * (s1_123_0 + s1_123_1);
+    gl64_t kB123 = (tmp3_0 + tmp3_2) * (s1_123_0 + s1_123_2);
+    gl64_t kC123 = (tmp3_1 + tmp3_2) * (s1_123_1 + s1_123_2);
+    gl64_t kD123 = tmp3_0 * s1_123_0;
+    gl64_t kE123 = tmp3_1 * s1_123_1;
+    gl64_t kF123 = tmp3_2 * s1_123_2;
+    gl64_t kG123 = kD123 - kE123;
+    tmp3_0 = (kC123 + kG123) - kF123;
+    tmp3_1 = ((((kA123 + kC123) - kE123) - kE123) - kD123);
+    tmp3_2 = kB123 - kG123;
+    // Op 124: dim3x1 add
+    gl64_t s1_124 = *(gl64_t*)&expressions_params[9][5];
+    tmp3_0 = tmp3_0 + s1_124; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 125: dim3x3 add
+    gl64_t s1_125_0 = *(gl64_t*)&expressions_params[13][3];
+    gl64_t s1_125_1 = *(gl64_t*)&expressions_params[13][3+1];
+    gl64_t s1_125_2 = *(gl64_t*)&expressions_params[13][3+2];
+    tmp3_0 = tmp3_0 + s1_125_0; tmp3_1 = tmp3_1 + s1_125_1; tmp3_2 = tmp3_2 + s1_125_2;
+    // Op 126: dim3x3 mul
+    gl64_t s1_126_0 = *(gl64_t*)&expressions_params[10][11];
+    gl64_t s1_126_1 = *(gl64_t*)&expressions_params[10][11+1];
+    gl64_t s1_126_2 = *(gl64_t*)&expressions_params[10][11+2];
+    gl64_t kA126 = (tmp3_0 + tmp3_1) * (s1_126_0 + s1_126_1);
+    gl64_t kB126 = (tmp3_0 + tmp3_2) * (s1_126_0 + s1_126_2);
+    gl64_t kC126 = (tmp3_1 + tmp3_2) * (s1_126_1 + s1_126_2);
+    gl64_t kD126 = tmp3_0 * s1_126_0;
+    gl64_t kE126 = tmp3_1 * s1_126_1;
+    gl64_t kF126 = tmp3_2 * s1_126_2;
+    gl64_t kG126 = kD126 - kE126;
+    tmp3_0 = (kC126 + kG126) - kF126;
+    tmp3_1 = ((((kA126 + kC126) - kE126) - kE126) - kD126);
+    tmp3_2 = kB126 - kG126;
+    // Op 127: dim3x1 add
+    gl64_t s1_127 = *(gl64_t*)&expressions_params[9][0];
+    tmp3_0 = tmp3_0 + s1_127; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 128: dim3x3 add
     tmp3_0 = tmp3_6 + tmp3_0; tmp3_1 = tmp3_7 + tmp3_1; tmp3_2 = tmp3_8 + tmp3_2;
-    // Op 127: dim3x3 mul
-    gl64_t s1_127_0 = *(gl64_t*)&expressions_params[13][6];
-    gl64_t s1_127_1 = *(gl64_t*)&expressions_params[13][6+1];
-    gl64_t s1_127_2 = *(gl64_t*)&expressions_params[13][6+2];
-    gl64_t kA127 = (tmp3_0 + tmp3_1) * (s1_127_0 + s1_127_1);
-    gl64_t kB127 = (tmp3_0 + tmp3_2) * (s1_127_0 + s1_127_2);
-    gl64_t kC127 = (tmp3_1 + tmp3_2) * (s1_127_1 + s1_127_2);
-    gl64_t kD127 = tmp3_0 * s1_127_0;
-    gl64_t kE127 = tmp3_1 * s1_127_1;
-    gl64_t kF127 = tmp3_2 * s1_127_2;
-    gl64_t kG127 = kD127 - kE127;
-    tmp3_6 = (kC127 + kG127) - kF127;
-    tmp3_7 = ((((kA127 + kC127) - kE127) - kE127) - kD127);
-    tmp3_8 = kB127 - kG127;
-    // Op 128: dim3x1 mul
-    gl64_t s0_128_0 = *(gl64_t*)&expressions_params[13][0];
-    gl64_t s0_128_1 = *(gl64_t*)&expressions_params[13][0+1];
-    gl64_t s0_128_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t s1_128 = *(gl64_t*)&expressions_params[10][8];
-    tmp3_0 = s0_128_0 * s1_128; tmp3_1 = s0_128_1 * s1_128; tmp3_2 = s0_128_2 * s1_128;
-    // Op 129: dim3x1 add
-    gl64_t s1_129 = *(gl64_t*)&expressions_params[10][7];
-    tmp3_0 = tmp3_0 + s1_129; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 130: dim3x3 mul
-    gl64_t s1_130_0 = *(gl64_t*)&expressions_params[13][0];
-    gl64_t s1_130_1 = *(gl64_t*)&expressions_params[13][0+1];
-    gl64_t s1_130_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t kA130 = (tmp3_0 + tmp3_1) * (s1_130_0 + s1_130_1);
-    gl64_t kB130 = (tmp3_0 + tmp3_2) * (s1_130_0 + s1_130_2);
-    gl64_t kC130 = (tmp3_1 + tmp3_2) * (s1_130_1 + s1_130_2);
-    gl64_t kD130 = tmp3_0 * s1_130_0;
-    gl64_t kE130 = tmp3_1 * s1_130_1;
-    gl64_t kF130 = tmp3_2 * s1_130_2;
-    gl64_t kG130 = kD130 - kE130;
-    tmp3_0 = (kC130 + kG130) - kF130;
-    tmp3_1 = ((((kA130 + kC130) - kE130) - kE130) - kD130);
-    tmp3_2 = kB130 - kG130;
+    // Op 129: dim3x3 mul
+    gl64_t s1_129_0 = *(gl64_t*)&expressions_params[13][6];
+    gl64_t s1_129_1 = *(gl64_t*)&expressions_params[13][6+1];
+    gl64_t s1_129_2 = *(gl64_t*)&expressions_params[13][6+2];
+    gl64_t kA129 = (tmp3_0 + tmp3_1) * (s1_129_0 + s1_129_1);
+    gl64_t kB129 = (tmp3_0 + tmp3_2) * (s1_129_0 + s1_129_2);
+    gl64_t kC129 = (tmp3_1 + tmp3_2) * (s1_129_1 + s1_129_2);
+    gl64_t kD129 = tmp3_0 * s1_129_0;
+    gl64_t kE129 = tmp3_1 * s1_129_1;
+    gl64_t kF129 = tmp3_2 * s1_129_2;
+    gl64_t kG129 = kD129 - kE129;
+    tmp3_6 = (kC129 + kG129) - kF129;
+    tmp3_7 = ((((kA129 + kC129) - kE129) - kE129) - kD129);
+    tmp3_8 = kB129 - kG129;
+    // Op 130: dim3x1 mul
+    gl64_t s0_130_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s0_130_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s0_130_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t s1_130 = *(gl64_t*)&expressions_params[10][8];
+    tmp3_0 = s0_130_0 * s1_130; tmp3_1 = s0_130_1 * s1_130; tmp3_2 = s0_130_2 * s1_130;
     // Op 131: dim3x1 add
-    gl64_t s1_131 = *(gl64_t*)&expressions_params[10][9];
+    gl64_t s1_131 = *(gl64_t*)&expressions_params[10][7];
     tmp3_0 = tmp3_0 + s1_131; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 132: dim3x3 mul
     gl64_t s1_132_0 = *(gl64_t*)&expressions_params[13][0];
@@ -848,7 +849,7 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     tmp3_1 = ((((kA132 + kC132) - kE132) - kE132) - kD132);
     tmp3_2 = kB132 - kG132;
     // Op 133: dim3x1 add
-    gl64_t s1_133 = *(gl64_t*)&expressions_params[10][10];
+    gl64_t s1_133 = *(gl64_t*)&expressions_params[10][9];
     tmp3_0 = tmp3_0 + s1_133; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 134: dim3x3 mul
     gl64_t s1_134_0 = *(gl64_t*)&expressions_params[13][0];
@@ -864,12 +865,23 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     tmp3_0 = (kC134 + kG134) - kF134;
     tmp3_1 = ((((kA134 + kC134) - kE134) - kE134) - kD134);
     tmp3_2 = kB134 - kG134;
-    // Op 135: dim1x1 add
-    gl64_t s0_135 = *(gl64_t*)&expressions_params[9][0];
-    gl64_t s1_135 = *(gl64_t*)&expressions_params[10][0];
-    tmp1_2 = s0_135 + s1_135;
-    // Op 136: dim3x1 add
-    tmp3_0 = tmp3_0 + tmp1_2; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 135: dim3x1 add
+    gl64_t s1_135 = *(gl64_t*)&expressions_params[10][10];
+    tmp3_0 = tmp3_0 + s1_135; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 136: dim3x3 mul
+    gl64_t s1_136_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_136_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_136_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA136 = (tmp3_0 + tmp3_1) * (s1_136_0 + s1_136_1);
+    gl64_t kB136 = (tmp3_0 + tmp3_2) * (s1_136_0 + s1_136_2);
+    gl64_t kC136 = (tmp3_1 + tmp3_2) * (s1_136_1 + s1_136_2);
+    gl64_t kD136 = tmp3_0 * s1_136_0;
+    gl64_t kE136 = tmp3_1 * s1_136_1;
+    gl64_t kF136 = tmp3_2 * s1_136_2;
+    gl64_t kG136 = kD136 - kE136;
+    tmp3_0 = (kC136 + kG136) - kF136;
+    tmp3_1 = ((((kA136 + kC136) - kE136) - kE136) - kD136);
+    tmp3_2 = kB136 - kG136;
     // Op 137: dim3x3 mul
     gl64_t s1_137_0 = *(gl64_t*)&expressions_params[13][0];
     gl64_t s1_137_1 = *(gl64_t*)&expressions_params[13][0+1];
@@ -884,35 +896,33 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     tmp3_0 = (kC137 + kG137) - kF137;
     tmp3_1 = ((((kA137 + kC137) - kE137) - kE137) - kD137);
     tmp3_2 = kB137 - kG137;
-    // Op 138: dim3x1 add
-    gl64_t s1_138 = *(gl64_t*)&expressions_params[9][4];
-    tmp3_0 = tmp3_0 + s1_138; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 139: dim3x3 mul
-    gl64_t s1_139_0 = *(gl64_t*)&expressions_params[13][0];
-    gl64_t s1_139_1 = *(gl64_t*)&expressions_params[13][0+1];
-    gl64_t s1_139_2 = *(gl64_t*)&expressions_params[13][0+2];
-    gl64_t kA139 = (tmp3_0 + tmp3_1) * (s1_139_0 + s1_139_1);
-    gl64_t kB139 = (tmp3_0 + tmp3_2) * (s1_139_0 + s1_139_2);
-    gl64_t kC139 = (tmp3_1 + tmp3_2) * (s1_139_1 + s1_139_2);
-    gl64_t kD139 = tmp3_0 * s1_139_0;
-    gl64_t kE139 = tmp3_1 * s1_139_1;
-    gl64_t kF139 = tmp3_2 * s1_139_2;
-    gl64_t kG139 = kD139 - kE139;
-    tmp3_0 = (kC139 + kG139) - kF139;
-    tmp3_1 = ((((kA139 + kC139) - kE139) - kE139) - kD139);
-    tmp3_2 = kB139 - kG139;
-    // Op 140: dim3x1 add
-    gl64_t s1_140 = *(gl64_t*)&expressions_params[9][5];
-    tmp3_0 = tmp3_0 + s1_140; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 141: dim3x3 add
-    gl64_t s1_141_0 = *(gl64_t*)&expressions_params[13][3];
-    gl64_t s1_141_1 = *(gl64_t*)&expressions_params[13][3+1];
-    gl64_t s1_141_2 = *(gl64_t*)&expressions_params[13][3+2];
-    tmp3_0 = tmp3_0 + s1_141_0; tmp3_1 = tmp3_1 + s1_141_1; tmp3_2 = tmp3_2 + s1_141_2;
+    // Op 138: dim1x1 add
+    gl64_t s0_138 = *(gl64_t*)&expressions_params[9][0];
+    gl64_t s1_138 = *(gl64_t*)&expressions_params[10][0];
+    tmp1_2 = s0_138 + s1_138;
+    // Op 139: dim3x1 add
+    tmp3_0 = tmp3_0 + tmp1_2; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 140: dim3x3 mul
+    gl64_t s1_140_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_140_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_140_2 = *(gl64_t*)&expressions_params[13][0+2];
+    gl64_t kA140 = (tmp3_0 + tmp3_1) * (s1_140_0 + s1_140_1);
+    gl64_t kB140 = (tmp3_0 + tmp3_2) * (s1_140_0 + s1_140_2);
+    gl64_t kC140 = (tmp3_1 + tmp3_2) * (s1_140_1 + s1_140_2);
+    gl64_t kD140 = tmp3_0 * s1_140_0;
+    gl64_t kE140 = tmp3_1 * s1_140_1;
+    gl64_t kF140 = tmp3_2 * s1_140_2;
+    gl64_t kG140 = kD140 - kE140;
+    tmp3_0 = (kC140 + kG140) - kF140;
+    tmp3_1 = ((((kA140 + kC140) - kE140) - kE140) - kD140);
+    tmp3_2 = kB140 - kG140;
+    // Op 141: dim3x1 add
+    gl64_t s1_141 = *(gl64_t*)&expressions_params[9][4];
+    tmp3_0 = tmp3_0 + s1_141; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 142: dim3x3 mul
-    gl64_t s1_142_0 = *(gl64_t*)&expressions_params[10][14];
-    gl64_t s1_142_1 = *(gl64_t*)&expressions_params[10][14+1];
-    gl64_t s1_142_2 = *(gl64_t*)&expressions_params[10][14+2];
+    gl64_t s1_142_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s1_142_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s1_142_2 = *(gl64_t*)&expressions_params[13][0+2];
     gl64_t kA142 = (tmp3_0 + tmp3_1) * (s1_142_0 + s1_142_1);
     gl64_t kB142 = (tmp3_0 + tmp3_2) * (s1_142_0 + s1_142_2);
     gl64_t kC142 = (tmp3_1 + tmp3_2) * (s1_142_1 + s1_142_2);
@@ -923,68 +933,71 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     tmp3_0 = (kC142 + kG142) - kF142;
     tmp3_1 = ((((kA142 + kC142) - kE142) - kE142) - kD142);
     tmp3_2 = kB142 - kG142;
-    // Op 143: dim1x1 sub
-    gl64_t s0_143 = *(gl64_t*)&expressions_params[9][0];
-    gl64_t s1_143 = *(gl64_t*)&expressions_params[10][2];
-    tmp1_2 = s0_143 - s1_143;
-    // Op 144: dim3x1 sub
+    // Op 143: dim3x1 add
+    gl64_t s1_143 = *(gl64_t*)&expressions_params[9][5];
+    tmp3_0 = tmp3_0 + s1_143; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 144: dim3x3 add
+    gl64_t s1_144_0 = *(gl64_t*)&expressions_params[13][3];
+    gl64_t s1_144_1 = *(gl64_t*)&expressions_params[13][3+1];
+    gl64_t s1_144_2 = *(gl64_t*)&expressions_params[13][3+2];
+    tmp3_0 = tmp3_0 + s1_144_0; tmp3_1 = tmp3_1 + s1_144_1; tmp3_2 = tmp3_2 + s1_144_2;
+    // Op 145: dim3x3 mul
+    gl64_t s1_145_0 = *(gl64_t*)&expressions_params[10][14];
+    gl64_t s1_145_1 = *(gl64_t*)&expressions_params[10][14+1];
+    gl64_t s1_145_2 = *(gl64_t*)&expressions_params[10][14+2];
+    gl64_t kA145 = (tmp3_0 + tmp3_1) * (s1_145_0 + s1_145_1);
+    gl64_t kB145 = (tmp3_0 + tmp3_2) * (s1_145_0 + s1_145_2);
+    gl64_t kC145 = (tmp3_1 + tmp3_2) * (s1_145_1 + s1_145_2);
+    gl64_t kD145 = tmp3_0 * s1_145_0;
+    gl64_t kE145 = tmp3_1 * s1_145_1;
+    gl64_t kF145 = tmp3_2 * s1_145_2;
+    gl64_t kG145 = kD145 - kE145;
+    tmp3_0 = (kC145 + kG145) - kF145;
+    tmp3_1 = ((((kA145 + kC145) - kE145) - kE145) - kD145);
+    tmp3_2 = kB145 - kG145;
+    // Op 146: dim1x1 sub
+    gl64_t s0_146 = *(gl64_t*)&expressions_params[9][0];
+    gl64_t s1_146 = *(gl64_t*)&expressions_params[10][2];
+    tmp1_2 = s0_146 - s1_146;
+    // Op 147: dim3x1 sub
     tmp3_0 = tmp3_0 - tmp1_2; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 145: dim3x3 add
+    // Op 148: dim3x3 add
     tmp3_0 = tmp3_6 + tmp3_0; tmp3_1 = tmp3_7 + tmp3_1; tmp3_2 = tmp3_8 + tmp3_2;
-    // Op 146: dim3x3 mul
-    gl64_t s1_146_0 = *(gl64_t*)&expressions_params[13][6];
-    gl64_t s1_146_1 = *(gl64_t*)&expressions_params[13][6+1];
-    gl64_t s1_146_2 = *(gl64_t*)&expressions_params[13][6+2];
-    gl64_t kA146 = (tmp3_0 + tmp3_1) * (s1_146_0 + s1_146_1);
-    gl64_t kB146 = (tmp3_0 + tmp3_2) * (s1_146_0 + s1_146_2);
-    gl64_t kC146 = (tmp3_1 + tmp3_2) * (s1_146_1 + s1_146_2);
-    gl64_t kD146 = tmp3_0 * s1_146_0;
-    gl64_t kE146 = tmp3_1 * s1_146_1;
-    gl64_t kF146 = tmp3_2 * s1_146_2;
-    gl64_t kG146 = kD146 - kE146;
-    tmp3_6 = (kC146 + kG146) - kF146;
-    tmp3_7 = ((((kA146 + kC146) - kE146) - kE146) - kD146);
-    tmp3_8 = kB146 - kG146;
-    // Op 147: dim1x1 sub_swap
-    gl64_t s0_147 = *(gl64_t*)&expressions_params[9][6];
-    gl64_t s1_147 = *(gl64_t*)&expressions_params[10][6];
-    tmp1_2 = s1_147 - s0_147;
-    // Op 148: dim3x1 mul
-    gl64_t s0_148_0 = *(gl64_t*)&expressions_params[13][0];
-    gl64_t s0_148_1 = *(gl64_t*)&expressions_params[13][0+1];
-    gl64_t s0_148_2 = *(gl64_t*)&expressions_params[13][0+2];
-    tmp3_0 = s0_148_0 * tmp1_2; tmp3_1 = s0_148_1 * tmp1_2; tmp3_2 = s0_148_2 * tmp1_2;
-    // Op 149: dim3x1 add
-    gl64_t s1_149 = *(gl64_t*)&expressions_params[9][1];
-    tmp3_0 = tmp3_0 + s1_149; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 150: dim3x3 add
-    gl64_t s1_150_0 = *(gl64_t*)&expressions_params[13][3];
-    gl64_t s1_150_1 = *(gl64_t*)&expressions_params[13][3+1];
-    gl64_t s1_150_2 = *(gl64_t*)&expressions_params[13][3+2];
-    tmp3_0 = tmp3_0 + s1_150_0; tmp3_1 = tmp3_1 + s1_150_1; tmp3_2 = tmp3_2 + s1_150_2;
-    // Op 151: dim3x3 mul
-    gl64_t s1_151_0 = *(gl64_t*)&expressions_params[10][17];
-    gl64_t s1_151_1 = *(gl64_t*)&expressions_params[10][17+1];
-    gl64_t s1_151_2 = *(gl64_t*)&expressions_params[10][17+2];
-    gl64_t kA151 = (tmp3_0 + tmp3_1) * (s1_151_0 + s1_151_1);
-    gl64_t kB151 = (tmp3_0 + tmp3_2) * (s1_151_0 + s1_151_2);
-    gl64_t kC151 = (tmp3_1 + tmp3_2) * (s1_151_1 + s1_151_2);
-    gl64_t kD151 = tmp3_0 * s1_151_0;
-    gl64_t kE151 = tmp3_1 * s1_151_1;
-    gl64_t kF151 = tmp3_2 * s1_151_2;
-    gl64_t kG151 = kD151 - kE151;
-    tmp3_0 = (kC151 + kG151) - kF151;
-    tmp3_1 = ((((kA151 + kC151) - kE151) - kE151) - kD151);
-    tmp3_2 = kB151 - kG151;
+    // Op 149: dim3x3 mul
+    gl64_t s1_149_0 = *(gl64_t*)&expressions_params[13][6];
+    gl64_t s1_149_1 = *(gl64_t*)&expressions_params[13][6+1];
+    gl64_t s1_149_2 = *(gl64_t*)&expressions_params[13][6+2];
+    gl64_t kA149 = (tmp3_0 + tmp3_1) * (s1_149_0 + s1_149_1);
+    gl64_t kB149 = (tmp3_0 + tmp3_2) * (s1_149_0 + s1_149_2);
+    gl64_t kC149 = (tmp3_1 + tmp3_2) * (s1_149_1 + s1_149_2);
+    gl64_t kD149 = tmp3_0 * s1_149_0;
+    gl64_t kE149 = tmp3_1 * s1_149_1;
+    gl64_t kF149 = tmp3_2 * s1_149_2;
+    gl64_t kG149 = kD149 - kE149;
+    tmp3_6 = (kC149 + kG149) - kF149;
+    tmp3_7 = ((((kA149 + kC149) - kE149) - kE149) - kD149);
+    tmp3_8 = kB149 - kG149;
+    // Op 150: dim1x1 sub_swap
+    gl64_t s0_150 = *(gl64_t*)&expressions_params[9][6];
+    gl64_t s1_150 = *(gl64_t*)&expressions_params[10][6];
+    tmp1_2 = s1_150 - s0_150;
+    // Op 151: dim3x1 mul
+    gl64_t s0_151_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s0_151_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s0_151_2 = *(gl64_t*)&expressions_params[13][0+2];
+    tmp3_0 = s0_151_0 * tmp1_2; tmp3_1 = s0_151_1 * tmp1_2; tmp3_2 = s0_151_2 * tmp1_2;
     // Op 152: dim3x1 add
-    gl64_t s1_152 = *(gl64_t*)&expressions_params[9][0];
+    gl64_t s1_152 = *(gl64_t*)&expressions_params[9][1];
     tmp3_0 = tmp3_0 + s1_152; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 153: dim3x3 add
-    tmp3_0 = tmp3_6 + tmp3_0; tmp3_1 = tmp3_7 + tmp3_1; tmp3_2 = tmp3_8 + tmp3_2;
+    gl64_t s1_153_0 = *(gl64_t*)&expressions_params[13][3];
+    gl64_t s1_153_1 = *(gl64_t*)&expressions_params[13][3+1];
+    gl64_t s1_153_2 = *(gl64_t*)&expressions_params[13][3+2];
+    tmp3_0 = tmp3_0 + s1_153_0; tmp3_1 = tmp3_1 + s1_153_1; tmp3_2 = tmp3_2 + s1_153_2;
     // Op 154: dim3x3 mul
-    gl64_t s1_154_0 = *(gl64_t*)&expressions_params[13][6];
-    gl64_t s1_154_1 = *(gl64_t*)&expressions_params[13][6+1];
-    gl64_t s1_154_2 = *(gl64_t*)&expressions_params[13][6+2];
+    gl64_t s1_154_0 = *(gl64_t*)&expressions_params[10][17];
+    gl64_t s1_154_1 = *(gl64_t*)&expressions_params[10][17+1];
+    gl64_t s1_154_2 = *(gl64_t*)&expressions_params[10][17+2];
     gl64_t kA154 = (tmp3_0 + tmp3_1) * (s1_154_0 + s1_154_1);
     gl64_t kB154 = (tmp3_0 + tmp3_2) * (s1_154_0 + s1_154_2);
     gl64_t kC154 = (tmp3_1 + tmp3_2) * (s1_154_1 + s1_154_2);
@@ -992,49 +1005,49 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     gl64_t kE154 = tmp3_1 * s1_154_1;
     gl64_t kF154 = tmp3_2 * s1_154_2;
     gl64_t kG154 = kD154 - kE154;
-    tmp3_6 = (kC154 + kG154) - kF154;
-    tmp3_7 = ((((kA154 + kC154) - kE154) - kE154) - kD154);
-    tmp3_8 = kB154 - kG154;
-    // Op 155: dim1x1 sub
-    gl64_t s0_155 = *(gl64_t*)&expressions_params[9][7];
-    gl64_t s1_155 = *(gl64_t*)&expressions_params[10][10];
-    tmp1_2 = s0_155 - s1_155;
-    // Op 156: dim3x1 mul
-    gl64_t s0_156_0 = *(gl64_t*)&expressions_params[13][0];
-    gl64_t s0_156_1 = *(gl64_t*)&expressions_params[13][0+1];
-    gl64_t s0_156_2 = *(gl64_t*)&expressions_params[13][0+2];
-    tmp3_0 = s0_156_0 * tmp1_2; tmp3_1 = s0_156_1 * tmp1_2; tmp3_2 = s0_156_2 * tmp1_2;
-    // Op 157: dim3x1 add
-    gl64_t s1_157 = *(gl64_t*)&expressions_params[9][1];
-    tmp3_0 = tmp3_0 + s1_157; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
-    // Op 158: dim3x3 add
-    gl64_t s1_158_0 = *(gl64_t*)&expressions_params[13][3];
-    gl64_t s1_158_1 = *(gl64_t*)&expressions_params[13][3+1];
-    gl64_t s1_158_2 = *(gl64_t*)&expressions_params[13][3+2];
-    tmp3_0 = tmp3_0 + s1_158_0; tmp3_1 = tmp3_1 + s1_158_1; tmp3_2 = tmp3_2 + s1_158_2;
-    // Op 159: dim3x3 mul
-    gl64_t s1_159_0 = *(gl64_t*)&expressions_params[10][20];
-    gl64_t s1_159_1 = *(gl64_t*)&expressions_params[10][20+1];
-    gl64_t s1_159_2 = *(gl64_t*)&expressions_params[10][20+2];
-    gl64_t kA159 = (tmp3_0 + tmp3_1) * (s1_159_0 + s1_159_1);
-    gl64_t kB159 = (tmp3_0 + tmp3_2) * (s1_159_0 + s1_159_2);
-    gl64_t kC159 = (tmp3_1 + tmp3_2) * (s1_159_1 + s1_159_2);
-    gl64_t kD159 = tmp3_0 * s1_159_0;
-    gl64_t kE159 = tmp3_1 * s1_159_1;
-    gl64_t kF159 = tmp3_2 * s1_159_2;
-    gl64_t kG159 = kD159 - kE159;
-    tmp3_0 = (kC159 + kG159) - kF159;
-    tmp3_1 = ((((kA159 + kC159) - kE159) - kE159) - kD159);
-    tmp3_2 = kB159 - kG159;
+    tmp3_0 = (kC154 + kG154) - kF154;
+    tmp3_1 = ((((kA154 + kC154) - kE154) - kE154) - kD154);
+    tmp3_2 = kB154 - kG154;
+    // Op 155: dim3x1 add
+    gl64_t s1_155 = *(gl64_t*)&expressions_params[9][0];
+    tmp3_0 = tmp3_0 + s1_155; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
+    // Op 156: dim3x3 add
+    tmp3_0 = tmp3_6 + tmp3_0; tmp3_1 = tmp3_7 + tmp3_1; tmp3_2 = tmp3_8 + tmp3_2;
+    // Op 157: dim3x3 mul
+    gl64_t s1_157_0 = *(gl64_t*)&expressions_params[13][6];
+    gl64_t s1_157_1 = *(gl64_t*)&expressions_params[13][6+1];
+    gl64_t s1_157_2 = *(gl64_t*)&expressions_params[13][6+2];
+    gl64_t kA157 = (tmp3_0 + tmp3_1) * (s1_157_0 + s1_157_1);
+    gl64_t kB157 = (tmp3_0 + tmp3_2) * (s1_157_0 + s1_157_2);
+    gl64_t kC157 = (tmp3_1 + tmp3_2) * (s1_157_1 + s1_157_2);
+    gl64_t kD157 = tmp3_0 * s1_157_0;
+    gl64_t kE157 = tmp3_1 * s1_157_1;
+    gl64_t kF157 = tmp3_2 * s1_157_2;
+    gl64_t kG157 = kD157 - kE157;
+    tmp3_6 = (kC157 + kG157) - kF157;
+    tmp3_7 = ((((kA157 + kC157) - kE157) - kE157) - kD157);
+    tmp3_8 = kB157 - kG157;
+    // Op 158: dim1x1 sub
+    gl64_t s0_158 = *(gl64_t*)&expressions_params[9][7];
+    gl64_t s1_158 = *(gl64_t*)&expressions_params[10][10];
+    tmp1_2 = s0_158 - s1_158;
+    // Op 159: dim3x1 mul
+    gl64_t s0_159_0 = *(gl64_t*)&expressions_params[13][0];
+    gl64_t s0_159_1 = *(gl64_t*)&expressions_params[13][0+1];
+    gl64_t s0_159_2 = *(gl64_t*)&expressions_params[13][0+2];
+    tmp3_0 = s0_159_0 * tmp1_2; tmp3_1 = s0_159_1 * tmp1_2; tmp3_2 = s0_159_2 * tmp1_2;
     // Op 160: dim3x1 add
-    gl64_t s1_160 = *(gl64_t*)&expressions_params[9][0];
+    gl64_t s1_160 = *(gl64_t*)&expressions_params[9][1];
     tmp3_0 = tmp3_0 + s1_160; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 161: dim3x3 add
-    tmp3_0 = tmp3_6 + tmp3_0; tmp3_1 = tmp3_7 + tmp3_1; tmp3_2 = tmp3_8 + tmp3_2;
+    gl64_t s1_161_0 = *(gl64_t*)&expressions_params[13][3];
+    gl64_t s1_161_1 = *(gl64_t*)&expressions_params[13][3+1];
+    gl64_t s1_161_2 = *(gl64_t*)&expressions_params[13][3+2];
+    tmp3_0 = tmp3_0 + s1_161_0; tmp3_1 = tmp3_1 + s1_161_1; tmp3_2 = tmp3_2 + s1_161_2;
     // Op 162: dim3x3 mul
-    gl64_t s1_162_0 = *(gl64_t*)&expressions_params[13][6];
-    gl64_t s1_162_1 = *(gl64_t*)&expressions_params[13][6+1];
-    gl64_t s1_162_2 = *(gl64_t*)&expressions_params[13][6+2];
+    gl64_t s1_162_0 = *(gl64_t*)&expressions_params[10][20];
+    gl64_t s1_162_1 = *(gl64_t*)&expressions_params[10][20+1];
+    gl64_t s1_162_2 = *(gl64_t*)&expressions_params[10][20+2];
     gl64_t kA162 = (tmp3_0 + tmp3_1) * (s1_162_0 + s1_162_1);
     gl64_t kB162 = (tmp3_0 + tmp3_2) * (s1_162_0 + s1_162_2);
     gl64_t kC162 = (tmp3_1 + tmp3_2) * (s1_162_1 + s1_162_2);
@@ -1042,46 +1055,65 @@ __device__ __forceinline__ void eval_expr_13b25f36(
     gl64_t kE162 = tmp3_1 * s1_162_1;
     gl64_t kF162 = tmp3_2 * s1_162_2;
     gl64_t kG162 = kD162 - kE162;
-    tmp3_3 = (kC162 + kG162) - kF162;
-    tmp3_4 = ((((kA162 + kC162) - kE162) - kE162) - kD162);
-    tmp3_5 = kB162 - kG162;
-    // Op 163: dim3x3 sub_swap
-    uint64_t s0_163_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_2));
-    gl64_t s0_163_0 = *(gl64_t*)&dParams->aux_trace[s0_163_pos];
-    gl64_t s0_163_1 = *(gl64_t*)&dParams->aux_trace[s0_163_pos + TILE_HEIGHT];
-    gl64_t s0_163_2 = *(gl64_t*)&dParams->aux_trace[s0_163_pos + 2*TILE_HEIGHT];
-    gl64_t s1_163_0 = *(gl64_t*)&expressions_params[12][0];
-    gl64_t s1_163_1 = *(gl64_t*)&expressions_params[12][0+1];
-    gl64_t s1_163_2 = *(gl64_t*)&expressions_params[12][0+2];
-    tmp3_6 = s1_163_0 - s0_163_0; tmp3_7 = s1_163_1 - s0_163_1; tmp3_8 = s1_163_2 - s0_163_2;
+    tmp3_0 = (kC162 + kG162) - kF162;
+    tmp3_1 = ((((kA162 + kC162) - kE162) - kE162) - kD162);
+    tmp3_2 = kB162 - kG162;
+    // Op 163: dim3x1 add
+    gl64_t s1_163 = *(gl64_t*)&expressions_params[9][0];
+    tmp3_0 = tmp3_0 + s1_163; tmp3_1 = tmp3_1; tmp3_2 = tmp3_2;
     // Op 164: dim3x3 add
-    gl64_t s0_164_0 = *(gl64_t*)&expressions_params[10][11];
-    gl64_t s0_164_1 = *(gl64_t*)&expressions_params[10][11+1];
-    gl64_t s0_164_2 = *(gl64_t*)&expressions_params[10][11+2];
-    gl64_t s1_164_0 = *(gl64_t*)&expressions_params[10][14];
-    gl64_t s1_164_1 = *(gl64_t*)&expressions_params[10][14+1];
-    gl64_t s1_164_2 = *(gl64_t*)&expressions_params[10][14+2];
-    tmp3_0 = s0_164_0 + s1_164_0; tmp3_1 = s0_164_1 + s1_164_1; tmp3_2 = s0_164_2 + s1_164_2;
-    // Op 165: dim3x3 add
-    gl64_t s1_165_0 = *(gl64_t*)&expressions_params[10][17];
-    gl64_t s1_165_1 = *(gl64_t*)&expressions_params[10][17+1];
-    gl64_t s1_165_2 = *(gl64_t*)&expressions_params[10][17+2];
-    tmp3_0 = tmp3_0 + s1_165_0; tmp3_1 = tmp3_1 + s1_165_1; tmp3_2 = tmp3_2 + s1_165_2;
-    // Op 166: dim3x3 add
-    gl64_t s1_166_0 = *(gl64_t*)&expressions_params[10][20];
-    gl64_t s1_166_1 = *(gl64_t*)&expressions_params[10][20+1];
-    gl64_t s1_166_2 = *(gl64_t*)&expressions_params[10][20+2];
-    tmp3_0 = tmp3_0 + s1_166_0; tmp3_1 = tmp3_1 + s1_166_1; tmp3_2 = tmp3_2 + s1_166_2;
-    // Op 167: dim3x3 sub
-    tmp3_0 = tmp3_6 - tmp3_0; tmp3_1 = tmp3_7 - tmp3_1; tmp3_2 = tmp3_8 - tmp3_2;
-    // Op 168: dim3x1 mul
-    gl64_t s1_168 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[false ? getBufferOffset_pack256(chunkBase, 1, domainSize, nCols_0) : getBufferOffset(logicalRow_2, 1, domainSize, nCols_0)];
-    tmp3_0 = tmp3_0 * s1_168; tmp3_1 = tmp3_1 * s1_168; tmp3_2 = tmp3_2 * s1_168;
+    tmp3_0 = tmp3_6 + tmp3_0; tmp3_1 = tmp3_7 + tmp3_1; tmp3_2 = tmp3_8 + tmp3_2;
+    // Op 165: dim3x3 mul
+    gl64_t s1_165_0 = *(gl64_t*)&expressions_params[13][6];
+    gl64_t s1_165_1 = *(gl64_t*)&expressions_params[13][6+1];
+    gl64_t s1_165_2 = *(gl64_t*)&expressions_params[13][6+2];
+    gl64_t kA165 = (tmp3_0 + tmp3_1) * (s1_165_0 + s1_165_1);
+    gl64_t kB165 = (tmp3_0 + tmp3_2) * (s1_165_0 + s1_165_2);
+    gl64_t kC165 = (tmp3_1 + tmp3_2) * (s1_165_1 + s1_165_2);
+    gl64_t kD165 = tmp3_0 * s1_165_0;
+    gl64_t kE165 = tmp3_1 * s1_165_1;
+    gl64_t kF165 = tmp3_2 * s1_165_2;
+    gl64_t kG165 = kD165 - kE165;
+    tmp3_3 = (kC165 + kG165) - kF165;
+    tmp3_4 = ((((kA165 + kC165) - kE165) - kE165) - kD165);
+    tmp3_5 = kB165 - kG165;
+    // Op 166: dim3x3 sub_swap
+    uint64_t s0_166_pos = dExpsArgs->mapOffsetsExps[2] + (usePack256_1 ? getBufferOffset_pack256(chunkBase, 0, domainSize, nCols_2) : getBufferOffset(logicalRow_1, 0, domainSize, nCols_2));
+    gl64_t s0_166_0 = *(gl64_t*)&dParams->aux_trace[s0_166_pos];
+    gl64_t s0_166_1 = *(gl64_t*)&dParams->aux_trace[s0_166_pos + TILE_HEIGHT];
+    gl64_t s0_166_2 = *(gl64_t*)&dParams->aux_trace[s0_166_pos + 2*TILE_HEIGHT];
+    gl64_t s1_166_0 = *(gl64_t*)&expressions_params[12][0];
+    gl64_t s1_166_1 = *(gl64_t*)&expressions_params[12][0+1];
+    gl64_t s1_166_2 = *(gl64_t*)&expressions_params[12][0+2];
+    tmp3_6 = s1_166_0 - s0_166_0; tmp3_7 = s1_166_1 - s0_166_1; tmp3_8 = s1_166_2 - s0_166_2;
+    // Op 167: dim3x3 add
+    gl64_t s0_167_0 = *(gl64_t*)&expressions_params[10][11];
+    gl64_t s0_167_1 = *(gl64_t*)&expressions_params[10][11+1];
+    gl64_t s0_167_2 = *(gl64_t*)&expressions_params[10][11+2];
+    gl64_t s1_167_0 = *(gl64_t*)&expressions_params[10][14];
+    gl64_t s1_167_1 = *(gl64_t*)&expressions_params[10][14+1];
+    gl64_t s1_167_2 = *(gl64_t*)&expressions_params[10][14+2];
+    tmp3_0 = s0_167_0 + s1_167_0; tmp3_1 = s0_167_1 + s1_167_1; tmp3_2 = s0_167_2 + s1_167_2;
+    // Op 168: dim3x3 add
+    gl64_t s1_168_0 = *(gl64_t*)&expressions_params[10][17];
+    gl64_t s1_168_1 = *(gl64_t*)&expressions_params[10][17+1];
+    gl64_t s1_168_2 = *(gl64_t*)&expressions_params[10][17+2];
+    tmp3_0 = tmp3_0 + s1_168_0; tmp3_1 = tmp3_1 + s1_168_1; tmp3_2 = tmp3_2 + s1_168_2;
     // Op 169: dim3x3 add
+    gl64_t s1_169_0 = *(gl64_t*)&expressions_params[10][20];
+    gl64_t s1_169_1 = *(gl64_t*)&expressions_params[10][20+1];
+    gl64_t s1_169_2 = *(gl64_t*)&expressions_params[10][20+2];
+    tmp3_0 = tmp3_0 + s1_169_0; tmp3_1 = tmp3_1 + s1_169_1; tmp3_2 = tmp3_2 + s1_169_2;
+    // Op 170: dim3x3 sub
+    tmp3_0 = tmp3_6 - tmp3_0; tmp3_1 = tmp3_7 - tmp3_1; tmp3_2 = tmp3_8 - tmp3_2;
+    // Op 171: dim3x1 mul
+    gl64_t s1_171 = *(gl64_t*)&dParams->pConstPolsExtendedTreeAddress[false ? getBufferOffset_pack256(chunkBase, 1, domainSize, nCols_0) : getBufferOffset(logicalRow_2, 1, domainSize, nCols_0)];
+    tmp3_0 = tmp3_0 * s1_171; tmp3_1 = tmp3_1 * s1_171; tmp3_2 = tmp3_2 * s1_171;
+    // Op 172: dim3x3 add
     tmp3_0 = tmp3_3 + tmp3_0; tmp3_1 = tmp3_4 + tmp3_1; tmp3_2 = tmp3_5 + tmp3_2;
-    // Op 170: dim3x1 mul
-    gl64_t s1_170 = *(gl64_t*)&dParams->aux_trace[dArgs->zi_offset + (1 - 1) * domainSize + row + threadIdx.x];
-    tmp3_0 = tmp3_0 * s1_170; tmp3_1 = tmp3_1 * s1_170; tmp3_2 = tmp3_2 * s1_170;
+    // Op 173: dim3x1 mul
+    gl64_t s1_173 = *(gl64_t*)&dParams->aux_trace[dArgs->zi_offset + (1 - 1) * domainSize + row + threadIdx.x];
+    tmp3_0 = tmp3_0 * s1_173; tmp3_1 = tmp3_1 * s1_173; tmp3_2 = tmp3_2 * s1_173;
 
     // Write final result to shared memory and store to output
     *(gl64_t*)&expressions_params[bufferCommitsSize + 1][0 * blockDim.x + threadIdx.x] = tmp3_0;
