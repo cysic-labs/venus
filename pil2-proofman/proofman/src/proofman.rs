@@ -3487,6 +3487,15 @@ where
 
         let mut air_instance = pctx.air_instances[instance_id].write().unwrap();
 
+        // The prover reads the trace and value buffers with the shapes of the setup, so they must
+        // have them before they are handed over.
+        if air_instance.airgroup_id != airgroup_id || air_instance.air_id != air_id {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "Instance {instance_id} is airgroup_id={airgroup_id}, air_id={air_id}, but its trace is airgroup_id={}, air_id={}",
+                air_instance.airgroup_id, air_instance.air_id
+            )));
+        }
+
         if air_instance.num_rows != (1 << setup.stark_info.stark_struct.n_bits) {
             return Err(ProofmanError::InvalidSetup(format!(
                 "Row count mismatch for airgroup_id={}, air_id={}: expected {} rows (from proving key), but got {} rows (from pil-helpers).",
@@ -3494,6 +3503,43 @@ where
                 air_id,
                 1 << setup.stark_info.stark_struct.n_bits,
                 air_instance.num_rows
+            )));
+        }
+
+        // A packed trace holds fewer words per row than the committed columns it packs.
+        let n_cols = setup.stark_info.map_sections_n["cm1"] as usize;
+        let n_cols_trace = air_instance.n_cols_trace;
+        let width_fits = if air_instance.is_packed { n_cols_trace <= n_cols } else { n_cols_trace == n_cols };
+        if !width_fits || air_instance.trace.len() < air_instance.num_rows * n_cols_trace {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "Trace of airgroup_id={airgroup_id}, air_id={air_id} has {} words for {} rows of {n_cols_trace} words (packed: {}), but the setup commits {n_cols} columns",
+                air_instance.trace.len(),
+                air_instance.num_rows,
+                air_instance.is_packed
+            )));
+        }
+
+        let n_airgroup_values = setup
+            .stark_info
+            .airgroupvalues_map
+            .as_ref()
+            .map(|map| map.iter().map(|entry| if entry.stage == 1 { 1 } else { 3 }).sum::<usize>())
+            .unwrap_or(0);
+
+        let n_air_values = setup
+            .stark_info
+            .airvalues_map
+            .as_ref()
+            .map(|map| map.iter().map(|entry| if entry.stage == 1 { 1 } else { 3 }).sum::<usize>())
+            .unwrap_or(0);
+
+        // Values the trace brings must cover the setup's; missing ones are allocated below.
+        let short = |values: &[F], expected: usize| !values.is_empty() && values.len() < expected;
+        if short(&air_instance.airvalues, n_air_values) || short(&air_instance.airgroup_values, n_airgroup_values) {
+            return Err(ProofmanError::InvalidSetup(format!(
+                "Trace of airgroup_id={airgroup_id}, air_id={air_id} has {} air values and {} airgroup values, expected {n_air_values} and {n_airgroup_values}",
+                air_instance.airvalues.len(),
+                air_instance.airgroup_values.len()
             )));
         }
 
@@ -3530,20 +3576,6 @@ where
                 );
             }
         }
-
-        let n_airgroup_values = setup
-            .stark_info
-            .airgroupvalues_map
-            .as_ref()
-            .map(|map| map.iter().map(|entry| if entry.stage == 1 { 1 } else { 3 }).sum::<usize>())
-            .unwrap_or(0);
-
-        let n_air_values = setup
-            .stark_info
-            .airvalues_map
-            .as_ref()
-            .map(|map| map.iter().map(|entry| if entry.stage == 1 { 1 } else { 3 }).sum::<usize>())
-            .unwrap_or(0);
 
         if n_air_values > 0 && air_instance.airvalues.is_empty() {
             air_instance.init_airvalues(n_air_values);

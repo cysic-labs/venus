@@ -31,11 +31,43 @@ impl<F: PrimeField64> ProofMan<F>
 where
     GoldilocksQuinticExtension: ExtensionField<F>,
 {
+    /// The airgroup a worker's aggregated proof claims, which must be one of the setup's.
+    fn aggregated_proof_airgroup(&self, airgroup_id: u64) -> ProofmanResult<usize> {
+        let n_airgroups = self.pctx.global_info.air_groups.len();
+        usize::try_from(airgroup_id).ok().filter(|&airgroup_id| airgroup_id < n_airgroups).ok_or_else(|| {
+            ProofmanError::InvalidProof(format!(
+                "Invalid aggregated proof airgroup id {airgroup_id}: expected < {n_airgroups}"
+            ))
+        })
+    }
+
+    /// Checks what a worker's aggregated proof claims before anything reads it: an airgroup of
+    /// the setup, at least one aggregated worker, and the aggregation publics it starts with,
+    /// which must fit in the publics of the airgroup's recursive2 setup. Returns the airgroup.
+    fn check_aggregated_proof(&self, proof: &AggProofs) -> ProofmanResult<usize> {
+        let airgroup_id = self.aggregated_proof_airgroup(proof.airgroup_id)?;
+        if proof.worker_indexes.is_empty() {
+            return Err(ProofmanError::InvalidProof(format!(
+                "Aggregated proof for airgroup {airgroup_id} aggregates no worker proof"
+            )));
+        }
+        let setup = self.setups.sctx_recursive2.as_ref().unwrap().get_setup(airgroup_id, 0)?;
+        let publics_aggregation = n_publics_aggregation(&self.pctx, airgroup_id);
+        if proof.proof.len() < publics_aggregation || publics_aggregation > setup.stark_info.n_publics as usize {
+            return Err(ProofmanError::InvalidProof(format!(
+                "Aggregated proof for airgroup {airgroup_id} of {} words cannot hold its {publics_aggregation} \
+                 aggregation publics",
+                proof.proof.len()
+            )));
+        }
+        Ok(airgroup_id)
+    }
+
     pub fn register_aggregated_proofs(&self, agg_proofs: Vec<AggProofsRegister>) -> ProofmanResult<()> {
         let mut received = self.received_agg_proofs.write().unwrap();
 
         for proof in agg_proofs {
-            let airgroup_vec = &mut received[proof.airgroup_id as usize];
+            let airgroup_vec = &mut received[self.aggregated_proof_airgroup(proof.airgroup_id)?];
 
             for &worker_idx in &proof.worker_indexes {
                 if airgroup_vec.contains(&worker_idx) {
@@ -80,9 +112,17 @@ where
         }
 
         for proof in agg_proofs {
+            let airgroup_id = match self.check_aggregated_proof(&proof) {
+                Ok(airgroup_id) => airgroup_id,
+                Err(error) => {
+                    self.cancellation_info.write().unwrap().cancel(Some(error));
+                    break;
+                }
+            };
+
             {
                 let received = self.received_agg_proofs.read().unwrap();
-                let airgroup_vec = &received[proof.airgroup_id as usize];
+                let airgroup_vec = &received[airgroup_id];
 
                 for &worker_idx in &proof.worker_indexes {
                     if !airgroup_vec.contains(&worker_idx) {
@@ -102,9 +142,10 @@ where
             let mut stored_contributions = Vec::new();
             for w in &proof.worker_indexes {
                 let mut worker_contributions = self.worker_contributions.write().unwrap();
-                if let Some(contrib) = worker_contributions.iter_mut().find(|contrib| {
-                    contrib.worker_index == *w as u32 && contrib.airgroup_id == proof.airgroup_id as usize
-                }) {
+                if let Some(contrib) = worker_contributions
+                    .iter_mut()
+                    .find(|contrib| contrib.worker_index == *w as u32 && contrib.airgroup_id == airgroup_id)
+                {
                     if contrib.aggregated {
                         self.cancellation_info.write().unwrap().cancel(Some(ProofmanError::InvalidProof(
                             "Proof contribution was already aggregated".into(),
@@ -121,10 +162,13 @@ where
                     break;
                 }
             }
+            if self.cancellation_info.read().unwrap().token.is_cancelled() {
+                break;
+            }
 
             timer_start_debug!(VERIFYING_OUTER_AGGREGATED_PROOF);
-            let setup = self.setups.sctx_recursive2.as_ref().unwrap().get_setup(proof.airgroup_id as usize, 0)?;
-            let publics_aggregation = n_publics_aggregation(&self.pctx, proof.airgroup_id as usize);
+            let setup = self.setups.sctx_recursive2.as_ref().unwrap().get_setup(airgroup_id, 0)?;
+            let publics_aggregation = n_publics_aggregation(&self.pctx, airgroup_id);
             let (publics, rec_proof) = proof.proof.split_at(publics_aggregation);
 
             let mut publics_extended = vec![0; setup.stark_info.n_publics as usize];
@@ -163,7 +207,7 @@ where
             let id = {
                 let mut rec2_proofs = self.recursive2_proofs_ongoing.write().unwrap();
                 let id = rec2_proofs.len();
-                let agg_proof = Proof::new(ProofType::Recursive2, proof.airgroup_id as usize, 0, Some(id), proof.proof);
+                let agg_proof = Proof::new(ProofType::Recursive2, airgroup_id, 0, Some(id), proof.proof);
                 rec2_proofs.push(Some(agg_proof));
                 id
             };
