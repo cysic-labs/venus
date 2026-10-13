@@ -88,7 +88,8 @@ pub fn secp256r1_is_on_curve(p: &[u64; 8], #[cfg(feature = "hints")] hints: &mut
 }
 
 /// Given two points `p` and `q` and scalars `r`, `s`, and `t`, computes the triple scalar multiplication `r·g + s·p + t·q`
-/// It assumes that `r,s,t ∈ [1, N-1]` and that `p,q != 𝒪`
+/// It assumes that `p,q != 𝒪` and that `r,s,t` are not all zero; they need not be reduced, and `q`
+/// is not used when `t` is zero
 pub fn secp256r1_triple_scalar_mul_with_g(
     r: &[u64; 4],
     s: &[u64; 4],

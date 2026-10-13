@@ -216,7 +216,7 @@ pub fn secp256k1_scalar_mul(
 }
 
 /// Given a point `p` and scalars `k1` and `k2`, computes the double scalar multiplication `k1·G + k2·p`
-/// It assumes that `k1,k2 ∈ [1, N-1]` and that `p != 𝒪`
+/// It assumes that `p != 𝒪` and that `k1,k2` are not both zero; they need not be reduced
 pub fn secp256k1_double_scalar_mul_with_g(
     k1: &[u64; 4],
     k2: &[u64; 4],
@@ -438,7 +438,7 @@ pub fn secp256k1_double_scalar_mul_with_g(
 }
 
 /// Given two points `p` and `q` and scalars `r`, `s`, and `t`, computes the triple scalar multiplication `r·g + s·p + t·q`
-/// It assumes that `r,s,t ∈ [1, N-1]` and that `p,q != 𝒪`
+/// It assumes that `p,q != 𝒪` and that `r,s,t` are not all zero; they need not be reduced
 pub fn secp256k1_triple_scalar_mul_with_g(
     r: &[u64; 4],
     s: &[u64; 4],

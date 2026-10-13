@@ -1,10 +1,13 @@
 use tiny_keccak::{Hasher, Keccak};
 
-use crate::zisklib::{eq, fcall_secp256k1_ecdsa_verify, gt, is_zero, ZERO_256};
+use crate::zisklib::{eq, fcall_secp256k1_ecdsa_verify, gt, is_zero, lt, ZERO_256};
 
 use super::{
-    constants::{IDENTITY, N_MINUS_ONE, P_MINUS_ONE},
-    curve::{secp256k1_is_on_curve, secp256k1_lift_x, secp256k1_triple_scalar_mul_with_g},
+    constants::{IDENTITY, N_MINUS_ONE, P, P_MINUS_ONE},
+    curve::{
+        secp256k1_double_scalar_mul_with_g, secp256k1_is_on_curve, secp256k1_lift_x,
+        secp256k1_triple_scalar_mul_with_g,
+    },
     scalar::{secp256k1_fn_neg, secp256k1_fn_reduce},
 };
 
@@ -57,8 +60,8 @@ pub fn secp256k1_ecdsa_verify(
     }
 
     // Ecdsa verification computes (x, y) = [z·s⁻¹ (mod n)]G + [r·s⁻¹ (mod n)]PK
-    // and checks that x ≡ r (mod n)
-    // We can equivalently hint (x,y), verify that
+    // and checks that (x, y) != 𝒪 and x ≡ r (mod n)
+    // We can equivalently hint (x,y), bind it through
     //   [z]G + [r]PK + [-s](x,y) == 𝒪,
     // and ensure that x ≡ r (mod n), saving us from expensive fn arithmetic
 
@@ -72,23 +75,13 @@ pub fn secp256k1_ecdsa_verify(
         hints,
     );
 
-    // Check the recovered point is valid
-    // Note: Identity point would be raised here
-    if !secp256k1_is_on_curve(
-        &point,
-        #[cfg(feature = "hints")]
-        hints,
-    ) {
-        return false;
-    }
-
-    // Check that [z]G + [r]PK + [-s](x,y) == 𝒪
+    // Bind the hint to (x, y), which is the identity exactly when (x, y) = 𝒪 (an invalid signature)
     let neg_s = secp256k1_fn_neg(
         s,
         #[cfg(feature = "hints")]
         hints,
     );
-    if secp256k1_triple_scalar_mul_with_g(
+    let Some(point) = secp256k1_bind_hinted_point(
         z,
         r,
         &neg_s,
@@ -96,11 +89,9 @@ pub fn secp256k1_ecdsa_verify(
         &point,
         #[cfg(feature = "hints")]
         hints,
-    )
-    .is_some()
-    {
+    ) else {
         return false;
-    }
+    };
 
     // Check that x ≡ r (mod n)
     let point_x: [u64; 4] = [point[0], point[1], point[2], point[3]];
@@ -189,18 +180,9 @@ pub fn secp256k1_ecdsa_recover(
         hints,
     );
 
-    // Check the recovered point is valid
-    // Note: Identity point would be raised here
-    if !secp256k1_is_on_curve(
-        &point,
-        #[cfg(feature = "hints")]
-        hints,
-    ) {
-        return Err(ECDSA_RECOVER_ERR_RECOVERY_FAILED);
-    }
-
-    // Check that [z]G + [-s]R + [r](xQ,yQ) == 𝒪
-    if secp256k1_triple_scalar_mul_with_g(
+    // Bind the hint through [z]G + [-s]R + [r](xQ,yQ) == 𝒪; the recovery fails exactly when
+    // the recovered point is the identity
+    secp256k1_bind_hinted_point(
         z,
         &neg_s,
         r,
@@ -209,13 +191,63 @@ pub fn secp256k1_ecdsa_recover(
         #[cfg(feature = "hints")]
         hints,
     )
-    .is_some()
-    {
-        return Err(ECDSA_RECOVER_ERR_RECOVERY_FAILED);
+    .ok_or(ECDSA_RECOVER_ERR_RECOVERY_FAILED)
+}
+
+/// Binds the hinted point `q` to the unique point satisfying [a]G + [b]P + [c]Q == 𝒪, where `c` is
+/// invertible modulo n, and returns it, or `None` when that point is the identity.
+///
+/// The hint is prover-chosen, so any other value panics: a wrong hint must not be reported as an
+/// invalid signature.
+fn secp256k1_bind_hinted_point(
+    a: &[u64; 4],
+    b: &[u64; 4],
+    c: &[u64; 4],
+    p: &[u64; 8],
+    q: &[u64; 8],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> Option<[u64; 8]> {
+    if eq(q, &IDENTITY) {
+        // Q = 𝒪 holds iff [a]G + [b]P == 𝒪
+        assert!(
+            secp256k1_double_scalar_mul_with_g(
+                a,
+                b,
+                p,
+                #[cfg(feature = "hints")]
+                hints,
+            )
+            .is_none(),
+            "Hinted identity does not satisfy the ECDSA relation"
+        );
+        return None;
     }
 
-    // Return the recovered public key
-    Ok(point)
+    let x = [q[0], q[1], q[2], q[3]];
+    let y = [q[4], q[5], q[6], q[7]];
+    assert!(lt(&x, &P) && lt(&y, &P), "Hinted point is not canonical");
+    assert!(
+        secp256k1_is_on_curve(
+            q,
+            #[cfg(feature = "hints")]
+            hints,
+        ),
+        "Hinted point is not on the curve"
+    );
+    assert!(
+        secp256k1_triple_scalar_mul_with_g(
+            a,
+            b,
+            c,
+            p,
+            q,
+            #[cfg(feature = "hints")]
+            hints,
+        )
+        .is_none(),
+        "Hinted point does not satisfy the ECDSA relation"
+    );
+    Some(*q)
 }
 
 // ==================== C FFI Functions ====================
@@ -473,5 +505,57 @@ mod tests {
 
         assert_eq!(recover(&zero, &s, &z, 0), Err(ECDSA_RECOVER_ERR_INVALID_R));
         assert_eq!(recover(&r, &zero, &z, 0), Err(ECDSA_RECOVER_ERR_INVALID_S));
+    }
+
+    fn sub(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
+        let mut out = [0u64; 4];
+        let mut borrow = false;
+        for i in 0..4 {
+            let (d, b1) = a[i].overflowing_sub(b[i]);
+            let (d, b2) = d.overflowing_sub(borrow as u64);
+            out[i] = d;
+            borrow = b1 || b2;
+        }
+        assert!(!borrow);
+        out
+    }
+
+    fn bind(
+        a: &[u64; 4],
+        b: &[u64; 4],
+        c: &[u64; 4],
+        p: &[u64; 8],
+        q: &[u64; 8],
+    ) -> Option<[u64; 8]> {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        secp256k1_bind_hinted_point(
+            a,
+            b,
+            c,
+            p,
+            q,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        )
+    }
+
+    #[test]
+    fn rejects_point_hints_that_would_invalidate_a_signature() {
+        // With private key 1 and nonce 1, R = G satisfies [z]G + [r]PK + [-s]R == 𝒪
+        let (z, r, s) = signature_for_private_key_and_nonce_one();
+        let neg_s = sub(&N, &s);
+        assert_eq!(bind(&z, &r, &neg_s, &G, &G), Some(G));
+
+        // Another point or the identity must abort the proof instead of yielding `false`
+        let mut neg_g = G;
+        neg_g[4..8].copy_from_slice(&sub(&P, &G[4..8].try_into().unwrap()));
+        assert!(std::panic::catch_unwind(|| bind(&z, &r, &neg_s, &G, &neg_g)).is_err());
+        assert!(std::panic::catch_unwind(|| bind(&z, &r, &neg_s, &G, &IDENTITY)).is_err());
+
+        // When [z]G + [r]PK == 𝒪, R is the identity and the signature is invalid
+        let z_cancel = sub(&N, &r);
+        assert_eq!(bind(&z_cancel, &r, &neg_s, &G, &IDENTITY), None);
+        assert!(!verify(&G, &z_cancel, &r, &s));
     }
 }
