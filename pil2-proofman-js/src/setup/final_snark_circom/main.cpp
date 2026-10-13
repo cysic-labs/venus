@@ -322,5 +322,6 @@ extern "C" __attribute__((visibility("default"))) int getWitness(void *zkin, cha
         std::cerr << "Unknown runtime error" << std::endl;
         exit(-2);
     }
+    return 0;
 }
 

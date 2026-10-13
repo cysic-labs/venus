@@ -354,6 +354,7 @@ extern "C" __attribute__((visibility("default"))) int getWitnessFinal(void *zkin
         std::cerr << "Unknown runtime error" << std::endl;
         exit(-2);
     }
+    return 0;
 }
 
 extern "C" __attribute__((visibility("default"))) int getWitness(uint64_t *proof, void* circuit_, void* pWitness, uint64_t nMutexes) {
