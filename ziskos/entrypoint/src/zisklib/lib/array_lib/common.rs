@@ -75,6 +75,10 @@ impl U256 {
         Ordering::Equal
     }
 
+    pub fn is_zero_slices(a: &[Self]) -> bool {
+        a.iter().all(|limb| limb.is_zero())
+    }
+
     pub fn eq_slices(a: &[Self], b: &[Self]) -> bool {
         // TODO: Do with hint and instructions?
 
@@ -139,7 +143,8 @@ impl U256 {
 
     #[inline(always)]
     pub fn flat_to_slice(flat: &[u64]) -> &[U256] {
-        debug_assert_eq!(flat.len() % 4, 0, "Flat slice length must be multiple of 4");
+        // Flat lengths may come from hints, so a partial limb must be rejected rather than dropped
+        assert_eq!(flat.len() % 4, 0, "Flat slice length must be multiple of 4");
         // Safe because U256 is #[repr(transparent)] over [u64; 4]
         unsafe { core::slice::from_raw_parts(flat.as_ptr() as *const U256, flat.len() / 4) }
     }

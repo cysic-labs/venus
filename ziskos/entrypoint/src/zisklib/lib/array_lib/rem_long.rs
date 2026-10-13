@@ -148,9 +148,9 @@ pub fn rem_long(
     rem.to_vec()
 }
 
-/// Verify that a = q·b + r
+/// Verify that a = q·b + r with 0 <= r < b
 #[inline(always)]
-fn verify_division(
+pub(super) fn verify_division(
     a: &[U256],
     b: &[U256],
     quo: &[U256],
@@ -177,6 +177,11 @@ fn verify_division(
     );
     assert!(!quo[len_quo - 1].is_zero(), "Quotient must not have leading zeros");
 
+    // Check 1 <= len(r) <= len(b), with no leading zeros unless r = 0
+    assert!(len_rem > 0, "Remainder must have at least one limb");
+    assert!(len_rem <= len_b, "Remainder length must be less than or equal to divisor length");
+    assert!(len_rem == 1 || !rem[len_rem - 1].is_zero(), "Remainder must not have leading zeros");
+
     // Multiply the quotient by b
     let q_b_len = mul_long(
         quo,
@@ -186,15 +191,11 @@ fn verify_division(
         hints,
     );
 
-    // Check 1 <= len(r)
-    assert!(len_rem > 0, "Remainder must have at least one limb");
-
-    if rem[len_rem - 1].is_zero() {
+    if U256::is_zero_slices(rem) {
         // If the remainder is zero, then a must be equal to q·b
         assert!(U256::eq_slices(a, &q_b[..q_b_len]), "Remainder is zero, but a != q·b");
     } else {
         // If the remainder is non-zero, then we should check that a must be equal to q·b + r and r < b
-
         assert!(U256::lt_slices(rem, b), "Remainder must be less than divisor");
 
         let q_b_r_len = add_agtb(
@@ -205,5 +206,39 @@ fn verify_division(
             hints,
         );
         assert!(U256::eq_slices(a, &q_b_r[..q_b_r_len]), "a != q·b + r");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verify(a: &[U256], b: &[U256], quo: &[U256], rem: &[U256]) {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        let mut q_b = vec![U256::ZERO; a.len() + 1];
+        let mut q_b_r = vec![U256::ZERO; a.len() + 1];
+        verify_division(
+            a,
+            b,
+            quo,
+            rem,
+            &mut q_b,
+            &mut q_b_r,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        );
+    }
+
+    #[test]
+    fn rejects_a_nonzero_remainder_disguised_by_a_zero_top_limb() {
+        // a = 5·b exactly, so the only valid remainder is zero
+        let b = [U256::from_u64(7), U256::ONE];
+        let a = [U256::from_u64(35), U256::from_u64(5)];
+        let quo = [U256::from_u64(5)];
+        verify(&a, &b, &quo, &[U256::ZERO]);
+
+        let forged_rem = [U256::from_u64(9), U256::ZERO];
+        assert!(std::panic::catch_unwind(|| verify(&a, &b, &quo, &forged_rem)).is_err());
     }
 }

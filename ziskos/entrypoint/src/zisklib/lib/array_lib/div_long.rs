@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::zisklib::fcall_division;
 
-use super::{add_agtb, mul_long, U256};
+use super::{rem_long::verify_division, U256};
 
 /// Divides two large numbers
 ///
@@ -61,53 +61,18 @@ pub fn div_long(
     let rem = U256::flat_to_slice(&rem_flat[..limbs_rem]);
 
     // Verify the division
-
-    // Since len(a) >= len(b), the division a = q·b + r must satisfy:
-    //      1] max{len(q·b), len(r)} <= len(a) => len(q) + len(b) - 1 <= len(q·b) <= len(a)
-    //                                         =>                        len(r)   <= len(a)
-    //      2] 1 <= len(r) <= len(b)
-
-    // Check 1 <= len(q) <= len(a) - len(b) + 1
-    let len_quo = quo.len();
-    assert!(len_quo > 0, "Quotient must have at least one limb");
-    assert!(
-        len_quo <= len_a - len_b + 1,
-        "Quotient length must be less than or equal to dividend length"
-    );
-    assert!(!quo[len_quo - 1].is_zero(), "Quotient must not have leading zeros");
-
-    // Multiply the quotient by b
-    let mut q_b = vec![U256::ZERO; len_a + 1]; // The +1 is because mul_long is a general purpose function
-    let q_b_len = mul_long(
-        quo,
+    let mut q_b = vec![U256::ZERO; len_a + 1]; // The +1 is because mul_long and add_agtb are a general purpose functions
+    let mut q_b_r = vec![U256::ZERO; len_a + 1];
+    verify_division(
+        a,
         b,
+        quo,
+        rem,
         &mut q_b,
+        &mut q_b_r,
         #[cfg(feature = "hints")]
         hints,
     );
-
-    // Check 1 <= len(r)
-    let len_rem = rem.len();
-    assert!(len_rem > 0, "Remainder must have at least one limb");
-
-    if rem[len_rem - 1].is_zero() {
-        // If the remainder is zero, then a must be equal to q·b
-        assert!(U256::eq_slices(a, &q_b[..q_b_len]), "Remainder is zero, but a != q·b");
-    } else {
-        // If the remainder is non-zero, then we should check that a must be equal to q·b + r and r < b
-
-        assert!(U256::lt_slices(rem, b), "Remainder must be less than divisor");
-
-        let mut q_b_r = vec![U256::ZERO; len_a + 1]; // The +1 is because add_agtb is a general purpose function
-        let q_b_r_len = add_agtb(
-            &q_b[..q_b_len],
-            rem,
-            &mut q_b_r,
-            #[cfg(feature = "hints")]
-            hints,
-        );
-        assert!(U256::eq_slices(a, &q_b_r[..q_b_r_len]), "a != q·b + r");
-    }
 
     (quo.to_vec(), rem.to_vec())
 }
