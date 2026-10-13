@@ -189,6 +189,7 @@ pub fn build_air_stark_draft(input: AirInput<'_>) -> Result<AirStarkDraft> {
     let mut expressions = format_air_expressions(&ctx)?;
     let mut constraints = format_air_constraints(&ctx)?;
     let mut symbols = format_air_symbols(&ctx)?;
+    check_values_bound_to_transcript(&symbols)?;
     let hints = format_air_hints(&ctx, &expressions, &symbols)?;
 
     annotate_expressions(&mut expressions, &constraints)?;
@@ -299,6 +300,27 @@ pub fn build_air_stark_draft(input: AirInput<'_>) -> Result<AirStarkDraft> {
     };
 
     Ok(AirStarkDraft { stark_info, expressions, constraints, symbols, hints })
+}
+
+/// Rejects values that no Fiat-Shamir transcript binds, since a prover could choose them after
+/// seeing the challenges they feed: only stage-1 proof values are folded into the global
+/// challenge, and the airgroup values are absorbed right after the stage-2 root.
+fn check_values_bound_to_transcript(symbols: &[FormattedSymbol]) -> Result<()> {
+    for symbol in symbols {
+        let stage = symbol.stage.unwrap_or(1);
+        match symbol.symbol_type.as_str() {
+            "proofvalue" if stage != 1 => anyhow::bail!(
+                "proof value {} has stage {stage}, but only stage-1 proof values are bound to the transcript",
+                symbol.name
+            ),
+            "airgroupvalue" if stage > 2 => anyhow::bail!(
+                "airgroup value {} has stage {stage}, but only stage-1 and stage-2 airgroup values are bound to the transcript",
+                symbol.name
+            ),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn generate_constraint_polynomial(
