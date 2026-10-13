@@ -204,6 +204,50 @@ inline bool venusGeneratedExprMatches(const ParserParams &parserParams, const ui
 '''
 
 
+# A run of dim3 additions that sums consecutive extension values of one broadcast buffer (for
+# example the evaluations) into one temporary is emitted as a loop instead of straight-line code,
+# which keeps the kernel small. It must be long enough for the loop to pay off.
+MIN_CONTIGUOUS_ADD_CHAIN = 8
+
+
+def contiguous_add_chain_end(ops, args, start, buffer_commit_size):
+    """End (exclusive) of the add chain starting at op `start`, or None if there is none: the first op
+    adds two consecutive triplets of a broadcast buffer, and each next op adds the following triplet
+    of the same buffer to the previous op's destination, overwriting it."""
+    def op(i):
+        return args[i*8:(i+1)*8]
+    if ops[start] != 2:
+        return None
+    arith_op, dest, t0, a0, _, t1, a1, _ = op(start)
+    if arith_op != 0 or t0 != t1 or t0 < buffer_commit_size + 2 or a1 != a0 + 3:
+        return None
+    end, last = start + 1, a1
+    while end < len(ops) and ops[end] == 2:
+        arith_op, d, t0, a0, _, t1, a1, _ = op(end)
+        if arith_op != 0 or d != dest or t0 != buffer_commit_size + 1 or a0 != dest or t1 != op(start)[2] \
+                or a1 != last + 3:
+            break
+        end, last = end + 1, a1
+    return end if end - start >= MIN_CONTIGUOUS_ADD_CHAIN else None
+
+
+def emit_contiguous_add_chain(L, args, start, end):
+    _, dest, buffer, first, _, _, second, _ = args[start*8:(start+1)*8]
+    last = args[(end-1)*8 + 6]
+    d = [f'tmp3_{dest + k}' for k in range(3)]
+    L.append(f'    // Ops {start}-{end - 1}: dim3x3 add chain over contiguous triplets of buffer {buffer}.')
+    L.append('    {')
+    L.append(f'        gl64_t *values = (gl64_t*)expressions_params[{buffer}];')
+    for k in range(3):
+        L.append(f'        {d[k]} = values[{first + k}];')
+    L.append('#pragma unroll 1')
+    L.append(f'        for (int offset = {second}; offset <= {last}; offset += 3) {{')
+    for k in range(3):
+        L.append(f'            {d[k]} = {d[k]} + values[offset + {k}];')
+    L.append('        }')
+    L.append('    }')
+
+
 def gen_load(src_type, src_arg, src_offset, dim, dump, var_prefix):
     """Generate CUDA matching load__() semantics exactly.
     Q expressions always have domainExtended=true.
@@ -568,7 +612,15 @@ def generate_evaluator(dump, out_path, direct_store=False):
     last_dest_type = None
     last_dest_idx = None
 
-    for i in range(nOps):
+    i = 0
+    while i < nOps:
+        chain_end = contiguous_add_chain_end(ops, args, i, dump['bufferCommitSize'])
+        if chain_end is not None:
+            emit_contiguous_add_chain(L, args, i, chain_end)
+            last_dest_type = 'tmp3'
+            last_dest_idx = args[i*8 + 1]
+            i = chain_end
+            continue
         a = args[i*8:(i+1)*8]
         arith_op = a[0]
         dest_idx = a[1]
@@ -637,6 +689,7 @@ def generate_evaluator(dump, out_path, direct_store=False):
                 L.append(f'    {d2} = kB{i} - kG{i};')
             elif arith_op == 3:
                 L.append(f'    {d0} = {b0} - {a0}; {d1} = {b1} - {a1}; {d2} = {b2} - {a2};')
+        i += 1
 
     L.append('')
     if direct_store and last_dest_type == 'tmp3':
