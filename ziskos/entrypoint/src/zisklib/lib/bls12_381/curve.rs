@@ -162,7 +162,7 @@ pub fn is_on_curve_bls12_381(
     eq(&lhs, &rhs)
 }
 
-/// Check if a non-zero point `p` is on the BLS12-381 subgroup
+/// Check if a point `p` on the BLS12-381 curve is on the subgroup
 pub fn is_on_subgroup_bls12_381(
     p: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -170,6 +170,9 @@ pub fn is_on_subgroup_bls12_381(
     // p in subgroup iff:
     //          ((x²-1)/3)(2·σ(P) - P - σ²(P)) == σ²(P)
     // where σ(x,y) = (ɣ·x,y)
+    //
+    // Points outside the subgroup can make the intermediate values 𝒪 or equal to each other
+    // (e.g. P = (0, 2) gives 2·σ(P) - P - σ²(P) = 𝒪), so only the complete group law is used
 
     // Compute σ(P), σ²(P)
     let sigma1 = sigma_endomorphism_bls12_381(
@@ -210,12 +213,21 @@ pub fn is_on_subgroup_bls12_381(
     eq(&lhs, &rhs)
 }
 
-/// Adds two non-zero points `p1` and `p2` on the BLS12-381 curve
+/// Adds two points `p1` and `p2` on the BLS12-381 curve
+///
+/// The addition syscall only implements the chord rule, which is wrong for 𝒪 and leaves the
+/// slope free for equal x-coordinates, so those cases are resolved here before reaching it
 pub fn add_bls12_381(
     p1: &[u64; 12],
     p2: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 12] {
+    if eq(p1, &G1_IDENTITY) {
+        return *p2;
+    } else if eq(p2, &G1_IDENTITY) {
+        return *p1;
+    }
+
     let x1: [u64; 6] = p1[0..6].try_into().unwrap();
     let y1: [u64; 6] = p1[6..12].try_into().unwrap();
     let x2: [u64; 6] = p2[0..6].try_into().unwrap();
@@ -353,8 +365,15 @@ pub fn neg_bls12_381(p: &[u64; 12], #[cfg(feature = "hints")] hints: &mut Vec<u6
     result
 }
 
-/// Doubling of a non-zero point `p` on the BLS12-381 curve
+/// Doubling of a point `p` on the BLS12-381 curve
+///
+/// The doubling syscall leaves the slope free for 𝒪 (encoded as zeros), so 𝒪 is resolved here.
+/// No other point has y = 0, since the curve has no points of order 2
 pub fn dbl_bls12_381(p: &[u64; 12], #[cfg(feature = "hints")] hints: &mut Vec<u64>) -> [u64; 12] {
+    if eq(p, &G1_IDENTITY) {
+        return G1_IDENTITY;
+    }
+
     let mut p = SyscallPoint384 { x: p[0..6].try_into().unwrap(), y: p[6..12].try_into().unwrap() };
     syscall_bls12_381_curve_dbl(
         &mut p,
@@ -368,7 +387,7 @@ pub fn dbl_bls12_381(p: &[u64; 12], #[cfg(feature = "hints")] hints: &mut Vec<u6
     result
 }
 
-/// Subtraction of two non-zero points `p1` and `p2` on the BLS12-381 curve
+/// Subtraction of two points `p1` and `p2` on the BLS12-381 curve
 pub fn sub_bls12_381(
     p1: &[u64; 12],
     p2: &[u64; 12],
@@ -396,41 +415,10 @@ pub fn sub_bls12_381(
     )
 }
 
-/// Subtraction of two points `p1` and `p2` on the BLS12-381 curve
-pub fn sub_complete_bls12_381(
-    p1: &[u64; 12],
-    p2: &[u64; 12],
-    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
-) -> [u64; 12] {
-    let p1_is_inf = *p1 == G1_IDENTITY;
-    let p2_is_inf = *p2 == G1_IDENTITY;
-
-    // Handle identity cases
-    if p1_is_inf && p2_is_inf {
-        // O - O = O
-        return G1_IDENTITY;
-    } else if p1_is_inf {
-        // O - P2 = -P2
-        return neg_bls12_381(
-            p2,
-            #[cfg(feature = "hints")]
-            hints,
-        );
-    } else if p2_is_inf {
-        // P1 - O = P1
-        return *p1;
-    }
-
-    // Perform regular subtraction: P1 - P2 = P1 + (-P2)
-    sub_bls12_381(
-        p1,
-        p2,
-        #[cfg(feature = "hints")]
-        hints,
-    )
-}
-
 /// Multiplies a non-zero point `p` on the BLS12-381 curve by a scalar `k` on the BLS12-381 scalar field
+///
+/// The double-and-add loop calls the curve syscalls directly, so `p` must be in the subgroup and
+/// `k` must be reduced: then no intermediate point is 𝒪 or ±`p`
 pub fn scalar_mul_bls12_381(
     p: &[u64; 12],
     k: &[u64; 4],
@@ -532,40 +520,35 @@ pub fn scalar_mul_bls12_381(
     result
 }
 
-/// Scalar multiplication of a non-zero point `p` by a binary scalar `k`
+/// Scalar multiplication of a point `p` by a binary scalar `k` (big-endian, leading bit set)
+///
+/// Uses the complete group law, so `p` may be any point of the curve, including points outside
+/// the subgroup whose multiples reach 𝒪 or ±`p` along the way
 pub fn scalar_mul_bin_bls12_381(
     p: &[u64; 12],
     k: &[u8],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 12] {
-    let x1: [u64; 6] = p[0..6].try_into().unwrap();
-    let y1: [u64; 6] = p[6..12].try_into().unwrap();
-    let p = SyscallPoint384 { x: x1, y: y1 };
-
-    let mut r = SyscallPoint384 { x: x1, y: y1 };
+    let mut r = *p;
     for &bit in k.iter().skip(1) {
-        syscall_bls12_381_curve_dbl(
-            &mut r,
+        r = dbl_bls12_381(
+            &r,
             #[cfg(feature = "hints")]
             hints,
         );
         if bit == 1 {
-            let mut params = SyscallBls12_381CurveAddParams { p1: &mut r, p2: &p };
-            syscall_bls12_381_curve_add(
-                &mut params,
+            r = add_bls12_381(
+                &r,
+                p,
                 #[cfg(feature = "hints")]
                 hints,
             );
         }
     }
-
-    let mut result = [0u64; 12];
-    result[0..6].copy_from_slice(&r.x);
-    result[6..12].copy_from_slice(&r.y);
-    result
+    r
 }
 
-/// Scalar multiplication of a non-zero point by (x²-1)/3
+/// Scalar multiplication of a point by (x²-1)/3
 pub fn scalar_mul_by_x2div3_bls12_381(
     p: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -842,5 +825,30 @@ pub fn g1_u64_le_to_bytes_be_bls12_381(limbs: &[u64; 12], bytes: &mut [u8; 96]) 
         for j in 0..8 {
             bytes[48 + i * 8 + j] = ((limb >> (8 * (7 - j))) & 0xFF) as u8;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::constants::G1_GENERATOR;
+    use super::*;
+
+    fn in_subgroup(p: &[u64; 12]) -> bool {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        is_on_subgroup_bls12_381(
+            p,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        )
+    }
+
+    #[test]
+    fn subgroup_check_rejects_the_order_3_point() {
+        // (0, 2) is fixed by σ, so the check reaches 𝒪 in its intermediate points
+        let order_3 = [0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0];
+        assert!(!in_subgroup(&order_3));
+        assert!(in_subgroup(&G1_GENERATOR));
+        assert!(in_subgroup(&G1_IDENTITY));
     }
 }

@@ -5,11 +5,11 @@ use crate::zisklib::{
 
 use super::{
     constants::{G1_GENERATOR, G1_IDENTITY, G2_GENERATOR, G2_IDENTITY, R, TRUSTED_SETUP_TAU_G2},
-    curve::{decompress_bls12_381, scalar_mul_bls12_381, sub_bls12_381, sub_complete_bls12_381},
+    curve::{decompress_bls12_381, scalar_mul_bls12_381, sub_bls12_381},
     pairing::pairing_batch_bls12_381,
     twist::{
         decompress_twist_bls12_381, neg_twist_bls12_381, scalar_mul_twist_bls12_381,
-        sub_complete_twist_bls12_381, sub_twist_bls12_381,
+        sub_twist_bls12_381,
     },
 };
 
@@ -87,7 +87,7 @@ pub fn verify_kzg_proof(
         #[cfg(feature = "hints")]
         hints,
     );
-    let c_minus_y = sub_complete_bls12_381(
+    let c_minus_y = sub_bls12_381(
         &commitment,
         &y_g1,
         #[cfg(feature = "hints")]
@@ -101,7 +101,7 @@ pub fn verify_kzg_proof(
         #[cfg(feature = "hints")]
         hints,
     );
-    let t_minus_z = sub_complete_twist_bls12_381(
+    let t_minus_z = sub_twist_bls12_381(
         &tau_g2,
         &z_g2,
         #[cfg(feature = "hints")]

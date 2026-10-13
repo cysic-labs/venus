@@ -192,7 +192,7 @@ pub fn is_on_curve_twist_bls12_381(
     eq(&x_cubed_plus_b, &y_sq)
 }
 
-/// Check if a non-zero point `p` is on the BLS12-381 twist subgroup
+/// Check if a point `p` on the BLS12-381 twist is on the subgroup
 pub fn is_on_subgroup_twist_bls12_381(
     p: &[u64; 24],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -200,6 +200,9 @@ pub fn is_on_subgroup_twist_bls12_381(
     // p in subgroup iff:
     //          x·𝜓³(P) + P == 𝜓²(P)
     // where ψ := 𝜑⁻¹𝜋ₚ𝜑 is the untwist-Frobenius-twist endomorphism
+    //
+    // For points outside the subgroup the multiples of 𝜓³(P) can reach 𝒪 (e.g. for points of
+    // order 13), which the complete addition and doubling handle
 
     // Compute ψ²(P), ψ³(P)
     let utf1 = utf_endomorphism_twist_bls12_381(
@@ -300,6 +303,9 @@ fn psi2_twist_bls12_381(
 
 /// Efficient cofactor clearing for G2 using endomorphisms
 /// Implements: h_eff * P where h_eff is the effective cofactor
+///
+/// `p` is any point of the twist, so the intermediate points can be 𝒪 or equal to each other,
+/// which the complete addition and doubling handle
 pub fn clear_cofactor_twist_bls12_381(
     p: &[u64; 24],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -371,12 +377,18 @@ pub fn clear_cofactor_twist_bls12_381(
     )
 }
 
-/// Addition of two non-zero points
+/// Addition of two points
 pub fn add_twist_bls12_381(
     p1: &[u64; 24],
     p2: &[u64; 24],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 24] {
+    if eq(p1, &G2_IDENTITY) {
+        return *p2;
+    } else if eq(p2, &G2_IDENTITY) {
+        return *p1;
+    }
+
     let x1: [u64; 12] = p1[0..12].try_into().unwrap();
     let y1: [u64; 12] = p1[12..24].try_into().unwrap();
     let x2: [u64; 12] = p2[0..12].try_into().unwrap();
@@ -557,11 +569,16 @@ pub fn add_complete_twist_bls12_381(
     ))
 }
 
-/// Doubling of a non-zero point
+/// Doubling of a point
 pub fn dbl_twist_bls12_381(
     p: &[u64; 24],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 24] {
+    // 𝒪 is encoded as zeros; no other point has y = 0, since the twist has no points of order 2
+    if eq(p, &G2_IDENTITY) {
+        return G2_IDENTITY;
+    }
+
     let x: [u64; 12] = p[0..12].try_into().unwrap();
     let y: [u64; 12] = p[12..24].try_into().unwrap();
 
@@ -638,7 +655,7 @@ pub fn dbl_twist_bls12_381(
     result
 }
 
-/// Subtraction of two non-zero points `p1` and `p2` on the BLS12-381 curve
+/// Subtraction of two points `p1` and `p2` on the BLS12-381 twist
 pub fn sub_twist_bls12_381(
     p1: &[u64; 24],
     p2: &[u64; 24],
@@ -666,40 +683,6 @@ pub fn sub_twist_bls12_381(
     )
 }
 
-/// Subtraction of two points `p1` and `p2` on the BLS12-381 curve
-pub fn sub_complete_twist_bls12_381(
-    p1: &[u64; 24],
-    p2: &[u64; 24],
-    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
-) -> [u64; 24] {
-    let p1_is_inf = *p1 == G2_IDENTITY;
-    let p2_is_inf = *p2 == G2_IDENTITY;
-
-    // Handle identity cases
-    if p1_is_inf && p2_is_inf {
-        // O - O = O
-        return G2_IDENTITY;
-    } else if p1_is_inf {
-        // O - P2 = -P2
-        return neg_twist_bls12_381(
-            p2,
-            #[cfg(feature = "hints")]
-            hints,
-        );
-    } else if p2_is_inf {
-        // P1 - O = P1
-        return *p1;
-    }
-
-    // Perform regular subtraction: P1 - P2 = P1 + (-P2)
-    sub_twist_bls12_381(
-        p1,
-        p2,
-        #[cfg(feature = "hints")]
-        hints,
-    )
-}
-
 /// Negation of a point
 pub fn neg_twist_bls12_381(
     p: &[u64; 24],
@@ -721,7 +704,7 @@ pub fn neg_twist_bls12_381(
     result
 }
 
-/// Multiplies a non-zero point `p` on the BLS12-381 curve by a scalar `k` on the BLS12-381 scalar field
+/// Multiplies a point `p` on the BLS12-381 twist by a scalar `k` on the BLS12-381 scalar field
 pub fn scalar_mul_twist_bls12_381(
     p: &[u64; 24],
     k: &[u64; 4],
@@ -817,7 +800,7 @@ pub fn scalar_mul_twist_bls12_381(
     q
 }
 
-/// Scalar multiplication of a non-zero point `p` by a binary scalar `k`
+/// Scalar multiplication of a point `p` by a binary scalar `k` (big-endian, leading bit set)
 pub fn scalar_mul_bin_twist_bls12_381(
     p: &[u64; 24],
     k: &[u8],
@@ -842,7 +825,7 @@ pub fn scalar_mul_bin_twist_bls12_381(
     r
 }
 
-/// Scalar multiplication of a non-zero point by x
+/// Scalar multiplication of a point by |x|
 pub fn scalar_mul_by_abs_x_twist_bls12_381(
     p: &[u64; 24],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -1194,5 +1177,63 @@ pub fn g2_u64_le_to_bytes_be_bls12_381(limbs: &[u64; 24], bytes: &mut [u8; 192])
         for j in 0..8 {
             bytes[144 + i * 8 + j] = ((limb >> (8 * (7 - j))) & 0xFF) as u8;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A point of order 13 of the twist, outside the subgroup
+    const ORDER_13: [u64; 24] = [
+        0x56905843518bc0c2,
+        0x6bae16f9f2763ab5,
+        0x34d320e323d9fcc7,
+        0xffeef5b14a3e2468,
+        0x8340a1a548d700c5,
+        0x043ff79d06a80add,
+        0xee69a68b7d4704a4,
+        0x278c22ea15e6d03c,
+        0x0a23c05406588284,
+        0x09b25206fa89dded,
+        0x7d4ebc6409c2fdae,
+        0x032762e5199990da,
+        0x4501e53fabc600f3,
+        0x67961c8d7bcc69b9,
+        0xb6502cc324ab0479,
+        0x0f05b83418b3d3b6,
+        0x916f6195da10e94d,
+        0x07b8eb3b0d94f08c,
+        0x7eb47d01649f4c1e,
+        0x0a516e85dc3f7497,
+        0x1192186219d8d38a,
+        0xfefcf24fd6b08089,
+        0x02d3dda394c1dd5f,
+        0x082b2fb28bdddaf7,
+    ];
+
+    #[test]
+    fn clears_the_cofactor_of_a_low_order_point() {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        assert!(is_on_curve_twist_bls12_381(
+            &ORDER_13,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        ));
+        assert!(!is_on_subgroup_twist_bls12_381(
+            &ORDER_13,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        ));
+        // The |x| ladders reach 𝒪 and must stay there
+        assert_eq!(
+            clear_cofactor_twist_bls12_381(
+                &ORDER_13,
+                #[cfg(feature = "hints")]
+                &mut hints,
+            ),
+            G2_IDENTITY
+        );
     }
 }

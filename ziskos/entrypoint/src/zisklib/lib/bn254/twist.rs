@@ -43,7 +43,7 @@ pub fn is_on_curve_twist_bn254(
     eq(&x_cubed_plus_b, &y_sq)
 }
 
-/// Check if a non-zero point `p` is on the BN254 twist subgroup
+/// Check if a point `p` on the BN254 twist is on the subgroup
 pub fn is_on_subgroup_twist_bn254(
     p: &[u64; 16],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -52,6 +52,9 @@ pub fn is_on_subgroup_twist_bn254(
     //      (x+1)·Q + 𝜓(x·Q) + 𝜓²(x·Q) == 𝜓³((2x)·Q)
     // where 𝜓 is the Frobenius endomorphism
     // as described in https://eprint.iacr.org/2022/348.pdf
+    //
+    // For points outside the subgroup the partial sums can be 𝒪 or equal to each other,
+    // which the complete addition and doubling handle
     let xp: [u64; 16] = scalar_mul_by_x_twist_bn254(
         p,
         #[cfg(feature = "hints")]
@@ -163,12 +166,18 @@ pub fn to_affine_twist_bn254(
     ]
 }
 
-/// Addition of two non-zero points
+/// Addition of two points
 pub fn add_twist_bn254(
     p1: &[u64; 16],
     p2: &[u64; 16],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 16] {
+    if eq(p1, &G2_IDENTITY) {
+        return *p2;
+    } else if eq(p2, &G2_IDENTITY) {
+        return *p1;
+    }
+
     let x1: [u64; 8] = p1[0..8].try_into().unwrap();
     let y1: [u64; 8] = p1[8..16].try_into().unwrap();
     let x2: [u64; 8] = p2[0..8].try_into().unwrap();
@@ -257,8 +266,13 @@ pub fn add_twist_bn254(
     ]
 }
 
-/// Doubling of a non-zero point
+/// Doubling of a point
 pub fn dbl_twist_bn254(p: &[u64; 16], #[cfg(feature = "hints")] hints: &mut Vec<u64>) -> [u64; 16] {
+    // 𝒪 is encoded as zeros; no other point has y = 0, since the twist has no points of order 2
+    if eq(p, &G2_IDENTITY) {
+        return G2_IDENTITY;
+    }
+
     let x: [u64; 8] = p[0..8].try_into().unwrap();
     let y: [u64; 8] = p[8..16].try_into().unwrap();
 
@@ -352,7 +366,7 @@ pub fn neg_twist_bn254(p: &[u64; 16], #[cfg(feature = "hints")] hints: &mut Vec<
     ]
 }
 
-/// Scalar multiplication of a non-zero point by x
+/// Scalar multiplication of a point by x
 pub fn scalar_mul_by_x_twist_bn254(
     p: &[u64; 16],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
