@@ -1014,6 +1014,7 @@ void free_json_string(char* json_str) {
     }
 }
 
+// Leaves both outputs null when the proof cannot be converted: exceptions must not cross the C ABI.
 void snark_proof_bytes_to_json(
     uint8_t* proof_bytes,
     uint64_t proof_size,
@@ -1023,15 +1024,30 @@ void snark_proof_bytes_to_json(
     char** proof_json_out,
     char** publics_json_out
 ) {
-    auto [proof_json, publics_json] = snark_proof_to_json(
-        proof_bytes, proof_size, public_bytes, public_size, protocol_id
-    );
-    
-    *proof_json_out = (char*)malloc(proof_json.size() + 1);
-    *publics_json_out = (char*)malloc(publics_json.size() + 1);
-    
-    strcpy(*proof_json_out, proof_json.c_str());
-    strcpy(*publics_json_out, publics_json.c_str());
+    *proof_json_out = nullptr;
+    *publics_json_out = nullptr;
+    try {
+        auto [proof_json, publics_json] = snark_proof_to_json(
+            proof_bytes, proof_size, public_bytes, public_size, protocol_id
+        );
+
+        char *proof_json_copy = (char*)malloc(proof_json.size() + 1);
+        char *publics_json_copy = (char*)malloc(publics_json.size() + 1);
+        if (proof_json_copy == nullptr || publics_json_copy == nullptr) {
+            free(proof_json_copy);
+            free(publics_json_copy);
+            zklog.error("snark_proof_bytes_to_json: failed to allocate the JSON strings");
+            return;
+        }
+        strcpy(proof_json_copy, proof_json.c_str());
+        strcpy(publics_json_copy, publics_json.c_str());
+        *proof_json_out = proof_json_copy;
+        *publics_json_out = publics_json_copy;
+    } catch (const std::exception &e) {
+        zklog.error("snark_proof_bytes_to_json: " + std::string(e.what()));
+    } catch (...) {
+        zklog.error("snark_proof_bytes_to_json: unknown exception");
+    }
 }
 
 void setLogLevel(uint64_t level) {

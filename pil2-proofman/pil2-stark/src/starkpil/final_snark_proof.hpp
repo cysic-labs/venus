@@ -119,6 +119,10 @@ std::pair<std::string, std::string> snark_proof_to_json(
     json publics_json = json::array();
     
     // Parse public inputs (always the same format)
+    if (public_size % AltBn128::Fr.bytes() != 0) {
+        throw std::runtime_error("Public inputs size (" + std::to_string(public_size) +
+                                 " bytes) is not a multiple of " + std::to_string(AltBn128::Fr.bytes()) + " bytes");
+    }
     for (size_t i = 0; i < public_size; i += AltBn128::Fr.bytes()) {
         AltBn128::FrElement pub;
         AltBn128::Fr.fromRprBE(pub, public_bytes + i, AltBn128::Fr.bytes());
@@ -143,13 +147,13 @@ std::pair<std::string, std::string> snark_proof_to_json(
     }
     
     // Validate proof size before parsing
-    // Each commitment is a G1 point with 2 coordinates (x, y), each coordinate is AltBn128::Fr.bytes()
+    // Each commitment is a G1 point with 2 base field coordinates (x, y)
     // Each evaluation is a single Fr element
-    size_t expected_size = (orderedCommitments.size() * 2 + orderedEvaluations.size()) * AltBn128::Fr.bytes();
-    if (proof_size < expected_size) {
+    size_t expected_size = orderedCommitments.size() * 2 * AltBn128::F1.bytes() + orderedEvaluations.size() * AltBn128::Fr.bytes();
+    if (proof_size != expected_size) {
         throw std::runtime_error("Proof size (" + std::to_string(proof_size) + 
-                                 " bytes) is smaller than expected (" + std::to_string(expected_size) + 
-                                 " bytes) for " + protocol_name + " protocol");
+                                 " bytes) is not the expected " + std::to_string(expected_size) + 
+                                 " bytes for " + protocol_name + " protocol");
     }
     
     size_t offset = 0;
@@ -158,15 +162,15 @@ std::pair<std::string, std::string> snark_proof_to_json(
     for (const auto& key : orderedCommitments) {
         json point = json::array();
         
-        AltBn128::FrElement x;
-        AltBn128::Fr.fromRprBE(x, proof_bytes + offset, AltBn128::Fr.bytes());
-        point.push_back(AltBn128::Fr.toString(x));
-        offset += AltBn128::Fr.bytes();
+        AltBn128::F1Element x;
+        AltBn128::F1.fromRprBE(x, proof_bytes + offset, AltBn128::F1.bytes());
+        point.push_back(AltBn128::F1.toString(x));
+        offset += AltBn128::F1.bytes();
         
-        AltBn128::FrElement y;
-        AltBn128::Fr.fromRprBE(y, proof_bytes + offset, AltBn128::Fr.bytes());
-        point.push_back(AltBn128::Fr.toString(y));
-        offset += AltBn128::Fr.bytes();
+        AltBn128::F1Element y;
+        AltBn128::F1.fromRprBE(y, proof_bytes + offset, AltBn128::F1.bytes());
+        point.push_back(AltBn128::F1.toString(y));
+        offset += AltBn128::F1.bytes();
         
         point.push_back("1");
         

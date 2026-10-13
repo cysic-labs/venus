@@ -6714,6 +6714,7 @@ dependencies = [
  "colored",
  "executor",
  "fields",
+ "num-bigint",
  "precompiles-hints",
  "proofman",
  "proofman-common",

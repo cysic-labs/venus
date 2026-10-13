@@ -2,6 +2,7 @@ use crate::{
     get_default_proving_key, get_default_proving_key_snark, ZiskProgramVK, ZiskProof, ZiskPublics,
 };
 use anyhow::{anyhow, Ok, Result};
+use num_bigint::BigUint;
 use proofman::{get_vadcop_final_proof_vkey, verify_snark_proof, SnarkProof, SnarkProtocol};
 use proofman_util::VadcopFinalProof;
 use proofman_verifier::{verify_vadcop_final, verify_vadcop_final_compressed};
@@ -9,6 +10,11 @@ use rom_setup::rom_merkle_setup_verkey;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use zisk_common::ElfBinaryLike;
+
+/// BN254 scalar field modulus. The final SNARK's public input is the SHA-256 of the statement it
+/// proves reduced into this field, as the circuit and the Solidity verifier compute it.
+const BN254_SCALAR_MODULUS: &str =
+    "21888242871839275222246405745257275088548364400416034343698204186575808495617";
 
 pub fn verify_zisk_snark_proof(
     proof: &ZiskProof,
@@ -65,13 +71,12 @@ pub fn verify_zisk_snark_proof_with_proving_key(
 
             let verkey = get_vadcop_final_proof_vkey(&proving_key, false)?;
 
+            // The public input is recomputed from the claimed statement, never taken as given.
             let pubs = publics.bytes_solidity(program_vk, &verkey)?;
-            let hash = Sha256::digest(&pubs).to_vec();
-
             let snark_proof = SnarkProof {
                 proof_bytes: proof_bytes.clone(),
+                public_snark_bytes: snark_public_input(&pubs),
                 public_bytes: pubs,
-                public_snark_bytes: hash,
                 protocol_id,
             };
 
@@ -85,6 +90,17 @@ pub fn verify_zisk_snark_proof_with_proving_key(
         }
         _ => Err(anyhow!("Not a snark proof.")),
     }
+}
+
+/// The final SNARK's public input for `statement`: its SHA-256 reduced into the BN254 scalar field,
+/// as 32 big-endian bytes.
+fn snark_public_input(statement: &[u8]) -> Vec<u8> {
+    let modulus = BigUint::parse_bytes(BN254_SCALAR_MODULUS.as_bytes(), 10)
+        .expect("BN254_SCALAR_MODULUS is decimal");
+    let digest = (BigUint::from_bytes_be(&Sha256::digest(statement)) % modulus).to_bytes_be();
+    let mut public_input = vec![0u8; 32 - digest.len()];
+    public_input.extend(digest);
+    public_input
 }
 
 pub fn verify_zisk_proof_with_proving_key(
