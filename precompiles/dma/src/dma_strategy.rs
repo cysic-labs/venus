@@ -212,7 +212,8 @@ impl<F: PrimeField64> DmaStrategy<F> {
         info.inputcpy = rows_inputcpy.div_ceil(rows_x_inputcpy_instance);
 
         let remain_dma = rows_full % rows_x_full_instance;
-        let available_on_dma = if rows_full == 0 { 0 } else { rows_x_full_instance - remain_dma };
+        let available_on_dma =
+            if rows_full == 0 || remain_dma == 0 { 0 } else { rows_x_full_instance - remain_dma };
         let remain_dma_memcpy = rows_memcpy % rows_x_memcpy_instance;
         let remain_dma_inputcpy = rows_inputcpy % rows_x_inputcpy_instance;
         let remain = remain_dma_memcpy + remain_dma_inputcpy;
@@ -599,5 +600,77 @@ impl<F: PrimeField64> DmaStrategy<F> {
 
         fs::write(&full_path, debug_info)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fields::Goldilocks;
+
+    type TestStrategy = DmaStrategy<Goldilocks>;
+
+    fn rows(
+        memcpy: usize,
+        memset: usize,
+        memcmp: usize,
+        inputcpy: usize,
+    ) -> [usize; DMA_COUNTER_OPS] {
+        let mut rows = [0; DMA_COUNTER_OPS];
+        rows[DMA_COUNTER_MEMCPY] = memcpy;
+        rows[DMA_COUNTER_MEMSET] = memset;
+        rows[DMA_COUNTER_MEMCMP] = memcmp;
+        rows[DMA_COUNTER_INPUTCPY] = inputcpy;
+        rows
+    }
+
+    fn calculate(rows: &[usize]) -> DmaInstances {
+        let mut info = DmaInstances::default();
+        TestStrategy::calculate_dma_strategy(rows, 8, 4, 4, &mut info);
+        info
+    }
+
+    #[test]
+    fn exact_full_instance_does_not_absorb_memcpy_remainder() {
+        let info = calculate(&rows(1, 8, 0, 0));
+
+        assert_eq!(info.full, 1);
+        assert_eq!(info.memcpy, 1);
+        assert_eq!(info.inputcpy, 0);
+        assert_eq!(info.rows_memcpy_to_full, 0);
+        assert_eq!(info.rows_inputcpy_to_full, 0);
+    }
+
+    #[test]
+    fn exact_full_instance_does_not_absorb_inputcpy_remainder() {
+        let info = calculate(&rows(0, 0, 8, 1));
+
+        assert_eq!(info.full, 1);
+        assert_eq!(info.memcpy, 0);
+        assert_eq!(info.inputcpy, 1);
+        assert_eq!(info.rows_memcpy_to_full, 0);
+        assert_eq!(info.rows_inputcpy_to_full, 0);
+    }
+
+    #[test]
+    fn exact_full_instance_allocates_extra_full_for_two_partial_remainders() {
+        let info = calculate(&rows(1, 8, 0, 1));
+
+        assert_eq!(info.full, 2);
+        assert_eq!(info.memcpy, 0);
+        assert_eq!(info.inputcpy, 0);
+        assert_eq!(info.rows_memcpy_to_full, 1);
+        assert_eq!(info.rows_inputcpy_to_full, 1);
+    }
+
+    #[test]
+    fn non_exact_full_instance_still_absorbs_remainder_capacity() {
+        let info = calculate(&rows(1, 7, 0, 0));
+
+        assert_eq!(info.full, 1);
+        assert_eq!(info.memcpy, 0);
+        assert_eq!(info.inputcpy, 0);
+        assert_eq!(info.rows_memcpy_to_full, 1);
+        assert_eq!(info.rows_inputcpy_to_full, 0);
     }
 }
