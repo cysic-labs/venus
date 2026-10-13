@@ -257,6 +257,11 @@ pub unsafe extern "C" fn modexp_bytes_c(
     result_ptr: *mut u8,
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> usize {
+    // An empty modulus has an empty result (EIP-198), so nothing is read or written
+    if modulus_len == 0 {
+        return 0;
+    }
+
     let base_bytes = std::slice::from_raw_parts(base_ptr, base_len);
     let exp_bytes = std::slice::from_raw_parts(exp_ptr, exp_len);
     let modulus_bytes = std::slice::from_raw_parts(modulus_ptr, modulus_len);
