@@ -548,9 +548,7 @@ pub fn generate_recursive_proof<F: PrimeField64>(
 }
 
 fn pinned_recursive_trace_pool_enabled() -> bool {
-    std::env::var("VENUS_RECURSIVE_TRACE_PINNED_POOL")
-        .map(|value| !value.is_empty() && value != "0")
-        .unwrap_or(false)
+    std::env::var("VENUS_RECURSIVE_TRACE_PINNED_POOL").map(|value| !value.is_empty() && value != "0").unwrap_or(false)
 }
 
 fn pinned_recursive_trace_pool_limit() -> usize {
