@@ -425,11 +425,11 @@ fn eval_exp(
 ) -> Result<CodeRefJson> {
     match exp.op.as_str() {
         "add" | "sub" | "mul" => {
-            let normalized_mul = normalized_zero_add_sub(exp);
-            let op = normalized_mul.unwrap_or(exp.op.as_str());
+            let one_operand = zero_operand_to_one(exp);
+            let op = if one_operand.is_some() { "mul" } else { exp.op.as_str() };
             let mut values = Vec::with_capacity(exp.values.len());
-            for value in &exp.values {
-                if normalized_mul.is_some() && is_zero_number(value) {
+            for (idx, value) in exp.values.iter().enumerate() {
+                if one_operand == Some(idx) {
                     values.push(CodeRefJson::number("1"));
                 } else {
                     values.push(eval_exp(ctx, symbols, expressions, value, prime)?);
@@ -1062,15 +1062,17 @@ impl CodeRefJson {
     }
 }
 
-fn normalized_zero_add_sub(expression: &FormattedExpression) -> Option<&'static str> {
-    if expression.values.len() != 2 {
+/// Index of the literal zero operand that the JS setup (pil2-proofman-js `addInfoExpressions`)
+/// replaces with one to turn an addition or subtraction into a multiplication: `0 + x` becomes
+/// `1 * x`, and `x + 0` or `x - 0` becomes `x * 1`. Only that operand is replaced, so `0 + 0`
+/// and `0 - 0` become `1 * 0` and `0 * 1` and still evaluate to zero.
+fn zero_operand_to_one(expression: &FormattedExpression) -> Option<usize> {
+    let [lhs, rhs] = expression.values.as_slice() else {
         return None;
-    }
-    let lhs_zero = is_zero_number(&expression.values[0]);
-    let rhs_zero = is_zero_number(&expression.values[1]);
+    };
     match expression.op.as_str() {
-        "add" if lhs_zero || rhs_zero => Some("mul"),
-        "sub" if rhs_zero => Some("mul"),
+        "add" if is_zero_number(lhs) => Some(0),
+        "add" | "sub" if is_zero_number(rhs) => Some(1),
         _ => None,
     }
 }
