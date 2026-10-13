@@ -336,13 +336,19 @@ fn write_recursive2(
     recursive_stark_struct: &StarkStruct,
     recursive1_roots: &[Vec<u64>],
 ) -> Result<SetupProduct> {
-    let recursive1_stark_path = proving_key_dir
-        .join(&vadcop_info.name)
-        .join(airgroup_name)
-        .join("airs")
-        .join(&vadcop_info.airs[airgroup_id][0].name)
-        .join("recursive1")
-        .join("recursive1");
+    let recursive1_path = |air_name: &str| {
+        proving_key_dir
+            .join(&vadcop_info.name)
+            .join(airgroup_name)
+            .join("airs")
+            .join(air_name)
+            .join("recursive1")
+            .join("recursive1")
+    };
+    let recursive1_stark_path = recursive1_path(&vadcop_info.airs[airgroup_id][0].name);
+    for air in &vadcop_info.airs[airgroup_id][1..] {
+        check_same_recursion_air(&recursive1_stark_path, &recursive1_path(&air.name))?;
+    }
     let recursive1 = read_setup_product(&recursive1_stark_path)?;
 
     let verifier_name = format!("{airgroup_name}_recursive2.verifier.circom");
@@ -389,6 +395,8 @@ fn write_recursive2(
         "Recursive2".to_string(),
         StarkStructMode::Fixed(recursive_stark_struct.clone()),
     )?;
+
+    check_same_recursion_air(&recursive1_stark_path, &setup_path)?;
 
     let vks = Recursive2VerificationKeys {
         root_c_recursives1: recursive1_roots.to_vec(),
@@ -717,6 +725,40 @@ fn recursivef_stark_struct(n_bits: u32) -> Result<StarkStruct> {
         ..Default::default()
     };
     generate_stark_struct(&settings, u64::from(n_bits))
+}
+
+/// recursive2 verifies every recursive1 proof and its own proofs with one verifier rendered from the
+/// first recursive1 setup, which tells the circuits apart only by their verification keys. So all
+/// of them must be the same AIR: identical setups up to names and ids.
+fn check_same_recursion_air(reference: &Path, setup: &Path) -> Result<()> {
+    fn air_shape(value: serde_json::Value, top_level: bool) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => map
+                .into_iter()
+                .filter(|(key, _)| {
+                    key != "name" && !(top_level && (key == "airId" || key == "airgroupId"))
+                })
+                .map(|(key, value)| (key, air_shape(value, false)))
+                .collect(),
+            serde_json::Value::Array(values) => {
+                values.into_iter().map(|value| air_shape(value, false)).collect()
+            }
+            value => value,
+        }
+    }
+    for extension in ["starkinfo.json", "verifierinfo.json"] {
+        let reference_file = reference.with_extension(extension);
+        let setup_file = setup.with_extension(extension);
+        if air_shape(read_json(&reference_file)?, true) != air_shape(read_json(&setup_file)?, true)
+        {
+            anyhow::bail!(
+                "{} differs from {}, but recursive2 verifies both setups with the same circuit",
+                setup_file.display(),
+                reference_file.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn read_setup_product(setup_path: &Path) -> Result<SetupProduct> {

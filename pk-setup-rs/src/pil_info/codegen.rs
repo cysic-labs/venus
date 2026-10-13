@@ -624,7 +624,10 @@ fn fix_eval(reference: &mut CodeRefJson, ctx: &CodegenContext) -> Result<()> {
         .ev_map
         .iter()
         .position(|ev| {
-            ev.ev_type == reference.ref_type && ev.id == id && ev.opening_pos == opening_pos
+            ev.ev_type == reference.ref_type
+                && ev.id == id
+                && ev.opening_pos == opening_pos
+                && ev.commit_id == reference.commit_id
         })
         .with_context(|| {
             format!(
