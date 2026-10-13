@@ -588,15 +588,8 @@ pub fn msm_complete_bls12_381(
             continue;
         }
 
-        // Reduce the scalar modulo the group order, and skip if the result is zero
-        let scalar = reduce_fr_bls12_381(
-            scalar,
-            #[cfg(feature = "hints")]
-            hints,
-        );
-        if is_zero(&scalar) {
-            continue;
-        }
+        // Validate the point before the zero-scalar skip below: EIP-2537 rejects an invalid
+        // point whatever its scalar
 
         // Verify point coordinates are in the field
         let x: [u64; 6] = point[0..6].try_into().unwrap();
@@ -621,6 +614,16 @@ pub fn msm_complete_bls12_381(
             hints,
         ) {
             return Err(G1_MSM_ERR_NOT_IN_SUBGROUP);
+        }
+
+        // Reduce the scalar modulo the group order, and skip if the result is zero
+        let scalar = reduce_fr_bls12_381(
+            scalar,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+        if is_zero(&scalar) {
+            continue;
         }
 
         // Compute P * k
@@ -850,5 +853,19 @@ mod tests {
         assert!(!in_subgroup(&order_3));
         assert!(in_subgroup(&G1_GENERATOR));
         assert!(in_subgroup(&G1_IDENTITY));
+    }
+
+    #[test]
+    fn msm_rejects_an_invalid_point_with_a_zero_scalar() {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        let off_curve = [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0];
+        let result = msm_complete_bls12_381(
+            &[off_curve],
+            &[[0; 4]],
+            #[cfg(feature = "hints")]
+            &mut hints,
+        );
+        assert_eq!(result, Err(G1_MSM_ERR_NOT_ON_CURVE));
     }
 }
