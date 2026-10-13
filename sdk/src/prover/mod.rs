@@ -455,13 +455,16 @@ impl ZiskPublics {
             );
         }
 
-        let mut data = [0u8; ZISK_PUBLIC_DATA_BYTES];
-        for (i, chunk) in publics_bytes[ZISK_PROGRAM_VK_BYTES..].chunks_exact(8).enumerate() {
-            let v32 = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
-            data[i * 4..(i + 1) * 4].copy_from_slice(&v32.to_le_bytes());
+        let mut data = Vec::with_capacity(ZISK_PUBLIC_DATA_BYTES);
+        for (i, output) in publics_bytes[ZISK_PROGRAM_VK_BYTES..].chunks_exact(8).enumerate() {
+            let value = u64::from_le_bytes(output.try_into().unwrap());
+            let value = u32::try_from(value).map_err(|_| {
+                anyhow::anyhow!("public output {i} does not fit in 32 bits: {value}")
+            })?;
+            data.extend_from_slice(&value.to_le_bytes());
         }
 
-        Ok(Self { data: data.to_vec(), ptr: Cell::new(0) })
+        Ok(Self { data, ptr: Cell::new(0) })
     }
 
     pub fn new(publics_bytes: &[u8]) -> Self {
