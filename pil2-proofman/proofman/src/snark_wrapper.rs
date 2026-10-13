@@ -30,6 +30,21 @@ pub enum SnarkProtocol {
     Plonk,
 }
 
+/// BN254 scalar field modulus, big-endian: the field of the final SNARK's public input and
+/// evaluations.
+const BN254_SCALAR_MODULUS: [u8; BN254_ELEMENT_BYTES] = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d, 0x28, 0x33, 0xe8,
+    0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
+];
+/// BN254 base field modulus, big-endian: the field of the coordinates of the final SNARK's
+/// commitments.
+const BN254_BASE_MODULUS: [u8; BN254_ELEMENT_BYTES] = [
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d, 0x97, 0x81, 0x6a,
+    0x91, 0x68, 0x71, 0xca, 0x8d, 0x3c, 0x20, 0x8c, 0x16, 0xd8, 0x7c, 0xfd, 0x47,
+];
+/// Bytes of a big-endian BN254 field element in a SNARK proof or its public input.
+const BN254_ELEMENT_BYTES: usize = 32;
+
 impl SnarkProtocol {
     pub fn protocol_id(&self) -> u64 {
         match self {
@@ -50,6 +65,14 @@ impl SnarkProtocol {
             2 => Ok(SnarkProtocol::Plonk),
             10 => Ok(SnarkProtocol::Fflonk),
             _ => Err(ProofmanError::InvalidConfiguration(format!("Unsupported snark protocol id: {}", protocol_id))),
+        }
+    }
+
+    /// Commitments (G1 points) and evaluations a proof serializes, in this order.
+    fn proof_shape(&self) -> (usize, usize) {
+        match self {
+            SnarkProtocol::Plonk => (9, 6),
+            SnarkProtocol::Fflonk => (4, 16),
         }
     }
 }
@@ -109,6 +132,7 @@ impl SnarkProof {
     pub fn convert_to_json(
         &self,
     ) -> Result<(serde_json::Value, serde_json::Value), Box<dyn std::error::Error + Send + Sync>> {
+        self.check_encoding()?;
         let (proof_json, publics_json) =
             snark_proof_bytes_to_json_c(&self.proof_bytes, &self.public_snark_bytes, self.protocol_id as i32);
 
@@ -120,6 +144,41 @@ impl SnarkProof {
 
     pub fn get_public_bytes(&self) -> &[u8] {
         &self.public_bytes
+    }
+
+    /// Checks the encoding the JSON conversion reads: a known protocol, a proof of exactly its
+    /// size, whole public inputs, and every element canonical, so that a proof has one encoding.
+    fn check_encoding(&self) -> ProofmanResult<()> {
+        let protocol = SnarkProtocol::from_protocol_id(self.protocol_id)?;
+        let (n_commitments, n_evaluations) = protocol.proof_shape();
+        let coordinates_len = 2 * n_commitments * BN254_ELEMENT_BYTES;
+        let proof_len = coordinates_len + n_evaluations * BN254_ELEMENT_BYTES;
+        if self.proof_bytes.len() != proof_len {
+            return Err(ProofmanError::InvalidProof(format!(
+                "{} proof is {} bytes, expected {proof_len}",
+                protocol.protocol_name(),
+                self.proof_bytes.len()
+            )));
+        }
+        if self.public_snark_bytes.len() % BN254_ELEMENT_BYTES != 0 {
+            return Err(ProofmanError::InvalidProof(format!(
+                "SNARK public input is {} bytes, not a whole number of {BN254_ELEMENT_BYTES}-byte elements",
+                self.public_snark_bytes.len()
+            )));
+        }
+
+        // Big-endian elements of equal length compare as the numbers they encode.
+        let below = |bytes: &[u8], modulus: &[u8; BN254_ELEMENT_BYTES]| {
+            bytes.chunks_exact(BN254_ELEMENT_BYTES).all(|element| element < modulus.as_slice())
+        };
+        let (coordinates, evaluations) = self.proof_bytes.split_at(coordinates_len);
+        if !below(coordinates, &BN254_BASE_MODULUS)
+            || !below(evaluations, &BN254_SCALAR_MODULUS)
+            || !below(&self.public_snark_bytes, &BN254_SCALAR_MODULUS)
+        {
+            return Err(ProofmanError::InvalidProof("SNARK proof has a non-canonical field element".to_string()));
+        }
+        Ok(())
     }
 }
 
