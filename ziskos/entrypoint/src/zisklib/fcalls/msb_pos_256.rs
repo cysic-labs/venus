@@ -17,7 +17,7 @@ pub fn fcall_msb_pos_256(
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> (u64, u64) {
     #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
-    {
+    let (limb, bit) = {
         let tmp: [u64; 8] = [x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3]];
         let (i, pos) = msb_pos_256(&tmp, 2);
         #[cfg(feature = "hints")]
@@ -27,15 +27,19 @@ pub fn fcall_msb_pos_256(
             hints.push(pos as u64);
         }
         (i as u64, pos as u64)
-    }
+    };
     #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
-    {
+    let (limb, bit) = {
         ziskos_fcall_param!(2, 1); // Number of inputs
         ziskos_fcall_param!(x, 4);
         ziskos_fcall_param!(y, 4);
         ziskos_fcall!(FCALL_MSB_POS_256_ID);
         (ziskos_fcall_get(), ziskos_fcall_get())
-    }
+    };
+
+    // On the zkVM the position is prover-chosen, and callers use it as a limb index and a shift
+    assert!(limb < 4 && bit < 64, "msb_pos hint out of range");
+    (limb, bit)
 }
 
 #[allow(unused_variables)]
@@ -46,7 +50,7 @@ pub fn fcall_msb_pos_256_3(
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> (u64, u64) {
     #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
-    {
+    let (limb, bit) = {
         let tmp: [u64; 12] =
             [x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3], z[0], z[1], z[2], z[3]];
         let (i, pos) = msb_pos_256(&tmp, 3);
@@ -57,14 +61,18 @@ pub fn fcall_msb_pos_256_3(
             hints.push(pos as u64);
         }
         (i as u64, pos as u64)
-    }
+    };
     #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
-    {
+    let (limb, bit) = {
         ziskos_fcall_param!(3, 1); // Number of inputs
         ziskos_fcall_param!(x, 4);
         ziskos_fcall_param!(y, 4);
         ziskos_fcall_param!(z, 4);
         ziskos_fcall!(FCALL_MSB_POS_256_ID);
         (ziskos_fcall_get(), ziskos_fcall_get())
-    }
+    };
+
+    // On the zkVM the position is prover-chosen, and callers use it as a limb index and a shift
+    assert!(limb < 4 && bit < 64, "msb_pos hint out of range");
+    (limb, bit)
 }
