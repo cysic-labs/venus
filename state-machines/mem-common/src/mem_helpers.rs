@@ -127,7 +127,7 @@ impl MemHelpers {
         let offset = Self::get_byte_offset(addr) * 8;
         let mut value = read_values[0] >> offset;
         if is_double {
-            value |= (read_values[1] >> offset) << (64 - offset);
+            value |= read_values[1] << (64 - offset);
         }
         match bytes {
             1 => value & 0xFF,
@@ -202,5 +202,42 @@ impl MemHelpers {
         };
         let count = value & 0x3FFF_FFFF;
         (rows, count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unaligned_access_matches_byte_view() {
+        // Two consecutive aligned words with distinct bytes: byte i of the region is 0x10 + i.
+        let words = [0x1716_1514_1312_1110u64, 0x1f1e_1d1c_1b1a_1918];
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let value = 0xa7a6_a5a4_a3a2_a1a0u64;
+        for offset in 0..8usize {
+            for width in [1usize, 2, 4, 8] {
+                let addr = RAM_ADDR as u32 + offset as u32;
+                let range = offset..offset + width;
+
+                let mut read = [0u8; 8];
+                read[..width].copy_from_slice(&bytes[range.clone()]);
+                assert_eq!(
+                    MemHelpers::get_read_value(addr, width as u8, words),
+                    u64::from_le_bytes(read),
+                    "read offset={offset} width={width}"
+                );
+
+                let mut written = bytes.clone();
+                written[range].copy_from_slice(&value.to_le_bytes()[..width]);
+                let expected = [0, 1]
+                    .map(|i| u64::from_le_bytes(written[i * 8..i * 8 + 8].try_into().unwrap()));
+                assert_eq!(
+                    MemHelpers::get_write_values(addr, width as u8, value, words),
+                    expected,
+                    "write offset={offset} width={width}"
+                );
+            }
+        }
     }
 }
