@@ -171,7 +171,7 @@ verify: check-key check-rust-verifiers
 		echo "proof file not found at $(PROOF_FILE), run make prove first"; \
 		exit 1; \
 	fi
-	"$(CARGO_ZISK_BIN)" verify -p "$(PROOF_FILE)" -k "$(PROVING_KEY)"
+	"$(CARGO_ZISK_BIN)" verify -p "$(PROOF_FILE)" -k "$(PROVING_KEY)" -e "$(ELF)"
 
 clean:
 	rm -rf "$(ROOT)/target" "$(ROOT)/tmp" "$(GUEST_DIR)/target" "$(GUEST_DIR)/build" "$(GUEST_DIR)/hints"
