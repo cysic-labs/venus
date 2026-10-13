@@ -14,6 +14,16 @@ use crate::recursive_circom::{CircomCodeLine, CircomCodeRef, CircomStarkInfo, Ci
 const GOLDILOCKS_P: i128 = 0xFFFF_FFFF_0000_0001;
 const FIELD_EXTENSION: u64 = 3;
 
+/// The stage count `stark_verify` transcribes.
+const NATIVE_N_STAGES: usize = 2;
+/// The challenges `stark_verify` draws, as (stage, stage id) in transcript order: two for stage 2,
+/// one for the quotient stage, the evaluation point and the two FRI challenges.
+const NATIVE_CHALLENGES: [(u64, u64); 6] = [(2, 0), (2, 1), (3, 0), (4, 0), (5, 0), (5, 1)];
+/// The transcript arity of `stark_verify`'s Poseidon16 transcript.
+const NATIVE_TRANSCRIPT_ARITY: u64 = 4;
+/// The only zerofier `stark_verify` computes.
+const NATIVE_BOUNDARY: &str = "everyRow";
+
 /// Public entry points of a rendered verifier module.
 #[derive(Debug, Clone, Copy)]
 pub struct RustVerifierEntry {
@@ -28,6 +38,7 @@ pub fn render_rust_verifier(
     verifier_info: &CircomVerifierInfo,
     entry: RustVerifierEntry,
 ) -> Result<String> {
+    check_native_shape(stark_info)?;
     let width = stark_info.stark_struct.merkle_tree_arity * 4;
     let mut out = String::new();
     writeln!(out, "use fields::{{Goldilocks, CubicExtensionField, Field, Poseidon{width}}};")?;
@@ -68,6 +79,80 @@ pub fn render_rust_verifier(
         writeln!(out, "}}")?;
     }
     Ok(out)
+}
+
+/// Rejects setups `stark_verify` would verify wrongly: it implements a fixed transcript and proof
+/// layout rather than reading them from the setup.
+fn check_native_shape(stark_info: &CircomStarkInfo) -> Result<()> {
+    let stark_struct = &stark_info.stark_struct;
+    if stark_struct.verification_hash_type != "GL" {
+        bail!(
+            "the native verifier only verifies GL proofs, not {}",
+            stark_struct.verification_hash_type
+        );
+    }
+    if stark_struct.transcript_arity != NATIVE_TRANSCRIPT_ARITY {
+        bail!(
+            "the native verifier's transcript has arity {NATIVE_TRANSCRIPT_ARITY}, not {}",
+            stark_struct.transcript_arity
+        );
+    }
+    if stark_info.n_stages != NATIVE_N_STAGES {
+        bail!(
+            "the native verifier transcribes {NATIVE_N_STAGES} stages, not {}",
+            stark_info.n_stages
+        );
+    }
+    let challenges =
+        stark_info.challenges_map.iter().map(|c| (c.stage, c.stage_id)).collect::<Vec<_>>();
+    if challenges != NATIVE_CHALLENGES {
+        bail!(
+            "the native verifier draws the challenges {NATIVE_CHALLENGES:?} as (stage, stageId), \
+             not {challenges:?}"
+        );
+    }
+    if let Some(boundary) = stark_info.boundaries.iter().find(|b| b.name != NATIVE_BOUNDARY) {
+        bail!(
+            "the native verifier only computes the {NATIVE_BOUNDARY} zerofier, not {}",
+            boundary.name
+        );
+    }
+    if !stark_info.custom_commits.is_empty()
+        || !stark_info.air_values_map.is_empty()
+        || !stark_info.airgroup_values_map.is_empty()
+        || !stark_info.proof_values_map.is_empty()
+    {
+        bail!("the native verifier reads no custom commits, air values, airgroup values or proof values");
+    }
+    if stark_struct.last_level_verification == 0 {
+        bail!("the native verifier requires last-level Merkle verification");
+    }
+    if !(1..u64::BITS as u64).contains(&stark_struct.pow_bits) {
+        bail!("the native verifier requires 1 to 63 grinding bits, not {}", stark_struct.pow_bits);
+    }
+
+    // The queries index the extended domain, every fold must shrink it, and the terminal layer must
+    // be at least the blowup for the final polynomial to bound a degree.
+    let steps = stark_struct.steps.iter().map(|step| step.n_bits).collect::<Vec<_>>();
+    let Some(&terminal_bits) = steps.last() else {
+        bail!("the native verifier requires FRI steps");
+    };
+    if steps[0] != stark_struct.n_bits_ext {
+        bail!("the first FRI step has {} bits, not nBitsExt {}", steps[0], stark_struct.n_bits_ext);
+    }
+    if steps.windows(2).any(|pair| pair[1] >= pair[0]) {
+        bail!("FRI steps {steps:?} must strictly decrease");
+    }
+    let blowup_bits = stark_struct
+        .n_bits_ext
+        .checked_sub(stark_struct.n_bits)
+        .context("nBits exceeds nBitsExt")?;
+    if terminal_bits < blowup_bits {
+        bail!(
+            "the FRI terminal layer 2^{terminal_bits} is smaller than the blowup 2^{blowup_bits}"
+        );
+    }
+    Ok(())
 }
 
 fn render_code(
@@ -194,6 +279,21 @@ fn render_verifier_info(out: &mut String, stark_info: &CircomStarkInfo) -> Resul
         .iter()
         .position(|ev| ev.ev_type == "cm" && ev.id == q_pol as u64)
         .context("q polynomial evaluation not found in evMap")?;
+    // stark_verify reads the quotient pieces as the qDeg evaluations from q_index on.
+    for piece in 0..stark_info.q_deg {
+        let index = q_index + piece as usize;
+        let is_piece = stark_info.ev_map.get(index).is_some_and(|ev| {
+            ev.ev_type == "cm"
+                && ev.prime == 0
+                && stark_info
+                    .cm_pols_map
+                    .get(ev.id as usize)
+                    .is_some_and(|pol| pol.stage == q_stage && pol.stage_id == Some(piece))
+        });
+        if !is_piece {
+            bail!("evaluation {index} is not quotient piece {piece} at the evaluation point");
+        }
+    }
     let optional = |value: Option<u32>| value.map_or("None".to_string(), |v| format!("Some({v})"));
     let boundaries = stark_info
         .boundaries
