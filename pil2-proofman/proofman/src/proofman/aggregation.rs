@@ -138,7 +138,7 @@ where
             if self.cancellation_info.read().unwrap().token.is_cancelled() {
                 break;
             }
-            let proof_acc_challenge = get_accumulated_challenge(&self.pctx, &proof.proof);
+            let proof_acc_challenge = get_accumulated_challenge(&self.pctx, airgroup_id, &proof.proof)?;
             let mut stored_contributions = Vec::new();
             for w in &proof.worker_indexes {
                 let mut worker_contributions = self.worker_contributions.write().unwrap();
@@ -309,7 +309,7 @@ where
                 }
 
                 let global_challenge = self.pctx.get_global_challenge().clone();
-                let accumulated_challenge = get_accumulated_challenge(&self.pctx, &agg_proofs_data[0].proof);
+                let accumulated_challenge = get_accumulated_challenge(&self.pctx, 0, &agg_proofs_data[0].proof)?;
                 let global_challenge_calculated = calculate_global_challenge(
                     &self.pctx,
                     &[ContributionsInfo {

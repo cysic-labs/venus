@@ -2712,7 +2712,7 @@ where
                     let mut received_agg_proofs = self.received_agg_proofs.write().unwrap();
                     for proof in &agg_proofs {
                         let airgroup_id = proof.airgroup_id as usize;
-                        let proof_acc_challenge = get_accumulated_challenge_slice(&self.pctx, &proof.proof);
+                        let proof_acc_challenge = get_accumulated_challenge_slice(&self.pctx, airgroup_id, &proof.proof)?;
                         if let Some(contrib) = worker_contributions
                             .iter_mut()
                             .find(|contrib| contrib.worker_index == worker_index && contrib.airgroup_id == airgroup_id)
@@ -2753,7 +2753,7 @@ where
                     let mut received_agg_proofs = self.received_agg_proofs.write().unwrap();
                     for proof in agg_proofs {
                         let airgroup_id = proof.airgroup_id as usize;
-                        let proof_acc_challenge = get_accumulated_challenge_slice(&self.pctx, &proof.proof);
+                        let proof_acc_challenge = get_accumulated_challenge_slice(&self.pctx, airgroup_id, &proof.proof)?;
                         if let Some(contrib) = worker_contributions
                             .iter_mut()
                             .find(|contrib| contrib.worker_index == worker_index && contrib.airgroup_id == airgroup_id)

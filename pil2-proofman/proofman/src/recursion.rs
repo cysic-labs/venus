@@ -355,16 +355,41 @@ pub fn n_publics_aggregation<F: PrimeField64>(pctx: &ProofCtx<F>, airgroup_id: u
     publics_aggregation
 }
 
-pub fn get_accumulated_challenge_slice<'a, F: PrimeField64>(pctx: &ProofCtx<F>, proof: &'a [u64]) -> &'a [u64] {
-    if pctx.global_info.curve != CurveType::None {
-        &proof[6..16]
+/// The accumulated challenge a recursive2 proof carries among its aggregation publics, after the
+/// circuit type, the proof count and the aggregation types of its airgroup.
+pub fn get_accumulated_challenge_slice<'a, F: PrimeField64>(
+    pctx: &ProofCtx<F>,
+    airgroup_id: usize,
+    proof: &'a [u64],
+) -> ProofmanResult<&'a [u64]> {
+    let agg_types = pctx
+        .global_info
+        .agg_types
+        .get(airgroup_id)
+        .ok_or_else(|| ProofmanError::InvalidProof(format!("Invalid aggregation airgroup id {airgroup_id}")))?;
+    let len = if pctx.global_info.curve != CurveType::None {
+        10
     } else {
-        &proof[6..6 + pctx.global_info.lattice_size.unwrap()]
-    }
+        pctx.global_info.lattice_size.ok_or_else(|| {
+            ProofmanError::InvalidSetup("global info latticeSize is required for curve None aggregation".into())
+        })?
+    };
+    let start = 2 + 4 * agg_types.len();
+    proof.get(start..start + len).ok_or_else(|| {
+        ProofmanError::InvalidProof(format!(
+            "Proof of {} words is too short for its accumulated challenge at {start}..{}",
+            proof.len(),
+            start + len
+        ))
+    })
 }
 
-pub fn get_accumulated_challenge<F: PrimeField64>(pctx: &ProofCtx<F>, proof: &[u64]) -> Vec<u64> {
-    get_accumulated_challenge_slice(pctx, proof).to_vec()
+pub fn get_accumulated_challenge<F: PrimeField64>(
+    pctx: &ProofCtx<F>,
+    airgroup_id: usize,
+    proof: &[u64],
+) -> ProofmanResult<Vec<u64>> {
+    Ok(get_accumulated_challenge_slice(pctx, airgroup_id, proof)?.to_vec())
 }
 
 pub fn gen_recursive_proof_size<F: PrimeField64>(
