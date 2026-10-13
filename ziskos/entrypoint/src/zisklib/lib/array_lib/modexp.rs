@@ -95,8 +95,6 @@ fn modexp_short(
     modulus: &U256,
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> Vec<U256> {
-    let len_e = exp.len();
-
     // Compute base = base (mod modulus)
     let base = rem_short_init(
         base,
@@ -105,30 +103,22 @@ fn modexp_short(
         hints,
     );
 
-    // Hint exponent bits
-    let (len, bits) = fcall_bin_decomp(
+    // Exponent bits, bound to the exponent before the loop may exit early
+    let bits = exponent_bits(
         exp,
         #[cfg(feature = "hints")]
         hints,
     );
-
-    // We should recompose the exponent from bits to verify correctness
-    let mut rec_exp = vec![0u64; len_e];
-
-    // Recompose the MSB
-    let bits_pos = len - 1;
-    let limb_idx = bits_pos / 64;
-    let bit_in_limb = bits_pos % 64;
-    rec_exp[limb_idx] = 1u64 << bit_in_limb;
 
     // Scratch space
     let mut scratch = ShortScratch::new();
 
     // Initialize out = base
     let mut out = base;
-    for (bit_idx, &bit) in bits.iter().enumerate().skip(1) {
+    for &bit in bits.iter().skip(1) {
         if out.is_zero() {
-            return vec![U256::ZERO];
+            // out stays zero for the remaining bits
+            break;
         }
 
         // Compute out = out² (mod modulus)
@@ -150,16 +140,8 @@ fn modexp_short(
                 #[cfg(feature = "hints")]
                 hints,
             );
-
-            // Recompose the exponent
-            let bits_pos = len - 1 - bit_idx;
-            let limb_idx = bits_pos / 64;
-            let bit_in_limb = bits_pos % 64;
-            rec_exp[limb_idx] |= 1u64 << bit_in_limb;
         }
     }
-
-    assert_eq!(rec_exp[..], *exp, "Exponent decomposition mismatch");
 
     vec![out]
 }
@@ -171,7 +153,6 @@ fn modexp_long(
     modulus: &[U256],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> Vec<U256> {
-    let len_e = exp.len();
     let len_m = modulus.len();
 
     // Compute base = base (mod modulus)
@@ -182,30 +163,22 @@ fn modexp_long(
         hints,
     );
 
-    // Hint exponent bits
-    let (len, bits) = fcall_bin_decomp(
+    // Exponent bits, bound to the exponent before the loop may exit early
+    let bits = exponent_bits(
         exp,
         #[cfg(feature = "hints")]
         hints,
     );
-
-    // We should recompose the exponent from bits to verify correctness
-    let mut rec_exp = vec![0u64; len_e];
-
-    // Recompose the MSB
-    let bits_pos = len - 1;
-    let limb_idx = bits_pos / 64;
-    let bit_in_limb = bits_pos % 64;
-    rec_exp[limb_idx] = 1u64 << bit_in_limb;
 
     // Scratch space
     let mut scratch = LongScratch::new(len_m);
 
     // Initialize out = base
     let mut out = base.clone();
-    for (bit_idx, &bit) in bits.iter().enumerate().skip(1) {
+    for &bit in bits.iter().skip(1) {
         if out.len() == 1 && out[0].is_zero() {
-            return vec![U256::ZERO];
+            // out stays zero for the remaining bits
+            break;
         }
 
         // Compute out = out² (mod modulus)
@@ -227,18 +200,38 @@ fn modexp_long(
                 #[cfg(feature = "hints")]
                 hints,
             );
-
-            // Recompose the exponent
-            let bits_pos = len - 1 - bit_idx;
-            let limb_idx = bits_pos / 64;
-            let bit_in_limb = bits_pos % 64;
-            rec_exp[limb_idx] |= 1u64 << bit_in_limb;
         }
     }
 
-    assert_eq!(rec_exp[..], *exp, "Exponent decomposition mismatch");
-
     out
+}
+
+/// Hints the big-endian bit decomposition of the non-zero exponent `exp` and binds it to `exp`
+fn exponent_bits(exp: &[u64], #[cfg(feature = "hints")] hints: &mut Vec<u64>) -> Vec<u64> {
+    let (_, bits) = fcall_bin_decomp(
+        exp,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+    verify_exponent_bits(exp, &bits);
+    bits
+}
+
+/// Checks that the big-endian bit decomposition `bits` recomposes to `exp` and starts with a set
+/// bit, which the square-and-multiply loops rely on
+fn verify_exponent_bits(exp: &[u64], bits: &[u64]) {
+    assert_eq!(bits.first(), Some(&1), "Exponent decomposition must start with a set bit");
+
+    // Bits other than 1 count as 0, both here and in the square-and-multiply loops
+    let len = bits.len();
+    let mut rec_exp = vec![0u64; exp.len()];
+    for (bit_idx, &bit) in bits.iter().enumerate() {
+        if bit == 1 {
+            let bit_pos = len - 1 - bit_idx;
+            rec_exp[bit_pos / 64] |= 1u64 << (bit_pos % 64);
+        }
+    }
+    assert_eq!(rec_exp[..], *exp, "Exponent decomposition mismatch");
 }
 
 /// Compute modular exponentiation from big-endian byte arrays
@@ -339,6 +332,69 @@ fn u256_le_to_bytes_be(limbs: &[U256], output: &mut [u8]) {
             if pos_from_end < out_len {
                 output[out_len - 1 - pos_from_end] = byte_val;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use num_bigint::BigUint;
+
+    use super::*;
+
+    fn bits_be(value: u64) -> Vec<u64> {
+        let len = 64 - value.leading_zeros() as usize;
+        (0..len).map(|i| (value >> (len - 1 - i)) & 1).collect()
+    }
+
+    fn modexp_biguint(base: &BigUint, exp: &BigUint, modulus: &BigUint) -> BigUint {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        let result = modexp(
+            &bytes_be_to_u256_le(&base.to_bytes_be()),
+            &bytes_be_to_u64_le(&exp.to_bytes_be()),
+            &bytes_be_to_u256_le(&modulus.to_bytes_be()),
+            #[cfg(feature = "hints")]
+            &mut hints,
+        );
+        let bytes: Vec<u8> =
+            U256::slice_to_flat(&result).iter().flat_map(|limb| limb.to_le_bytes()).collect();
+        BigUint::from_bytes_le(&bytes)
+    }
+
+    #[test]
+    fn rejects_the_decomposition_of_a_different_exponent() {
+        let exp = [65537];
+        verify_exponent_bits(&exp, &bits_be(65537));
+
+        assert!(std::panic::catch_unwind(|| verify_exponent_bits(&exp, &bits_be(65536))).is_err());
+        let mut padded = bits_be(65537);
+        padded.insert(0, 0);
+        assert!(std::panic::catch_unwind(|| verify_exponent_bits(&exp, &padded)).is_err());
+    }
+
+    #[test]
+    fn matches_the_reference_on_short_long_and_early_zero_paths() {
+        let two = BigUint::from(2u32);
+        let all_ones = |bits: u32| (BigUint::from(1u32) << bits) - 1u32;
+        let cases = [
+            // Short modulus
+            (BigUint::from(3u32), BigUint::from(65537u32), (BigUint::from(1u32) << 255) - 19u32),
+            (all_ones(300), all_ones(70), (BigUint::from(1u32) << 256) - 189u32),
+            // Short modulus reaching zero before the last exponent bit
+            (two.pow(10), BigUint::from(30u32), two.pow(200)),
+            // Long modulus, squaring limbs that maximize the carries
+            (all_ones(1024), BigUint::from(3u32), all_ones(1100)),
+            (all_ones(700), all_ones(65), all_ones(700) - 2u32),
+            // Long modulus reaching zero before the last exponent bit
+            (two.pow(100), BigUint::from(7u32), two.pow(600)),
+        ];
+        for (base, exp, modulus) in cases {
+            assert_eq!(
+                modexp_biguint(&base, &exp, &modulus),
+                base.modpow(&exp, &modulus),
+                "{base} ^ {exp} mod {modulus}"
+            );
         }
     }
 }
