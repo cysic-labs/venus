@@ -6,6 +6,7 @@ pub const E_B: [u64; 4] = [0x7, 0, 0, 0];
 /// Secp256k1 base field size
 pub const P: [u64; 4] =
     [0xFFFFFFFEFFFFFC2F, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF];
+pub const P_MINUS_ONE: [u64; 4] = [P[0] - 1, P[1], P[2], P[3]];
 
 /// A known non-quadratic residue in Fp
 pub const NQR: [u64; 4] = [3, 0, 0, 0];
@@ -18,6 +19,7 @@ pub const N_MINUS_ONE: [u64; 4] = [N[0] - 1, N[1], N[2], N[3]];
 /// Secp256k1 group identity point
 pub const IDENTITY_X: [u64; 4] = [0; 4];
 pub const IDENTITY_Y: [u64; 4] = [0; 4];
+pub const IDENTITY: [u64; 8] = [0; 8];
 
 /// Secp256k1 group of points generator
 pub const G_X: [u64; 4] =

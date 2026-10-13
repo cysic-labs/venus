@@ -1,9 +1,9 @@
 use tiny_keccak::{Hasher, Keccak};
 
-use crate::zisklib::{eq, fcall_secp256k1_ecdsa_verify, gt, ZERO_256};
+use crate::zisklib::{eq, fcall_secp256k1_ecdsa_verify, gt, is_zero, ZERO_256};
 
 use super::{
-    constants::N_MINUS_ONE,
+    constants::{IDENTITY, N_MINUS_ONE, P_MINUS_ONE},
     curve::{secp256k1_is_on_curve, secp256k1_lift_x, secp256k1_triple_scalar_mul_with_g},
     scalar::{secp256k1_fn_neg, secp256k1_fn_reduce},
 };
@@ -33,7 +33,21 @@ pub fn secp256k1_ecdsa_verify(
     s: &[u64; 4],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> bool {
-    // pk must be on the curve
+    if is_zero(r) || gt(r, &N_MINUS_ONE) {
+        return false;
+    }
+    if is_zero(s) || gt(s, &N_MINUS_ONE) {
+        return false;
+    }
+    if eq(pk, &IDENTITY) {
+        return false;
+    }
+
+    let pk_x = [pk[0], pk[1], pk[2], pk[3]];
+    let pk_y = [pk[4], pk[5], pk[6], pk[7]];
+    if gt(&pk_x, &P_MINUS_ONE) || gt(&pk_y, &P_MINUS_ONE) {
+        return false;
+    }
     if !secp256k1_is_on_curve(
         pk,
         #[cfg(feature = "hints")]
@@ -369,4 +383,95 @@ fn pubkey_to_address(pk: &[u64; 8]) -> [u8; 32] {
     result[12..32].copy_from_slice(&hash[12..32]);
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::constants::{G, G_X, N, P};
+    use super::*;
+
+    fn signature_for_private_key_and_nonce_one() -> ([u64; 4], [u64; 4], [u64; 4]) {
+        let z = [1, 0, 0, 0];
+        let r = G_X;
+        let mut s = r;
+        s[0] += 1;
+        (z, r, s)
+    }
+
+    fn verify(pk: &[u64; 8], z: &[u64; 4], r: &[u64; 4], s: &[u64; 4]) -> bool {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        secp256k1_ecdsa_verify(
+            pk,
+            z,
+            r,
+            s,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        )
+    }
+
+    fn recover(r: &[u64; 4], s: &[u64; 4], z: &[u64; 4], recid: u8) -> Result<[u64; 8], u8> {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        secp256k1_ecdsa_recover(
+            r,
+            s,
+            z,
+            recid,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        )
+    }
+
+    fn lift(x: &[u64; 4], odd: bool) -> Result<[u64; 8], bool> {
+        #[cfg(feature = "hints")]
+        let mut hints = Vec::new();
+        secp256k1_lift_x(
+            x,
+            odd,
+            #[cfg(feature = "hints")]
+            &mut hints,
+        )
+    }
+
+    #[test]
+    fn verifies_and_recovers_known_algebraic_vector() {
+        let (z, r, s) = signature_for_private_key_and_nonce_one();
+        assert!(verify(&G, &z, &r, &s));
+        assert_eq!(recover(&r, &s, &z, 0), Ok(G));
+    }
+
+    #[test]
+    fn rejects_noncanonical_signature_and_public_key_inputs() {
+        let (z, r, s) = signature_for_private_key_and_nonce_one();
+        let zero = [0u64; 4];
+        let mut n_plus_one = N;
+        n_plus_one[0] += 1;
+
+        assert!(!verify(&G, &z, &zero, &s));
+        assert!(!verify(&G, &z, &N, &s));
+        assert!(!verify(&G, &z, &n_plus_one, &s));
+        assert!(!verify(&G, &z, &r, &zero));
+        assert!(!verify(&G, &z, &r, &N));
+        assert!(!verify(&G, &z, &r, &n_plus_one));
+        assert!(!verify(&[0; 8], &z, &r, &s));
+
+        let mut noncanonical_pk = G;
+        noncanonical_pk[0..4].copy_from_slice(&P);
+        assert!(!verify(&noncanonical_pk, &z, &r, &s));
+
+        let mut noncanonical_y = G;
+        noncanonical_y[4..8].copy_from_slice(&P);
+        assert!(!verify(&noncanonical_y, &z, &r, &s));
+
+        let mut equivalent_x = lift(&[1, 0, 0, 0], false).unwrap();
+        let mut p_plus_one = P;
+        p_plus_one[0] += 1;
+        equivalent_x[0..4].copy_from_slice(&p_plus_one);
+        assert!(!verify(&equivalent_x, &z, &r, &s));
+
+        assert_eq!(recover(&zero, &s, &z, 0), Err(ECDSA_RECOVER_ERR_INVALID_R));
+        assert_eq!(recover(&r, &zero, &z, 0), Err(ECDSA_RECOVER_ERR_INVALID_S));
+    }
 }
