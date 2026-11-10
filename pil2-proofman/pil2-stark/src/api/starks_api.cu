@@ -42,6 +42,19 @@ extern uint64_t getFinalSnarkProtocolIdGPU(void *snark_prover);
 #include "poseidon_bn128.cuh"
 #include "proofman_sumcheck.cuh"
 #include <cuda_runtime.h>
+#include <nvtx3/nvToolsExt.h>
+
+namespace {
+// Names each proof submission (basic, compressor, recursive1, recursive2, vadcop_final, contribution) so
+// Nsight Systems can attribute the device work a thread launches to the proof it belongs to. NVTX costs
+// nothing when no profiler is attached.
+struct ProofNvtxRange {
+    explicit ProofNvtxRange(const char *name) { nvtxRangePushA(name); }
+    ~ProofNvtxRange() { nvtxRangePop(); }
+    ProofNvtxRange(const ProofNvtxRange &) = delete;
+    ProofNvtxRange &operator=(const ProofNvtxRange &) = delete;
+};
+}  // namespace
 #include <mutex>
 #include <algorithm>
 #include <map>
@@ -1697,6 +1710,7 @@ static bool gpuWitnessFillTrace(DeviceCommitBuffers *d_buffers, StepsParams *par
 
 
 uint64_t gen_proof_gpu(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *params_, void *globalChallenge, uint64_t* proofBuffer, char *proofFile, void *d_buffers_, uint64_t streamId_, char *constPolsPath,  char *constTreePath, char *customCommitsFixedPath, bool selfContained) {
+    ProofNvtxRange nvtx_range("basic");
 
     auto key = std::make_pair(airgroupId, airId);
     std::string proofType = "basic";
@@ -2337,6 +2351,7 @@ void get_stream_id_proof_gpu(void *d_buffers_, uint64_t streamId) {
 
 uint64_t gen_recursive_proof_gpu(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *trace, void *aux_trace, void *pConstPols, void *pConstTree, void *pPublicInputs, uint64_t* proofBuffer, char *proof_file, bool vadcop, void *d_buffers_, char *constPolsPath, char *constTreePath, char *proofType, bool force_recursive_stream, char *recurser_id, uint64_t streamId_)
 {
+    ProofNvtxRange nvtx_range(proofType);
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     bool aggregation = false;
     if(string(proofType) == "recursive1" || string(proofType) == "recursive2") {
@@ -3564,6 +3579,7 @@ int64_t commit_witness_streaming_gpu(void *d_buffers_, uint64_t slotIdx,
                                      void *packed, uint64_t nBits, uint64_t nBitsExt,
                                      uint64_t nCols, uint64_t wordsPerRow,
                                      void *colWidths, void *root, void *params_) {
+    ProofNvtxRange nvtx_range("contribution");
     if (d_buffers_ == nullptr) return -10;
     DeviceCommitBuffers *d_buffers = (DeviceCommitBuffers *)d_buffers_;
     if (d_buffers->streamCommitSlots == 0) return -11;
