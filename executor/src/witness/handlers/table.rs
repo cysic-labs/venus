@@ -21,11 +21,15 @@ impl TableWitnessHandler {
         global_id: usize,
         stats_scope_id: u64,
     ) -> ExecutorResult<()> {
-        let secn_instances = state.instance_set.secn_instances.read_or_poison("secn_instances")?;
-        let secn_instance =
-            secn_instances.get(&global_id).ok_or(ExecutorError::InstanceNotFound { global_id })?;
+        let secn_instance = state
+            .instance_set
+            .secn_instances
+            .read_or_poison("secn_instances")?
+            .get(&global_id)
+            .cloned()
+            .ok_or(ExecutorError::InstanceNotFound { global_id })?;
 
-        let instance = &**secn_instance;
+        let instance = &*secn_instance;
         // Tables have no per-chunk collectors and build their own trace: a pooled buffer would
         // only be dropped.
         generator

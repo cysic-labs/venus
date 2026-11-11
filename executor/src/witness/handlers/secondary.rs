@@ -10,6 +10,8 @@ use proofman_fields::PrimeField64;
 use crate::error::{ExecutorError, ExecutorResult, MutexExt, RwLockExt};
 use crate::state::ExecutionState;
 use crate::{AirClassifier, ChunkDataCollector, WitnessGenerator};
+
+use super::SecnInstanceMap;
 use zisk_common::{BusDevice, Instance, PayloadType};
 
 /// The collectors of one instance, as `collect_instance` returns them.
@@ -43,11 +45,16 @@ impl SecondaryWitnessHandler {
         stats_scope_id: u64,
         collect: bool,
     ) -> ExecutorResult<()> {
-        let secn_instances = state.instance_set.secn_instances.read_or_poison("secn_instances")?;
-        let secn_instance =
-            secn_instances.get(&global_id).ok_or(ExecutorError::InstanceNotFound { global_id })?;
+        // Cloned out: the guard is not held across the collect and the witness below.
+        let secn_instance = state
+            .instance_set
+            .secn_instances
+            .read_or_poison("secn_instances")?
+            .get(&global_id)
+            .cloned()
+            .ok_or(ExecutorError::InstanceNotFound { global_id })?;
 
-        let instance = &**secn_instance;
+        let instance = &*secn_instance;
         let has_collectors = |global_id: usize| -> ExecutorResult<bool> {
             Ok(state
                 .collector_store
@@ -82,6 +89,8 @@ impl SecondaryWitnessHandler {
         }
         let (_, air_id) = pctx.dctx_get_instance_info(global_id)?;
         if AirClassifier::is_memory_related(air_id) || AirClassifier::is_mem_align(air_id) {
+            let secn_instances: SecnInstanceMap<F> =
+                state.instance_set.secn_instances.read_or_poison("secn_instances")?.clone();
             Self::collect_mem_pass(collector, state, pctx, &secn_instances, global_id, instance)?;
         } else if !has_collectors(global_id)? {
             collector.collect_single(pctx, state, global_id, instance)?;
@@ -112,7 +121,7 @@ impl SecondaryWitnessHandler {
         collector: &ChunkDataCollector<F>,
         state: &ExecutionState<F>,
         pctx: &ProofCtx<F>,
-        secn_instances: &HashMap<usize, Box<dyn Instance<F>>>,
+        secn_instances: &SecnInstanceMap<F>,
         global_id: usize,
         instance: &dyn Instance<F>,
     ) -> ExecutorResult<()> {

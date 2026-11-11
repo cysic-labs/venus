@@ -209,13 +209,27 @@ impl<F: PrimeField64> WitnessPhase<F> {
         state: &ExecutionState<F>,
         plans: Vec<Plan>,
     ) -> ExecutorResult<()> {
-        let mut secn_instances =
-            state.instance_set.secn_instances.write_or_poison("secn_instances")?;
-        for plan in plans {
-            let global_id =
-                plan.global_id.ok_or(ExecutorError::SecnPlanMissing { phase: "populate" })?;
+        // Built outside the write lock, which is then held only for the inserts.
+        let mut built = Vec::with_capacity(plans.len());
+        {
+            let secn_instances = state.instance_set.secn_instances.read_or_poison("secn_instances")?;
+            for plan in plans {
+                let global_id =
+                    plan.global_id.ok_or(ExecutorError::SecnPlanMissing { phase: "populate" })?;
+                if !secn_instances.contains_key(&global_id) {
+                    built.push((global_id, plan));
+                }
+            }
+        }
+        let built = built
+            .into_iter()
+            .map(|(global_id, plan)| {
+                Ok((global_id, Arc::from(self.sm_bundle.build_instance(InstanceCtx::new(global_id, plan))?)))
+            })
+            .collect::<ExecutorResult<Vec<(usize, Arc<dyn Instance<F>>)>>>()?;
+        let mut secn_instances = state.instance_set.secn_instances.write_or_poison("secn_instances")?;
+        for (global_id, instance) in built {
             if let Entry::Vacant(e) = secn_instances.entry(global_id) {
-                let instance = self.sm_bundle.build_instance(InstanceCtx::new(global_id, plan))?;
                 e.insert(instance);
             }
         }
@@ -331,10 +345,14 @@ impl<F: PrimeField64> WitnessPhase<F> {
         air_id: usize,
         stats_scope_id: u64,
     ) -> ExecutorResult<()> {
-        let secn_instances =
-            ctx.state.instance_set.secn_instances.read_or_poison("secn_instances")?;
-        let secn_instance =
-            secn_instances.get(&global_id).ok_or(ExecutorError::InstanceNotFound { global_id })?;
+        let secn_instance = ctx
+            .state
+            .instance_set
+            .secn_instances
+            .read_or_poison("secn_instances")?
+            .get(&global_id)
+            .cloned()
+            .ok_or(ExecutorError::InstanceNotFound { global_id })?;
 
         let needs_collection = !ctx
             .state
@@ -343,7 +361,7 @@ impl<F: PrimeField64> WitnessPhase<F> {
             .read_or_poison("collector_store")?
             .contains_key(&global_id);
 
-        let instance = &**secn_instance;
+        let instance = &*secn_instance;
 
         // The ROM backend is picked when the instance is built; this is where an
         // ASM execution finds out it got the wrong one. See `require_asm_rom_mode`.
@@ -401,8 +419,10 @@ impl<F: PrimeField64> WitnessPhase<F> {
         global_ids: &[usize],
         is_asm_emulator: bool,
     ) -> ExecutorResult<()> {
-        let secn_instances_guard =
-            state.instance_set.secn_instances.read_or_poison("secn_instances")?;
+        // A snapshot of the Arcs: the collect below runs for hundreds of milliseconds and must not
+        // hold the map against the second round's registration.
+        let secn_instances_guard: SecnInstanceMap<F> =
+            state.instance_set.secn_instances.read_or_poison("secn_instances")?.clone();
 
         let mut instances_to_collect = HashMap::new();
 

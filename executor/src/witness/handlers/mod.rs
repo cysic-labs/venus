@@ -10,11 +10,12 @@ pub use secondary::SecondaryWitnessHandler;
 pub use table::TableWitnessHandler;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use zisk_common::Instance;
 
 /// Map of secondary instances keyed by `global_id`.
-pub(crate) type SecnInstanceMap<F> = HashMap<usize, Box<dyn Instance<F>>>;
+pub(crate) type SecnInstanceMap<F> = HashMap<usize, Arc<dyn Instance<F>>>;
 
 /// Map of borrowed secondary instances.
 pub(crate) type SecnInstanceMapRef<'a, F> = HashMap<usize, &'a dyn Instance<F>>;

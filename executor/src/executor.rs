@@ -22,7 +22,7 @@ use crate::{
 };
 use proofman_common::{lease_pool, BufferPool, ProofCtx, ProofmanError, ProofmanResult, SetupCtx};
 use proofman_fields::PrimeField64;
-use proofman_util::{timer_start_info, timer_stop_and_log_info};
+use proofman_util::{timer_start_info, timer_stop_and_log_info, timer_start_debug, timer_stop_and_log_debug};
 use proofman_witness::{WitnessComponent, WitnessManager};
 use zisk_asm_runner::OwnedMemInstances;
 use zisk_pil::{INPUT_DATA_AIR_IDS, MEM_AIR_IDS, ROM_DATA_AIR_IDS};
@@ -537,13 +537,16 @@ impl<F: PrimeField64> ZiskExecutor<F> {
             let collecting = match (self.witness.as_ref(), proofman_extras) {
                 (Some(witness), Some(extras)) if two_rounds && !first_round.is_empty() => {
                     Some(scope.spawn(|| {
-                        witness.pre_calculate(
+                        timer_start_debug!(COLLECT_FIRST_ROUND);
+                        let r = witness.pre_calculate(
                             extras.pctx(),
                             extras,
                             &self.state,
                             &first_round,
                             is_asm_emulator,
-                        )
+                        );
+                        timer_stop_and_log_debug!(COLLECT_FIRST_ROUND);
+                        r
                     }))
                 }
                 _ => None,
@@ -593,7 +596,9 @@ impl<F: PrimeField64> ZiskExecutor<F> {
                     }
                 }
             }
+            timer_start_debug!(POPULATE_SECN_ROUND2);
             self.populate_secn_round(registry, plans, &ids)?;
+            timer_stop_and_log_debug!(POPULATE_SECN_ROUND2);
 
             if let Some(handle) = collecting {
                 handle

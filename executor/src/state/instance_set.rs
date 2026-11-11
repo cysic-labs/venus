@@ -17,7 +17,10 @@ pub struct InstanceSet<F: PrimeField64> {
     pub main_instances: RwLock<HashMap<usize, Arc<MainInstance<F>>>>,
 
     /// Secondary state machine instances, indexed by their global ID.
-    pub secn_instances: RwLock<HashMap<usize, Box<dyn Instance<F>>>>,
+    // `Arc` values for the same reason as `main_instances`: every handler clones its instance out
+    // and drops the guard before collecting or computing, so registering the second round (the
+    // memory instances, a write) is never blocked behind first-round witnesses still computing.
+    pub secn_instances: RwLock<HashMap<usize, Arc<dyn Instance<F>>>>,
 }
 
 impl<F: PrimeField64> InstanceSet<F> {
