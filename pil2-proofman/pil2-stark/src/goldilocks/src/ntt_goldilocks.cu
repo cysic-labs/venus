@@ -1421,8 +1421,14 @@ struct NttRun {
     void run()
     {
         stage = dit ? 0 : lg;
+        // A narrow batch (the recursion LDE stages its iNTT 3 columns at a time) gives a two-pass split's
+        // radix-9/10 launches, 256/512-thread blocks one or two per SM, a grid of a few hundred blocks:
+        // most SMs idle. Three passes of 32/64-thread blocks fill the GPU instead (19 -> 21 LDE x 236
+        // columns -7% alone, -11% under a second stream; 18 -> 19 x 400 -10%). From lg 18 only: the
+        // three-pass split of lg 17 would need a radix-5 pass, which the kernels do not have.
+        const bool narrow = lg >= 18 && ((size_t)ncols << lg) <= ((size_t)1 << 23);
         if (lg <= 10) { step(lg); }
-        else if (lg <= 19) {
+        else if (lg <= 19 && !narrow) {
             // lg 19 included: one 10+9 split beats three radix-6/7 passes of 32/64-thread
             // blocks on the 2^19 extended domains (Keccakf-class, measured -3%); at lg 20
             // the radix-10 passes' extra shared stages eat the saved pass (+5%), so the
