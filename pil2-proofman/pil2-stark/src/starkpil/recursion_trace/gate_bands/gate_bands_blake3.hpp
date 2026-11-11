@@ -214,69 +214,84 @@ struct BlockInputs {
     }
 };
 
-// Rebuild one lane's whole 56-row column group, and count every lookup it makes. Returns the final
-// state, which the caller needs for the feedforward.
+// Where a clock's cells go: straight into the trace, or (device) into a staging tile the block then
+// stores row by row.
+template <class T>
+struct TraceWriter {
+    T *trace;
+    uint64_t nCols;
+    B3_HD void put(uint64_t row, uint64_t c, uint64_t x) { store(trace[row * nCols + c], x); }
+};
+
+// One clock (G evaluation g of round r) of one lane: its row of the lane's column group, and every lookup
+// it makes. `v` is the permutation state before the clock and is left after it; `zTop` (clocks 52..55,
+// round 6's diagonal G's) gets the z words the boundary columns' top bits come from.
+template <class W, class Sink>
+B3_HD inline void expand_clock(W &w, uint64_t base, uint64_t lane, const Layout &L, const BlockInputs &in,
+                               Sink &mul, uint32_t v[16], int r, int g, uint32_t zTop[4]) {
+    auto put = [&](uint64_t row, uint64_t c, uint64_t x) { w.put(row, c, x); };
+    const uint64_t row = base + (uint64_t)(r * G_PER_ROUND + g);
+    const int ia = g_idx(g, 0), ib = g_idx(g, 1), ic = g_idx(g, 2), id = g_idx(g, 3);
+    const uint32_t x = in.block[sigma(r, 2 * g)];
+    const uint32_t y = in.block[sigma(r, 2 * g + 1)];
+    const GTrace t = g_step(v[ia], v[ib], v[ic], v[id], x, y);
+
+    auto lim = [&](uint64_t colBase, int per, int idx) { return colBase + lane * per + idx; };
+    for (int i = 0; i < 2; i++) {
+        put(row, lim(L.va, 2, i), (t.va >> (16 * i)) & 0xFFFF);
+        put(row, lim(L.x,  2, i), (x    >> (16 * i)) & 0xFFFF);
+        put(row, lim(L.y,  2, i), (y    >> (16 * i)) & 0xFFFF);
+        // va, x and y: every limb, every row. vc is not a column -- the air builds it
+        // from vc'' and the IV.
+        mul.range((t.va >> (16 * i)) & 0xFFFF);
+        mul.range((x    >> (16 * i)) & 0xFFFF);
+        mul.range((y    >> (16 * i)) & 0xFFFF);
+    }
+    for (int i = 0; i < 4; i++) {
+        const uint8_t vb_b = (t.vb >> (8 * i)) & 0xFF, vd_b = (t.vd >> (8 * i)) & 0xFF;
+        const uint8_t a1_b = (t.a1 >> (8 * i)) & 0xFF, d1_b = (t.d1 >> (8 * i)) & 0xFF;
+        const uint8_t c1_b = (t.c1 >> (8 * i)) & 0xFF, a2_b = (t.a2 >> (8 * i)) & 0xFF;
+        const uint8_t d2_b = (t.d2 >> (8 * i)) & 0xFF, c2_b = (t.c2 >> (8 * i)) & 0xFF;
+        const uint8_t b1_b = (t.b1 >> (8 * i)) & 0xFF, z_b = (t.z >> (8 * i)) & 0xFF;
+        put(row, lim(L.vb, 4, i), vb_b);
+        put(row, lim(L.vd, 4, i), vd_b);
+        put(row, lim(L.va_p, 4, i), a1_b);
+        put(row, lim(L.vd_p, 4, i), d1_b);
+        put(row, lim(L.vc_p, 4, i), c1_b);
+        put(row, lim(L.va_pp, 4, i), a2_b);
+        put(row, lim(L.vd_pp, 4, i), d2_b);
+        put(row, lim(L.vc_pp, 4, i), c2_b);
+        put(row, lim(L.vb_pp_xor, 4, i), z_b);
+
+        uint8_t s0, s1;
+        table_out(vb_b, c1_b, 12, s0, s1);
+        put(row, L.vb_p_s + lane * 8 + i * 2 + 0, s0);
+        put(row, L.vb_p_s + lane * 8 + i * 2 + 1, s1);
+
+        // the four XOR groups the permutation looks up, per byte
+        mul.table(table_row(vd_b, a1_b, 0));    // vd' = (vd ^ va') >>> 16
+        mul.table(table_row(vb_b, c1_b, 12));   // vb' = (vb ^ vc') >>> 12
+        mul.table(table_row(d1_b, a2_b, 0));    // vd'' = (vd' ^ va'')
+        mul.table(table_row(b1_b, c2_b, 0));    // z = vb' ^ vc''
+    }
+    put(row, L.vb_pp_t + lane, (t.z >> 7) & 1);
+    if (r == ROUNDS - 1 && g >= G_PER_ROUND - 4) zTop[g - (G_PER_ROUND - 4)] = t.z;
+
+    v[ia] = t.a2; v[ib] = t.b2; v[ic] = t.c2; v[id] = t.d2;
+}
+
+// Rebuild one lane's whole 56-row column group, and count every lookup it makes. Leaves the final
+// state, which the feedforward needs, and the z words of clocks 52..55.
 template <class T, class Sink>
 B3_HD inline void expand_lane(T *trace, uint64_t nCols, uint64_t base, uint64_t lane,
                         const Layout &L, const BlockInputs &in, Sink &mul,
-                        uint32_t finalState[16]) {
-    auto put = [&](uint64_t r, uint64_t c, uint64_t v) { store(trace[r * nCols + c], v); };
-
+                        uint32_t finalState[16], uint32_t zTop[4]) {
     uint32_t v[16];
     in.initial_state(v);
-
-    for (int r = 0; r < ROUNDS; r++) {
-        for (int g = 0; g < G_PER_ROUND; g++) {
-            const uint64_t row = base + (uint64_t)(r * G_PER_ROUND + g);
-            const int ia = g_idx(g, 0), ib = g_idx(g, 1), ic = g_idx(g, 2), id = g_idx(g, 3);
-            const uint32_t x = in.block[sigma(r, 2 * g)];
-            const uint32_t y = in.block[sigma(r, 2 * g + 1)];
-            const GTrace t = g_step(v[ia], v[ib], v[ic], v[id], x, y);
-
-            auto lim = [&](uint64_t colBase, int per, int idx) { return colBase + lane * per + idx; };
-            for (int i = 0; i < 2; i++) {
-                put(row, lim(L.va, 2, i), (t.va >> (16 * i)) & 0xFFFF);
-                put(row, lim(L.x,  2, i), (x    >> (16 * i)) & 0xFFFF);
-                put(row, lim(L.y,  2, i), (y    >> (16 * i)) & 0xFFFF);
-                // va, x and y: every limb, every row. vc is not a column -- the air builds it
-                // from vc'' and the IV.
-                mul.range((t.va >> (16 * i)) & 0xFFFF);
-                mul.range((x    >> (16 * i)) & 0xFFFF);
-                mul.range((y    >> (16 * i)) & 0xFFFF);
-            }
-            for (int i = 0; i < 4; i++) {
-                const uint8_t vb_b = (t.vb >> (8 * i)) & 0xFF, vd_b = (t.vd >> (8 * i)) & 0xFF;
-                const uint8_t a1_b = (t.a1 >> (8 * i)) & 0xFF, d1_b = (t.d1 >> (8 * i)) & 0xFF;
-                const uint8_t c1_b = (t.c1 >> (8 * i)) & 0xFF, a2_b = (t.a2 >> (8 * i)) & 0xFF;
-                const uint8_t d2_b = (t.d2 >> (8 * i)) & 0xFF, c2_b = (t.c2 >> (8 * i)) & 0xFF;
-                const uint8_t b1_b = (t.b1 >> (8 * i)) & 0xFF, z_b = (t.z >> (8 * i)) & 0xFF;
-                put(row, lim(L.vb, 4, i), vb_b);
-                put(row, lim(L.vd, 4, i), vd_b);
-                put(row, lim(L.va_p, 4, i), a1_b);
-                put(row, lim(L.vd_p, 4, i), d1_b);
-                put(row, lim(L.vc_p, 4, i), c1_b);
-                put(row, lim(L.va_pp, 4, i), a2_b);
-                put(row, lim(L.vd_pp, 4, i), d2_b);
-                put(row, lim(L.vc_pp, 4, i), c2_b);
-                put(row, lim(L.vb_pp_xor, 4, i), z_b);
-
-                uint8_t s0, s1;
-                table_out(vb_b, c1_b, 12, s0, s1);
-                put(row, L.vb_p_s + lane * 8 + i * 2 + 0, s0);
-                put(row, L.vb_p_s + lane * 8 + i * 2 + 1, s1);
-
-                // the four XOR groups the permutation looks up, per byte
-                mul.table(table_row(vd_b, a1_b, 0));    // vd' = (vd ^ va') >>> 16
-                mul.table(table_row(vb_b, c1_b, 12));   // vb' = (vb ^ vc') >>> 12
-                mul.table(table_row(d1_b, a2_b, 0));    // vd'' = (vd' ^ va'')
-                mul.table(table_row(b1_b, c2_b, 0));    // z = vb' ^ vc''
-            }
-            put(row, L.vb_pp_t + lane, (t.z >> 7) & 1);
-
-            v[ia] = t.a2; v[ib] = t.b2; v[ic] = t.c2; v[id] = t.d2;
-        }
-    }
-    std::memcpy(finalState, v, sizeof(v));
+    TraceWriter<T> w{trace, nCols};
+    for (int r = 0; r < ROUNDS; r++)
+        for (int g = 0; g < G_PER_ROUND; g++) expand_clock(w, base, lane, L, in, mul, v, r, g, zTop);
+    for (int i = 0; i < 16; i++) finalState[i] = v[i];
 }
 
 // ─── Whole-block expansion ───────────────────────────────────────────────────
@@ -345,7 +360,7 @@ template <class T, class Sink>
 B3_HD inline void expand_boundary_columns(T *trace, uint64_t nCols, uint64_t base,
                                     uint64_t lane, const Layout &L, Kind kind,
                                     const BlockInputs &in, const uint32_t fs[16],
-                                    Sink &mul) {
+                                    const uint32_t zTop[4], Sink &mul) {
     auto put = [&](uint64_t r, uint64_t c, uint64_t v) { store(trace[r * nCols + c], v); };
     constexpr uint64_t P = 0xFFFFFFFF00000001ull;
 
@@ -383,14 +398,12 @@ B3_HD inline void expand_boundary_columns(T *trace, uint64_t nCols, uint64_t bas
         }
     }
 
-    // vb'' top bits of clocks 52..55 (bits 7 of z[1..4]; z[0]'s is vb_pp_t), parked in the
-    // out_bytes group at clocks 16..23, which no other role uses.
+    // vb'' top bits of clocks 52..55 (bit 7 of z's bytes 1..3; byte 0's is vb_pp_t), parked in the
+    // out_bytes group at clocks 16..23, which no other role uses. From the z words rather than the
+    // cells round 6 stored, so a device thread can own the boundary while another owns round 6.
     for (int c = CLOCKS - 4; c < CLOCKS; c++) {
-        const uint64_t row = base + (uint64_t)c;
-        const uint64_t zcol = L.vb_pp_xor + lane * 4;
         for (int j = 1; j < 4; j++) {
-            const uint64_t zb = load(trace[row * nCols + zcol + j]);
-            put(base + top_bit_clock(c, j), L.outBytes + lane * 2 + top_bit_col(j), (zb >> 7) & 1);
+            put(base + top_bit_clock(c, j), L.outBytes + lane * 2 + top_bit_col(j), (zTop[c - (CLOCKS - 4)] >> (8 * j + 7)) & 1);
         }
     }
 }
@@ -405,12 +418,11 @@ B3_HD inline void expand_one_lane(T *trace, uint64_t nCols, uint64_t row, uint64
                             uint64_t band, uint64_t lane, Kind kind, uint64_t flags, Sink &mul) {
     const Layout L = layout(lanes, band);
     const BlockInputs in = read_boundary(trace, nCols, row + lane, kind, flags);
-    uint32_t fs[16];
-    expand_lane(trace, nCols, row, lane, L, in, mul, fs);
-    expand_boundary_columns(trace, nCols, row, lane, L, kind, in, fs, mul);
+    uint32_t fs[16], zTop[4];
+    expand_lane(trace, nCols, row, lane, L, in, mul, fs, zTop);
+    expand_boundary_columns(trace, nCols, row, lane, L, kind, in, fs, zTop, mul);
 }
 
-// Expand one BLAKE3 block: every lane's interior, its boundary columns, and the lookups they make.
 template <class T, class Sink>
 B3_HD inline void expand_block(T *trace, uint64_t nCols, uint64_t row, uint64_t lanes, uint64_t band,
                          Kind kind, uint64_t flags, Sink &mul) {
