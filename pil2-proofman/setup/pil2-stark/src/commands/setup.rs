@@ -425,6 +425,8 @@ pub fn run_setup(opts: &SetupOptions) -> Result<()> {
             cap: opts.exps_cap,
             chunk: opts.exps_chunk,
             stark_src: opts.exps_stark_src.clone().map(std::path::PathBuf::from),
+            keep_dir: None,
+            dry_run: false,
         };
         // Non-fatal: setup itself succeeded and the provingKey is valid; the
         // prover falls back to the interpreter for any AIR without a .so.

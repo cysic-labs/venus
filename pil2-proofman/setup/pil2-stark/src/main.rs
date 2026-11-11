@@ -720,6 +720,8 @@ fn main() -> anyhow::Result<()> {
                     cap: args.exps_cap,
                     chunk: args.exps_chunk,
                     stark_src: args.exps_stark_src.map(std::path::PathBuf::from),
+                    keep_dir: None,
+                    dry_run: false,
                 };
                 run_gen_exps(&gen_opts)?;
             }
@@ -751,6 +753,8 @@ fn main() -> anyhow::Result<()> {
                 cap: args.exps_cap,
                 chunk: args.exps_chunk,
                 stark_src: args.exps_stark_src.map(std::path::PathBuf::from),
+                keep_dir: None,
+                dry_run: false,
             };
             run_gen_exps(&gen_opts)
         }

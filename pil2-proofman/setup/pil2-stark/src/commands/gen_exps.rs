@@ -26,6 +26,10 @@ pub struct GenExpsOptions {
     /// pil2-stark source root for the nvcc includes; `None` uses the vendored
     /// `proofman-starks-src` tree.
     pub stark_src: Option<PathBuf>,
+    /// Keep the generated `.cu` sources here (inspection); `None` uses a temp dir removed on exit.
+    pub keep_dir: Option<PathBuf>,
+    /// Emit the sources into `keep_dir` without compiling or touching the proving key.
+    pub dry_run: bool,
 }
 
 /// Generate + compile the expression kernels for every AIR under `proving_key`.
@@ -46,8 +50,8 @@ pub fn run_gen_exps(opts: &GenExpsOptions) -> Result<()> {
         chunk: opts.chunk,
         archspec: opts.arch.clone(),
         stark_src: opts.stark_src.clone(),
-        keep_dir: None,
-        dry_run: false,
+        keep_dir: opts.keep_dir.clone(),
+        dry_run: opts.dry_run,
         optimize: true,
     };
     let summary = proofman_exps_codegen::generate_all(&opts.proving_key, &cfg)?;

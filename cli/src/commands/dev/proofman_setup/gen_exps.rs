@@ -30,6 +30,14 @@ pub(crate) struct ZiskProofmanGenExps {
     #[arg(long)]
     stark_src: Option<PathBuf>,
 
+    /// Keep the generated `.cu` sources in this directory (for inspection).
+    #[arg(long)]
+    keep_dir: Option<PathBuf>,
+
+    /// Only emit the sources into --keep-dir: no compile, the proving key is untouched.
+    #[arg(long, requires = "keep_dir")]
+    dry_run: bool,
+
     /// Verbosity (-v, -vv)
     #[arg(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -45,6 +53,8 @@ impl ZiskProofmanGenExps {
             cap: self.cap,
             chunk: self.chunk,
             stark_src: self.stark_src.clone(),
+            keep_dir: self.keep_dir.clone(),
+            dry_run: self.dry_run,
         };
         run_gen_exps(&opts)
     }
