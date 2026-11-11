@@ -1710,7 +1710,10 @@ static bool gpuWitnessFillTrace(DeviceCommitBuffers *d_buffers, StepsParams *par
 
 
 uint64_t gen_proof_gpu(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *params_, void *globalChallenge, uint64_t* proofBuffer, char *proofFile, void *d_buffers_, uint64_t streamId_, char *constPolsPath,  char *constTreePath, char *customCommitsFixedPath, bool selfContained) {
-    ProofNvtxRange nvtx_range("basic");
+    // "basic:<airgroup>:<air>", so a profile can tell the airs apart (and their uploads).
+    char nvtx_name[48];
+    snprintf(nvtx_name, sizeof(nvtx_name), "basic:%lu:%lu", (unsigned long)airgroupId, (unsigned long)airId);
+    ProofNvtxRange nvtx_range(nvtx_name);
 
     auto key = std::make_pair(airgroupId, airId);
     std::string proofType = "basic";
