@@ -1,15 +1,17 @@
+//! Non-Linux-x86_64 stub: placeholder type whose methods are unreachable. Off
+//! the supported platform these are never exercised, so they carry no docs.
+#![allow(missing_docs)]
+
 use crate::{AsmService, ControlShmem};
 use anyhow::Result;
 use std::sync::Arc;
-use zisk_common::io::StreamSink;
+use zisk_common::io::{StreamError, StreamSink};
 
-/// HintsShmem struct manages the writing of processed precompile hints to shared memory.
 pub struct HintsShmem;
 
 impl HintsShmem {
     pub fn new(
-        _base_port: Option<u16>,
-        _local_rank: i32,
+        _shm_prefix: &str,
         _unlock_mapped_memory: bool,
         _control_writer: Arc<ControlShmem>,
         _active_services: &[AsmService],
@@ -19,15 +21,27 @@ impl HintsShmem {
         );
     }
 
+    pub fn bind_semaphores(&self, _sem_prefix: &str) -> Result<()> {
+        unreachable!(
+            "HintsShmem::bind_semaphores() is not supported on this platform. Only Linux x86_64 is supported."
+        );
+    }
+
     pub fn set_active_services(&self, _active_services: &[AsmService]) -> Result<()> {
         unreachable!(
             "HintsShmem::set_active_services() is not supported on this platform. Only Linux x86_64 is supported."
         );
     }
+
+    pub fn is_active_consumer(&self, _service: AsmService) -> bool {
+        unreachable!(
+            "HintsShmem::is_active_consumer() is not supported on this platform. Only Linux x86_64 is supported."
+        );
+    }
 }
 
 impl StreamSink for HintsShmem {
-    fn submit(&self, _processed: &[u64]) -> anyhow::Result<()> {
+    fn submit(&self, _processed: &[u64]) -> Result<(), StreamError> {
         unreachable!(
             "HintsShmem::submit() is not supported on this platform. Only Linux x86_64 is supported."
         );

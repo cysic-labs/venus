@@ -6,7 +6,7 @@
 #include <vector>
 #include <assert.h>
 
-MemAlignCounter::MemAlignCounter(std::shared_ptr<MemContext> context) :context(context) {
+MemAlignCounter::MemAlignCounter(std::shared_ptr<MemContext> context) :context(context), elapsed_ms(0), total_usleep(0) {
     total_counters.chunk_id = 0xFFFFFFFF;
     total_counters.full_5 = 0;
     total_counters.full_3 = 0;
@@ -48,22 +48,24 @@ void MemAlignCounter::execute()
     elapsed_ms = ((get_usec() - init) / 1000);
 }
 
-void MemAlignCounter::execute_chunk(uint32_t chunk_id, const MemCountersBusData *chunk_data, uint32_t chunk_size) {
+void MemAlignCounter::execute_chunk(uint32_t chunk_id, const MemCountersBusData *chunk_words, uint32_t chunk_size) {
     uint32_t full_5 = 0;
     uint32_t full_3 = 0;
     uint32_t full_2 = 0;
     uint32_t read_byte = 0;
     uint32_t write_byte = 0;
     
-    for (uint32_t i = 0; i < chunk_size; i++) {
-        switch (chunk_data[i].flags & 0x3F) {
+    const uint64_t *words = (const uint64_t *)chunk_words;
+    for (uint32_t w = 0; w < chunk_size; w += mops_record_len(words[w])) {
+        const MemCountersBusData rec = mops_decode_record(words + w);
+        switch (rec.flags & 0x3F) {
             // 1 byte read
             case MOPS_READ_1:
                 read_byte += 1;
                 break;        
             // 2 bytes read
             case MOPS_READ_2:
-                if ((chunk_data[i].addr & 0x07) > 6) {
+                if ((rec.addr & 0x07) > 6) {
                     full_3 += 1;
                 } else {
                     full_2 += 1;
@@ -71,7 +73,7 @@ void MemAlignCounter::execute_chunk(uint32_t chunk_id, const MemCountersBusData 
                 break;
             // 4 bytes read
             case MOPS_READ_4: 
-                if ((chunk_data[i].addr & 0x07) > 4) {
+                if ((rec.addr & 0x07) > 4) {
                     full_3 += 1;
                 } else {
                     full_2 += 1;
@@ -79,10 +81,10 @@ void MemAlignCounter::execute_chunk(uint32_t chunk_id, const MemCountersBusData 
                 break;
             // 8 bytes read
             case MOPS_READ_8: 
-                if ((chunk_data[i].addr & 0x07) > 0) {
+                if ((rec.addr & 0x07) > 0) {
                     full_3 += 1;
                 }
-                // if chunk_data[i].addr & 0x07 == 0 ==> aligned read 
+                // if rec.addr & 0x07 == 0 ==> aligned read 
                 break;
             // 1 byte write (clear)
             case MOPS_CWRITE_1:
@@ -94,7 +96,7 @@ void MemAlignCounter::execute_chunk(uint32_t chunk_id, const MemCountersBusData 
                 break;
             // 2 bytes write
             case MOPS_WRITE_2:
-                if ((chunk_data[i].addr & 0x07) > 6) {
+                if ((rec.addr & 0x07) > 6) {
                     full_5 += 1;
                 } else {
                     full_3 += 1;
@@ -102,7 +104,7 @@ void MemAlignCounter::execute_chunk(uint32_t chunk_id, const MemCountersBusData 
                 break;
             // 4 bytes write
             case MOPS_WRITE_4:
-                if ((chunk_data[i].addr & 0x07) > 4) {
+                if ((rec.addr & 0x07) > 4) {
                     full_5 += 1;
                 } else { 
                     full_3 += 1;
@@ -110,17 +112,17 @@ void MemAlignCounter::execute_chunk(uint32_t chunk_id, const MemCountersBusData 
                 break;
             // 8 bytes write
             case MOPS_WRITE_8:
-                if ((chunk_data[i].addr & 0x07) > 0) {
+                if ((rec.addr & 0x07) > 0) {
                     full_5 += 1;
                 }
-                // if chunk_data[i].addr & 0x07 == 0 ==> aligned write
+                // if rec.addr & 0x07 == 0 ==> aligned write
                 break;       
             case MOPS_BLOCK_READ + 0x00:
             case MOPS_BLOCK_READ + 0x10:
             case MOPS_BLOCK_READ + 0x20:
             case MOPS_BLOCK_READ + 0x30:
-                if ((chunk_data[i].addr & 0x07) > 0) {
-                    const uint32_t count = chunk_data[i].flags >> MOPS_BLOCK_COUNT_SBITS;
+                if ((rec.addr & 0x07) > 0) {
+                    const uint32_t count = rec.flags >> MOPS_BLOCK_COUNT_SBITS;
                     full_5 += count;
                 }
                 break;
@@ -128,8 +130,8 @@ void MemAlignCounter::execute_chunk(uint32_t chunk_id, const MemCountersBusData 
             case MOPS_BLOCK_WRITE + 0x10:
             case MOPS_BLOCK_WRITE + 0x20:
             case MOPS_BLOCK_WRITE + 0x30:
-                if ((chunk_data[i].addr & 0x07) > 0) {
-                    const uint32_t count = chunk_data[i].flags >> MOPS_BLOCK_COUNT_SBITS;
+                if ((rec.addr & 0x07) > 0) {
+                    const uint32_t count = rec.flags >> MOPS_BLOCK_COUNT_SBITS;
                     full_5 += count;
                 }
                 break;
@@ -151,8 +153,10 @@ void MemAlignCounter::execute_chunk(uint32_t chunk_id, const MemCountersBusData 
             case MOPS_ALIGNED_BLOCK_WRITE + 0x20:
             case MOPS_ALIGNED_BLOCK_WRITE + 0x30:
                 break;
+            case MOPS_READ_8_VALUE:   // the free-input word: an aligned read
+                break;
             default:
-                printf("MemAlignCounter: Unknown flags: 0x%X\n", chunk_data[i].flags);
+                printf("MemAlignCounter: Unknown flags: 0x%X\n", rec.flags);
                 assert(false && "Unknown flags in MemAlignCounter");
         }
     }
@@ -172,5 +176,22 @@ void MemAlignCounter::debug (void) {
     for (auto &count: counters) {
         printf("MEM_ALIGN_COUNTER #%d F5:%d F3:%d F2:%d RB:%d WB:%d\n", index++, count.full_5, count.full_3, count.full_2, count.read_byte, count.write_byte);
     }
+}
+
+void MemAlignCounter::save_csv (const std::string &filename) {
+    const char *header = "chunk_id,full_5,full_3,full_2,read_byte,write_byte";
+
+    FILE *f = fopen(filename.c_str(), "w");
+    if (!f) {
+        printf("ERROR: could not open %s for writing\n", filename.c_str());
+        return;
+    }
+    fprintf(f, "%s\n", header);
+    for (const auto &c : counters) {
+        fprintf(f, "%u,%u,%u,%u,%u,%u\n", c.chunk_id, c.full_5, c.full_3, c.full_2, c.read_byte, c.write_byte);
+    }
+    fprintf(f, "total,%u,%u,%u,%u,%u\n", total_counters.full_5, total_counters.full_3, total_counters.full_2, total_counters.read_byte, total_counters.write_byte);
+    fclose(f);
+    printf("\nWritten to %s\n", filename.c_str());
 }
 

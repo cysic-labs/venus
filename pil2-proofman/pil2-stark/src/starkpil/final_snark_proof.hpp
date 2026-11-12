@@ -119,10 +119,6 @@ std::pair<std::string, std::string> snark_proof_to_json(
     json publics_json = json::array();
     
     // Parse public inputs (always the same format)
-    if (public_size % AltBn128::Fr.bytes() != 0) {
-        throw std::runtime_error("Public inputs size (" + std::to_string(public_size) +
-                                 " bytes) is not a multiple of " + std::to_string(AltBn128::Fr.bytes()) + " bytes");
-    }
     for (size_t i = 0; i < public_size; i += AltBn128::Fr.bytes()) {
         AltBn128::FrElement pub;
         AltBn128::Fr.fromRprBE(pub, public_bytes + i, AltBn128::Fr.bytes());
@@ -147,18 +143,26 @@ std::pair<std::string, std::string> snark_proof_to_json(
     }
     
     // Validate proof size before parsing
-    // Each commitment is a G1 point with 2 base field coordinates (x, y)
-    // Each evaluation is a single Fr element
-    size_t expected_size = orderedCommitments.size() * 2 * AltBn128::F1.bytes() + orderedEvaluations.size() * AltBn128::Fr.bytes();
-    if (proof_size != expected_size) {
+    // Each commitment is a G1 point with 2 coordinates (x, y), each an element of the base field Fq
+    // (AltBn128::F1), as SnarkProof::toBytes writes them. Each evaluation is a single Fr element
+    size_t expected_size =
+        orderedCommitments.size() * 2 * AltBn128::F1.bytes() + orderedEvaluations.size() * AltBn128::Fr.bytes();
+    if (proof_size < expected_size) {
         throw std::runtime_error("Proof size (" + std::to_string(proof_size) + 
-                                 " bytes) is not the expected " + std::to_string(expected_size) + 
-                                 " bytes for " + protocol_name + " protocol");
+                                 " bytes) is smaller than expected (" + std::to_string(expected_size) + 
+                                 " bytes) for " + protocol_name + " protocol");
     }
     
     size_t offset = 0;
+
+    // snarkjs reads a PLONK proof's commitments and evaluations at its top level, and an FFLONK
+    // proof's under "polynomials" and "evaluations" (snarkjs src/proof.js, fromObjectProof).
+    const bool nested = protocol_id == Zkey::FFLONK_PROTOCOL_ID;
+    json &commitments_json = nested ? proof_json["polynomials"] : proof_json;
+    json &evaluations_json = nested ? proof_json["evaluations"] : proof_json;
     
-    // Parse commitments (G1 points - each has x and y coordinates)
+    // Parse commitments (G1 points - each has x and y coordinates). Coordinates live in the
+    // base field: reading them as Fr would reduce a coordinate in [r, q) to another point.
     for (const auto& key : orderedCommitments) {
         json point = json::array();
         
@@ -174,13 +178,13 @@ std::pair<std::string, std::string> snark_proof_to_json(
         
         point.push_back("1");
         
-        proof_json[key] = point;
+        commitments_json[key] = point;
     }
     
     for (const auto& key : orderedEvaluations) {
         AltBn128::FrElement eval;
         AltBn128::Fr.fromRprBE(eval, proof_bytes + offset, AltBn128::Fr.bytes());
-        proof_json[key] = AltBn128::Fr.toString(eval);
+        evaluations_json[key] = AltBn128::Fr.toString(eval);
         offset += AltBn128::Fr.bytes();
     }
     

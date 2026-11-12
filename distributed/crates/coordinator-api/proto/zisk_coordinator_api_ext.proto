@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package zisk.coordinator.v1;
+
+import "zisk_coordinator_api.proto";
+
+// ============================================================================
+// ZisK Coordinator Extended API — DEPRECATED
+//
+// Job metadata now travels on the base contract, in
+// `ZiskCoordinatorApi.JobRequest` (`JobRequestMessage.metadata`). This service
+// is kept as an alias of that RPC for clients built against it, and is removed
+// in the first non-alpha release.
+// ============================================================================
+
+service ZiskCoordinatorApiExt {
+  option deprecated = true;
+
+  // Alias of `ZiskCoordinatorApi.JobRequest` with the same `metadata`.
+  rpc JobRequestExt(JobRequestExtMessage)
+      returns (JobResponse) {
+    option deprecated = true;
+  }
+}
+
+message JobRequestExtMessage {
+  option deprecated = true;
+
+  JobKindExt job_kind = 1;
+  // Caller-defined job-level metadata as key/value pairs. Empty map means no
+  // metadata.
+  map<string, string> metadata = 2;
+}
+
+// Restricted job-kind set for the extended API: only jobs that can carry
+// job-level metadata (prove, execute). Reuses the base request messages.
+message JobKindExt {
+  option deprecated = true;
+
+  oneof kind {
+    ProveRequest   prove   = 1;
+    ExecuteRequest execute = 2;
+  }
+}

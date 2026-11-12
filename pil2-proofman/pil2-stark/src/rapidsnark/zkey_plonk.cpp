@@ -1,7 +1,5 @@
 #include <stdexcept>
 #include <memory.h>
-#include <new>
-#include <vector>
 
 #include "zkey.hpp"
 #include "zkey_plonk.hpp"
@@ -58,50 +56,30 @@ namespace Zkey {
     PlonkZkeyHeader* PlonkZkeyHeader::loadPlonkZkeyHeaderDirect(BinFileUtils::BinFile *f) {
         auto plonkZkeyHeader = new PlonkZkeyHeader();
 
-        // Read entire header section into a local buffer; every field below must lie inside it.
+        // Read entire header section into a local buffer 
         u_int64_t sectionSize = f->getSectionSize(Zkey::ZKEY_PL_HEADER_SECTION);
-        std::vector<uint8_t> buf(sectionSize);
-        if (sectionSize > 0) {
-            f->readSectionTo(buf.data(), Zkey::ZKEY_PL_HEADER_SECTION, 0, sectionSize);
-        }
+        uint8_t *buf = new uint8_t[sectionSize];
+        f->readSectionTo(buf, Zkey::ZKEY_PL_HEADER_SECTION, 0, sectionSize);
 
         u_int64_t off = 0;
 
-        auto readBytes = [&](u_int64_t len) -> const uint8_t* {
-            if (len > sectionSize - off) {
-                throw std::runtime_error("truncated plonk zkey header");
-            }
-            const uint8_t *ptr = buf.data() + off;
-            off += len;
-            return ptr;
-        };
-
         auto readUint32 = [&](u_int32_t &out) {
-            memcpy(&out, readBytes(sizeof(u_int32_t)), sizeof(u_int32_t));
+            memcpy(&out, buf + off, sizeof(u_int32_t));
+            off += sizeof(u_int32_t);
         };
 
-        // Deep-copy small pointer fields; they own their memory.
-        auto copyField = [&](u_int64_t len) -> void* {
-            const uint8_t *src = readBytes(len);
-            if (len == 0) {
-                return nullptr;
-            }
-            void *copy = malloc(len);
-            if (copy == nullptr) {
-                throw std::bad_alloc();
-            }
-            memcpy(copy, src, len);
-            return copy;
-        };
-
-        // Read fields in the same order as loadPlonkZkeyHeader.
+        
+        // Read fields in the same order as loadPlonkZkeyHeader
+        
         readUint32(plonkZkeyHeader->n8q);
         mpz_init(plonkZkeyHeader->qPrime);
-        mpz_import(plonkZkeyHeader->qPrime, plonkZkeyHeader->n8q, -1, 1, -1, 0, readBytes(plonkZkeyHeader->n8q));
+        mpz_import(plonkZkeyHeader->qPrime, plonkZkeyHeader->n8q, -1, 1, -1, 0, buf + off);
+        off += plonkZkeyHeader->n8q;
 
         readUint32(plonkZkeyHeader->n8r);
         mpz_init(plonkZkeyHeader->rPrime);
-        mpz_import(plonkZkeyHeader->rPrime, plonkZkeyHeader->n8r, -1, 1, -1, 0, readBytes(plonkZkeyHeader->n8r));
+        mpz_import(plonkZkeyHeader->rPrime, plonkZkeyHeader->n8r, -1, 1, -1, 0, buf + off);
+        off += plonkZkeyHeader->n8r;
 
         readUint32(plonkZkeyHeader->nVars);
         readUint32(plonkZkeyHeader->nPublic);
@@ -109,21 +87,41 @@ namespace Zkey {
         readUint32(plonkZkeyHeader->nAdditions);
         readUint32(plonkZkeyHeader->nConstraints);
 
-        const u_int64_t n8q = plonkZkeyHeader->n8q;
-        plonkZkeyHeader->k1 = copyField(plonkZkeyHeader->n8r);
-        plonkZkeyHeader->k2 = copyField(plonkZkeyHeader->n8r);
+        // Deep-copy small pointer fields — they own their memory
+        auto copyField = [](uint8_t *src, size_t len) -> void* {
+            void *copy = malloc(len);
+            memcpy(copy, src, len);
+            return copy;
+        };
 
-        plonkZkeyHeader->QM = copyField(n8q * 2);
-        plonkZkeyHeader->QL = copyField(n8q * 2);
-        plonkZkeyHeader->QR = copyField(n8q * 2);
-        plonkZkeyHeader->QO = copyField(n8q * 2);
-        plonkZkeyHeader->QC = copyField(n8q * 2);
 
-        plonkZkeyHeader->S1 = copyField(n8q * 2);
-        plonkZkeyHeader->S2 = copyField(n8q * 2);
-        plonkZkeyHeader->S3 = copyField(n8q * 2);
+        plonkZkeyHeader->k1 = copyField(buf + off, plonkZkeyHeader->n8r);
+        off += plonkZkeyHeader->n8r;
+        plonkZkeyHeader->k2 = copyField(buf + off, plonkZkeyHeader->n8r);
+        off += plonkZkeyHeader->n8r;
 
-        plonkZkeyHeader->X2 = copyField(n8q * 4);
+        plonkZkeyHeader->QM = copyField(buf + off, plonkZkeyHeader->n8q * 2);
+        off += plonkZkeyHeader->n8q * 2;
+        plonkZkeyHeader->QL = copyField(buf + off, plonkZkeyHeader->n8q * 2);
+        off += plonkZkeyHeader->n8q * 2;
+        plonkZkeyHeader->QR = copyField(buf + off, plonkZkeyHeader->n8q * 2);
+        off += plonkZkeyHeader->n8q * 2;
+        plonkZkeyHeader->QO = copyField(buf + off, plonkZkeyHeader->n8q * 2);
+        off += plonkZkeyHeader->n8q * 2;
+        plonkZkeyHeader->QC = copyField(buf + off, plonkZkeyHeader->n8q * 2);
+        off += plonkZkeyHeader->n8q * 2;
+
+        plonkZkeyHeader->S1 = copyField(buf + off, plonkZkeyHeader->n8q * 2);
+        off += plonkZkeyHeader->n8q * 2;
+        plonkZkeyHeader->S2 = copyField(buf + off, plonkZkeyHeader->n8q * 2);
+        off += plonkZkeyHeader->n8q * 2;
+        plonkZkeyHeader->S3 = copyField(buf + off, plonkZkeyHeader->n8q * 2);
+        off += plonkZkeyHeader->n8q * 2;
+
+        plonkZkeyHeader->X2 = copyField(buf + off, plonkZkeyHeader->n8q * 4);
+        off += plonkZkeyHeader->n8q * 4;
+
+        delete[] buf;
 
         return plonkZkeyHeader;
     }

@@ -10,10 +10,6 @@ module.exports = class PackedExpressions {
         this.values = [];
         this.references = [];
         this.expressionLabels = [];
-        this.appliesRowOffset = [];
-    }
-    setAppliesRowOffset(id, appliesRowOffset) {
-        this.appliesRowOffset[id] = appliesRowOffset;
     }
     insert(expr) {
         return this.expressions.push(expr) - 1;
@@ -93,15 +89,6 @@ module.exports = class PackedExpressions {
     }
     getReferenceKey(id, rowOffset = 0) {
         return rowOffset ? (rowOffset > 0 ? `im_${id}+${rowOffset}` : `im_${id}${rowOffset}`) : `im_${id}`;
-    }
-    // Returns the expression reference by id only if applies row offset, otherwise returns false.
-    getExpressionReference (id) {
-        let key = this.getReferenceKey(id, 0);
-        if (typeof this.references[key] === 'undefined') {
-            return false;
-        }
-        const res = this.references[key];
-        return this.appliesRowOffset[id] ? res : false;
     }
     pushExpressionReference (id, rowOffset = 0) {
         let key = this.getReferenceKey(id, rowOffset);

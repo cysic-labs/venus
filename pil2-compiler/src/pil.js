@@ -35,8 +35,9 @@ const OPTIONS = {
     'debug-witness-cols': { describe: 'debug witness columns' },
     'debug-fixed-cols-match': { describe: 'debug fixed columns match with pattern' },
     'debug-witness-cols-match': { describe: 'debug witness columns match with pattern' },
-    'debug-constraints-match': { describe: 'debug constraints match with pattern' },
+    'debug-constraints-match': { describe: 'debug constraints match with pattern' },    
     'fixed-to-file': { describe: 'save fixed columns to file' },
+    'fixed-to-txt': { describe: 'save fixed columns of listed airs (or all) to txt files (one file per air)', type: 'string-list' },
     // TODO: option to force witness name as snake_case and air, airtemplate, airgroup in CamelCase
 }
 
@@ -156,6 +157,9 @@ async function run() {
             if (typeof OPTIONS[key] === 'undefined') {
                 console.log(`\x1B[1;31mERROR:\x1B[0;31m Unknown option \x1B[1m${key}\x1B[0;31m (config.${camelCaseKey})\n       try use -h or --help to see all options\x1B[0m`);
                 process.exit(1);
+            }
+            if (typeof value === 'string' && OPTIONS[key].type === 'string-list') {
+                value = value.split(',').map(v => v.trim());
             }
             return [camelCaseKey, value];
         }));

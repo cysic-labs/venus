@@ -1,0 +1,182 @@
+use crate::{
+    job_events::{CoordinatorJobEvent, CoordinatorJobResult},
+    Coordinator, CoordinatorError, CoordinatorResult,
+};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use zisk_cluster_common::{
+    ComputeCapacity, CoordinatorMessageDto, DataId, ExecuteTaskRequestDto,
+    ExecuteTaskRequestTypeDto, ExecuteTaskResponseDto, ExecuteTaskResponseResultDataDto,
+    HintsModeDto, InputsModeDto, Job, JobExecutionMode, JobId, JobPhase, JobState,
+    LaunchProofResponseDto, LaunchWrapRequestDto, WorkerState, WrapParamsDto,
+};
+use zisk_common::{Proof, ProofKind};
+
+impl Coordinator {
+    /// Launch a wrap job: compress/reduce an existing vadcop proof to minimal or SNARK format.
+    ///
+    /// Selects any single idle worker, sends a WRAP task to it, and returns the job ID.
+    /// The proof data must be `Proof::to_bincode`; `metadata` is the caller's, if any.
+    pub async fn launch_wrap(
+        &self,
+        request: LaunchWrapRequestDto,
+        metadata: Option<std::collections::BTreeMap<String, String>>,
+    ) -> CoordinatorResult<LaunchProofResponseDto> {
+        let metadata = self.admit_job_metadata(metadata)?;
+        // Before any worker is reserved, as in `launch_proof`.
+        if ProofKind::from(request.proof_dest) == ProofKind::Snark {
+            self.ensure_snark_available(request.snark_protocol).await?;
+        }
+
+        // Atomic single-worker reservation under one pool write lock —
+        // prevents two concurrent launch_wrap calls from double-booking.
+        let job_id = JobId::new();
+        let worker_id =
+            self.workers_pool.try_reserve_single_ready_for(&job_id, JobPhase::Recurse).await?;
+
+        let mut job = Job::new(
+            job_id.clone(),
+            DataId::new(),
+            String::new(),
+            InputsModeDto::InputsNone,
+            HintsModeDto::HintsNone,
+            ComputeCapacity::from(1),
+            ComputeCapacity::from(1),
+            vec![worker_id.clone()],
+            vec![],
+            JobExecutionMode::Standard,
+            metadata,
+            false,
+            ProofKind::VadcopFinal,
+        );
+        job.change_state(JobState::Running(JobPhase::Recurse)); // reuse Aggregate phase as wrap phase
+
+        let job_arc = Arc::new(RwLock::new(job));
+        self.jobs.write().await.insert(job_id.clone(), job_arc);
+        self.alloc_job_events(&job_id).await;
+        self.fire_job_event(&job_id, CoordinatorJobEvent::Queued).await;
+        self.fire_job_event(&job_id, CoordinatorJobEvent::Started).await;
+
+        crate::metrics::record_job_started(&job_id, crate::metrics::KIND_WRAP, 1);
+        crate::metrics::record_job_phase(&job_id, crate::metrics::PHASE_AGGREGATION);
+
+        #[allow(deprecated)] // `metadata` is deprecated and left empty.
+        let req = ExecuteTaskRequestDto {
+            worker_id: worker_id.clone(),
+            job_id: job_id.clone(),
+            params: ExecuteTaskRequestTypeDto::WrapParams(WrapParamsDto {
+                proof_data: request.proof_data,
+                proof_dest: request.proof_dest,
+            }),
+            metadata: None,
+        };
+        let message = CoordinatorMessageDto::ExecuteTaskRequest(req);
+        if let Err(e) = self.workers_pool.send_message(&worker_id, message).await {
+            // Canonical failure path releases the worker reservation.
+            let reason = format!("Failed to dispatch wrap task: {}", e);
+            let _ = self.fail_job(&job_id, &reason).await;
+            return Err(e);
+        }
+
+        tracing::info!("[Wrap] Job {} started on worker {}", job_id, worker_id);
+
+        Ok(LaunchProofResponseDto { job_id })
+    }
+
+    /// Handle completion of a wrap task from a worker.
+    pub(super) async fn handle_wrap_completion(
+        &self,
+        execute_task_response: ExecuteTaskResponseDto,
+    ) -> CoordinatorResult<()> {
+        let job_id = &execute_task_response.job_id;
+        let worker_id = &execute_task_response.worker_id;
+
+        let job_entry = {
+            let jobs_map = self.jobs.read().await;
+            jobs_map.get(job_id).cloned().ok_or(CoordinatorError::NotFoundOrInaccessible)?
+        };
+        let mut job = job_entry.write().await;
+
+        if job.state().is_resolved() {
+            return Ok(());
+        }
+
+        // Bind the payload to the phase mutated below (see
+        // `validate_response_phase`) — ahead of the `Ready` flip, which is itself
+        // a mutation: a rejected payload must not un-mark a computing worker.
+        // Only for a success response; a failure carries no `result_data` to
+        // bind and is owned by the branch below.
+        if execute_task_response.success {
+            Self::validate_response_phase(&job, &execute_task_response)?;
+        }
+
+        self.workers_pool.mark_worker_with_state(worker_id, WorkerState::Ready).await?;
+
+        if !execute_task_response.success {
+            // fail_job (takes its own job lock) records failure metrics
+            // and runs post_launch_proof; inline change_state would skip both.
+            drop(job);
+            let reason = execute_task_response.error_message.unwrap_or_default();
+            let _ = self.fail_job(job_id, &reason).await;
+            return Err(CoordinatorError::Internal(format!("Wrap task failed: {}", reason)));
+        }
+
+        let Some(ExecuteTaskResponseResultDataDto::WrapResult(wrap_result)) =
+            execute_task_response.result_data
+        else {
+            return Err(CoordinatorError::Internal(
+                "Expected WrapResult in wrap completion".to_string(),
+            ));
+        };
+
+        // A proof that does not decode, or cannot be saved (which would complete the job with
+        // no proof for its webhook), fails the job.
+        let zisk_proof = match Proof::from_bincode(&wrap_result.proof_data)
+            .and_then(|p| p.ensure_saveable().map(|()| p))
+        {
+            Ok(p) => p,
+            Err(e) => {
+                drop(job);
+                let reason = format!("Wrap proof from worker {worker_id} is malformed: {e}");
+                let _ = self.fail_job(job_id, &reason).await;
+                return Err(CoordinatorError::Internal(reason));
+            }
+        };
+        let seed = zisk_proof.random_seed;
+        job.proof = Some(zisk_proof);
+        job.change_state(JobState::Completed);
+
+        // Pairs with launch_wrap's record_job_started.
+        crate::metrics::record_job_terminal(crate::metrics::JobOutcome {
+            job_id,
+            outcome: crate::metrics::OUTCOME_SUCCESS,
+            reason: None,
+            workers: &job.workers,
+            contributions_started: job.phase_start_time(&JobPhase::Recurse),
+            duration: job.duration_ms.map(|ms| ms as f64 / 1000.0),
+            phases: None,
+            steps: None,
+            instances: None,
+            costs: None,
+        });
+
+        tracing::info!(
+            "[Wrap] Job {} completed successfully{}",
+            job_id,
+            Self::format_job_metadata(job.metadata.as_ref())
+        );
+
+        drop(job);
+
+        self.fire_job_event(
+            job_id,
+            CoordinatorJobEvent::Completed(CoordinatorJobResult::Wrap {
+                proof_bytes: wrap_result.proof_data,
+                random_seed: seed,
+            }),
+        )
+        .await;
+
+        Ok(())
+    }
+}

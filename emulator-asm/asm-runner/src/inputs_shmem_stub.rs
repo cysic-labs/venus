@@ -1,8 +1,12 @@
+//! Non-Linux-x86_64 stub: placeholder type whose methods are unreachable. Off
+//! the supported platform these are never exercised, so they carry no docs.
+#![allow(missing_docs)]
+
 use std::sync::Arc;
 
-use zisk_common::io::StreamSink;
+use zisk_common::io::{StreamError, StreamProcessor, StreamSink};
 
-use crate::ControlShmem;
+use crate::{ControlShmem, RANDOM_SEED_WORDS};
 
 use anyhow::Result;
 
@@ -10,13 +14,18 @@ pub struct InputsShmemWriter;
 
 impl InputsShmemWriter {
     pub fn new(
-        _base_port: Option<u16>,
-        _local_rank: i32,
+        _shm_prefix: &str,
         _unlock_mapped_memory: bool,
         _control_writer: Arc<ControlShmem>,
     ) -> Result<Self> {
         unreachable!(
             "InputsShmemWriter::new() is not supported on this platform. Only Linux x86_64 is supported."
+        );
+    }
+
+    pub fn bind_semaphores(&self, _sem_prefix: &str) -> Result<()> {
+        unreachable!(
+            "InputsShmemWriter::bind_semaphores() is not supported on this platform. Only Linux x86_64 is supported."
         );
     }
 
@@ -32,6 +41,24 @@ impl InputsShmemWriter {
         );
     }
 
+    pub fn set_random_seed(&self, _seed: &[u64; RANDOM_SEED_WORDS]) -> Result<()> {
+        unreachable!(
+            "InputsShmemWriter::set_random_seed() is not supported on this platform. Only Linux x86_64 is supported."
+        );
+    }
+
+    pub fn signal_reset(&self) -> Result<()> {
+        unreachable!(
+            "InputsShmemWriter::signal_reset() is not supported on this platform. Only Linux x86_64 is supported."
+        );
+    }
+
+    pub fn clear_reset(&self) -> Result<()> {
+        unreachable!(
+            "InputsShmemWriter::clear_reset() is not supported on this platform. Only Linux x86_64 is supported."
+        );
+    }
+
     pub fn reset(&self) {
         unreachable!(
             "InputsShmemWriter::reset() is not supported on this platform. Only Linux x86_64 is supported."
@@ -39,8 +66,22 @@ impl InputsShmemWriter {
     }
 }
 
+impl StreamProcessor for InputsShmemWriter {
+    fn process_hints(&self, _data: &[u64], _first_batch: bool) -> Result<bool, StreamError> {
+        unreachable!(
+            "InputsShmemWriter::process_hints() is not supported on this platform. Only Linux x86_64 is supported."
+        );
+    }
+
+    fn reset(&self) {
+        unreachable!(
+            "InputsShmemWriter::reset() is not supported on this platform. Only Linux x86_64 is supported."
+        );
+    }
+}
+
 impl StreamSink for InputsShmemWriter {
-    fn submit(&self, _hints: &[u64]) -> anyhow::Result<()> {
+    fn submit(&self, _hints: &[u64]) -> Result<(), StreamError> {
         unreachable!(
             "InputsShmemWriter::submit() is not supported on this platform. Only Linux x86_64 is supported."
         );

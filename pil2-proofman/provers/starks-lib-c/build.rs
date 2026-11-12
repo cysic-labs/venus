@@ -2,129 +2,128 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::UNIX_EPOCH;
+
+/// Detects whether GPU (CUDA) support is available.
+/// Returns false if the cpu-only feature is set or if no CUDA toolkit is found.
+fn detect_gpu() -> bool {
+    if cfg!(feature = "cpu-only") {
+        return false;
+    }
+    // Check for nvcc in standard CUDA location or PATH
+    let nvcc_in_cuda = Path::new("/usr/local/cuda/bin/nvcc").exists();
+    let nvcc_in_path = Command::new("nvcc").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    nvcc_in_cuda || nvcc_in_path
+}
 
 fn main() {
+    // CUDA arch resolution lives entirely in pil2-stark/Makefile
     println!("cargo:rerun-if-env-changed=CUDA_ARCHS");
-    println!("cargo:rerun-if-env-changed=CUDA_GRAPH");
+    println!("cargo:rerun-if-env-changed=CUDA_ARCH");
+    println!("cargo:rerun-if-env-changed=CUDA_GENCODE_FLAGS");
 
-    // **Check if the `no_lib_link` feature is enabled**
-    if env::var("CARGO_FEATURE_NO_LIB_LINK").is_ok() {
-        println!("Skipping linking because `no_lib_link` feature is enabled.");
-        return;
-    }
-
-    // Paths
-    let pil2_stark_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../pil2-stark");
-    let library_folder =
-        if cfg!(feature = "gpu") { pil2_stark_path.join("lib-gpu") } else { pil2_stark_path.join("lib") };
-    let library_name = if cfg!(feature = "gpu") { "starksgpu" } else { "starks" };
-    let lib_file = library_folder.join(format!("lib{library_name}.a"));
-
-    if !pil2_stark_path.exists() {
-        panic!("Missing `pil2-stark` directory! Ensure repository was cloned correctly.");
-    }
-
-    // Ensure pil2-stark submodule content is available (only needed when pil2-stark is a
-    // git submodule rather than a committed directory).
-    if !pil2_stark_path.join(".git").exists() && !pil2_stark_path.join("src").exists() {
-        // Use repo root + explicit submodule path to avoid initializing unrelated submodules.
-        let repo_root = Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(&pil2_stark_path)
-            .output()
-            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-            .unwrap_or_else(|_| pil2_stark_path.parent().unwrap_or(&pil2_stark_path).to_path_buf());
-        if let Ok(rel) = pil2_stark_path.strip_prefix(&repo_root) {
-            let rel_str = rel.to_string_lossy();
-            run_command(
-                "git",
-                &["submodule", "update", "--init", "--recursive", "--", &rel_str],
-                &repo_root,
-            );
-        } else {
-            run_command("git", &["submodule", "update", "--init", "--recursive"], &pil2_stark_path);
-        }
-    }
-
-    // For GPU builds, ensure submodules are initialized and blst is compiled
-    if cfg!(feature = "gpu") {
-        ensure_gpu_submodules_initialized(&pil2_stark_path);
-        ensure_blst_compiled(&pil2_stark_path);
-    }
-
-    // gencode_flags: None = auto-detect (delegate to Makefile configure.sh), Some = explicit archs
-    let gencode_flags: Option<String> = if cfg!(feature = "gpu") {
-        match parse_cuda_archs() {
-            None => {
-                eprintln!("CUDA_ARCHS not set — auto-detecting GPU arch from host");
-                None
-            }
-            Some(archs) => {
-                let flags = cuda_gencode_flags(&archs);
-                eprintln!("CUDA gencode flags: {}", flags);
-                Some(flags)
-            }
-        }
+    // Determine if GPU support should be used:
+    // - If cpu-only feature is set, always use CPU
+    // - Otherwise, auto-detect CUDA availability
+    let use_gpu = if cfg!(feature = "cpu-only") {
+        println!("cargo:warning=[BUILD INFO] STARKS compiled with CPU-only support (feature enabled)");
+        false
+    } else if detect_gpu() {
+        println!("cargo:warning=[BUILD INFO] STARKS compiled with GPU support");
+        true
     } else {
-        None
-    };
-
-    // Detect if CUDA_ARCHS changed since last build.
-    // Stamp stores "auto" for host-detected builds, or the gencode flags string for explicit builds.
-    let archs_stamp_path = library_folder.join(".cuda_archs_stamp");
-    let cuda_graph = if cfg!(feature = "gpu") {
-        env::var("CUDA_GRAPH").unwrap_or_else(|_| "0".to_string())
-    } else {
-        "n/a".to_string()
-    };
-    let stamp_content = if cfg!(feature = "gpu") {
-        format!("{}\nCUDA_GRAPH={}", gencode_flags.as_deref().unwrap_or("auto"), cuda_graph)
-    } else {
-        gencode_flags.as_deref().unwrap_or("auto").to_string()
-    };
-    let archs_changed = if cfg!(feature = "gpu") {
-        fs::read_to_string(&archs_stamp_path).map(|s| s.trim() != stamp_content).unwrap_or(true)
-    } else {
+        println!("cargo:warning=[BUILD INFO] STARKS compiled with CPU-only support (CUDA not detected)");
         false
     };
 
-    // Check if the `no_cpp_compilation` feature is enabled
-    if cfg!(feature = "no_cpp_compilation") {
-        println!("Skipping C++ compilation because `no_cpp_compilation` feature is enabled.");
-        if !lib_file.exists() {
-            eprintln!("Warning: Library `{}` not found. Make sure to compile it manually.", lib_file.display());
-            eprintln!(
-                "Run: cd pil2-stark && make {}",
-                if cfg!(feature = "gpu") { "starks_lib_gpu" } else { "starks_lib" }
-            );
-        }
+    // Set build mode as environment variable for runtime access
+    if use_gpu {
+        println!("cargo:rustc-env=STARKS_BUILD_MODE=GPU");
     } else {
-        // Rebuild if library is missing or CUDA_ARCHS changed since last build
-        if !lib_file.exists() || archs_changed {
-            if cfg!(feature = "gpu") {
-                eprintln!("`libstarksgpu.a` missing or CUDA_ARCHS changed — recompiling...");
-                run_command("make", &["clean"], &pil2_stark_path);
-                match &gencode_flags {
-                    Some(flags) => {
-                        let gencode_arg = format!("CUDA_GENCODE_FLAGS={}", flags);
-                        run_command("make", &["-j", &gencode_arg, "starks_lib_gpu"], &pil2_stark_path);
-                    }
-                    None => run_command("make", &["-j", "starks_lib_gpu"], &pil2_stark_path),
-                }
-                if let Err(e) = fs::write(&archs_stamp_path, &stamp_content) {
-                    eprintln!(
-                        "Warning: failed to write CUDA arch stamp {:?}: {e} — next build will recompile",
-                        archs_stamp_path
-                    );
-                }
-            } else {
-                eprintln!("`libstarks.a` not found! Compiling...");
-                run_command("make", &["clean"], &pil2_stark_path);
-                run_command("make", &["-j", "starks_lib"], &pil2_stark_path);
-            }
-        } else {
-            println!("C++ library already compiled, skipping rebuild.");
+        println!("cargo:rustc-env=STARKS_BUILD_MODE=CPU");
+    }
+
+    // Sources are carried by the `proofman-starks-src` crate. Build in place when
+    // that tree is writable (a local path dependency / this workspace); when it is
+    // a read-only registry checkout (a published consumer), mirror it into OUT_DIR
+    // first — the Makefile generates files in-tree (goldilocks `configure.sh`,
+    // `.simd_stamp`) and writes `build/` and `lib/` alongside the sources.
+    let vendored = proofman_starks_src::source_dir();
+    // Writable tree = local path dependency (this workspace); read-only = a
+    // published registry checkout that must be mirrored before building.
+    let in_place = is_writable(&vendored);
+    let pil2_stark_path = if in_place {
+        vendored.canonicalize().unwrap_or(vendored)
+    } else {
+        let dst = Path::new(&env::var("OUT_DIR").unwrap()).join("pil2-stark");
+        sync_tree(&vendored, &dst);
+        dst.canonicalize().unwrap_or(dst)
+    };
+    let library_folder = if use_gpu { pil2_stark_path.join("lib-gpu") } else { pil2_stark_path.join("lib") };
+    let library_name = if use_gpu { "starksgpu" } else { "starks" };
+    let lib_file = library_folder.join(format!("lib{library_name}.a"));
+
+    // The CPU and GPU variants of this script can run concurrently against the
+    // same checkout (one cargo build graph may contain both, and a second cargo
+    // process or rust-analyzer can overlap with either). All staleness probes,
+    // cleans and make invocations below mutate shared in-tree state, so they
+    // must be serialized; the lock is held until this process exits.
+    let lock_path = pil2_stark_path.join(".build_lock");
+    let build_lock = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap_or_else(|e| panic!("Failed to open build lock {}: {e}", lock_path.display()));
+    build_lock.lock().unwrap_or_else(|e| panic!("Failed to acquire build lock {}: {e}", lock_path.display()));
+
+    // For GPU builds: in a local checkout, auto-initialize the blst/sppark
+    // submodules exactly as before (a fresh clone may not have them yet). In a
+    // published checkout their files are bundled into the crate, so skip the git
+    // call — there is no repo there. Then compile blst.
+    if use_gpu {
+        if in_place {
+            ensure_gpu_submodules_initialized(&pil2_stark_path);
+        }
+        ensure_blst_compiled(&pil2_stark_path);
+    }
+
+    let tracked_files = find_tracked_files(&pil2_stark_path);
+    for file in &tracked_files {
+        println!("cargo:rerun-if-changed={}", file.display());
+    }
+    println!("cargo:rerun-if-changed={}", lib_file.display());
+
+    // Detect if the Makefile changed since the last build (see the clean below).
+    let makefile_path = pil2_stark_path.join("Makefile");
+    let makefile_stamp_path = library_folder.join(".makefile_stamp");
+    let current_makefile = fs::read(&makefile_path).ok();
+    let stored_makefile = fs::read(&makefile_stamp_path).ok();
+    let makefile_changed = current_makefile.is_some() && current_makefile != stored_makefile;
+
+    // No staleness gate here: cargo only re-runs this script when one of the
+    // `rerun-if-changed` / `rerun-if-env-changed` inputs above actually moved
+    let target = if use_gpu { "starks_lib_gpu" } else { "starks_lib" };
+
+    // Clean build when the Makefile itself changes: compiler flag edits (e.g.
+    // toggling a -D define) aren't tracked by make's .d files, so a flag flip
+    // would otherwise leave stale objects linked into the new library.
+    if makefile_changed {
+        eprintln!("Makefile changed — running clean rebuild...");
+        // Variant-scoped: a full `make clean` would delete the other variant's
+        // build dirs, which may belong to a build that just finished or
+        // (without the lock) one still in flight.
+        run_command("make", &[if use_gpu { "clean_gpu" } else { "clean_cpu" }], &pil2_stark_path);
+    }
+    eprintln!("Running make -j {target}...");
+    run_command("make", &["-j", target], &pil2_stark_path);
+
+    // Write the stamp after make succeeds (make creates the output directory).
+    if let Some(content) = &current_makefile {
+        if let Err(e) = fs::write(&makefile_stamp_path, content) {
+            eprintln!(
+                "Warning: failed to write Makefile stamp {:?}: {e} — next build will recompile",
+                makefile_stamp_path
+            );
         }
     }
 
@@ -132,17 +131,11 @@ fn main() {
     let abs_lib_path = library_folder.canonicalize().unwrap_or_else(|_| library_folder.clone());
 
     if !lib_file.exists() {
-        if cfg!(feature = "gpu") {
+        if use_gpu {
             panic!("`libstarksgpu.a` was not found at {}", lib_file.display());
         } else {
             panic!("`libstarks.a` was not found at {}", lib_file.display());
         }
-    }
-
-    // Ensure Rust triggers a rebuild if the C++ source code changes
-    // Skip this if no_cpp_compilation is enabled
-    if !cfg!(feature = "no_cpp_compilation") {
-        track_file_changes(&pil2_stark_path, gencode_flags.as_deref(), &archs_stamp_path, &stamp_content);
     }
 
     // Add platform-specific library search paths
@@ -172,11 +165,14 @@ fn main() {
     // Link the static library
     println!("cargo:rustc-link-search=native={}", abs_lib_path.display());
     println!("cargo:rustc-link-lib=static={library_name}");
-    if cfg!(feature = "gpu") {
+    if use_gpu {
         // Add the CUDA library path
         let cuda_path = "/usr/local/cuda/lib64"; // Adjust this path if necessary
         println!("cargo:rustc-link-search=native={cuda_path}");
-        println!("cargo:rustc-link-lib=dylib=cudart"); // Link the CUDA runtime library
+        println!("cargo:rustc-link-lib=static=cudart_static"); // Link the CUDA runtime library statically
+                                                               // cudart_static requires additional system libraries
+        println!("cargo:rustc-link-lib=dylib=dl");
+        println!("cargo:rustc-link-lib=dylib=rt");
 
         // Add the blst library for GPU MSM
         let blst_path = pil2_stark_path.join("external/blst");
@@ -196,60 +192,10 @@ fn main() {
         for lib in &["sodium", "pthread", "gmp", "stdc++", "gmpxx", "crypto", "iomp5"] {
             println!("cargo:rustc-link-lib={lib}");
         }
+        // libstarks.a is always compiled with -D__USE_MPI_RMA__ on Linux, so link MPI
+        println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu/openmpi/lib");
+        println!("cargo:rustc-link-lib=mpi");
     }
-}
-
-fn parse_cuda_archs() -> Option<Vec<u32>> {
-    match env::var("CUDA_ARCHS") {
-        Err(_) => None, // Not set → auto-detect via Makefile configure.sh
-        Ok(val) if val.trim().eq_ignore_ascii_case("major") => {
-            // All major architectures since Ampere: Ampere/Ada/Hopper/Blackwell-DC/Blackwell-consumer
-            // sm_100 = B100/B200/GB200 (datacenter Blackwell); sm_120 = RTX 5090/5080/5070/5060 (consumer Blackwell)
-            // Note: sm_100 and sm_120 are NOT cross-compatible (sm_100 has TMEM hardware sm_120 lacks)
-            Some(vec![80, 86, 89, 90, 100, 120])
-        }
-        Ok(val) => {
-            let mut archs = Vec::new();
-            for token in val.split(',') {
-                let s = token.trim();
-                match s.parse::<u32>() {
-                    Ok(n) => archs.push(n),
-                    Err(_) => panic!(
-                        "CUDA_ARCHS contains invalid entry {:?} — expected integers (e.g. '89', '89,90', or 'major')",
-                        s
-                    ),
-                }
-            }
-            if archs.is_empty() {
-                panic!("CUDA_ARCHS is set but empty — expected integers (e.g. '89', '89,90', or 'major')");
-            }
-            // Normalize: sort + dedup so stamp comparison is order/duplicate-independent
-            archs.sort_unstable();
-            archs.dedup();
-            Some(archs)
-        }
-    }
-}
-
-fn cuda_gencode_flags(archs: &[u32]) -> String {
-    let mut flags = Vec::new();
-    for &arch in archs {
-        flags.push(format!("-gencode arch=compute_{arch},code=sm_{arch}"));
-    }
-    // sm_100-119 are separate, incompatible lineages — embed PTX for the highest arch in each lineage present.
-    let max_dc_blackwell = archs.iter().filter(|&&a| (100..120).contains(&a)).max().copied();
-    let max_other = archs.iter().filter(|&&a| !(100..120).contains(&a)).max().copied();
-    match (max_dc_blackwell, max_other) {
-        (Some(dc), Some(other)) => {
-            flags.push(format!("-gencode arch=compute_{dc},code=compute_{dc}"));
-            flags.push(format!("-gencode arch=compute_{other},code=compute_{other}"));
-        }
-        _ => {
-            let max_arch = *archs.iter().max().expect("archs list is empty");
-            flags.push(format!("-gencode arch=compute_{max_arch},code=compute_{max_arch}"));
-        }
-    }
-    flags.join(" ")
 }
 
 /// Runs an external command and checks for errors
@@ -265,151 +211,110 @@ fn run_command(cmd: &str, args: &[&str], dir: &Path) {
     }
 }
 
-/// Tracks changes in the `pil2-stark` directory to trigger recompilation only when needed
-fn track_file_changes(pil2_stark_path: &Path, gencode_flags: Option<&str>, stamp_path: &Path, stamp_content: &str) {
-    let source_files = find_source_files(pil2_stark_path);
-    let lib_file: PathBuf = if cfg!(feature = "gpu") {
-        pil2_stark_path.join("lib-gpu/libstarksgpu.a")
-    } else {
-        pil2_stark_path.join("lib/libstarks.a")
-    };
-
-    for file in &source_files {
-        println!("cargo:rerun-if-changed={}", file.display());
-    }
-
-    // If any C++ source file changed, force a rebuild
-    if source_files_have_changed(&source_files, &lib_file) {
-        eprintln!("Changes detected! Running `make clean` and recompiling...");
-        run_command("make", &["clean"], pil2_stark_path);
-        if cfg!(feature = "gpu") {
-            match gencode_flags {
-                Some(flags) => {
-                    let gencode_arg = format!("CUDA_GENCODE_FLAGS={}", flags);
-                    run_command("make", &["-j", &gencode_arg, "starks_lib_gpu"], pil2_stark_path);
-                }
-                None => run_command("make", &["-j", "starks_lib_gpu"], pil2_stark_path),
-            }
-            if let Err(e) = fs::write(stamp_path, stamp_content) {
-                eprintln!("Warning: failed to write CUDA arch stamp {:?}: {e} — next build will recompile", stamp_path);
-            }
-        } else {
-            run_command("make", &["-j", "starks_lib"], pil2_stark_path);
-        }
-    } else {
-        println!("No C++ source changes detected, skipping rebuild.");
-    }
-}
-
-/// Checks if any `.cpp`, `.h`, or `.hpp` file has changed since the last build
-fn source_files_have_changed(source_files: &[PathBuf], lib_file: &Path) -> bool {
-    let mut modified_files: Vec<PathBuf> = Vec::new();
-
-    // Get the modification time of `libstarks.a`
-    let lib_modified_time = match fs::metadata(lib_file) {
-        Ok(metadata) => {
-            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-            eprintln!("`{}` last modified: {:?}", lib_file.display(), modified);
-            modified
-        }
-        Err(_) => {
-            eprintln!("Library `{}` does not exist, triggering rebuild.", lib_file.display());
-            return true; // If `libstarks.a` is missing, we must rebuild.
-        }
-    };
-
-    // Check if any `.cpp`, `.h`, or `.hpp` file has been modified after `libstarks.a`
-    for file in source_files {
-        if let Ok(metadata) = fs::metadata(file) {
-            if let Ok(modified_time) = metadata.modified() {
-                if modified_time > lib_modified_time {
-                    modified_files.push(file.clone());
-                }
-            }
+/// Recursively finds all files in `pil2-stark`, skipping build output directories.
+fn find_tracked_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+        if matches!(name, "build" | "build-gpu" | "build_gpu" | "lib" | "lib-gpu" | ".vscode" | ".git") {
+            return files;
         }
     }
-
-    // Print the list of modified files (if any)
-    if !modified_files.is_empty() {
-        eprintln!("Modified files detected:");
-        for file in &modified_files {
-            eprintln!(" - {}", file.display());
-        }
-        return true;
-    }
-
-    false // No changes detected
-}
-
-/// Finds all `.cpp`, `.h`, `.hpp`, `.c`, `.cuh` and `.asm` files in `pil2-stark` (recursive search)
-fn find_source_files(dir: &Path) -> Vec<PathBuf> {
-    let mut source_files = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                source_files.extend(find_source_files(&path));
-            } else if let Some(ext) = path.extension() {
-                if cfg!(feature = "gpu") {
-                    if (ext == "c"
-                        || ext == "cpp"
-                        || ext == "h"
-                        || ext == "hpp"
-                        || ext == "cu"
-                        || ext == "cuh"
-                        || ext == "asm")
-                        && path.file_name() != Some(std::ffi::OsStr::new("starks_lib_gpu.h"))
-                    {
-                        source_files.push(path);
-                    }
-                } else if (ext == "c" || ext == "cpp" || ext == "h" || ext == "hpp" || ext == "asm")
-                    && path.file_name() != Some(std::ffi::OsStr::new("starks_lib.h"))
-                {
-                    source_files.push(path);
+                files.extend(find_tracked_files(&path));
+            } else {
+                // Skip build-generated files: .mk (make includes), .d (dependency
+                // files), and the build lock
+                let ext = path.extension().and_then(|e| e.to_str());
+                if matches!(ext, Some("mk" | "d")) {
+                    continue;
                 }
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name == ".build_lock" || name.ends_with("_stamp") {
+                    continue;
+                }
+                files.push(path);
             }
         }
     }
-    source_files
+    files
 }
 
-/// Ensures GPU-required submodules (blst and sppark) are initialized
+/// Ensures GPU-required submodules (blst and sppark) are initialized. Local
+/// checkouts only — a published crate ships the submodule files in-tree, so the
+/// caller skips this (there is no git repo to update there).
 fn ensure_gpu_submodules_initialized(pil2_stark_path: &Path) {
     let blst_path = pil2_stark_path.join("external/blst");
     let sppark_path = pil2_stark_path.join("external/sppark");
 
     if !is_submodule_initialized(&blst_path) || !is_submodule_initialized(&sppark_path) {
         eprintln!("GPU submodules not fully initialized, running git submodule update...");
-        // Only update the specific submodules we need, not all repo submodules.
-        // Find the repo root so we can specify exact submodule paths.
-        let repo_root = Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(pil2_stark_path)
-            .output()
-            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-            .unwrap_or_else(|_| pil2_stark_path.parent().unwrap_or(pil2_stark_path).to_path_buf());
-        // Compute relative paths from repo root to the specific external dirs
-        if let (Ok(blst_rel), Ok(sppark_rel)) = (
-            blst_path.strip_prefix(&repo_root),
-            sppark_path.strip_prefix(&repo_root),
-        ) {
-            let blst_str = blst_rel.to_string_lossy();
-            let sppark_str = sppark_rel.to_string_lossy();
-            run_command(
-                "git",
-                &["submodule", "update", "--init", "--recursive", "--", &blst_str, &sppark_str],
-                &repo_root,
-            );
-        } else {
-            // Fallback: init only blst and sppark relative to pil2-stark, avoid touching
-            // unrelated submodules (e.g. private ones the user may not have access to).
-            let blst_rel = "external/blst";
-            let sppark_rel = "external/sppark";
-            run_command(
-                "git",
-                &["submodule", "update", "--init", "--recursive", "--", blst_rel, sppark_rel],
-                pil2_stark_path,
-            );
+        let workspace_root = pil2_stark_path.parent().unwrap_or(pil2_stark_path);
+        run_command("git", &["submodule", "update", "--init", "--recursive"], workspace_root);
+    }
+}
+
+/// Whether the source tree is writable — true for a local path dependency (this
+/// workspace), false for a read-only registry checkout of the vendored sources.
+///
+/// Probes by opening an existing file (the Makefile) for writing rather than
+/// creating a temp file, so it leaves no trace in the source tree. Opening for
+/// write without writing changes neither the file's contents nor its mtime.
+fn is_writable(dir: &Path) -> bool {
+    fs::OpenOptions::new().write(true).open(dir.join("Makefile")).is_ok()
+}
+
+/// Grant the owner write permission without making the file world-writable
+/// (`set_readonly(false)` would set every write bit on Unix).
+#[cfg(unix)]
+fn make_writable(mut perms: fs::Permissions) -> fs::Permissions {
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(perms.mode() | 0o200);
+    perms
+}
+
+#[cfg(not(unix))]
+fn make_writable(mut perms: fs::Permissions) -> fs::Permissions {
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    perms
+}
+
+/// Recursively mirror `src` into `dst`, copying a file only when the source is
+/// newer (preserving mtime) so the Makefile's incremental rebuilds keep working
+/// across cargo invocations. Used only for read-only (published) source trees.
+fn sync_tree(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("create OUT_DIR source mirror");
+    for entry in fs::read_dir(src).expect("read vendored source dir").flatten() {
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            sync_tree(&from, &to);
+        } else if from.is_file() {
+            let src_mtime = fs::metadata(&from).and_then(|m| m.modified()).ok();
+            let dst_mtime = fs::metadata(&to).and_then(|m| m.modified()).ok();
+            let stale = match (src_mtime, dst_mtime) {
+                (Some(s), Some(d)) => s > d,
+                _ => true,
+            };
+            if stale {
+                fs::copy(&from, &to).expect("copy vendored source file");
+                // fs::copy preserves source permissions; a published source is a
+                // read-only registry checkout, but the build must rewrite this
+                // mirror (configure.sh codegen, make objects, stamps), so add the
+                // owner write bit to the copy.
+                if let Ok(meta) = fs::metadata(&to) {
+                    let perms = meta.permissions();
+                    if perms.readonly() {
+                        let _ = fs::set_permissions(&to, make_writable(perms));
+                    }
+                }
+                if let (Some(s), Ok(f)) = (src_mtime, fs::File::options().write(true).open(&to)) {
+                    let _ = f.set_modified(s);
+                }
+            }
         }
     }
 }
@@ -435,7 +340,7 @@ fn ensure_blst_compiled(pil2_stark_path: &Path) {
     println!("cargo:rerun-if-changed={}", blst_path.join("src").display());
     println!("cargo:rerun-if-changed={}", blst_path.join("build").display());
     if !build_script.exists() {
-        panic!("blst build.sh not found at {}. Submodule init may have failed.", build_script.display());
+        panic!("blst build.sh not found at {} — vendored blst sources are incomplete.", build_script.display());
     }
 
     // Run the blst build script
@@ -457,11 +362,10 @@ fn ensure_blst_compiled(pil2_stark_path: &Path) {
     eprintln!("blst library successfully compiled at {}", blst_lib.display());
 }
 
-/// Checks if a git submodule is initialized (has .git file or directory with content)
+/// Checks if a git submodule is initialized (has a .git entry or non-empty dir).
 fn is_submodule_initialized(path: &Path) -> bool {
     // Initialized submodules have a .git file (not directory) pointing to parent's .git/modules/
-    let git_path = path.join(".git");
-    if git_path.exists() {
+    if path.join(".git").exists() {
         return true;
     }
     // Fallback: check if directory exists and is not empty

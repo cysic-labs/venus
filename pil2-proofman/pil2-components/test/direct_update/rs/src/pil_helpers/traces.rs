@@ -10,15 +10,13 @@ use proofman_common::GenericTrace;
 use proofman_common::PackedInfoConst;
 pub use proofman_macros::trace_row;
 pub use proofman_macros::values;
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use std::fmt;
 
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "d4f9476857a189aeae6d696a66ef3dc9e2bd10e22844ed00038a96b450ad4684";
-
-pub const MERKLE_TREE_ARITY: u64 = 4;
+pub const PILOUT_HASH: &str = "238e0d7292b034d1084df581f2ee911540cb2209a980471700ec89b95557d2c6";
 
 //AIRGROUP CONSTANTS
 
@@ -100,8 +98,8 @@ pub type DirectUpdateProdLocalFixed<F> = GenericTrace<DirectUpdateProdLocalFixed
 trace_row!(DirectUpdateProdLocalTraceRow<F> {
  a:[F; 2], b:[F; 2], c:[F; 2], perform_operation:F,
 });
-pub type DirectUpdateProdLocalTrace<F> = GenericTrace<DirectUpdateProdLocalTraceRow<F>, 16, 0, 0>;
 
+pub type DirectUpdateProdLocalTrace<F> = GenericTrace<DirectUpdateProdLocalTraceRow<F>, 16, 0, 0>;
 
 trace_row!(DirectUpdateProdGlobalFixedRow<F> {
  __L1__: F,
@@ -111,8 +109,8 @@ pub type DirectUpdateProdGlobalFixed<F> = GenericTrace<DirectUpdateProdGlobalFix
 trace_row!(DirectUpdateProdGlobalTraceRow<F> {
  c:[F; 2], d:[F; 2], perform_operation:F,
 });
-pub type DirectUpdateProdGlobalTrace<F> = GenericTrace<DirectUpdateProdGlobalTraceRow<F>, 16, 0, 1>;
 
+pub type DirectUpdateProdGlobalTrace<F> = GenericTrace<DirectUpdateProdGlobalTraceRow<F>, 16, 0, 1>;
 
 trace_row!(DirectUpdateSumLocalFixedRow<F> {
  __L1__: F,
@@ -122,8 +120,8 @@ pub type DirectUpdateSumLocalFixed<F> = GenericTrace<DirectUpdateSumLocalFixedRo
 trace_row!(DirectUpdateSumLocalTraceRow<F> {
  a:[F; 2], b:[F; 2], c:[F; 2], perform_operation:F,
 });
-pub type DirectUpdateSumLocalTrace<F> = GenericTrace<DirectUpdateSumLocalTraceRow<F>, 32, 1, 0>;
 
+pub type DirectUpdateSumLocalTrace<F> = GenericTrace<DirectUpdateSumLocalTraceRow<F>, 32, 1, 0>;
 
 trace_row!(DirectUpdateSumGlobalFixedRow<F> {
  __L1__: F,
@@ -133,8 +131,8 @@ pub type DirectUpdateSumGlobalFixed<F> = GenericTrace<DirectUpdateSumGlobalFixed
 trace_row!(DirectUpdateSumGlobalTraceRow<F> {
  c:[F; 2], d:[F; 2], perform_operation:F,
 });
-pub type DirectUpdateSumGlobalTrace<F> = GenericTrace<DirectUpdateSumGlobalTraceRow<F>, 32, 1, 1>;
 
+pub type DirectUpdateSumGlobalTrace<F> = GenericTrace<DirectUpdateSumGlobalTraceRow<F>, 32, 1, 1>;
 
 values!(DirectUpdateProdLocalAirValues<F> {
  c_airval: [F; 2], perform_direct_update: [F; 2],
@@ -161,4 +159,13 @@ values!(DirectUpdateSumGlobalAirGroupValues<F> {
 });
 
 pub const PACKED_INFO: &[(usize, usize, PackedInfoConst)] = &[
+];
+
+/// Display name for every `(airgroup_id, air_id)` pair, derived directly from the
+/// PILOUT. Lets code resolve an AIR name without a loaded setup/`GlobalInfo`.
+pub const AIR_NAMES: &[(usize, usize, &str)] = &[
+    (0, 0, "DirectUpdateProdLocal"),
+    (0, 1, "DirectUpdateProdGlobal"),
+    (1, 0, "DirectUpdateSumLocal"),
+    (1, 1, "DirectUpdateSumGlobal"),
 ];

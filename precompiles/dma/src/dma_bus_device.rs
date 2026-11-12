@@ -5,22 +5,22 @@
 use std::fmt;
 use std::ops::Add;
 
-use precompiles_common::MemProcessor;
-use precompiles_helpers::DmaInfo;
 use zisk_common::{BusDevice, BusDeviceMode, BusId, Metrics, OPERATION_BUS_ID, OP_TYPE, STEP};
 use zisk_common::{OP, OPERATION_PRECOMPILED_BUS_DATA_SIZE};
 use zisk_core::zisk_ops::ZiskOp;
 use zisk_core::ZiskOperationType;
+use zisk_precomp_common::MemProcessor;
+use zisk_precomp_helpers::DmaInfo;
 
 use crate::{generate_dma_mem_inputs, skip_dma_mem_inputs};
 
 // The `DmaOpMultiCounter` struct represents a counter that monitors and measures
 // dma specific operation on the data bus.
 //
-// Dma              Full   OnlyMemCpy
+// Dma              Full   OnlyMemCpy   OnlyInputCpy
 // Dma64Aligned     Full4  OnlyMemCpy8  OnlyInputCpy4 OnlyMemSet8 Mem4
 // DmaUnaligned     Full
-// DmaPrePost       Full   OnlyMemCpy
+// DmaPrePost       Full   OnlyMemCpy   OnlyInputCpy
 //
 // MEMCPY + XMEMCPY
 //    dma_memcpy | dma_pre_post_memcpy | dma_unaligned  (unaligned_dst_src)
@@ -32,7 +32,7 @@ use crate::{generate_dma_mem_inputs, skip_dma_mem_inputs};
 //    dma | dma_pre_post | dma_64_aligned_mem  (aligned_dst_src)
 //
 // INPUTCPY
-//    dma | dma_pre_post | dma_64_aligned_inputcpy
+//    dma_inputcpy | dma_pre_post_inputcpy | dma_64_aligned_inputcpy
 //
 // XMEMSET
 //    dma | dma_pre_post | dma_64_aligned_memset
@@ -161,6 +161,8 @@ impl DmaCounterInputGen {
                 let rows = loop_count.div_ceil(Self::OPS_X_ROW[operation]);
                 self.counters[DMA_64_ALIGNED_OFFSET + operation] += rows;
                 self.counters[DMA_64_ALIGNED_INPUTS_OFFSET + operation] += 1;
+                // Some operations can be grouped in different rows. For example, 8 memcpy words
+                // could be grouped into two rows of 4 operations or into one row of 8 operations.
                 if Self::IS_DOUBLE[operation] == 1 {
                     let rows = loop_count.div_ceil(Self::OPS_X_ROW[operation + 4]);
                     self.counters[DMA_64_ALIGNED_OFFSET + operation + 4] += rows;

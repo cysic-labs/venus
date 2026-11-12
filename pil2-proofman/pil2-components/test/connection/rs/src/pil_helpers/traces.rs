@@ -10,15 +10,13 @@ use proofman_common::GenericTrace;
 use proofman_common::PackedInfoConst;
 pub use proofman_macros::trace_row;
 pub use proofman_macros::values;
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use std::fmt;
 
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "841a7d066d80810bc9e3de76724e4acbf331966b59fc35703765326518f0173d";
-
-pub const MERKLE_TREE_ARITY: u64 = 4;
+pub const PILOUT_HASH: &str = "fb26a4a8b1c6dc0093eb37e31dfde704933401d19b52b91a281bbb161dbdaa09";
 
 //AIRGROUP CONSTANTS
 
@@ -41,8 +39,8 @@ pub type Connection1Fixed<F> = GenericTrace<Connection1FixedRow<F>, 8, 0, 0>;
 trace_row!(Connection1TraceRow<F> {
  a:F, b:F, c:F,
 });
-pub type Connection1Trace<F> = GenericTrace<Connection1TraceRow<F>, 8, 0, 0>;
 
+pub type Connection1Trace<F> = GenericTrace<Connection1TraceRow<F>, 8, 0, 0>;
 
 trace_row!(Connection2FixedRow<F> {
  S1: F, S2: F, S3: F, ID: F, __L1__: F,
@@ -52,8 +50,8 @@ pub type Connection2Fixed<F> = GenericTrace<Connection2FixedRow<F>, 16, 0, 1>;
 trace_row!(Connection2TraceRow<F> {
  a:F, b:F, c:F,
 });
-pub type Connection2Trace<F> = GenericTrace<Connection2TraceRow<F>, 16, 0, 1>;
 
+pub type Connection2Trace<F> = GenericTrace<Connection2TraceRow<F>, 16, 0, 1>;
 
 trace_row!(ConnectionNewFixedRow<F> {
  ID: F, CONN_2: [F; 3], CONN_3: [F; 3], CONN_4: [F; 3], CONN_5: [F; 3], CONN_6: [F; 4], CONN_7: [F; 4], __L1__: F,
@@ -63,8 +61,8 @@ pub type ConnectionNewFixed<F> = GenericTrace<ConnectionNewFixedRow<F>, 16, 0, 2
 trace_row!(ConnectionNewTraceRow<F> {
  a:[F; 6], b:[F; 6], c:[F; 6], d:[F; 6],
 });
-pub type ConnectionNewTrace<F> = GenericTrace<ConnectionNewTraceRow<F>, 16, 0, 2>;
 
+pub type ConnectionNewTrace<F> = GenericTrace<ConnectionNewTraceRow<F>, 16, 0, 2>;
 
 values!(Connection1AirGroupValues<F> {
  gprod_result: FieldExtension<F>,
@@ -79,4 +77,12 @@ values!(ConnectionNewAirGroupValues<F> {
 });
 
 pub const PACKED_INFO: &[(usize, usize, PackedInfoConst)] = &[
+];
+
+/// Display name for every `(airgroup_id, air_id)` pair, derived directly from the
+/// PILOUT. Lets code resolve an AIR name without a loaded setup/`GlobalInfo`.
+pub const AIR_NAMES: &[(usize, usize, &str)] = &[
+    (0, 0, "Connection1"),
+    (0, 1, "Connection2"),
+    (0, 2, "ConnectionNew"),
 ];

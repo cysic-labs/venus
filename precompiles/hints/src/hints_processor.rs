@@ -12,18 +12,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 use tracing::{debug, info};
-use zisk_common::io::{StreamProcessor, StreamSink};
+use zisk_cluster_common::{JobPhase, StreamMessage};
+use zisk_common::io::{StreamError, StreamProcessor, StreamSink};
 use zisk_common::{
     BuiltInHint, CtrlHint, HintCode, PartialPrecompileHint, PrecompileHint,
     PrecompileHintParseResult,
 };
-use zisk_distributed_common::{JobPhase, StreamMessage};
 
 use crate::hint_handlers::HintHandlers;
-
-/// Most hints dispatched and not yet drained to the sink. `process_hints` blocks at this many, so a
-/// hint stream faster than the sink cannot grow the reorder buffer and the pool queue unboundedly.
-const MAX_PENDING_HINTS: usize = 1024;
 
 /// Ordered result buffer with drain state.
 ///
@@ -408,15 +404,6 @@ impl<S: StreamSink> HintsProcessor<S> {
             // Atomically reserve slot - use Relaxed for seq since mutex provides ordering
             let seq_id = {
                 let mut queue = self.state.queue.lock().unwrap();
-
-                // Backpressure: wait until the drainer frees a slot
-                while queue.buffer.len() >= MAX_PENDING_HINTS {
-                    if self.state.error_flag.load(Ordering::Acquire) {
-                        return Err(anyhow::anyhow!("Processing stopped due to previous error"));
-                    }
-                    queue = self.state.drain_signal.wait(queue).unwrap();
-                }
-
                 let seq = self.state.next_seq.fetch_add(1, Ordering::Relaxed);
 
                 // Handle pass-through hints immediately
@@ -581,52 +568,53 @@ impl<S: StreamSink> HintsProcessor<S> {
                 break;
             }
 
-            // Drain all consecutive ready results from the front
+            // Drain all consecutive ready results from the front. Once the
+            // error flag is set, items are popped without submitting — the
+            // wire protocol with the C children is sequenced (each hint is
+            // delivered at a specific buffer offset), so submitting hint
+            // #N+1 after #N failed would feed the C side data it doesn't
+            // expect and crash it. The drainer stays alive across the
+            // failure so the next job's `reset_state` finds it ready.
             let mut drained_any = false;
             while let Some(Some(res)) = queue.buffer.front() {
                 drained_any = true;
+                let error_set = state.error_flag.load(Ordering::Acquire);
                 match res {
-                    Ok(data) => {
-                        // Clone data before dropping lock
+                    Ok(data) if !error_set => {
                         let data_to_submit = data.clone();
                         queue.buffer.pop_front();
                         queue.next_drain_seq += 1;
-
-                        // Drop lock before submitting to avoid blocking workers
                         drop(queue);
 
-                        // Submit to sink
                         if let Err(e) = hints_sink.submit(&data_to_submit) {
-                            eprintln!("Error submitting to sink: {}", e);
-                            // Flag the error under the lock, so that no waiter misses the wakeup
-                            let _queue = state.queue.lock().unwrap();
+                            tracing::error!("Error submitting to sink: {e}");
                             state.error_flag.store(true, Ordering::Release);
                             state.drain_signal.notify_all();
-                            return;
-                        }
-
-                        if let Some(broadcast_fn) = &mpi_broadcast_fn {
+                        } else if let Some(broadcast_fn) = &mpi_broadcast_fn {
                             let mut serialized = borsh::to_vec(&(
                                 JobPhase::ContributionsHintsStream,
                                 StreamMessage { data: data_to_submit.clone() },
                             ))
                             .unwrap();
-
                             broadcast_fn(&mut serialized)
                                 .expect("MPI broadcast failed in drainer thread");
                         }
 
-                        // Re-acquire lock for next iteration
                         queue = state.queue.lock().unwrap();
                     }
-                    Err(e) => {
-                        // Error found - signal to stop
-                        state.error_flag.store(true, Ordering::Release);
-                        eprintln!("[seq={}] Error: {}", queue.next_drain_seq, e);
+                    Ok(_) => {
+                        // Error flag already set — drop without submitting.
                         queue.buffer.pop_front();
                         queue.next_drain_seq += 1;
-                        state.drain_signal.notify_all();
-                        return;
+                    }
+                    Err(e) => {
+                        if !error_set {
+                            tracing::error!("[seq={}] Error: {}", queue.next_drain_seq, e);
+                            state.error_flag.store(true, Ordering::Release);
+                            state.drain_signal.notify_all();
+                        }
+                        queue.buffer.pop_front();
+                        queue.next_drain_seq += 1;
                     }
                 }
             }
@@ -709,8 +697,8 @@ impl<S: StreamSink> Drop for HintsProcessor<S> {
 }
 
 impl<S: StreamSink> StreamProcessor for HintsProcessor<S> {
-    fn process_hints(&self, data: &[u64], first_batch: bool) -> Result<bool> {
-        self.process_hints(data, first_batch)
+    fn process_hints(&self, data: &[u64], first_batch: bool) -> Result<bool, StreamError> {
+        self.process_hints(data, first_batch).map_err(StreamError::other)
     }
 
     fn reset(&self) {
@@ -727,7 +715,7 @@ mod tests {
     struct NullHints;
 
     impl StreamSink for NullHints {
-        fn submit(&self, _processed: &[u64]) -> Result<()> {
+        fn submit(&self, _processed: &[u64]) -> Result<(), StreamError> {
             Ok(())
         }
     }
@@ -985,7 +973,7 @@ mod tests {
         }
 
         impl StreamSink for RecordingSink {
-            fn submit(&self, processed: &[u64]) -> Result<()> {
+            fn submit(&self, processed: &[u64]) -> Result<(), StreamError> {
                 self.received.lock().unwrap().push(processed.to_vec());
                 Ok(())
             }
@@ -1027,9 +1015,9 @@ mod tests {
         }
 
         impl StreamSink for FailingSink {
-            fn submit(&self, _processed: &[u64]) -> Result<()> {
+            fn submit(&self, _processed: &[u64]) -> Result<(), StreamError> {
                 if self.should_fail.load(Ordering::Acquire) {
-                    Err(anyhow::anyhow!("Sink error"))
+                    Err(StreamError::other("Sink error"))
                 } else {
                     Ok(())
                 }
@@ -1058,74 +1046,6 @@ mod tests {
         // Wait should detect the error from drainer thread
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(p.state.error_flag.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn test_stalled_sink_blocks_producer_at_pending_limit() {
-        use std::time::{Duration, Instant};
-
-        // Sink that blocks every submission until it is opened
-        struct GatedSink {
-            open: Mutex<bool>,
-            opened: Condvar,
-            received: AtomicUsize,
-        }
-
-        impl StreamSink for GatedSink {
-            fn submit(&self, _processed: &[u64]) -> Result<()> {
-                let mut open = self.open.lock().unwrap();
-                while !*open {
-                    open = self.opened.wait(open).unwrap();
-                }
-                self.received.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-        }
-
-        let sink = Arc::new(GatedSink {
-            open: Mutex::new(false),
-            opened: Condvar::new(),
-            received: AtomicUsize::new(0),
-        });
-        let p = Arc::new(
-            HintsProcessor::builder(Arc::clone(&sink), None::<Arc<NullHints>>)
-                .num_threads(2)
-                .build()
-                .unwrap(),
-        );
-
-        let num_hints = 2 * MAX_PENDING_HINTS;
-        let mut data = Vec::with_capacity(2 * num_hints);
-        for i in 0..num_hints {
-            data.push(make_header(TEST_PASSTHROUGH_HINT, 8));
-            data.push(i as u64);
-        }
-        let producer = {
-            let p = Arc::clone(&p);
-            std::thread::spawn(move || p.process_hints(&data, false))
-        };
-
-        // With the sink stalled, the producer fills the buffer up to the limit and then waits
-        let start = Instant::now();
-        while p.state.queue.lock().unwrap().buffer.len() < MAX_PENDING_HINTS
-            && start.elapsed() < Duration::from_secs(10)
-        {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-        let pending = p.state.queue.lock().unwrap().buffer.len();
-        let producer_blocked = !producer.is_finished();
-
-        // Open the sink before asserting, so that a failure cannot leave the drainer blocked
-        *sink.open.lock().unwrap() = true;
-        sink.opened.notify_all();
-        assert_eq!(pending, MAX_PENDING_HINTS);
-        assert!(producer_blocked);
-
-        // Once the sink accepts data, every hint is drained
-        producer.join().unwrap().unwrap();
-        p.wait_for_completion().unwrap();
-        assert_eq!(sink.received.load(Ordering::Relaxed), num_hints);
     }
 
     // Builder tests
@@ -1310,7 +1230,7 @@ mod tests {
         }
 
         impl StreamSink for RecordingSink {
-            fn submit(&self, processed: &[u64]) -> Result<()> {
+            fn submit(&self, processed: &[u64]) -> Result<(), StreamError> {
                 self.received.lock().unwrap().push(processed.to_vec());
                 Ok(())
             }
@@ -1678,7 +1598,7 @@ mod tests {
         }
 
         impl StreamSink for RecordingSink {
-            fn submit(&self, processed: &[u64]) -> Result<()> {
+            fn submit(&self, processed: &[u64]) -> Result<(), StreamError> {
                 self.received.lock().unwrap().push(processed.to_vec());
                 Ok(())
             }

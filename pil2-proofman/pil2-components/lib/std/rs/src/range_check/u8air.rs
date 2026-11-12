@@ -1,36 +1,39 @@
 use std::sync::{
     atomic::{AtomicBool, AtomicU64},
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
 };
 
-use fields::PrimeField64;
-use proofman_util::create_buffer_fast;
+use proofman_fields::PrimeField64;
 use rayon::{
     iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator},
     slice::ParallelSliceMut,
     prelude::*,
 };
-use witness::WitnessComponent;
+use proofman_witness::WitnessComponent;
 use proofman_common::{AirInstance, BufferPool, ProofCtx, ProofmanResult, SetupCtx, TraceInfo};
 use std::sync::atomic::Ordering;
 use crate::AirComponent;
 
 const P2_8: usize = 256;
 
-pub struct U8Air {
+pub struct U8Air<F: PrimeField64> {
     airgroup_id: usize,
     air_id: usize,
     shift: usize,
     mask: usize,
     num_rows: usize,
     num_cols: usize,
-    multiplicities: Vec<Vec<AtomicU64>>,
+    // Flat col-major: idx = col * num_rows + row. Single allocation.
+    multiplicities: Vec<AtomicU64>,
     table_instance_id: AtomicU64,
     calculated: AtomicBool,
     shared_tables: bool,
+    // Persistent trace buffer slot. Pre-allocated in `new`; taken in `calculate_witness`
+    // and refilled by `ProofCtx::free_instance_traces` via the reclaim registry.
+    trace_buffer: Arc<Mutex<Option<Vec<F>>>>,
 }
 
-impl<F: PrimeField64> AirComponent<F> for U8Air {
+impl<F: PrimeField64> AirComponent<F> for U8Air<F> {
     fn new(
         pctx: &ProofCtx<F>,
         _sctx: &SetupCtx<F>,
@@ -42,10 +45,9 @@ impl<F: PrimeField64> AirComponent<F> for U8Air {
 
         // Get and store the ranges
         let num_cols = P2_8.div_ceil(num_rows);
-        let multiplicities = (0..num_cols)
-            .into_par_iter()
-            .map(|_| (0..num_rows).into_par_iter().map(|_| AtomicU64::new(0)).collect())
-            .collect();
+        let multiplicities: Vec<AtomicU64> =
+            (0..(num_cols * num_rows)).into_par_iter().map(|_| AtomicU64::new(0)).collect();
+        let trace_buffer = Arc::new(Mutex::new(Some(vec![F::ZERO; num_cols * num_rows])));
 
         Ok(Arc::new(Self {
             airgroup_id,
@@ -58,44 +60,30 @@ impl<F: PrimeField64> AirComponent<F> for U8Air {
             table_instance_id: AtomicU64::new(0),
             calculated: AtomicBool::new(false),
             shared_tables,
+            trace_buffer,
         }))
     }
 }
 
-impl U8Air {
+impl<F: PrimeField64> U8Air<F> {
     pub const fn get_global_row(value: u8) -> u64 {
         value as u64
     }
 
-    pub fn get_global_rows(values: &[u8]) -> Vec<u64> {
-        values.iter().map(|&v| Self::get_global_row(v)).collect()
-    }
-
-    #[inline(always)]
-    pub fn update_input(&self, value: u8, multiplicity: u64) {
+    /// Core update function: Updates multiplicities for value/multiplicity pairs
+    #[inline]
+    fn update(&self, iter: impl Iterator<Item = (u8, u64)>) {
         if self.calculated.load(Ordering::Relaxed) {
             return;
         }
 
-        // Identify to which sub-range the value belongs
-        let range_idx = (value as usize) >> self.shift;
-
-        // Get the row index
-        let row_idx = (value as usize) & self.mask;
-
-        // Update the multiplicity
-        self.multiplicities[range_idx][row_idx].fetch_add(multiplicity, Ordering::Relaxed);
-    }
-
-    pub fn update_inputs(&self, values: Vec<u32>) {
-        if self.calculated.load(Ordering::Relaxed) {
-            return;
-        }
-
-        for (value, multiplicity) in values.iter().enumerate() {
-            if *multiplicity == 0 {
+        for (value, multiplicity) in iter {
+            if multiplicity == 0 {
                 continue;
             }
+
+            // Convert value to usize for bitwise operations
+            let value = value as usize;
 
             // Identify to which sub-range the value belongs
             let range_idx = value >> self.shift;
@@ -103,9 +91,21 @@ impl U8Air {
             // Get the row index
             let row_idx = value & self.mask;
 
-            // Update the multiplicity
-            self.multiplicities[range_idx][row_idx].fetch_add(*multiplicity as u64, Ordering::Relaxed);
+            // Update the multiplicity (col-major flat layout)
+            self.multiplicities[range_idx * self.num_rows + row_idx].fetch_add(multiplicity, Ordering::Relaxed);
         }
+    }
+
+    /// Update a single value with a multiplicity
+    pub fn update_value(&self, value: u8, multiplicity: u64) {
+        self.update(std::iter::once((value, multiplicity)));
+    }
+
+    /// Update directly from an iterator of (value, multiplicity) pairs. Lets callers
+    /// avoid materializing intermediate buffers when values come from a synthetic range
+    /// or another iterator chain.
+    pub fn update_pairs(&self, pairs: impl Iterator<Item = (u8, u64)>) {
+        self.update(pairs);
     }
 
     pub fn airgroup_id(&self) -> usize {
@@ -117,7 +117,32 @@ impl U8Air {
     }
 }
 
-impl<F: PrimeField64> WitnessComponent<F> for U8Air {
+#[cfg(test)]
+impl<F: PrimeField64> U8Air<F> {
+    /// `num_rows` is the only thing `new` reads from the ProofCtx, so tests can skip it.
+    pub(crate) fn for_test(num_rows: usize) -> Arc<Self> {
+        let num_cols = P2_8.div_ceil(num_rows);
+        Arc::new(Self {
+            airgroup_id: 0,
+            air_id: 0,
+            shift: num_rows.trailing_zeros() as usize,
+            mask: num_rows - 1,
+            num_rows,
+            num_cols,
+            multiplicities: (0..num_cols * num_rows).map(|_| AtomicU64::new(0)).collect(),
+            table_instance_id: AtomicU64::new(0),
+            calculated: AtomicBool::new(false),
+            shared_tables: false,
+            trace_buffer: Arc::new(Mutex::new(Some(vec![F::ZERO; num_cols * num_rows]))),
+        })
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<u64> {
+        self.multiplicities.iter().map(|m| m.load(Ordering::Relaxed)).collect()
+    }
+}
+
+impl<F: PrimeField64 + Send + Sync + 'static> WitnessComponent<F> for U8Air<F> {
     fn execute(
         &self,
         pctx: Arc<ProofCtx<F>>,
@@ -135,7 +160,7 @@ impl<F: PrimeField64> WitnessComponent<F> for U8Air {
         }
 
         self.calculated.store(false, Ordering::Relaxed);
-        self.multiplicities.par_iter().flat_map(|vec| vec.par_iter()).for_each(|v| {
+        self.multiplicities.par_iter().for_each(|v| {
             v.store(0, Ordering::Relaxed);
         });
         self.table_instance_id.store(table_instance_id as u64, Ordering::SeqCst);
@@ -174,31 +199,54 @@ impl<F: PrimeField64> WitnessComponent<F> for U8Air {
 
             self.calculated.store(true, Ordering::Relaxed);
 
-            if self.shared_tables {
+            // An assigned table is computed only on its single owner node; its
+            // multiplicities are produced there, so there is no cross-rank reduction.
+            let assigned = pctx.dctx_is_assigned_table(instance_id)?;
+
+            if self.shared_tables && !assigned {
                 let owner_idx = pctx.dctx_get_process_owner_instance(instance_id)?;
-                pctx.mpi_ctx.distribute_multiplicities(&self.multiplicities, owner_idx);
+                pctx.mpi_ctx.distribute_multiplicities(&self.multiplicities, self.num_cols, self.num_rows, owner_idx);
             }
 
-            if !self.shared_tables || pctx.dctx_is_my_process_instance(instance_id)? {
+            if (!self.shared_tables && !assigned) || pctx.dctx_is_my_process_instance(instance_id)? {
                 let buffer_size = self.num_cols * self.num_rows;
-                // SAFETY: every element is written by the parallel loop below before it is read.
-                let mut buffer = unsafe { create_buffer_fast(buffer_size) };
+                // The slot is pre-populated by `new` and refilled by the reclaim hook
+                // on every prior iteration's clear_traces / Drop. If it's empty here,
+                // the reclaim path is broken.
+                let mut buffer = self
+                    .trace_buffer
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("U8Air trace_buffer must be populated by reclaim before calculate_witness");
+                debug_assert_eq!(buffer.len(), buffer_size);
+                let any_nonzero = AtomicBool::new(false);
+                let num_rows = self.num_rows;
                 buffer.par_chunks_mut(self.num_cols).enumerate().for_each(|(row, chunk)| {
-                    for (col, vec) in self.multiplicities.iter().enumerate() {
-                        chunk[col] = F::from_u64(vec[row].load(Ordering::Relaxed));
+                    for (col, slot) in chunk.iter_mut().enumerate() {
+                        let v = self.multiplicities[col * num_rows + row].load(Ordering::Relaxed);
+                        if v != 0 {
+                            any_nonzero.store(true, Ordering::Relaxed);
+                        }
+                        *slot = F::from_u64(v);
                     }
                 });
+                if !any_nonzero.load(Ordering::Relaxed) {
+                    tracing::info!(
+                        "Skipping uninitialized U8 range check table (airgroup_id: {}, air_id: {})",
+                        self.airgroup_id,
+                        self.air_id
+                    );
+                    pctx.dctx_skip_process_instance(instance_id);
+                    *self.trace_buffer.lock().unwrap() = Some(buffer);
+                    return Ok(());
+                }
                 let setup = sctx.get_setup(self.airgroup_id, self.air_id)?;
                 let n_cols = setup.stark_info.map_sections_n["cm1"] as usize;
-                let air_instance = AirInstance::new(TraceInfo::new(
-                    self.airgroup_id,
-                    self.air_id,
-                    n_cols,
-                    self.num_rows,
-                    buffer,
-                    false,
-                    false,
-                ));
+                let air_instance = AirInstance::new(
+                    TraceInfo::new(self.airgroup_id, self.air_id, n_cols, self.num_rows, buffer, false, false)
+                        .with_reclaim_slot(self.trace_buffer.clone()),
+                );
                 pctx.add_air_instance(air_instance, instance_id);
             }
         }

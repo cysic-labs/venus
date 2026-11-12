@@ -6,8 +6,6 @@
 #include <string>
 #include <memory.h>
 #include <stdexcept>
-#include <exception>
-#include <mutex>
 
 #include "binfile_utils.hpp"
 #include "thread_utils.hpp"
@@ -18,19 +16,10 @@
 
 namespace BinFileUtils
 {
-    // Section headers come from the file; a section must lie inside the file before it is recorded.
-    static bool sectionFits(u_int64_t totalSize, u_int64_t offset, u_int64_t len)
-    {
-        return offset <= totalSize && len <= totalSize - offset;
-    }
-
     BinFile::BinFile(void *data, uint64_t _size, std::string _type, uint32_t maxVersion)
         : addr(nullptr), size(0), pos(0), directRead(false), fileFd(-1), version(0), readingSection(nullptr)
     {
         size = _size;
-        if (size < 12) {
-            throw std::runtime_error("BinFile in-memory constructor: file header is too small");
-        }
         addr = malloc(size);
         if (addr == nullptr) {
             throw std::bad_alloc();
@@ -65,9 +54,6 @@ namespace BinFileUtils
                 sections.insert(std::make_pair(sType, std::vector<Section>()));
             }
 
-            if (!sectionFits(size, pos, sSize)) {
-                throw std::runtime_error("BinFile in-memory constructor: section data exceeds file size");
-            }
             sections[sType].push_back(Section((void *)((u_int64_t)addr + pos), sSize));
 
             pos += sSize;
@@ -91,10 +77,6 @@ namespace BinFileUtils
         if (fstat(fd, &sb) == -1) /* To obtain file size */
             throw std::system_error(errno, std::generic_category(), "fstat");
 
-        if (sb.st_size < 12) {
-            close(fd);
-            throw std::runtime_error("BinFile file constructor: file header is too small");
-        }
         size = sb.st_size;
         void *addrmm = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
         if (addrmm == MAP_FAILED) {
@@ -142,9 +124,6 @@ namespace BinFileUtils
                 sections.insert(std::make_pair(sType, std::vector<Section>()));
             }
 
-            if (!sectionFits(size, pos, sSize)) {
-                throw std::runtime_error("BinFile file constructor: section data exceeds file size");
-            }
             sections[sType].push_back(Section((void *)((u_int64_t)addr + pos), sSize));
 
             pos += sSize;
@@ -172,11 +151,6 @@ namespace BinFileUtils
             throw std::system_error(errno, std::generic_category(), "fstat");
         }
 
-        if (sb.st_size < 12) {
-            close(fileFd);
-            fileFd = -1;
-            throw std::runtime_error("BinFile direct-read constructor: file header is too small");
-        }
         size = sb.st_size;
 
         // Read the fixed-size file header: 4 bytes type + 4 bytes version + 4 bytes nSections = 12 bytes
@@ -222,16 +196,16 @@ namespace BinFileUtils
                 sections.insert(std::make_pair(sType, std::vector<Section>()));
             }
 
-            if (!sectionFits(size, filePos, sSize)) {
-                close(fileFd);
-                fileFd = -1;
-                throw std::runtime_error("BinFile direct-read constructor: section data exceeds file size");
-            }
-
             // In directRead mode, Section.start stores the FILE OFFSET (cast to void*)
             sections[sType].push_back(Section((void *)filePos, sSize));
 
             filePos += sSize; // skip past the section data
+
+            if (filePos > size) {
+                close(fileFd);
+                fileFd = -1;
+                throw std::runtime_error("Section data exceeds file size");
+            }
         }
 
         pos = 0;
@@ -249,24 +223,24 @@ namespace BinFileUtils
 
     void BinFile::readSectionTo(void *dest, u_int32_t sectionId, u_int64_t offset, u_int64_t len)
     {
-        if (sections.find(sectionId) == sections.end()) {
-            throw std::range_error("Section does not exist: " + std::to_string(sectionId));
-        }
-
-        u_int64_t sectionSize = sections[sectionId][0].size;
-        if (offset > sectionSize || len > sectionSize - offset) {
-            throw std::range_error("readSectionTo: offset+len exceeds section size");
-        }
-
         if (!directRead) {
             // Eager mode: copy from in-memory buffer
-            void *src = (void *)((u_int64_t)sections[sectionId][0].start + offset);
+            void *src = (void *)((u_int64_t)getSectionData(sectionId) + offset);
             memcpy(dest, src, len);
             return;
         }
 
+        if (sections.find(sectionId) == sections.end()) {
+            throw std::range_error("Section does not exist: " + std::to_string(sectionId));
+        }
+
         // In directRead mode, Section.start is the file offset
         u_int64_t fileOffset = (u_int64_t)sections[sectionId][0].start + offset;
+        u_int64_t sectionSize = sections[sectionId][0].size;
+
+        if (offset + len > sectionSize) {
+            throw std::range_error("readSectionTo: offset+len exceeds section size");
+        }
 
         // Read in a loop to handle partial reads
         u_int64_t totalRead = 0;
@@ -294,52 +268,33 @@ namespace BinFileUtils
         u_int64_t fileOffset = (u_int64_t)sections[sectionId][0].start + offset;
         u_int64_t sectionSize = sections[sectionId][0].size;
 
-        if (offset > sectionSize || len > sectionSize - offset) {
+        if (offset + len > sectionSize) {
             throw std::range_error("readSectionToParallel: offset+len exceeds section size");
         }
 
-        numThreads = std::max(numThreads, 1);
-        u_int64_t threadCount = static_cast<u_int64_t>(numThreads);
-        u_int64_t chunkSize = len / threadCount + (len % threadCount != 0);
+        u_int64_t chunkSize = (len + numThreads - 1) / numThreads;
         std::vector<std::thread> threads;
-        // An exception escaping a std::thread terminates the process; keep the first one and rethrow it after the join.
-        std::mutex errorMutex;
-        std::exception_ptr firstError = nullptr;
         for (int i = 0; i < numThreads; i++) {
             u_int64_t off = (u_int64_t)i * chunkSize;
             if (off >= len) break;
             u_int64_t sz = std::min(chunkSize, len - off);
-            threads.emplace_back([fd = this->fileFd, dest, fileOffset, off, sz, &errorMutex, &firstError]() {
-                try {
-                    u_int64_t done = 0;
-                    while (done < sz) {
-                        ssize_t r = ::pread(fd, (uint8_t *)dest + off + done,
-                                            sz - done, fileOffset + off + done);
-                        if (r <= 0) {
-                            throw std::system_error(errno, std::generic_category(), "pread parallel");
-                        }
-                        done += r;
+            threads.emplace_back([fd = this->fileFd, dest, fileOffset, off, sz]() {
+                u_int64_t done = 0;
+                while (done < sz) {
+                    ssize_t r = ::pread(fd, (uint8_t *)dest + off + done,
+                                        sz - done, fileOffset + off + done);
+                    if (r <= 0) {
+                        throw std::system_error(errno, std::generic_category(), "pread parallel");
                     }
-                } catch (...) {
-                    std::lock_guard<std::mutex> lock(errorMutex);
-                    if (firstError == nullptr) {
-                        firstError = std::current_exception();
-                    }
+                    done += r;
                 }
             });
         }
         for (auto &t : threads) t.join();
-        if (firstError != nullptr) {
-            std::rethrow_exception(firstError);
-        }
     }
 
     void BinFile::startReadSection(u_int32_t sectionId, u_int32_t sectionPos)
     {
-        if (directRead) {
-            throw std::runtime_error("startReadSection is not supported in direct read mode");
-        }
-
         if (sections.find(sectionId) == sections.end())
         {
             throw std::range_error("Section does not exist: " + std::to_string(sectionId));
@@ -409,37 +364,53 @@ namespace BinFileUtils
 
     u_int8_t BinFile::readU8LE()
     {
-        return *((u_int8_t *)read(sizeof(u_int8_t)));
+        if (pos + sizeof(u_int8_t) > size) {
+            throw std::out_of_range("Attempting to read beyond buffer bounds");
+        }
+        u_int8_t res = *((u_int8_t *)((u_int64_t)addr + pos));
+        pos += 1;
+        return res;
     }
 
 
     u_int16_t BinFile::readU16LE()
     {
-        return *((u_int16_t *)read(sizeof(u_int16_t)));
+        if (pos + sizeof(u_int16_t) > size) {
+            throw std::out_of_range("Attempting to read beyond buffer bounds");
+        }
+        u_int16_t res = *((u_int16_t *)((u_int64_t)addr + pos));
+        pos += 2;
+        return res;
     }
 
 
     u_int32_t BinFile::readU32LE()
     {
-        return *((u_int32_t *)read(sizeof(u_int32_t)));
+        if (pos + sizeof(u_int32_t) > size) {
+            throw std::out_of_range("Attempting to read beyond buffer bounds");
+        }
+        u_int32_t res = *((u_int32_t *)((u_int64_t)addr + pos));
+        pos += 4;
+        return res;
     }
 
     u_int64_t BinFile::readU64LE()
     {
-        return *((u_int64_t *)read(sizeof(u_int64_t)));
+        if (pos + sizeof(u_int64_t) > size) {
+            throw std::out_of_range("Attempting to read beyond buffer bounds u64");
+        }
+        u_int64_t res = *((u_int64_t *)((u_int64_t)addr + pos));
+        pos += 8;
+        return res;
     }
 
     bool BinFile::sectionExists(u_int32_t sectionId) {
         return sections.find(sectionId) != sections.end();
     }
 
-    // Cursor reads address the in-memory copy of the file, which direct read mode does not keep.
     void *BinFile::read(u_int64_t len)
     {
-        if (directRead) {
-            throw std::runtime_error("cursor reads are not supported in direct read mode");
-        }
-        if (pos > size || len > size - pos) {
+        if (pos + len > size) {
             throw std::out_of_range("Attempting to read beyond buffer bounds in read()");
         }
         void *res = (void *)((u_int64_t)addr + pos);
@@ -449,17 +420,12 @@ namespace BinFileUtils
 
     std::string BinFile::readString()
     {
-        if (readingSection == nullptr) {
-            throw std::runtime_error("readString called without an active section");
-        }
         uint8_t *startOfString = (uint8_t *)((u_int64_t)addr + pos);
+        uint8_t *endOfString = startOfString;
         uint8_t *endOfSection = (uint8_t *)((uint64_t)readingSection->start + readingSection->size);
-        if (startOfString > endOfSection) {
-            throw std::out_of_range("readString cursor is beyond section bounds");
-        }
 
-        uint8_t *endOfString = nullptr;
-        for (uint8_t *i = startOfString; i != endOfSection; i++)
+        uint8_t *i;
+        for (i = endOfString; i != endOfSection; i++)
         {
             if (*i == 0)
             {
@@ -468,11 +434,12 @@ namespace BinFileUtils
             }
         }
 
-        if (endOfString == nullptr) {
-            throw std::runtime_error("Unterminated string in binfile section");
+        if (i == endOfSection)
+        {
+            endOfString = i - 1;
         }
 
-        size_t len = static_cast<size_t>(endOfString - startOfString);
+        uint32_t len = endOfString - startOfString;
         std::string str = std::string((const char *)startOfString, len);
         pos += len + 1;
 

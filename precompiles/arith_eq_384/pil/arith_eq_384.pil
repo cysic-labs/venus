@@ -25,25 +25,34 @@ airtemplate ArithEq384(const int N) {
     const int BLS12_381_PRIME = 0x1A0111EA397FE69A4B1BA7B6434BACD764774B84F38512BF6730D2A0F6B0F6241EABFFFEB153FFFFB9FEFFFFFFFFAAAB;
 
     const int CLOCKS = 24;
-    // Ensure that the ARITH_EQ_384 can fit in N rows
+
     if (N < CLOCKS) {
-        error(`N must be at least ${CLOCKS}`);
+        error(`N must be at least ${CLOCKS} to fit the ArithEq384 arithmetization, but received N=${N}`);
     }
 
-    const int NUM_ARITH_EQ_384 = N / CLOCKS - 1; // The -1 is because CLOCKS is not a divisor of N
-    col fixed CLK_0 = [[1, 0:(CLOCKS-1)]:NUM_ARITH_EQ_384, 0...];
-    const expr LAST_CLK = (CLOCKS-1)'CLK_0;
+    // Calculate usable capacity
+    const int NUM_NON_USABLE_ROWS = N % CLOCKS;
+    const int NUM_OPS = (N - NUM_NON_USABLE_ROWS) / CLOCKS;
+
+    // Base clock: 1 at row 0, 0 elsewhere within each cycle
+    if (NUM_NON_USABLE_ROWS == 0) {
+        col fixed air.FIRST_CLK = [[1, 0:(CLOCKS-1)]:NUM_OPS];
+    } else {
+        col fixed air.FIRST_CLK = [[1, 0:(CLOCKS-1)]:NUM_OPS, 0...];
+    }
+
+    const expr CLK[CLOCKS];
+    for (int i = 0; i < CLOCKS; ++i) {
+        CLK[i] = (i)'FIRST_CLK;
+    }
+    const expr SECOND_CLK_TO_LAST = clock_set(start: 1, end: CLOCKS-1);
+    const expr LAST_CLK = CLK[CLOCKS-1];
 
     const int CHUNKS = CLOCKS;
     const int CBC = 2;
     const int CHUNK_BITS = 16;
     const int CHUNK_SIZE = 2**CHUNK_BITS;
     const int CHUNK_MAX = CHUNK_SIZE - 1;
-
-    const expr CLK[CLOCKS];
-    for (int i = 0; i < CLOCKS; ++i) {
-        CLK[i] = (i)'CLK_0;
-    }
 
     // TODO: carry min and max!!
     const int Q_HSC_BITS = 22; // Number of bits for high safe chunk of q
@@ -70,7 +79,6 @@ airtemplate ArithEq384(const int N) {
     col witness bits(Q_HSC_BITS) s;
     col witness bits(1) sel_op[OPS];
 
-
     const expr sel_arith384_mod = sel_op[0];
     const expr sel_bls12_381_curve_add = sel_op[1];
     const expr sel_bls12_381_curve_dbl = sel_op[2];
@@ -84,13 +92,9 @@ airtemplate ArithEq384(const int N) {
     const expr sel_check_diff = sel_bls12_381_curve_add;
     const expr sel_check_x_lt_prime = sel_arith384_mod + sel_bls12_381_curve + sel_bls12_381_complex;
     const expr sel_check_y_lt_prime = sel_bls12_381_curve + sel_bls12_381_complex;
-
-    const expr eq_selectors[EQS] = [sel_arith384_mod,
-                                    sel_bls12_381_curve_add, sel_bls12_381_curve_dbl,
-                                    sel_bls12_381_curve, sel_bls12_381_curve,
-                                    sel_bls12_381_complex_add, sel_bls12_381_complex_add,
-                                    sel_bls12_381_complex_sub, sel_bls12_381_complex_sub,
-                                    sel_bls12_381_complex_mul, sel_bls12_381_complex_mul];
+    // ops called with two direct operands: main sends a = p1/f1 address and b = p2/f2 address
+    // (no parameter struct, no indirections); the result overwrites p1/f1.
+    const expr sel_direct_ab = sel_bls12_381_curve_add + sel_bls12_381_complex;
 
     // constraint to set (x1,y1) = (x2,y2)
     sel_bls12_381_curve_dbl * (x1 - x2) === 0;
@@ -98,6 +102,8 @@ airtemplate ArithEq384(const int N) {
 
     const expr chunk_cols[7] = [x1, y1, x2, y2, x3, y3, s];
     const expr qs[QS] = [q0, q1, q2];
+
+    // TODO: explain concept of row_offset with x1, y1, x2, y2, x3, y3
 
     include "equations/arith384_mod.pil"
     include "equations/bls12_381_curve_add.pil"
@@ -124,30 +130,25 @@ airtemplate ArithEq384(const int N) {
     expr sum_sel_op = 0;
     expr sum_sel_op_clk0 = 0;
     for (int i = 0; i < OPS; ++i) {
+        sel_op_clk0[i] <== sel_op[i] * FIRST_CLK;
+
         // binary constraint
-        sel_op_clk0[i] * (1 - sel_op_clk0[i]) === 0;
         sel_op[i] * (1 - sel_op[i]) === 0;
 
         // selector latch
-        expr sel_op_active = clock_set(start: 1, end: CLOCKS - 1);
-        sel_op_active * (sel_op[i] - 'sel_op[i]) === 0;
+        SECOND_CLK_TO_LAST * (sel_op[i] - 'sel_op[i]) === 0;
 
-        // only one selector could be enabled
         sum_sel_op = sum_sel_op + sel_op[i];
         sum_sel_op_clk0 = sum_sel_op_clk0 + sel_op_clk0[i];
-
-        // only could be one in CLK_0
-        (1 - CLK_0) * sel_op_clk0[i] === 0;
-
-        // clock of selector must be active if selector is active
-        CLK_0 * (sel_op[i] - sel_op_clk0[i]) === 0;
     }
 
+    // only one selector can be enabled
     const expr in_use = sum_sel_op;
+    const expr in_use_clk0 = sum_sel_op_clk0;
     in_use * (1 - in_use) === 0;
 
-    const expr in_use_clk0 = sum_sel_op_clk0;
-    in_use_clk0 * (1 - in_use_clk0) === 0;
+    // padding rows: no selector can be active
+    (1 - FIRST_CLK - SECOND_CLK_TO_LAST) * in_use === 0;
 
     const expr eq[MAX_CEQS][CBC];
 
@@ -216,7 +217,7 @@ airtemplate ArithEq384(const int N) {
 
     // x_are_different in first clock that x_are_different == 1, after that x_are_different must be 0.
 
-    x_are_different === 'x_are_different * (1 - CLK_0) + x_chunk_different;
+    x_are_different === 'x_are_different * SECOND_CLK_TO_LAST + x_chunk_different;
 
     // 'x_are_different  CLK  x_chunk_different  x_are_different
     // ----------------  ---  -----------------  --------------
@@ -303,11 +304,26 @@ airtemplate ArithEq384(const int N) {
     //     1  ->  0     POS
     //     1  ->  1     ZERO, NEG
     //
-    // A single 2^18-row table (ARITH_EQ_LT_TABLE_ID) holds the transitions above for every chunk.
-    // At the first clock of the cycle 'borrow is masked to 0, and the result is below the modulus
-    // only if the borrow out of the most significant chunk (last clock) is 1, which the LAST_CLK
-    // constraint below enforces. It relies on the selector latch keeping the check selectors
-    // constant along the cycle.
+    // As we made for prime tables, for first clock of cycle, 'borrow must be 0, we could do it
+    // using a different table for first chunk, basically a table that ignores 'borrow value.
+    //
+    // 'borrow  borrow  valid values
+    // -------  ------  ------------
+    //     0  ->  0     ZERO, POS
+    //     0  ->  1     NEG
+    //     1  ->  0     ZERO, POS
+    //     1  ->  1     NEG
+    //
+    // In the case of the last clock, only rows with borrow = 1 are valid; for this reason
+    // the table only includes the valid combinations
+    //
+    // 'borrow  borrow  valid values
+    // -------  ------  ------------
+    //     0  ->  1     NEG
+    //     1  ->  1     NEG
+    //
+    // Originally the table had 2^18 rows, but now has 2^18 rows for the first clock, 2^17 rows for
+    // the last clock, and 2^18 rows for middle clocks, for a total size of 2^19 + 2^17 rows
 
     col witness bits(1) x3_lt;
     col witness bits(1) y3_lt;
@@ -319,17 +335,25 @@ airtemplate ArithEq384(const int N) {
                           + clk_cte_selector(bls12_381_complex_add_clk0, BLS12_381_PRIME)
                           + clk_cte_selector(bls12_381_complex_sub_clk0, BLS12_381_PRIME)
                           + clk_cte_selector(bls12_381_complex_mul_clk0, BLS12_381_PRIME);
-    const expr delta_x3 = x3 - y2 * sel_arith384_mod - lt_cte;
-    const expr delta_y3 = y3 - lt_cte;
 
-    lookup_assumes(ARITH_EQ_LT_TABLE_ID, [2 * 'x3_lt * (1 - CLK_0) + x3_lt, delta_x3], sel: sel_check_x_lt_prime);
-    lookup_assumes(ARITH_EQ_LT_TABLE_ID, [2 * 'y3_lt * (1 - CLK_0) + y3_lt, delta_y3], sel: sel_check_y_lt_prime);
-    LAST_CLK * (sel_check_x_lt_prime * (x3_lt - 1) + sel_check_y_lt_prime * (y3_lt - 1)) === 0;
+    col witness bits(64, signed) delta_x3;
+    col witness bits(64, signed) delta_y3;
+    
+    delta_x3 <== x3 - y2 * sel_arith384_mod - lt_cte;
+    delta_y3 <== y3 - lt_cte;
+
+    // CLK_LT_SELECTOR
+    // 0 - middle clocks
+    // 1 - first clock
+    // 2 - last clock
+    const expr CLK_LT_SELECTOR = 2 * LAST_CLK + FIRST_CLK;
+    lookup_assumes(ARITH_EQ_LT_TABLE_ID, [4 * CLK_LT_SELECTOR + 2 * 'x3_lt + x3_lt, delta_x3], sel: sel_check_x_lt_prime, sel_is_binary: 1);
+    lookup_assumes(ARITH_EQ_LT_TABLE_ID, [4 * CLK_LT_SELECTOR + 2 * 'y3_lt + y3_lt, delta_y3], sel: sel_check_y_lt_prime, sel_is_binary: 1);
 
     col witness bits(64, signed) carry[MAX_CEQS][CBC];
     for (int i = 0; i < MAX_CEQS; ++i) {
         // Initial carry must be 0
-        carry[i][0] * CLK_0 === 0;
+        carry[i][0] * FIRST_CLK === 0;
         for (int j = 0; j < CBC; ++j) {
             range_check(min: CARRY_MIN, max: CARRY_MAX, expression: carry[i][j]);
             if (j == CBC - 1) {
@@ -341,10 +365,12 @@ airtemplate ArithEq384(const int N) {
         }
     }
 
-    // The chunk terms of arith384_mod (x1*y1+x2-x3-q0*y2-q1*y2*2^384) beyond the cycle are the
-    // chunks of q1*y2 from 2^384 upwards. They must vanish instead of being carried into the next
-    // operation's equation; every term is a product of range-checked chunks, so the sums are zero
-    // only if all products are zero. They are expressed relative to the first clock of the cycle.
+    // The arith384_mod equation (x1*y1+x2-x3-q0*y2-q1*y2*p2_384) expands into 71 chunk terms,
+    // but only CLOCKS * CBC = 48 of them fit in the operation cycle. The 23 leftover terms are
+    // the chunks of q1*y2 from 2^384 upwards (chunks 24..46 of the product, shifted by p2_384
+    // to positions 48..70); they must vanish, so instead of extending the cycle we constrain
+    // them to zero directly, without carry propagation. They are all expressed relative to the
+    // first clock of the cycle, hence the arith384_mod_clk0 selector.
     for (int j = 0; j < length(eq_arith384_mod_zero_chunks); ++j) {
         arith384_mod_clk0 * eq_arith384_mod_zero_chunks[j] === 0;
     }
@@ -369,16 +395,22 @@ airtemplate ArithEq384(const int N) {
 
     // 6 reads    384 bits  = 4 * 6 = 24 reads 64 bits
     // 2 writes   384 bits  = 2 * 6 = 12 writes 64 bits
-    // 6 indirect  64 bits  = 6 * 1 =  6 reads 64 bits
-    //                     TOTAL    = 42 memory accesses
+    // 5 indirect  64 bits  = 5 * 1 =  5 reads 64 bits
+    //                     TOTAL    = 41 memory accesses
 
-    //                        READ           WRITE      INDIRECT
-    // arith384_mod           x1,y1,x2,y2    x3         x1,y1,x2,y2,x3
-    // bls12_381_curve_add    x1,y1,x2,y2    x3,y3      x1,y1,x2,y2
-    // bls12_381_curve_dbl    x1,y2          x3,y3      x1,y1
-    // bls12_381_complex_add  x1,y1,x2,y2    x3,y3      x1,y1,x2,y2
-    // bls12_381_complex_sub  x1,y1,x2,y2    x3,y3      x1,y1,x2,y2
-    // bls12_381_complex_mul  x1,y1,x2,y2    x3,y3      x1,y1,x2,y2
+    // Two calling conventions (see arith_eq.pil):
+    //   · struct:    b = address of a struct of pointers (ADDR_OP), a = 0, pointers read as
+    //                indirections (ADDR_IND_x).
+    //   · direct a/b: a = first operand address (ADDR_A), b = second operand address (ADDR_OP).
+    //   · single:    b = address of the only operand (ADDR_OP), a = 0.
+    //
+    //                        READ           WRITE      CALL        INDIRECT
+    // arith384_mod           x1,y1,x2,y2    x3         struct      x1,y1,x2,y2,x3
+    // bls12_381_curve_add    x1,y1,x2,y2    x3,y3      direct a/b  -
+    // bls12_381_curve_dbl    x1,y2          x3,y3      single      -
+    // bls12_381_complex_add  x1,y1,x2,y2    x3,y3      direct a/b  -
+    // bls12_381_complex_sub  x1,y1,x2,y2    x3,y3      direct a/b  -
+    // bls12_381_complex_mul  x1,y1,x2,y2    x3,y3      direct a/b  -
 
     const int ADDR_OP = MAIN_STEP + 1;
     const int ADDR_X1 = ADDR_OP + 1;
@@ -393,7 +425,9 @@ airtemplate ArithEq384(const int N) {
     const int ADDR_IND_2 = ADDR_IND_0 + 2;
     const int ADDR_IND_3 = ADDR_IND_0 + 3;
     const int ADDR_IND_4 = ADDR_IND_0 + 4;
-    const int ADDR_IND_5 = ADDR_IND_0 + 5;
+
+    // Main operand a: the first operand address of the direct a/b ops, 0 for the rest.
+    const int ADDR_A = ADDR_IND_4 + 1;
 
     // MEMORY ACCESS MAP
     //
@@ -417,7 +451,7 @@ airtemplate ArithEq384(const int N) {
     // 17  STEP + 1 | W | ADDR_X3 + 40  x3[20..23]  1         | ADDR_Y3 + 40  y3[20..23]  use_y3
     // 18  STEP     | R | ADDR_OP + 0   ADDR_IND_0  use_ind_0 | ADDR_OP + 8   ADDR_IND_1  use_ind_1
     // 19  STEP     | R | ADDR_OP + 16  ADDR_IND_2  use_ind_2 | ADDR_OP + 24  ADDR_IND_3  use_ind_3
-    // 20  STEP     | R | ADDR_OP + 32  ADDR_IND_4  use_ind_4 | ADDR_OP + 40  ADDR_IND_5  use_ind_5
+    // 20  STEP     | R | ADDR_OP + 32  ADDR_IND_4  use_ind_4 | ---
     // 21  ---       ----------     -------                 ----------      ---------
     // 22  ---       ----------     -------                 ----------      ---------
     // 23  ---       ----------     -------                 ----------      ---------
@@ -428,22 +462,27 @@ airtemplate ArithEq384(const int N) {
 
     // [arith384_mod]        ADDR_X1 === ADDR_IND_0
     //
-    // [bls12_381_curve_add] ADDR_X1 === ADDR_IND_0,
-    //                       ADDR_Y1 === ADDR_IND_0 + 48
+    // [bls12_381_curve_add] ADDR_X1 === ADDR_A,
+    //                       ADDR_Y1 === ADDR_A + 48
     //                       ADDR_X3 === ADDR_X1, ADDR_Y3 === ADDR_Y1
     //
     // [bls12_381_curve_dbl] ADDR_X1 === ADDR_OP,
     //                       ADDR_Y1 === ADDR_OP + 48
     //                       ADDR_X3 === ADDR_X1, ADDR_Y3 === ADDR_Y1
     //
-    // [bls12_381_complex]   ADDR_X1 === ADDR_IND_0
-    //                       ADDR_Y1 === ADDR_IND_0 + 48
+    // [bls12_381_complex]   ADDR_X1 === ADDR_A
+    //                       ADDR_Y1 === ADDR_A + 48
     //                       ADDR_X3 === ADDR_X1, ADDR_Y3 === ADDR_Y1
 
-    const expr use_ind_0 = sel_arith384_mod + sel_bls12_381_curve_add + sel_bls12_381_complex;
+    const expr use_ind_0 = sel_arith384_mod;
 
-    (sel_arith384_mod + sel_bls12_381_curve_add + sel_bls12_381_complex) * clock_eq(step_addr, ADDR_X1, ADDR_IND_0) === 0;
-    (sel_bls12_381_curve_add + sel_bls12_381_complex) * clock_eq(step_addr, ADDR_Y1, ADDR_IND_0, 48) === 0;
+    sel_arith384_mod * clock_eq(step_addr, ADDR_X1, ADDR_IND_0) === 0;
+
+    sel_direct_ab * clock_eq(step_addr, ADDR_X1, ADDR_A) === 0;
+    sel_direct_ab * clock_eq(step_addr, ADDR_Y1, ADDR_A, 48) === 0;
+
+    // The other ops are called with a = 0
+    (in_use - sel_direct_ab) * FIRST_CLK * step_addr'(ADDR_A) === 0;
 
     sel_bls12_381_curve_dbl * clock_eq(step_addr, ADDR_X1, ADDR_OP) === 0;
     sel_bls12_381_curve_dbl * clock_eq(step_addr, ADDR_Y1, ADDR_OP, 48) === 0;
@@ -453,18 +492,18 @@ airtemplate ArithEq384(const int N) {
 
     // [arith384_mod]        ADDR_Y1 === ADDR_IND_1
     //
-    // [bls12_381_curve_add] ADDR_X2 === ADDR_IND_1
-    //                       ADDR_Y2 === ADDR_IND_1 + 48
+    // [bls12_381_curve_add] ADDR_X2 === ADDR_OP
+    //                       ADDR_Y2 === ADDR_OP + 48
     //
-    // [bls12_381_complex]   ADDR_X2 === ADDR_IND_1
-    //                       ADDR_Y2 === ADDR_IND_1 + 48
+    // [bls12_381_complex]   ADDR_X2 === ADDR_OP
+    //                       ADDR_Y2 === ADDR_OP + 48
 
-    const expr use_ind_1 = sel_arith384_mod + sel_bls12_381_curve_add + sel_bls12_381_complex;
+    const expr use_ind_1 = sel_arith384_mod;
 
     sel_arith384_mod * clock_eq(step_addr, ADDR_Y1, ADDR_IND_1) === 0;
 
-    (sel_bls12_381_curve_add + sel_bls12_381_complex) * clock_eq(step_addr, ADDR_X2, ADDR_IND_1) === 0;
-    (sel_bls12_381_curve_add + sel_bls12_381_complex) * clock_eq(step_addr, ADDR_Y2, ADDR_IND_1, 48) === 0;
+    sel_direct_ab * clock_eq(step_addr, ADDR_X2, ADDR_OP) === 0;
+    sel_direct_ab * clock_eq(step_addr, ADDR_Y2, ADDR_OP, 48) === 0;
 
     // [arith384_mod]  ADDR_X2 === ADDR_IND_2
 
@@ -483,8 +522,6 @@ airtemplate ArithEq384(const int N) {
     const expr use_ind_4 = sel_arith384_mod;
 
     sel_arith384_mod * clock_eq(step_addr, ADDR_X3, ADDR_IND_4) === 0;
-
-    const expr use_ind_5 = 0;
 
     const expr mem_addr[2];
     mem_addr[0] = clock_map(step_addr, ADDR_X1, start: 0,  end: 5,  delta: 8) +
@@ -519,8 +556,7 @@ airtemplate ArithEq384(const int N) {
                         map_chunks_to_m32(y2, start: 6,  end: 11) +
                         map_chunks_to_m32(y3, start: 12, end: 17) +
                         clock_map(step_addr, ADDR_IND_1, 18) +
-                        clock_map(step_addr, ADDR_IND_3, 19) +
-                        clock_map(step_addr, ADDR_IND_5, 20);
+                        clock_map(step_addr, ADDR_IND_3, 19);
 
     mem_value[1][1] =   map_chunks_to_m32(y1, index: 2, start: 0,  end: 5) +
                         map_chunks_to_m32(y2, index: 2, start: 6,  end: 11) +
@@ -540,8 +576,7 @@ airtemplate ArithEq384(const int N) {
                  clock_set(use_y2, start: 6,  end: 11) +
                  clock_set(use_y3, start: 12, end: 17) +
                  clock_set(use_ind_1, 18) +
-                 clock_set(use_ind_3, 19) +
-                 clock_set(use_ind_5, 20);
+                 clock_set(use_ind_3, 19);
 
 
     precompiled_mem_op(
@@ -560,14 +595,16 @@ airtemplate ArithEq384(const int N) {
             value: mem_value[1]
     );
 
-    const expr bus_op = sel_arith384_mod * OP_ARITH_384_MOD +
-                        sel_bls12_381_curve_add * OP_EC_ADD_BLS12_381 +
-                        sel_bls12_381_curve_dbl * OP_EC_DBL_BLS12_381 +
-                        sel_bls12_381_complex_add * OP_COMPLEX_ADD_BLS12_381 +
-                        sel_bls12_381_complex_sub * OP_COMPLEX_SUB_BLS12_381 +
-                        sel_bls12_381_complex_mul * OP_COMPLEX_MUL_BLS12_381;
+    const expr bus_op = sel_arith384_mod * OP_ARITH384_MOD +
+                        sel_bls12_381_curve_add * OP_BLS12_381_CURVE_ADD +
+                        sel_bls12_381_curve_dbl * OP_BLS12_381_CURVE_DBL +
+                        sel_bls12_381_complex_add * OP_BLS12_381_COMPLEX_ADD +
+                        sel_bls12_381_complex_sub * OP_BLS12_381_COMPLEX_SUB +
+                        sel_bls12_381_complex_mul * OP_BLS12_381_COMPLEX_MUL;
 
-    proves_operation(op: bus_op,  a:[0, 0],  b:[step_addr'(ADDR_OP), 0], c:[0, 0], flag:0, 
+    // a is the first operand address for the direct a/b ops (0 for the rest), b the parameter
+    // struct address or the second (or only) operand address.
+    proves_operation(op: bus_op, a:[step_addr'(ADDR_A), 0], b:[step_addr'(ADDR_OP), 0], c:[0, 0], flag:0,
                      main_step: step_addr'(MAIN_STEP), mul: in_use_clk0);
 
     // selclk0 is the clock 0 for dedicated to one operation
@@ -590,10 +627,6 @@ airtemplate ArithEq384(const int N) {
             index += delta_index;
         }
         return res;
-    }
-
-    function chunk_to_m32_on_clock(const expr cl, int index, int current_clock): const expr {
-        return air.CLK[cl]*(index_on_clock(cl, index, current_clock) + index_on_clock(cl, index + 1, current_clock));
     }
 
     function index_on_clock(const expr cl, int index, int current_clock): const expr {
@@ -634,7 +667,7 @@ airtemplate ArithEq384(const int N) {
     }
 
     function clock_eq(const expr mvcol, int pos1, int pos2, int pos2_offset = 0): const expr {
-        return air.CLK_0 * (mvcol'(pos1) - mvcol'(pos2) - pos2_offset);
+        return air.FIRST_CLK * (mvcol'(pos1) - mvcol'(pos2) - pos2_offset);
     }
 
     function clk_cte_selector(const expr selclk0, int value, int chunk_bits = 16, int chunks = 24): expr {

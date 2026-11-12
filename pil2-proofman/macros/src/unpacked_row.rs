@@ -12,14 +12,32 @@ pub fn unpacked_row_impl(name: &Ident, generic: &Option<Ident>, fields: &[TraceF
     } else {
         quote! {}
     };
+    // An unpacked row holds one `F` per column and asks nothing else of it, so a row over any
+    // field works, BN128's `Fr` too.
     let generics_with_bounds = if let Some(g) = generic {
+        quote! { <#g: Copy + Default + Send> }
+    } else {
+        quote! {}
+    };
+    let typed_generics_with_bounds = if let Some(g) = generic {
         quote! { <#g: PrimeField64 + Copy + Default + Send> }
     } else {
         quote! {}
     };
 
     let unpacked_fields = get_unpacked_fields(fields);
-    let setter_getters = get_unpacked_setters_getters(fields);
+    let (setter_getters, typed_setter_getters) = get_unpacked_setters_getters(fields);
+    // The accessors of the `bit`/`ubit(N)`/`u8`… fields convert with `F::from_u8`… and
+    // `as_canonical_u64`: a 64-bit prime field's, so they get an impl of their own.
+    let typed_impl = if typed_setter_getters.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            impl #typed_generics_with_bounds #name #generics {
+                #(#typed_setter_getters)*
+            }
+        }
+    };
 
     // Calculate the total number of F elements in the row
     let row_size = calculate_row_size(fields);
@@ -44,6 +62,8 @@ pub fn unpacked_row_impl(name: &Ident, generic: &Option<Ident>, fields: &[TraceF
         impl #generics_with_bounds #name #generics {
             #(#setter_getters)*
         }
+
+        #typed_impl
 
         impl #generics_with_bounds proofman_common::trace::TraceRow for #name #generics {
             const ROW_SIZE: usize = #row_size; // Total number of F elements
@@ -71,8 +91,10 @@ fn get_unpacked_fields(fields: &[TraceField]) -> Vec<TokenStream> {
     unpacked_fields
 }
 
-fn get_unpacked_setters_getters(fields: &[TraceField]) -> Vec<TokenStream> {
+/// The accessors of the generic fields, and those of the typed ones, which need `PrimeField64`.
+fn get_unpacked_setters_getters(fields: &[TraceField]) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut setter_getters = vec![];
+    let mut typed_setter_getters = vec![];
 
     for f in fields.iter() {
         if contains_generic(&f.ty) {
@@ -84,14 +106,14 @@ fn get_unpacked_setters_getters(fields: &[TraceField]) -> Vec<TokenStream> {
         } else {
             // For non-generic fields, generate F field accessors with conversion
             if is_array(&f.ty) {
-                add_unpacked_array_setter_getter(&f.name, &f.ty, &mut setter_getters);
+                add_unpacked_array_setter_getter(&f.name, &f.ty, &mut typed_setter_getters);
             } else {
-                add_unpacked_setter_getter(&f.name, &f.ty, &mut setter_getters);
+                add_unpacked_setter_getter(&f.name, &f.ty, &mut typed_setter_getters);
             }
         }
     }
 
-    setter_getters
+    (setter_getters, typed_setter_getters)
 }
 
 fn add_unpacked_generic_setter_getter(field_name: &Ident, setter_getters: &mut Vec<TokenStream>) {
@@ -139,30 +161,89 @@ fn add_unpacked_setter_getter(field_name: &Ident, field_type: &BitType, setter_g
 }
 
 fn add_unpacked_array_setter_getter(field_name: &Ident, field_type: &BitType, setter_getters: &mut Vec<TokenStream>) {
-    let (bit_width, _, acc_dims) = collect_dimensions(field_type);
+    let (bit_width, dims, _acc_dims) = collect_dimensions(field_type);
     let rust_type = type_for_bitwidth(bit_width);
     let from_method = method_name_for_bitwidth(bit_width);
-    let args = dimension_args(&acc_dims);
-    let array_access = generate_array_access(&args);
+
+    // Runtime params: i0: usize, ...
+    let runtime_idents: Vec<Ident> = dims.iter().enumerate().map(|(i, _)| format_ident!("i{}", i)).collect();
+    let runtime_access = generate_array_access(&runtime_idents);
 
     let setter_name = format_ident!("set_{}", field_name);
     let getter_name = format_ident!("get_{}", field_name);
+    let setter_name_all = format_ident!("set_all_{}", field_name);
+    let getter_name_all = format_ident!("get_all_{}", field_name);
 
-    let conversion = if bit_width == 1 {
-        quote! { self.#field_name #array_access.as_canonical_u64() != 0 }
+    let runtime_conversion = if bit_width == 1 {
+        quote! { self.#field_name #runtime_access.as_canonical_u64() != 0 }
     } else {
-        quote! { self.#field_name #array_access.as_canonical_u64() as #rust_type }
+        quote! { self.#field_name #runtime_access.as_canonical_u64() as #rust_type }
     };
 
+    // Whole-array type: dims is outermost-first, wrap innermost-first
+    let mut nested_type = rust_type.clone();
+    for &len in dims.iter().rev() {
+        nested_type = quote! { [#nested_type; #len] };
+    }
+
+    // self.field[i0][i1]... and values[i0][i1]...
+    let all_field_access = {
+        let mut acc = quote! { self.#field_name };
+        for id in &runtime_idents {
+            acc = quote! { #acc[#id] };
+        }
+        acc
+    };
+    let all_values_access = {
+        let mut acc = quote! { values };
+        for id in &runtime_idents {
+            acc = quote! { #acc[#id] };
+        }
+        acc
+    };
+
+    // Setter: nested for-loops (unrolled by optimizer)
+    let inner_setter_stmt = quote! { #all_field_access = F::#from_method(#all_values_access); };
+    let mut all_setter_body = inner_setter_stmt;
+    for (i, &len) in dims.iter().enumerate().rev() {
+        let id = &runtime_idents[i];
+        all_setter_body = quote! { for #id in 0..#len { #all_setter_body } };
+    }
+
+    // Getter: nested std::array::from_fn
+    let inner_getter_expr = if bit_width == 1 {
+        quote! { #all_field_access.as_canonical_u64() != 0 }
+    } else {
+        let rt = rust_type.clone();
+        quote! { #all_field_access.as_canonical_u64() as #rt }
+    };
+    let mut all_getter_expr = inner_getter_expr;
+    for i in (0..dims.len()).rev() {
+        let id = &runtime_idents[i];
+        all_getter_expr = quote! { std::array::from_fn(|#id| #all_getter_expr) };
+    }
+
     setter_getters.push(quote! {
+        // Runtime-indexed version
         #[inline(always)]
-        pub fn #setter_name(&mut self, #(#args: usize,)* value: #rust_type) {
-            self.#field_name #array_access = F::#from_method(value);
+        pub fn #setter_name(&mut self, #(#runtime_idents: usize,)* value: #rust_type) {
+            self.#field_name #runtime_access = F::#from_method(value);
         }
 
         #[inline(always)]
-        pub fn #getter_name(&self, #(#args: usize),*) -> #rust_type {
-            #conversion
+        pub fn #getter_name(&self, #(#runtime_idents: usize),*) -> #rust_type {
+            #runtime_conversion
+        }
+
+        // Whole-array version
+        #[inline(always)]
+        pub fn #setter_name_all(&mut self, values: &#nested_type) {
+            #all_setter_body
+        }
+
+        #[inline(always)]
+        pub fn #getter_name_all(&self) -> #nested_type {
+            #all_getter_expr
         }
     });
 }
@@ -198,10 +279,6 @@ fn method_name_for_bitwidth(width: usize) -> Ident {
         33..=64 => format_ident!("from_u64"),
         _ => format_ident!("from_u128"),
     }
-}
-
-fn dimension_args(dims: &[usize]) -> Vec<Ident> {
-    dims.iter().enumerate().map(|(i, _)| format_ident!("i{}", i)).collect()
 }
 
 fn generate_array_access(idents: &[Ident]) -> TokenStream {

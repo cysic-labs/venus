@@ -1,6 +1,6 @@
 # Fibonacci Square Example Proofman Setup Guide
 
-This guide provides step-by-step instructions for setting up the necessary repositories and executing the Fibonacci square example using the Polygon Hermez zkEVM prover.
+This guide provides step-by-step instructions for setting up the repository and executing the Fibonacci square example with pil2-proofman, from PIL compilation to a fully aggregated proof.
 
 ## 0. Platform Compatibility
 
@@ -10,52 +10,43 @@ Detect your platform and set the appropriate library extension:
 export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi)
 ```
 
-## 1. Download and Set Up Required Repositories
+## 1. Set Up the Repository
 
-### 1.2 Install `pil2-compiler`
-
-Next, clone the `pil2-compiler` repository and install its dependencies:
-
-```bash
-git clone https://github.com/0xPolygonHermez/pil2-compiler.git
-cd pil2-compiler
-npm install
-cd ..
-```
-
-### 1.3 Install `pil2-proofman-js`
-
-Clone the `pil2-proofman-js` repository, switch to the `develop` branch, and install the dependencies:
-
-```bash
-git clone https://github.com/0xPolygonHermez/pil2-proofman-js
-cd pil2-proofman-js
-git checkout develop
-
-# TODO: Verify if the Stark Recurser raises any issues during this process
-
-npm install
-cd ..
-```
-# Update package lists and install required system packages
-sudo apt update
-sudo apt install -y build-essential libbenchmark-dev libomp-dev libgmp-dev nlohmann-json3-dev nasm libsodium-dev cmake
-
-### 1.4 Compile the PIL2 Stark C++ Library
-
-Compile the PIL2 Stark C++ Library (run only once):
-
-```bash
-(cd ../pil2-proofman/pil2-stark && make clean && make -j starks_lib && make -j bctree)
-```
-
-### 1.5 Install `pil2-proofman`
-
-Finally, clone the `pil2-proofman` repository:
+### 1.1 Clone the Repository
 
 ```bash
 git clone https://github.com/0xPolygonHermez/pil2-proofman.git
 cd pil2-proofman
+```
+
+All commands below run from the repository root.
+
+### 1.2 Install System Packages
+
+```bash
+sudo apt update
+sudo apt install -y build-essential libbenchmark-dev libomp-dev libgmp-dev nlohmann-json3-dev nasm libsodium-dev cmake
+```
+
+### 1.3 Node Dependencies (PIL Compiler)
+
+`pil2-compiler` is an npm dependency of the setup crate (`setup/pil2-stark/package.json`). 
+`proofman-setup` installs it on first use by itself, so this step is optional; run it
+by hand to see any npm error up front:
+
+```bash
+(cd setup/pil2-stark && npm install)
+```
+
+To use a local checkout of the compiler instead, point `PIL2C_EXEC` at its `pil2com` executable.
+
+### 1.4 Compile the PIL2 Stark C++ Library
+
+The Cargo build script compiles the library on demand as well; running it once up front surfaces missing
+system packages early:
+
+```bash
+(cd pil2-stark && make clean && make -j starks_lib && make -j bctree)
 ```
 
 ---
@@ -68,9 +59,11 @@ cd pil2-proofman
 To begin, compile the PIL files:
 
 ```bash
-node ../pil2-compiler/src/pil.js ./examples/fibonacci-square/pil/build.pil \
+cargo run --bin proofman-setup -- compile-pil \
+     -p ./examples/fibonacci-square/pil/build.pil \
      -I ./pil2-components/lib/std/pil \
-     -o ./examples/fibonacci-square/pil/build.pilout -u ./examples/fibonacci-square/build/fixed -O fixed-to-file
+     --fixed-to-file -u ./examples/fibonacci-square/pil/fixed \
+     -o ./examples/fibonacci-square/pil/build.pilout
 ```
 
 ### 2.2 Generate Setup
@@ -78,22 +71,37 @@ node ../pil2-compiler/src/pil.js ./examples/fibonacci-square/pil/build.pil \
 After compiling the PIL files, generate the setup:
 
 ```bash
-node ../pil2-proofman-js/src/main_setup.js \
-     -a ./examples/fibonacci-square/pil/build.pilout -t ./pil2-components/lib/std/pil \
+cargo run --bin proofman-setup -- setup \
+     -a ./examples/fibonacci-square/pil/build.pilout \
      -b ./examples/fibonacci-square/build -r -u ./examples/fibonacci-square/build/fixed
 ```
 
-Additionally, to run the snark setup, first generate the `recursivef` STARK with the native setup and then the final SNARK over it:
+The key's hash family is blake3, the default. Additionally, to run the snark setup:
 
 ```bash
-cargo run --manifest-path ../pk-setup-rs/Cargo.toml --release --bin generate-key-rs -- \
-     --root . --build-dir ./examples/fibonacci-square/build --snark
-node ../pil2-proofman-js/src/main_setup_snark.js \
+cargo run --bin proofman-setup -- setup-snark \
      -b ./examples/fibonacci-square/build \
-     -n plonk -p examples/fibonacci-square/src/publics_info.json -w <powers_of_tau>
+     --publics-info examples/fibonacci-square/src/publics_info.json --powers-of-tau <powers_of_tau>
 ```
 
-To run the aggregated proof, need to add -r to the previous command
+By default the final SNARK is pilfflonk, which wraps the blake3 key's recursivef
+(`provingKeySnark/recursivef/`): `setup-snark` sets that up first, as `setup-recursivef` does, if there
+is none. The ptau needs 15,204,438 powers `[τ^i]₁`: the official
+`powersOfTau28_hez_final_23.ptau` or a larger one (`pilfflonk/tests/download-ptau.sh 23` downloads
+it). The wrap's AIR is compiled over BN128 by a pil2-compiler that has `--field`, as
+`setup/pil2-stark`'s does.
+
+PLONK and FFLONK take a key of a poseidon family instead: run `setup` with `--hash Poseidon1` or
+`--hash Poseidon2`, and `setup-snark` with `--final-snark plonk` or `--final-snark fflonk`.
+
+If only wants to generate the recursive final for debugging purposes, run:
+
+```bash
+cargo run --bin proofman-setup -- setup-snark \
+     -b ./examples/fibonacci-square/build --only-recursive-final
+```
+
+Both `setup-snark` forms need a proving key generated with `-r`.
 
 ### 2.3 Generate PIL Helpers
 
@@ -105,8 +113,19 @@ cargo run --bin proofman-cli pil-helpers \
      --path ./examples/fibonacci-square/src -o
 ```
 
+### 2.4 Generate Custom Commits
 
-### 2.4 Build the Project
+To generate the custom commits, run the following command:
+
+```bash
+cargo run --bin proofman-cli gen-custom-commits-fixed \
+     --witness-lib ./target/debug/libfibonacci_square${PIL2_PROOFMAN_EXT} \
+     --proving-key examples/fibonacci-square/build/provingKey/ \
+     --custom-commits rom=examples/fibonacci-square/build/rom.bin
+```
+
+
+### 2.5 Build the Project
 
 Build the project with the following command:
 
@@ -114,7 +133,7 @@ Build the project with the following command:
 cargo build --workspace
 ```
 
-### 2.5 Verify Constraints
+### 2.6 Verify Constraints
 
 Verify the constraints by executing this command:
 
@@ -126,20 +145,22 @@ cargo run --bin proofman-cli verify-constraints \
      --custom-commits rom=examples/fibonacci-square/build/rom.bin
 ```
 
-### 2.6 Generate Proof
+### 2.7 Generate Basic Proofs
 
-Finally, generate the proof using the following command:
+Finally, generate the basic proofs using the following command:
 
 ```bash
 cargo run --bin proofman-cli prove \
      --witness-lib ./target/debug/libfibonacci_square${PIL2_PROOFMAN_EXT} \
      --proving-key examples/fibonacci-square/build/provingKey/ \
      --public-inputs examples/fibonacci-square/src/inputs.json \
-     --output-dir examples/fibonacci-square/build/proofs -y 
+     --custom-commits rom=examples/fibonacci-square/build/rom.bin \
+     --output-dir examples/fibonacci-square/build/proofs \
+     --verify-proofs
 ```
 
 
-### 2.7 Generate VadcopFinal Proof
+### 2.8 Generate Full Aggregated Proof
 
 This will only work if setup is generated with `-r` flag.
 Generate the final proof using the following command:
@@ -149,42 +170,58 @@ cargo run --bin proofman-cli prove \
      --witness-lib ./target/debug/libfibonacci_square${PIL2_PROOFMAN_EXT} \
      --proving-key examples/fibonacci-square/build/provingKey/ \
      --public-inputs examples/fibonacci-square/src/inputs.json \
+     --custom-commits rom=examples/fibonacci-square/build/rom.bin \
      --output-dir examples/fibonacci-square/build/proofs \
-     -a
+     --aggregation --verify-proofs
+```
+
+With the snark setup of 2.2, `prove-snark` wraps that proof in the final SNARK and `verify-snark`
+verifies it, here with pilfflonk's vkey:
+
+```bash
+cargo run --bin proofman-cli prove-snark \
+     -p examples/fibonacci-square/build/proofs/vadcop_final_proof.bin \
+     -k examples/fibonacci-square/build/provingKeySnark \
+     -o examples/fibonacci-square/build/proofs \
+&& cargo run --bin proofman-cli verify-snark \
+     -p examples/fibonacci-square/build/proofs/snark_proof.bin \
+     -k examples/fibonacci-square/build/provingKeySnark/final/provingKey/final/pilfflonk/pilfflonk.vkey.json
 ```
 
 ### 2.9 Generating GPU proof
 
-In order to generate a proof in the GPU, the following commands needs to be executed after generating the setup and pil-helpers
+In order to generate a proof in the GPU, the following commands need to be executed after generating the setup and pil-helpers.
+
+Note that `gen-custom-commits-fixed` must be invoked with `--gpu` so the resulting `rom_gpu.bin` is laid out for the GPU Merkle hasher; the file produced without `--gpu` is the CPU layout and is not interchangeable.
+
+STIR works on the GPU too: run the setup with `-s ./examples/fibonacci-square/src/config.stir.json --recursive-n-bits 18` (this example's recursive2 needs 2^18 rows under STIR), then prove with `--gpu` as below. The BN128 final layer (`setup-snark` / `prove-snark`) stays FRI.
 
 ```bash
-cargo build --features gpu --workspace \
-&& cargo run --features gpu --bin proofman-cli gen-custom-commits-fixed \
+cargo build --workspace \
+&& cargo run --bin proofman-cli gen-custom-commits-fixed \
      --witness-lib ./target/debug/libfibonacci_square${PIL2_PROOFMAN_EXT} \
      --proving-key examples/fibonacci-square/build/provingKey/ \
      --custom-commits rom=examples/fibonacci-square/build/rom_gpu.bin \
-&& cargo run --features gpu --bin proofman-cli prove \
+     --gpu \
+&& cargo run --bin proofman-cli prove \
      --witness-lib ./target/debug/libfibonacci_square${PIL2_PROOFMAN_EXT} \
      --proving-key examples/fibonacci-square/build/provingKey/ \
      --public-inputs examples/fibonacci-square/src/inputs.json \
      --output-dir examples/fibonacci-square/build/proofs \
-     --custom-commits rom=examples/fibonacci-square/build/rom_gpu.bin -y -a -f
+     --custom-commits rom=examples/fibonacci-square/build/rom_gpu.bin -y -f --gpu -vv
 ```
 ### 2.9 All at once
 
 **Without recursion:**
 
 ```bash
-export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
-&& node --max-old-space-size=65536 ../pil2-compiler/src/pil.js ./examples/fibonacci-square/pil/build.pil \
+export PIL2_PROOFMAN_EXT=$(if [[  "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
+&& cargo run --bin proofman-setup -- compile-pil --pil ./examples/fibonacci-square/pil/build.pil \
      -I ./pil2-components/lib/std/pil \
      -o ./examples/fibonacci-square/pil/build.pilout \
-&& node --max-old-space-size=65536 ../pil2-proofman-js/src/main_setup.js \
+&& cargo run --bin proofman-setup -- setup \
      -a ./examples/fibonacci-square/pil/build.pilout \
-     -b ./examples/fibonacci-square/build -t pil2-components/lib/std/pil \
-&& node ../pil2-proofman-js/src/main_stats.js \
-     -a ./examples/fibonacci-square/pil/build.pilout \
-     -o ./examples/fibonacci-square/build/build.stats \
+     -b ./examples/fibonacci-square/build \
 && cargo run --bin proofman-cli pil-helpers \
      --pilout ./examples/fibonacci-square/pil/build.pilout \
      --path ./examples/fibonacci-square/src -o \
@@ -206,25 +243,22 @@ export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib
      --custom-commits rom=examples/fibonacci-square/build/rom.bin -y
 ```
 
-**With recursion:**
+**With recursion (blake3, the default hash; `--hash Poseidon1` or `Poseidon2` in `setup` for the
+poseidon families):**
 
 ```bash
-export PIL2_PROOFMAN_EXT=$(if [[ "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
-&& node --max-old-space-size=65536 ../pil2-compiler/src/pil.js ./examples/fibonacci-square/pil/build.pil \
+export PIL2_PROOFMAN_EXT=$(if [[  "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
+&& cargo run --bin proofman-setup -- compile-pil --pil ./examples/fibonacci-square/pil/build.pil \
      -I ./pil2-components/lib/std/pil \
      -o ./examples/fibonacci-square/pil/build.pilout \
-&& node --max-old-space-size=65536 ../pil2-proofman-js/src/main_setup.js \
+&& cargo run --bin proofman-setup -- setup \
      -a ./examples/fibonacci-square/pil/build.pilout \
-     -b ./examples/fibonacci-square/build -t pil2-components/lib/std/pil \
-     -r \
-&& node ../pil2-proofman-js/src/main_stats.js \
-     -a ./examples/fibonacci-square/pil/build.pilout \
-     -o ./examples/fibonacci-square/build/build.stats \
+     -b ./examples/fibonacci-square/build -r \
 && cargo run --bin proofman-cli pil-helpers \
      --pilout ./examples/fibonacci-square/pil/build.pilout \
      --path ./examples/fibonacci-square/src -o \
 && cargo build --workspace \
-cargo run --bin proofman-cli gen-custom-commits-fixed \
+&& cargo run --bin proofman-cli gen-custom-commits-fixed \
      --witness-lib ./target/debug/libfibonacci_square${PIL2_PROOFMAN_EXT} \
      --proving-key examples/fibonacci-square/build/provingKey/ \
      --custom-commits rom=examples/fibonacci-square/build/rom.bin \
@@ -240,9 +274,83 @@ cargo run --bin proofman-cli gen-custom-commits-fixed \
      --custom-commits rom=examples/fibonacci-square/build/rom.bin \
      --verify-proofs \
      --aggregation \
-     --compressed \
      --output-dir examples/fibonacci-square/build/proofs \
 && cargo run --bin proofman-cli verify-stark \
      --proof ./examples/fibonacci-square/build/proofs/vadcop_final_proof.bin \
-     --verkey ./examples/fibonacci-square/build/provingKey/build/vadcop_final_compressed/vadcop_final_compressed.verkey.bin
+     --verkey ./examples/fibonacci-square/build/provingKey/build/vadcop_final/vadcop_final.verkey.bin
 ```
+
+**With recursion (BLAKE3), on GPU, in one shot:**
+
+The hash family is chosen at setup time and read back at runtime, so only `setup` takes
+`--hash`; nothing else in the flow changes and no rebuild is needed. Swap `blake3` for
+`Poseidon1` or `Poseidon2` and the same block works.
+
+Three things are GPU-specific, and each one bites differently if you skip it:
+
+- **`gen-custom-commits-fixed --gpu`** writes the ROM in the GPU Merkle hasher's layout. Keep it
+  in its own file (`rom_gpu.bin`): the CPU layout is *not* interchangeable, so reusing `rom.bin`
+  for both silently leaves whichever ran last, and the other path then fails or, worse, proves
+  against the wrong commitment.
+- **`prove --gpu`** runs the prover on the device. `-vv` is worth having: it reports the per-stage
+  timings you need to tell a real regression from noise.
+- **`gen-exps`** compiles each AIR's Q-expression into a CUDA kernel (`.exps.so`). Optional — an
+  AIR without one falls back to the interpreter — but it is where a large share of the GPU speedup
+  comes from. It is a **no-op without `nvcc` on PATH**, and silently so, which is the one failure
+  mode to watch for. `setup --gen-exps` does it inline; the standalone `gen-exps` subcommand does
+  it on an existing `provingKey/` without re-running setup, which is what you want when iterating.
+
+```bash
+export PIL2_PROOFMAN_EXT=$(if [[  "$(uname -s)" == "Darwin" ]]; then echo ".dylib"; else echo ".so"; fi) \
+&& cargo run --bin proofman-setup -- compile-pil --pil ./examples/fibonacci-square/pil/build.pil \
+     -I ./pil2-components/lib/std/pil \
+     -o ./examples/fibonacci-square/pil/build.pilout \
+&& cargo run --bin proofman-setup -- setup \
+     -a ./examples/fibonacci-square/pil/build.pilout \
+     -b ./examples/fibonacci-square/build -r \
+     --hash blake3 --gen-exps \
+&& cargo run --bin proofman-cli pil-helpers \
+     --pilout ./examples/fibonacci-square/pil/build.pilout \
+     --path ./examples/fibonacci-square/src -o \
+&& cargo build --workspace \
+&& cargo run --bin proofman-cli gen-custom-commits-fixed \
+     --witness-lib ./target/debug/libfibonacci_square${PIL2_PROOFMAN_EXT} \
+     --proving-key examples/fibonacci-square/build/provingKey/ \
+     --custom-commits rom=examples/fibonacci-square/build/rom_gpu.bin --gpu \
+&& cargo run --bin proofman-cli stats \
+     --witness-lib ./target/debug/libfibonacci_square${PIL2_PROOFMAN_EXT} \
+     --proving-key examples/fibonacci-square/build/provingKey/ \
+     --public-inputs examples/fibonacci-square/src/inputs.json \
+     --custom-commits rom=examples/fibonacci-square/build/rom_gpu.bin \
+&& cargo run --bin proofman-cli prove \
+     --witness-lib ./target/debug/libfibonacci_square${PIL2_PROOFMAN_EXT} \
+     --proving-key examples/fibonacci-square/build/provingKey/ \
+     --public-inputs examples/fibonacci-square/src/inputs.json \
+     --custom-commits rom=examples/fibonacci-square/build/rom_gpu.bin \
+     --verify-proofs \
+     --aggregation \
+     --output-dir examples/fibonacci-square/build/proofs -vv --gpu \
+&& cargo run --bin proofman-cli verify-stark \
+     --proof ./examples/fibonacci-square/build/proofs/vadcop_final_proof.bin \
+     --verkey ./examples/fibonacci-square/build/provingKey/build/vadcop_final/vadcop_final.verkey.bin
+```
+
+`--verify-proofs` checks every proof as it is produced, and the closing `verify-stark` checks the
+aggregated one against its verification key. That last step is what exercises the **native Rust
+verifier** in `verifier/src/blake3/`, which is generated from the AIR's constraints by `setup -r`
+and lives in the repo: change a recursion AIR and it has to be regenerated, or it will reject
+proofs a correct prover produced.
+
+### Regenerating only the CUDA kernels
+
+`gen-exps` works on an existing proving key, so iterating on the kernels costs a few seconds
+instead of a whole setup:
+
+```bash
+cargo run --release --bin proofman-setup -- gen-exps \
+     -p ./examples/fibonacci-square/build/provingKey
+```
+
+`--exps-arch` pins the CUDA arch (`auto` by default, or e.g. `sm_120` / `"89,120"`),
+`--exps-cap` skips an AIR whose Q exceeds N ops (default 60000, leaving it on the interpreter),
+and `--exps-chunk` fixes ops per chunk instead of auto-tuning the largest no-spill size.

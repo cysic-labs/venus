@@ -1,15 +1,26 @@
 [workspace]
 members = [
-    "sha-hasher/host", 
-    "sha-hasher/guest", 
-    "multiple-programs/host", 
-    "multiple-programs/guest", 
-    "multiple-programs/guest_2",
-    "aggregation/host",
-    "aggregation/guest",
-    "aggregation/guest_agg",
-    "big-program/host",
-    "big-program/guest",
+  "zisklib-demo/guest",
+  "sha-hasher/host",
+  "multiple-programs/host",
+  "aggregation/host",
+  "big-program/host",
+  "input-2gb/host",
+  "hints/host",
+  "hash/host",
+  "hash/guest",
+  "fibonacci/host",
+  "fibonacci/guest",
+  "merkle-tree/host",
+  "gcd/host",
+  "gcd/guest",
+  "primes/host",
+  "primes/guest",
+  "collatz/host",
+  "collatz/guest",
+  "recurser/l2/host",
+  "recurser/hash/host",
+  "utils"
 ]
 
 resolver = "2"
@@ -17,12 +28,15 @@ resolver = "2"
 [profile.release]
 opt-level = 3
 
-[profile.release.package."proofman-verifier"]
-opt-level = 0
-
 [workspace.dependencies]
-# Guest dependencies
 ziskos = { path = "../ziskos/entrypoint" }
-
-# Host dependencies
 zisk-sdk = { path = "../sdk" }
+zisk-verifier = { path = "../verifier" }
+zisk-test-artifacts = { path = "../test-artifacts", default-features = false }
+examples-utils = { path = "utils"}
+
+# proofman-util = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", branch = "pre-develop-1.4.0-alpha" }
+# proofman-fields = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", branch = "pre-develop-1.4.0-alpha" }
+
+proofman-util = "1.4.0-alpha"
+proofman-fields = "1.4.0-alpha"

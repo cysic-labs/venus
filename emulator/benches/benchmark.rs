@@ -3,7 +3,8 @@ extern crate criterion;
 use criterion::Criterion;
 //use std::{fs::File /* , time::Duration */};
 use zisk_common::EmuTrace;
-use zisk_core::{Riscv2zisk, ZiskRom};
+use zisk_core::ZiskRom;
+use zisk_transpiler_common::ZiskTranspiler;
 use ziskemu::{EmuOptions, Emulator, ZiskEmulator};
 
 // Thanks to the example provided by @jebbow in his article
@@ -84,7 +85,7 @@ fn bench_riscv2zisk(c: &mut Criterion) {
             let elf = std::fs::read(elf_file.clone()).unwrap();
             let _rom: ZiskRom = {
                 // Create an instance of the RISCV -> ZisK program converter
-                let rv2zk = Riscv2zisk::new(&elf);
+                let rv2zk = ZiskTranspiler::new(&elf);
 
                 // Convert program to rom
                 let result = rv2zk.run();
@@ -99,7 +100,7 @@ fn bench_riscv2zisk(c: &mut Criterion) {
     });
 
     /*if let Ok(report) = guard.report().build() {
-        let file = File::create("riscv2zisk.svg").unwrap();
+        let file = File::create("zisk_transpiler_riscv.svg").unwrap();
         report.flamegraph(file).unwrap();
     };*/
 }
@@ -117,7 +118,7 @@ fn bench_process_rom(c: &mut Criterion) {
         let elf = std::fs::read(elf_file.clone()).unwrap();
         let rom: ZiskRom = {
             // Create an instance of the RISCV -> ZisK program converter
-            let rv2zk = Riscv2zisk::new(&elf);
+            let rv2zk = ZiskTranspiler::new(&elf);
 
             // Convert program to rom
             let result = rv2zk.run();
@@ -171,7 +172,7 @@ fn bench_process_rom_callback(c: &mut Criterion) {
         let elf = std::fs::read(elf_file.clone()).unwrap();
         let zisk_rom: ZiskRom = {
             // Create an instance of the RISCV -> ZisK program converter
-            let rv2zk = Riscv2zisk::new(&elf);
+            let rv2zk = ZiskTranspiler::new(&elf);
 
             // Convert program to rom
             let result = rv2zk.run();

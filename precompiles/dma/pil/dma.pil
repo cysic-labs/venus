@@ -217,14 +217,7 @@ airtemplate Dma(int N = 2**21,
     const expr pre_op = _pre_op;
     const expr post_op = _pre_op + OP_DMA_POST_OFFSET;
     const expr sel = _sel;
-    sel * (1 - sel) === 0;
-
-    // Extended DMA variants carry count in the operation argument instead of
-    // reading it from EXTRA_PARAMS_ADDR, so they must be tied to a base op that
-    // normally performs that count load.
-    const expr sel_count_from_mem = sel_load_count_from_mem - sel_extended;
-    sel_extended * (1 - sel_load_count_from_mem) === 0;
-    sel_count_from_mem * (1 - sel_count_from_mem) === 0;
+    sel * (1 - sel) === 0;      
 
     // assuming max memory of 4GB (32 bits)
     // count: 24 bits RC + 8 bits T
@@ -324,16 +317,13 @@ airtemplate Dma(int N = 2**21,
         }
 
         range_check(expression: h_src64, min: 0, max: 2**22-1, sel: sel);
-        lookup_assumes(DUAL_RANGE_7_BITS_ID, expressions: [l_src64, l_dst64], sel: sel);
+        lookup_assumes(DUAL_RANGE_7_BITS_ID, expressions: [l_src64, l_dst64], sel: sel, sel_is_binary: 1);
 
         // High 32 bits of the source address, see dst_hi below.
         col witness bits(32) air.src_hi;
 
         src_hi * count * sel === 0;
-        if (enable_inputcpy || enable_memset) {
-            // the b argument of inputcpy and memset is the count, not an address
-            (sel_inputcpy + sel_memset) * src_hi === 0;
-        }
+        (sel_inputcpy + sel_memset) * src_hi === 0;
     } else {    
         const expr air.src = 0;
         const expr air.src64 = 0;
@@ -344,10 +334,9 @@ airtemplate Dma(int N = 2**21,
         range_check(expression: l_dst64, min: 0, max: 0x7F, sel: sel);
     }
 
-    // High 32 bits of the destination address. Main sends the full 64-bit address registers, and
-    // an operation with count == 0 touches no memory, so it is valid with any address: only then
-    // may the address carry bits above 32, for any other count the constraint below pins the
-    // high word to zero. Declared here because bus_result reads dst_hi.
+    // High 32 bits of the destination address. An operation with count == 0 touches no memory,
+    // so only then may the address carry bits above 32; for any other count the constraint below
+    // pins the word to zero. Declared here because bus_result reads dst_hi.
     col witness bits(32) dst_hi;
 
     dst_hi * count * sel === 0;
@@ -439,7 +428,7 @@ airtemplate Dma(int N = 2**21,
                        result_nz * DMA_ROM_NEQ_F +
                        use_src * DMA_ROM_USE_SRC_F;
 
-    lookup_assumes(DMA_ROM_ID, expressions: [dst_offset, src_offset, l_count, flags, pre_count, src_offset_after_pre, l_count64], sel: sel);
+    lookup_assumes(DMA_ROM_ID, expressions: [dst_offset, src_offset, l_count, flags, pre_count, src_offset_after_pre, l_count64], sel: sel, sel_is_binary: 1);
 
     // OP_DMA_MEMSET isn't implemented because usually memset used with static value known
     // in compilation time, and for this case we could use OP_DMA_XMEMSET. For a OP_DMA_MEMSET
@@ -516,7 +505,7 @@ airtemplate Dma(int N = 2**21,
                                      fill_byte,
                                      pre_result_nz,
                                      ...bus_pre_result
-                                    ], sel: use_pre);
+                                    ], sel: use_pre, sel_is_binary: 1);
 
     // DMA ===> DMA_PRE_POST (POST)
     // --------------------------------------------------------------------------------
@@ -537,7 +526,7 @@ airtemplate Dma(int N = 2**21,
                                      main_step,
                                      fill_byte, 
                                      post_result_nz,
-                                     ...bus_post_result], sel: use_post);
+                                     ...bus_post_result], sel: use_post, sel_is_binary: 1);
 
     // BUS: DMA ===> MAIN (Definitions)
 
@@ -571,7 +560,7 @@ airtemplate Dma(int N = 2**21,
     // For OP_DMA_MEMCPY and OP_DMA_MEMCMP we need read the third parameter (count), to do it 
     // we read a specific position on RAM, EXTRA_PARAM_ADDR.
     
-    precompiled_mem_load(sel: sel_count_from_mem,
+    precompiled_mem_load(sel: sel_load_count_from_mem - sel_extended, 
                          main_step:, 
                          addr: EXTRA_PARAMS_ADDR, 
                          value: [count_bus, 0]);

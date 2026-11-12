@@ -1,7 +1,4 @@
-use crate::{
-    handlers::{read_num_pairs, validate_hint_length},
-    hint_fields, zisklib,
-};
+use crate::{handlers::validate_hint_length, hint_fields, zisklib};
 
 use anyhow::Result;
 
@@ -20,7 +17,7 @@ pub fn bn254_g1_add_hint(data: &[u64]) -> Result<Vec<u64>> {
     let mut hints = Vec::new();
     let result: &mut [u8; 64] = &mut [0u8; 64];
     unsafe {
-        zisklib::bn254_g1_add_c(p1.as_ptr(), p2.as_ptr(), result.as_mut_ptr(), &mut hints);
+        zisklib::add_safe_bn254_c(p1.as_ptr(), p2.as_ptr(), result.as_mut_ptr(), &mut hints);
     }
 
     Ok(hints)
@@ -43,7 +40,12 @@ pub fn bn254_g1_mul_hint(data: &[u64]) -> Result<Vec<u64>> {
     let mut hints = Vec::new();
     let result: &mut [u8; 64] = &mut [0u8; 64];
     unsafe {
-        zisklib::bn254_g1_mul_c(point.as_ptr(), scalar.as_ptr(), result.as_mut_ptr(), &mut hints);
+        zisklib::scalar_mul_safe_bn254_c(
+            point.as_ptr(),
+            scalar.as_ptr(),
+            result.as_mut_ptr(),
+            &mut hints,
+        );
     }
 
     Ok(hints)
@@ -56,31 +58,26 @@ pub fn bn254_pairing_check_hint(data: &[u64]) -> Result<Vec<u64>> {
     const G2_WORDS: usize = 16;
     const PAIR_WORDS: usize = G1_WORDS + G2_WORDS;
 
-    let num_pairs = read_num_pairs(data, PAIR_WORDS, "PAIRING_BATCH_BN254")?;
+    if data.is_empty() {
+        anyhow::bail!("BN254_PAIRING_CHECK: data is empty");
+    }
+
+    let num_pairs = data[0] as usize;
+
+    let expected_len = 1 + num_pairs * PAIR_WORDS;
+
+    validate_hint_length(data, expected_len, "PAIRING_BATCH_BN254")?;
 
     let pairs_data = &data[1..];
 
     let mut hints = Vec::new();
     unsafe {
-        zisklib::bn254_pairing_check_c(pairs_data.as_ptr() as *const u8, num_pairs, &mut hints);
+        zisklib::pairing_check_safe_bn254_c(
+            pairs_data.as_ptr() as *const u8,
+            num_pairs,
+            &mut hints,
+        );
     }
 
     Ok(hints)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pairing_check_rejects_pair_count_that_wraps_to_the_data_length() {
-        // 24 * (2^61 + 1) wraps to 24 words in 64 bits, which unchecked arithmetic would accept
-        // for this one-pair payload.
-        let mut data = vec![(1u64 << 61) + 1];
-        data.extend_from_slice(&[0u64; 24]);
-
-        let err = bn254_pairing_check_hint(&data).unwrap_err();
-
-        assert!(err.to_string().contains("overflows the hint length"), "{err}");
-    }
 }

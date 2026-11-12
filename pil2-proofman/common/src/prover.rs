@@ -1,7 +1,7 @@
 use std::str::FromStr;
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ProofType {
     #[default]
     Basic = 0,
@@ -11,6 +11,7 @@ pub enum ProofType {
     VadcopFinal,
     VadcopFinalCompressed,
     RecursiveF,
+    RecurserAggregator,
 }
 
 impl ProofType {
@@ -23,6 +24,7 @@ impl ProofType {
             ProofType::VadcopFinal => 4,
             ProofType::VadcopFinalCompressed => 5,
             ProofType::RecursiveF => 6,
+            ProofType::RecurserAggregator => 7,
         }
     }
 }
@@ -37,6 +39,7 @@ impl From<ProofType> for &'static str {
             ProofType::VadcopFinal => "vadcop_final",
             ProofType::VadcopFinalCompressed => "vadcop_final_compressed",
             ProofType::RecursiveF => "recursive_f",
+            ProofType::RecurserAggregator => "recurser_aggregator",
         }
     }
 }
@@ -53,19 +56,22 @@ impl FromStr for ProofType {
             "vadcop_final" => Ok(ProofType::VadcopFinal),
             "vadcop_final_compressed" => Ok(ProofType::VadcopFinalCompressed),
             "recursive_f" => Ok(ProofType::RecursiveF),
+            "recurser_aggregator" => Ok(ProofType::RecurserAggregator),
             _ => Err(()),
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Proof<F: PrimeField64> {
     pub proof_type: ProofType,
     pub airgroup_id: usize,
     pub air_id: usize,
     pub global_idx: Option<usize>,
     pub proof: Vec<u64>,
-    pub circom_witness: Vec<F>,
+    /// Committed-pol trace, scattered directly by `getWitnessTrace` (witness proofs only).
+    pub trace: Vec<F>,
+    pub publics: Vec<F>,
     pub n_cols: usize,
 }
 
@@ -77,7 +83,7 @@ impl<F: PrimeField64> Proof<F> {
         global_idx: Option<usize>,
         proof: Vec<u64>,
     ) -> Self {
-        Self { proof_type, global_idx, airgroup_id, air_id, proof, circom_witness: Vec::new(), n_cols: 0 }
+        Self { proof_type, global_idx, airgroup_id, air_id, proof, trace: Vec::new(), publics: Vec::new(), n_cols: 0 }
     }
 
     pub fn new_witness(
@@ -85,10 +91,11 @@ impl<F: PrimeField64> Proof<F> {
         airgroup_id: usize,
         air_id: usize,
         global_idx: Option<usize>,
-        circom_witness: Vec<F>,
+        trace: Vec<F>,
+        publics: Vec<F>,
         n_cols: usize,
     ) -> Self {
-        Self { proof_type, global_idx, airgroup_id, air_id, circom_witness, proof: Vec::new(), n_cols }
+        Self { proof_type, global_idx, airgroup_id, air_id, trace, publics, proof: Vec::new(), n_cols }
     }
 }
 

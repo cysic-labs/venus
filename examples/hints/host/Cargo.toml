@@ -1,0 +1,15 @@
+[package]
+name = "hints-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zisk-sdk = { workspace = true }
+anyhow = "1.0"
+
+[build-dependencies]
+zisk-sdk = { workspace = true }
+
+[features]
+default = []
+gpu = []

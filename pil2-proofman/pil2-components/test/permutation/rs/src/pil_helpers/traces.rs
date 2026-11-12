@@ -10,15 +10,13 @@ use proofman_common::GenericTrace;
 use proofman_common::PackedInfoConst;
 pub use proofman_macros::trace_row;
 pub use proofman_macros::values;
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use std::fmt;
 
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "2b121161d7299196c31b8cc204263ead9914da79c827f22c18f0f89110c63bf5";
-
-pub const MERKLE_TREE_ARITY: u64 = 4;
+pub const PILOUT_HASH: &str = "023c28a88a59dd50cd47cfbccc04eed991ca0a59a6ac87628c00a6f8729cec44";
 
 //AIRGROUP CONSTANTS
 
@@ -43,8 +41,8 @@ pub type Permutation1_6Fixed<F> = GenericTrace<Permutation1_6FixedRow<F>, 64, 0,
 trace_row!(Permutation1_6TraceRow<F> {
  a1:F, b1:F, a2:F, b2:F, a3:F, b3:F, a4:F, b4:F, c1:F, d1:F, c2:F, d2:F, sel1:F, sel2:F, sel3:F,
 });
-pub type Permutation1_6Trace<F> = GenericTrace<Permutation1_6TraceRow<F>, 64, 0, 0>;
 
+pub type Permutation1_6Trace<F> = GenericTrace<Permutation1_6TraceRow<F>, 64, 0, 0>;
 
 trace_row!(Permutation1_7FixedRow<F> {
  __L1__: F,
@@ -54,8 +52,8 @@ pub type Permutation1_7Fixed<F> = GenericTrace<Permutation1_7FixedRow<F>, 128, 0
 trace_row!(Permutation1_7TraceRow<F> {
  a1:F, b1:F, a2:F, b2:F, a3:F, b3:F, a4:F, b4:F, c1:F, d1:F, c2:F, d2:F, sel1:F, sel2:F, sel3:F,
 });
-pub type Permutation1_7Trace<F> = GenericTrace<Permutation1_7TraceRow<F>, 128, 0, 1>;
 
+pub type Permutation1_7Trace<F> = GenericTrace<Permutation1_7TraceRow<F>, 128, 0, 1>;
 
 trace_row!(Permutation1_8FixedRow<F> {
  __L1__: F,
@@ -65,8 +63,8 @@ pub type Permutation1_8Fixed<F> = GenericTrace<Permutation1_8FixedRow<F>, 256, 0
 trace_row!(Permutation1_8TraceRow<F> {
  a1:F, b1:F, a2:F, b2:F, a3:F, b3:F, a4:F, b4:F, c1:F, d1:F, c2:F, d2:F, sel1:F, sel2:F, sel3:F,
 });
-pub type Permutation1_8Trace<F> = GenericTrace<Permutation1_8TraceRow<F>, 256, 0, 2>;
 
+pub type Permutation1_8Trace<F> = GenericTrace<Permutation1_8TraceRow<F>, 256, 0, 2>;
 
 trace_row!(Permutation2_6FixedRow<F> {
  __L1__: F,
@@ -76,8 +74,8 @@ pub type Permutation2_6Fixed<F> = GenericTrace<Permutation2_6FixedRow<F>, 512, 0
 trace_row!(Permutation2_6TraceRow<F> {
  c1:F, d1:F, c2:F, d2:F, sel:F,
 });
-pub type Permutation2_6Trace<F> = GenericTrace<Permutation2_6TraceRow<F>, 512, 0, 3>;
 
+pub type Permutation2_6Trace<F> = GenericTrace<Permutation2_6TraceRow<F>, 512, 0, 3>;
 
 values!(Permutation1_6AirGroupValues<F> {
  gsum_result: FieldExtension<F>, gprod_result: FieldExtension<F>,
@@ -96,4 +94,13 @@ values!(Permutation2_6AirGroupValues<F> {
 });
 
 pub const PACKED_INFO: &[(usize, usize, PackedInfoConst)] = &[
+];
+
+/// Display name for every `(airgroup_id, air_id)` pair, derived directly from the
+/// PILOUT. Lets code resolve an AIR name without a loaded setup/`GlobalInfo`.
+pub const AIR_NAMES: &[(usize, usize, &str)] = &[
+    (0, 0, "Permutation1_6"),
+    (0, 1, "Permutation1_7"),
+    (0, 2, "Permutation1_8"),
+    (0, 3, "Permutation2_6"),
 ];

@@ -1,545 +1,58 @@
 use std::os::raw::{c_void, c_char};
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use std::path::{Path, PathBuf};
-use std::collections::HashSet;
-use std::sync::RwLock;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{ErrorKind, Read};
 use libloading::{Library, Symbol};
-use std::ffi::{CString, OsString};
-use bytemuck::{cast_slice, cast_slice_mut};
-use std::sync::atomic::{AtomicBool, Ordering};
-use crate::{NativeRecursiveRuntime, RowInfo};
+use std::ffi::CString;
+use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+
+pub type GetWitnessTraceFunc = unsafe extern "C" fn(
+    zkin: *mut u64,
+    circom_circuit: *mut c_void,
+    exec_data: *mut u64,
+    trace: *mut c_void,
+    publics: *mut c_void,
+    n: u64,
+    n_publics: u64,
+    n_committed_pols: u64,
+    n_mutexes: u64,
+    signal_values: *mut c_void, // optional pool buffer (>= total_signal_no u64s); null => self-alloc
+) -> i64;
+
+pub type GetTotalSignalNoFunc = unsafe extern "C" fn() -> u64;
+pub type PrepareSignalMapFunc = unsafe extern "C" fn(circuit: *mut c_void, exec_data: *mut u64, exec_words: u64) -> i64;
+
+#[derive(Debug)]
+pub struct CircomState {
+    library: Option<Library>,
+    pub circuit: Option<*mut c_void>,
+    pub get_witness_trace_fn: Option<GetWitnessTraceFunc>,
+}
+
+unsafe impl Send for CircomState {}
+unsafe impl Sync for CircomState {}
 
 use proofman_starks_lib_c::set_memory_expressions_c;
 use proofman_starks_lib_c::{
     expressions_bin_new_c, stark_info_new_c, stark_info_free_c, expressions_bin_free_c, get_map_totaln_c,
-    get_map_totaln_custom_commits_fixed_c, get_map_totaln_contributions_c, get_proof_size_c, get_max_n_tmp1_c,
-    get_max_n_tmp3_c, get_const_tree_size_c, load_const_pols_c, load_const_tree_c, get_proof_pinned_size_c,
-    get_operations_quotient_c, calculate_words_per_row_c, validate_expressions_bin_c,
+    get_map_totaln_custom_commits_fixed_c, get_proof_size_c, get_max_n_tmp1_c, get_max_n_tmp3_c, get_const_tree_size_c,
+    get_proof_pinned_size_c, get_operations_quotient_c, calculate_words_per_row_c, load_device_setup_c,
 };
-use proofman_util::create_buffer_fast;
 
-use crate::{GlobalInfoAir, ProofmanError};
+use crate::{custom_commit_reserved_words, custom_commit_words_per_row, GlobalInfoAir, ProofmanError};
 use crate::ProofType;
-use crate::{EvMapEType, StarkInfo};
+use crate::StarkInfo;
 use crate::ProofmanResult;
+use crate::exec_format::{EXEC_FORMAT_VERSION, EXEC_FORMAT_VERSION_WIDE, EXEC_HEADER_WORDS, EXEC_MAGIC, EXEC_MAGIC_MASK};
 
 pub type GetSizeWitnessFunc = unsafe extern "C" fn() -> u64;
 
 pub type GetCircomCircuitFunc = unsafe extern "C" fn(dat_file: *const c_char) -> *mut c_void;
 
 pub type FreeCircomCircuitFunc = unsafe extern "C" fn(circuit: *mut c_void);
-
-const MAX_STARK_VECTOR_WORDS: usize = if usize::BITS >= 64 { 1usize << 33 } else { usize::MAX / 8 };
-const MAX_STARK_COLUMNS: u64 = 1_000_000;
-const MAX_SAFE_SHIFT_BITS: u64 = 30;
-const MAX_STARK_BLOWUP_BITS: u64 = 32;
-const MAX_FRI_QUERIES: u64 = 4096;
-const MAX_CHALLENGE_MAP_ENTRIES: usize = 4096;
-const MAX_METADATA_MAP_ENTRIES: usize = 1 << 20;
-const MAX_QUERY_CONSTANT_VALUES: u64 = 1 << 20;
-const SUPPORTED_STARK_N_STAGES: u32 = 2;
-const FIELD_EXTENSION: u64 = 3;
-const MAX_STARKINFO_JSON_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_EXEC_FILE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_VERKEY_JSON_BYTES: u64 = 16 * 1024 * 1024;
-
-fn invalid_setup(message: impl Into<String>) -> ProofmanError {
-    ProofmanError::InvalidSetup(message.into())
-}
-
-fn recursive_library_loading_allowed(value: Option<OsString>) -> bool {
-    value
-        .and_then(|value| value.into_string().ok())
-        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-}
-
-fn unsafe_recursive_library_loading_enabled() -> bool {
-    recursive_library_loading_allowed(std::env::var_os("PROOFMAN_ALLOW_UNSAFE_RECURSIVE_SO"))
-}
-
-fn read_to_string_limited(path: &Path, max_bytes: u64, label: &str) -> ProofmanResult<String> {
-    let file =
-        File::open(path).map_err(|err| invalid_setup(format!("Failed to open {label} {}: {err}", path.display())))?;
-    let len = file
-        .metadata()
-        .map_err(|err| invalid_setup(format!("Failed to stat {label} {}: {err}", path.display())))?
-        .len();
-    if len > max_bytes {
-        return Err(invalid_setup(format!("{label} {} exceeds size limit", path.display())));
-    }
-    let mut contents = String::with_capacity(len as usize);
-    file.take(max_bytes + 1)
-        .read_to_string(&mut contents)
-        .map_err(|err| invalid_setup(format!("Failed to read {label} {}: {err}", path.display())))?;
-    if contents.len() as u64 > max_bytes {
-        return Err(invalid_setup(format!("{label} {} exceeds size limit", path.display())));
-    }
-    Ok(contents)
-}
-
-/// Parses a verkey, the Goldilocks Merkle root of the constant tree, which is always 4 field elements.
-fn parse_goldilocks_verkey<F: PrimeField64>(contents: &str) -> ProofmanResult<Vec<F>> {
-    let values: Vec<u64> =
-        serde_json::from_str(contents).map_err(|err| invalid_setup(format!("Failed to parse verkey: {err}")))?;
-    if values.len() != 4 {
-        return Err(invalid_setup(format!("verkey must contain exactly 4 limbs, got {}", values.len())));
-    }
-    Ok(values.into_iter().map(F::from_u64).collect())
-}
-
-fn read_first_u64_limited(path: &Path, label: &str) -> ProofmanResult<u64> {
-    let mut file =
-        File::open(path).map_err(|err| invalid_setup(format!("Failed to open {label} {}: {err}", path.display())))?;
-    let len = file
-        .metadata()
-        .map_err(|err| invalid_setup(format!("Failed to stat {label} {}: {err}", path.display())))?
-        .len();
-    if len < 8 {
-        return Err(invalid_setup(format!("{label} {} is too short", path.display())));
-    }
-    let mut word = [0u8; 8];
-    file.read_exact(&mut word)
-        .map_err(|err| invalid_setup(format!("Failed to read {label} {}: {err}", path.display())))?;
-    Ok(u64::from_le_bytes(word))
-}
-
-fn checked_domain_size(n_bits: u64, label: &str) -> ProofmanResult<usize> {
-    if n_bits > MAX_SAFE_SHIFT_BITS {
-        return Err(invalid_setup(format!("{label} n_bits exceeds supported limit")));
-    }
-    if n_bits >= usize::BITS as u64 {
-        return Err(invalid_setup(format!("{label} n_bits is too large")));
-    }
-    1usize.checked_shl(n_bits as u32).ok_or_else(|| invalid_setup(format!("{label} n_bits is too large")))
-}
-
-fn checked_word_product(count: u64, domain_size: usize, label: &str) -> ProofmanResult<usize> {
-    if count > MAX_STARK_COLUMNS {
-        return Err(invalid_setup(format!("{label} column count exceeds limit")));
-    }
-    let count = usize::try_from(count).map_err(|_| invalid_setup(format!("{label} column count is too large")))?;
-    let words = count.checked_mul(domain_size).ok_or_else(|| invalid_setup(format!("{label} size overflow")))?;
-    if words > MAX_STARK_VECTOR_WORDS {
-        return Err(invalid_setup(format!("{label} size exceeds limit")));
-    }
-    Ok(words)
-}
-
-fn require_map_section(stark_info: &StarkInfo, section: &str, label: &str) -> ProofmanResult<u64> {
-    stark_info
-        .map_sections_n
-        .get(section)
-        .copied()
-        .ok_or_else(|| invalid_setup(format!("{label} is missing {section} section")))
-}
-
-fn checked_abs_opening(point: i64, label: &str) -> ProofmanResult<u64> {
-    if point == i64::MIN {
-        return Err(invalid_setup(format!("{label} contains unsupported opening point")));
-    }
-    Ok(if point < 0 { (-(point + 1)) as u64 + 1 } else { point as u64 })
-}
-
-fn validate_opening_points(
-    stark_info: &StarkInfo,
-    domain_size: usize,
-    extended_domain_size: usize,
-    label: &str,
-) -> ProofmanResult<()> {
-    if stark_info.opening_points.is_empty() {
-        return Err(invalid_setup(format!("{label} has empty openingPoints")));
-    }
-    if stark_info.opening_points.len() as u64 > MAX_FRI_QUERIES {
-        return Err(invalid_setup(format!("{label} openingPoints exceeds supported limit")));
-    }
-    let blowup = 1u64
-        .checked_shl((stark_info.stark_struct.n_bits_ext - stark_info.stark_struct.n_bits) as u32)
-        .ok_or_else(|| invalid_setup(format!("{label} blowup factor is too large")))?;
-    let mut seen = HashSet::new();
-    for &point in &stark_info.opening_points {
-        if !seen.insert(point) {
-            return Err(invalid_setup(format!("{label} has duplicate openingPoints")));
-        }
-        let abs_point = checked_abs_opening(point, label)?;
-        if abs_point >= domain_size as u64 {
-            return Err(invalid_setup(format!("{label} opening point exceeds trace domain")));
-        }
-        let extended = abs_point
-            .checked_mul(blowup)
-            .ok_or_else(|| invalid_setup(format!("{label} opening point extension overflow")))?;
-        if extended >= extended_domain_size as u64 {
-            return Err(invalid_setup(format!("{label} opening point exceeds extended domain")));
-        }
-    }
-    Ok(())
-}
-
-fn validate_pol_span(stage_pos: u64, dim: u64, section_columns: u64, label: &str) -> ProofmanResult<()> {
-    if dim != 1 && dim != FIELD_EXTENSION {
-        return Err(invalid_setup(format!("{label} has unsupported polynomial dimension")));
-    }
-    let end = stage_pos.checked_add(dim).ok_or_else(|| invalid_setup(format!("{label} polynomial span overflow")))?;
-    if end > section_columns {
-        return Err(invalid_setup(format!("{label} polynomial column span is out of range")));
-    }
-    Ok(())
-}
-
-fn validate_pol_maps(stark_info: &StarkInfo, label: &str) -> ProofmanResult<()> {
-    let const_columns = require_map_section(stark_info, "const", label)?;
-    if const_columns != stark_info.n_constants {
-        return Err(invalid_setup(format!("{label} const section does not match nConstants")));
-    }
-
-    let cm_pols =
-        stark_info.cm_pols_map.as_deref().ok_or_else(|| invalid_setup(format!("{label} is missing cmPolsMap")))?;
-    for (idx, pol) in cm_pols.iter().enumerate() {
-        if pol.pols_map_id != idx as u64 {
-            return Err(invalid_setup(format!("{label} cmPolsMap polsMapId does not match its index")));
-        }
-        if pol.stage == 0 || pol.stage > u64::from(stark_info.n_stages) + 1 {
-            return Err(invalid_setup(format!("{label} cmPolsMap has invalid stage")));
-        }
-        let section_columns = require_map_section(stark_info, &format!("cm{}", pol.stage), label)?;
-        validate_pol_span(pol.stage_pos, pol.dim, section_columns, label)?;
-    }
-
-    let const_pols = stark_info
-        .const_pols_map
-        .as_deref()
-        .ok_or_else(|| invalid_setup(format!("{label} is missing constPolsMap")))?;
-    for (idx, pol) in const_pols.iter().enumerate() {
-        if pol.pols_map_id != idx as u64 {
-            return Err(invalid_setup(format!("{label} constPolsMap polsMapId does not match its index")));
-        }
-        if pol.stage != 0 {
-            return Err(invalid_setup(format!("{label} constPolsMap has invalid stage")));
-        }
-        validate_pol_span(pol.stage_id, pol.dim, stark_info.n_constants, label)?;
-    }
-
-    if stark_info.custom_commits_map.len() != stark_info.custom_commits.len() {
-        return Err(invalid_setup(format!("{label} customCommitsMap size does not match customCommits")));
-    }
-    for (commit_id, maybe_pol_map) in stark_info.custom_commits_map.iter().enumerate() {
-        let section = format!("{}0", stark_info.custom_commits[commit_id].name);
-        let section_columns = require_map_section(stark_info, &section, label)?;
-        let pol_map = maybe_pol_map
-            .as_deref()
-            .ok_or_else(|| invalid_setup(format!("{label} customCommitsMap has a null entry")))?;
-        for (idx, pol) in pol_map.iter().enumerate() {
-            if pol.commit_id != commit_id as u64 || pol.pols_map_id != idx as u64 {
-                return Err(invalid_setup(format!("{label} customCommitsMap metadata does not match its index")));
-            }
-            validate_pol_span(pol.stage_pos, pol.dim, section_columns, label)?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_ev_map(stark_info: &StarkInfo, label: &str) -> ProofmanResult<()> {
-    let cm_pols_len = stark_info.cm_pols_map.as_ref().map(|v| v.len()).unwrap_or(0);
-    let const_pols_len = stark_info.const_pols_map.as_ref().map(|v| v.len()).unwrap_or(0);
-    for ev in &stark_info.ev_map {
-        let opening_pos = match ev.opening_pos {
-            Some(pos) => {
-                usize::try_from(pos).map_err(|_| invalid_setup(format!("{label} evMap openingPos is too large")))?
-            }
-            None => stark_info
-                .opening_points
-                .iter()
-                .position(|&point| point == ev.prime)
-                .ok_or_else(|| invalid_setup(format!("{label} evMap prime is not in openingPoints")))?,
-        };
-        if opening_pos >= stark_info.opening_points.len() || stark_info.opening_points[opening_pos] != ev.prime {
-            return Err(invalid_setup(format!("{label} evMap openingPos does not match prime")));
-        }
-
-        match ev.type_ {
-            EvMapEType::Cm => {
-                if ev.id >= cm_pols_len as u64 {
-                    return Err(invalid_setup(format!("{label} evMap committed polynomial id is out of range")));
-                }
-            }
-            EvMapEType::Const => {
-                if ev.id >= const_pols_len as u64 {
-                    return Err(invalid_setup(format!("{label} evMap const polynomial id is out of range")));
-                }
-            }
-            EvMapEType::Custom => {
-                let commit_id = ev
-                    .commit_id
-                    .ok_or_else(|| invalid_setup(format!("{label} evMap custom entry is missing commitId")))?;
-                let commit_idx = usize::try_from(commit_id)
-                    .map_err(|_| invalid_setup(format!("{label} evMap custom commitId is too large")))?;
-                let pol_map = stark_info
-                    .custom_commits_map
-                    .get(commit_idx)
-                    .and_then(|entry| entry.as_ref())
-                    .ok_or_else(|| invalid_setup(format!("{label} evMap custom commitId is out of range")))?;
-                if ev.id >= pol_map.len() as u64 {
-                    return Err(invalid_setup(format!("{label} evMap custom polynomial id is out of range")));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_metadata_map_len<T>(
-    map: Option<&Vec<T>>,
-    key: &str,
-    max_entries: usize,
-    label: &str,
-) -> ProofmanResult<()> {
-    if let Some(map) = map {
-        if map.len() > max_entries {
-            return Err(invalid_setup(format!("{label} {key} exceeds supported length")));
-        }
-    }
-    Ok(())
-}
-
-fn validate_challenges_map(stark_info: &StarkInfo, label: &str) -> ProofmanResult<()> {
-    let challenges = stark_info
-        .challenges_map
-        .as_deref()
-        .ok_or_else(|| invalid_setup(format!("{label} is missing challengesMap")))?;
-    if challenges.is_empty() || challenges.len() > MAX_CHALLENGE_MAP_ENTRIES {
-        return Err(invalid_setup(format!("{label} challengesMap has invalid length")));
-    }
-
-    let mut seen = HashSet::new();
-    let mut xi_count = 0usize;
-    let max_stage = u64::from(stark_info.n_stages) + 3;
-    for challenge in challenges {
-        if challenge.dim != FIELD_EXTENSION {
-            return Err(invalid_setup(format!("{label} challengesMap has invalid dimension")));
-        }
-        if challenge.stage == 0 || challenge.stage > max_stage {
-            return Err(invalid_setup(format!("{label} challengesMap has invalid stage")));
-        }
-        if challenge.stage_id > MAX_CHALLENGE_MAP_ENTRIES as u64 {
-            return Err(invalid_setup(format!("{label} challengesMap stageId exceeds supported range")));
-        }
-        if !seen.insert((challenge.stage, challenge.stage_id)) {
-            return Err(invalid_setup(format!("{label} challengesMap has duplicate stage/stageId")));
-        }
-        if challenge.stage == u64::from(stark_info.n_stages) + 2 && challenge.stage_id == 0 {
-            xi_count += 1;
-        }
-    }
-    if xi_count != 1 {
-        return Err(invalid_setup(format!("{label} must contain exactly one xi challenge")));
-    }
-    Ok(())
-}
-
-pub fn validate_stark_info(stark_info: &StarkInfo, label: &str) -> ProofmanResult<usize> {
-    if stark_info.n_stages != SUPPORTED_STARK_N_STAGES {
-        return Err(invalid_setup(format!(
-            "{label} has unsupported nStages {}; expected {SUPPORTED_STARK_N_STAGES}",
-            stark_info.n_stages
-        )));
-    }
-    let n_bits = stark_info.stark_struct.n_bits;
-    let n_bits_ext = stark_info.stark_struct.n_bits_ext;
-    if n_bits_ext < n_bits {
-        return Err(invalid_setup(format!("{label} has nBitsExt smaller than nBits")));
-    }
-    if n_bits_ext - n_bits > MAX_STARK_BLOWUP_BITS {
-        return Err(invalid_setup(format!("{label} blowup factor exceeds limit")));
-    }
-    if stark_info.stark_struct.n_queries == 0 || stark_info.stark_struct.n_queries > MAX_FRI_QUERIES {
-        return Err(invalid_setup(format!("{label} nQueries exceeds supported limit")));
-    }
-    let extended_domain_size = checked_domain_size(n_bits_ext, label)?;
-    let domain_size = checked_domain_size(n_bits, label)?;
-    validate_opening_points(stark_info, domain_size, extended_domain_size, label)?;
-    let query_constant_values = stark_info
-        .n_constants
-        .checked_mul(stark_info.stark_struct.n_queries)
-        .ok_or_else(|| invalid_setup(format!("{label} query constant value count overflow")))?;
-    if query_constant_values > MAX_QUERY_CONSTANT_VALUES {
-        return Err(invalid_setup(format!("{label} query constant values exceed supported limit")));
-    }
-
-    validate_metadata_map_len(stark_info.publics_map.as_ref(), "publicsMap", MAX_METADATA_MAP_ENTRIES, label)?;
-    validate_metadata_map_len(stark_info.proof_values_map.as_ref(), "proofValuesMap", MAX_METADATA_MAP_ENTRIES, label)?;
-    validate_metadata_map_len(
-        stark_info.airgroupvalues_map.as_ref(),
-        "airgroupValuesMap",
-        MAX_METADATA_MAP_ENTRIES,
-        label,
-    )?;
-    validate_metadata_map_len(stark_info.airvalues_map.as_ref(), "airValuesMap", MAX_METADATA_MAP_ENTRIES, label)?;
-    validate_challenges_map(stark_info, label)?;
-    if stark_info.ev_map.len() > MAX_METADATA_MAP_ENTRIES {
-        return Err(invalid_setup(format!("{label} evMap exceeds supported length")));
-    }
-
-    for (section, &columns) in &stark_info.map_sections_n {
-        if columns > MAX_STARK_COLUMNS {
-            return Err(invalid_setup(format!("{label} section {section} column count exceeds limit")));
-        }
-        checked_word_product(columns, domain_size, &format!("{label} section {section}"))?;
-    }
-    for stage in 1..=(u64::from(stark_info.n_stages) + 1) {
-        let section = format!("cm{stage}");
-        if !stark_info.map_sections_n.contains_key(&section) {
-            return Err(invalid_setup(format!("{label} is missing {section} section")));
-        }
-    }
-    let const_columns = require_map_section(stark_info, "const", label)?;
-    if const_columns != stark_info.n_constants {
-        return Err(invalid_setup(format!("{label} const section does not match nConstants")));
-    }
-    if stark_info.q_dim != FIELD_EXTENSION {
-        return Err(invalid_setup(format!("{label} qDim must match field extension width")));
-    }
-    if stark_info.q_deg == 0 {
-        return Err(invalid_setup(format!("{label} qDeg must be nonzero")));
-    }
-    let blowup = 1u64
-        .checked_shl((n_bits_ext - n_bits) as u32)
-        .ok_or_else(|| invalid_setup(format!("{label} blowup factor is too large")))?;
-    if stark_info.q_deg > blowup {
-        return Err(invalid_setup(format!("{label} qDeg exceeds quotient blowup")));
-    }
-    let expected_q_columns = stark_info
-        .q_deg
-        .checked_mul(stark_info.q_dim)
-        .ok_or_else(|| invalid_setup(format!("{label} quotient column count overflow")))?;
-    if require_map_section(stark_info, "cm3", label)? != expected_q_columns {
-        return Err(invalid_setup(format!("{label} cm3 section does not match qDeg*qDim")));
-    }
-    for custom_commit in &stark_info.custom_commits {
-        if custom_commit.stage_widths.is_empty() {
-            return Err(invalid_setup(format!("{label} custom commit {} has empty stageWidths", custom_commit.name)));
-        }
-        for (idx, &stage_width) in custom_commit.stage_widths.iter().enumerate() {
-            checked_word_product(
-                u64::from(stage_width),
-                domain_size,
-                &format!("{label} custom commit {} stageWidths[{idx}]", custom_commit.name),
-            )?;
-        }
-        let section = format!("{}0", custom_commit.name);
-        let section_columns = stark_info.map_sections_n.get(&section).copied().ok_or_else(|| {
-            invalid_setup(format!("{label} custom commit {} is missing {section} section", custom_commit.name))
-        })?;
-        let expected_columns = u64::from(custom_commit.stage_widths[0]);
-        if section_columns != expected_columns {
-            return Err(invalid_setup(format!(
-                "{label} custom commit {} stageWidths[0] does not match {section} section",
-                custom_commit.name
-            )));
-        }
-    }
-    validate_pol_maps(stark_info, label)?;
-    validate_ev_map(stark_info, label)?;
-    if stark_info.boundaries.is_empty() {
-        return Err(invalid_setup(format!("{label} must contain at least one boundary")));
-    }
-    for boundary in &stark_info.boundaries {
-        match boundary.name.as_str() {
-            "everyRow" | "firstRow" | "lastRow" => {
-                if boundary.offset_min.is_some() || boundary.offset_max.is_some() {
-                    return Err(invalid_setup(format!(
-                        "{label} {} boundary must not carry frame offsets",
-                        boundary.name
-                    )));
-                }
-            }
-            "everyFrame" => {
-                let offset_min = boundary
-                    .offset_min
-                    .ok_or_else(|| invalid_setup(format!("{label} everyFrame boundary is missing offsetMin")))?;
-                let offset_max = boundary
-                    .offset_max
-                    .ok_or_else(|| invalid_setup(format!("{label} everyFrame boundary is missing offsetMax")))?;
-                let roots = offset_min
-                    .checked_add(offset_max)
-                    .ok_or_else(|| invalid_setup(format!("{label} everyFrame boundary offset overflow")))?;
-                if roots > domain_size as u64 {
-                    return Err(invalid_setup(format!("{label} everyFrame boundary offsets exceed trace size")));
-                }
-            }
-            _ => return Err(invalid_setup(format!("{label} unsupported boundary type {}", boundary.name))),
-        }
-    }
-    checked_word_product(stark_info.n_constants, domain_size, label)?;
-    Ok(domain_size)
-}
-
-fn checked_packed_const_words(words_per_row: u64, domain_size: usize, n_constants: u64) -> ProofmanResult<usize> {
-    let packed = checked_word_product(words_per_row, domain_size, "packed const polynomials")?;
-    let n_constants =
-        usize::try_from(n_constants).map_err(|_| invalid_setup("packed const n_constants is too large"))?;
-    let words = packed
-        .checked_add(1)
-        .and_then(|words| words.checked_add(n_constants))
-        .ok_or_else(|| invalid_setup("packed const polynomial size overflow"))?;
-    if words > MAX_STARK_VECTOR_WORDS {
-        return Err(invalid_setup("packed const polynomial size exceeds limit"));
-    }
-    Ok(words)
-}
-
-/// Returns the number of words of an exec file laid out as `[n_adds, n_smap, additions (4 words
-/// each), signal map (n_cols words per row)]`, after checking that its header matches its length.
-fn checked_exec_data_size_words(
-    exec_filename: &str,
-    n_adds: u64,
-    n_smap: u64,
-    n_cols: u64,
-    file_len: u64,
-) -> ProofmanResult<usize> {
-    let expected_bytes = n_adds
-        .checked_mul(4)
-        .zip(n_smap.checked_mul(n_cols))
-        .and_then(|(add_words, smap_words)| add_words.checked_add(smap_words))
-        .and_then(|words| words.checked_add(2))
-        .and_then(|words| words.checked_mul(8))
-        .filter(|&bytes| bytes <= MAX_EXEC_FILE_BYTES)
-        .ok_or_else(|| invalid_setup(format!("{exec_filename} exec file header exceeds the size limit")))?;
-    if file_len != expected_bytes {
-        return Err(invalid_setup(format!(
-            "{exec_filename} exec file has {file_len} bytes, its header declares {expected_bytes}"
-        )));
-    }
-    Ok((expected_bytes / 8) as usize)
-}
-
-/// Checks that every signal the exec data reads lies in the circuit witness: additions read the
-/// witness or earlier additions, the signal map reads the witness or any addition, and the publics
-/// follow the constant one at the start of the witness. Exec data that passes can be gathered
-/// without per-index checks.
-fn validate_exec_references(
-    exec_filename: &str,
-    exec_data: &[u64],
-    size_witness: u64,
-    n_publics: u64,
-) -> ProofmanResult<()> {
-    let n_adds = exec_data[0];
-    let (additions, signal_map) = exec_data[2..].split_at(n_adds as usize * 4);
-    if n_publics > 0 && n_publics >= size_witness {
-        return Err(invalid_setup(format!("{exec_filename} public input index exceeds witness size")));
-    }
-    for (i, addition) in additions.chunks_exact(4).enumerate() {
-        let available_witness = size_witness.saturating_add(i as u64);
-        if addition[0] >= available_witness || addition[1] >= available_witness {
-            return Err(invalid_setup(format!("{exec_filename} exec addition index exceeds witness size")));
-        }
-    }
-    let total_witness = size_witness.saturating_add(n_adds);
-    if signal_map.iter().any(|&signal| signal != 0 && signal >= total_witness) {
-        return Err(invalid_setup(format!("{exec_filename} exec signal index exceeds witness size")));
-    }
-    Ok(())
-}
+pub type FreeComponentCacheFunc = unsafe extern "C" fn();
 
 #[derive(Debug)]
 #[repr(C)]
@@ -574,57 +87,209 @@ pub struct Setup<F: PrimeField64> {
     pub stark_info: StarkInfo,
     pub const_pols_size: usize,
     pub const_pols_size_packed: usize,
+    pub custom_commits_reserved_words: usize,
+    /// Packed `words_per_row` reserved per custom commit (column count if unresolved at sizing).
+    /// `initialize_custom_commits` refuses a wider file, which would overrun the const buffer.
+    pub custom_commits_words_per_row: Vec<u64>,
     pub const_tree_size: usize,
     pub const_pols_path: String,
     pub const_pols_tree_path: String,
-    pub const_pols: Vec<F>,
-    pub const_pols_tree: Vec<F>,
     pub prover_buffer_size: u64,
-    pub contributions_size: u64,
     pub custom_commits_fixed_buffer_size: u64,
     pub proof_size: u64,
     pub pinned_proof_size: u64,
     pub setup_path: PathBuf,
     pub setup_type: ProofType,
-    pub size_witness: RwLock<Option<u64>>,
-    pub circom_library: RwLock<Option<Library>>,
-    pub circom_circuit: RwLock<Option<*mut c_void>>,
-    pub native_runtime: RwLock<Option<NativeRecursiveRuntime>>,
+    pub total_signal_no: Option<u64>,
+    pub circom_state: RwLock<CircomState>,
+    pub exec_data_path: Option<String>,
+    pub exec_data: Option<Arc<Vec<u64>>>,
     pub air_name: String,
     pub verkey: Vec<F>,
     pub verkey_file: String,
-    pub exec_data: RwLock<Option<Vec<u64>>>,
-    /// Whether `exec_data` was checked against the circuit's witness size when it was loaded.
-    pub exec_data_validated: AtomicBool,
     pub n_cols: u64,
     pub n_operations_quotient: u64,
-    pub preallocate: bool,
-    pub const_pols_loaded: AtomicBool,
+    pub gpu: bool,
 }
 
 impl<F: PrimeField64> Drop for Setup<F> {
     fn drop(&mut self) {
-        let mut circom_circuit_guard = self.circom_circuit.write().unwrap();
-
-        if circom_circuit_guard.is_some() {
-            let circom_circuit = circom_circuit_guard.take().unwrap();
-
-            let circom_library_guard = self.circom_library.read().unwrap();
-
-            if let Some(circom_library) = circom_library_guard.as_ref() {
+        let mut state = self.circom_state.write().unwrap();
+        let circuit = state.circuit.take();
+        if let Some(circom_library) = &state.library {
+            if let Some(circom_circuit) = circuit {
                 unsafe {
                     let free_circom_circuit: Symbol<FreeCircomCircuitFunc> =
                         circom_library.get(b"freeCircuit\0").expect("Failed to get freeCircuit symbol");
-
                     free_circom_circuit(circom_circuit);
+                }
+            }
+            // Best-effort: absent from an older proving key's library.
+            unsafe {
+                if let Ok(free_component_cache) = circom_library.get::<FreeComponentCacheFunc>(b"freeComponentCache\0")
+                {
+                    free_component_cache();
                 }
             }
         }
     }
 }
 
+/// Dimensions from a loaded `.exec` buffer's header.
+pub struct ExecHeader {
+    pub n_adds: u64,
+    pub map_rows: u64,
+    pub map_cols: u64,
+}
+
+/// Reads the header of a buffer [`load_exec_file`] returned, which has already validated it.
+///
+/// Go through this rather than indexing the buffer: the header has grown once already, and the
+/// call sites that hard-coded `exec[0]` for `n_adds` all became silently wrong when it did.
+pub fn exec_header(exec: &[u64]) -> ExecHeader {
+    debug_assert!(
+        exec.len() >= EXEC_HEADER_WORDS && exec[0] == (EXEC_MAGIC | EXEC_FORMAT_VERSION),
+        "exec buffer was not produced by load_exec_file"
+    );
+    ExecHeader { n_adds: exec[1], map_rows: exec[2], map_cols: exec[3] }
+}
+
+/// Reads a whole `.exec` file into memory and validates its header.
+///
+/// The layout is version 2 of [`exec_format`](crate::exec_format), Goldilocks', the only one the
+/// STARK prover reads: magic and version, `n_adds`, then the map's row and column extent, then the
+/// additions, the map as u32 pairs, and a gate-band section. This reads to the end of the file
+/// rather than to the map's length, so the band section comes along. A version 3 file, the BN128
+/// exec of the pilfflonk wrap, is refused as one.
+pub fn load_exec_file(exec_filename: &str, n_cols: u64) -> ProofmanResult<Vec<u64>> {
+    let mut file = File::open(exec_filename)?;
+
+    let file_bytes = file.metadata()?.len();
+    if file_bytes % 8 != 0 {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "exec file {exec_filename} is {file_bytes} bytes, not a multiple of 8"
+        )));
+    }
+    let total_elements = usize::try_from(file_bytes / 8)
+        .map_err(|_| ProofmanError::InvalidSetup(format!("exec file {exec_filename}: size overflow")))?;
+    if total_elements < EXEC_HEADER_WORDS {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "exec file {exec_filename} is {total_elements} words, too short to hold a header"
+        )));
+    }
+
+    let mut header = [0u64; EXEC_HEADER_WORDS];
+    for word in header.iter_mut() {
+        let mut bytes = [0u8; 8];
+        file.read_exact(&mut bytes)?;
+        *word = u64::from_le_bytes(bytes);
+    }
+
+    if header[0] & EXEC_MAGIC_MASK != EXEC_MAGIC {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "exec file {exec_filename} does not carry an exec header; it predates the current \
+             layout -- regenerate the proving key with a matching setup"
+        )));
+    }
+    let version = header[0] & !EXEC_MAGIC_MASK;
+    if version == EXEC_FORMAT_VERSION_WIDE {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "exec file {exec_filename} is format version {version}, the BN128 exec plonk2pil writes for \
+             the pilfflonk wrap; the STARK prover reads only version {EXEC_FORMAT_VERSION}, over Goldilocks"
+        )));
+    }
+    if version != EXEC_FORMAT_VERSION {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "exec file {exec_filename} is format version {version}, but this build reads version \
+             {EXEC_FORMAT_VERSION} -- regenerate the proving key with a matching setup"
+        )));
+    }
+
+    let (n_adds, map_rows, map_cols) = (header[1], header[2], header[3]);
+    if map_cols > n_cols {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "exec file {exec_filename} maps {map_cols} columns into a trace {n_cols} wide; the \
+             proving key's exec file and stark info disagree"
+        )));
+    }
+
+    // The map is u32 pairs, so its words are half its entries rounded up.
+    let prefix_elements: usize = (|| -> Option<usize> {
+        let adds_terms = n_adds.checked_mul(4)?;
+        let map_words = map_rows.checked_mul(map_cols)?.checked_add(1)? / 2;
+        usize::try_from((EXEC_HEADER_WORDS as u64).checked_add(adds_terms)?.checked_add(map_words)?).ok()
+    })()
+    .ok_or_else(|| {
+        ProofmanError::InvalidSetup(format!(
+            "exec header for {exec_filename}: size overflow (n_adds={n_adds}, map_rows={map_rows}, \
+             map_cols={map_cols})"
+        ))
+    })?;
+
+    if total_elements < prefix_elements {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "exec file {exec_filename} is {total_elements} words, shorter than its own header claims \
+             ({prefix_elements})"
+        )));
+    }
+
+    // Header already consumed; read the remaining u64s in one go.
+    let mut exec_data: Vec<u64> = vec![0; total_elements];
+    exec_data[..EXEC_HEADER_WORDS].copy_from_slice(&header);
+    let body_bytes = (total_elements - EXEC_HEADER_WORDS) * 8;
+    let body_slice =
+        unsafe { std::slice::from_raw_parts_mut(exec_data[EXEC_HEADER_WORDS..].as_mut_ptr() as *mut u8, body_bytes) };
+    file.read_exact(body_slice)?;
+    Ok(exec_data)
+}
+
 #[allow(clippy::too_many_arguments)]
 impl<F: PrimeField64> Setup<F> {
+    /// Uploads this setup to every GPU, gate-band section included.
+    ///
+    /// Go through this (or [`Setup::load_device_as`]) rather than `load_device_setup_c`: the GPU
+    /// expander rebuilds the hash gates' trace interiors from those bands, and a setup uploaded
+    /// without them proves a trace with holes in it.
+    pub fn load_device(
+        &self,
+        airgroup_id: u64,
+        air_id: u64,
+        d_buffers: *mut std::os::raw::c_void,
+        packed_info: *mut std::os::raw::c_void,
+    ) {
+        let exec = self.exec_data.as_ref().map(|e| e.as_slice());
+        self.load_device_as(self.setup_type.into(), airgroup_id, air_id, d_buffers, packed_info, exec);
+    }
+
+    /// [`Setup::load_device`] with the registration key and the exec buffer spelled out, for
+    /// `prove_air`: it proves one AIR under the proof type named in the proof file, which can
+    /// differ from this setup's own, and it loads the exec file itself.
+    pub fn load_device_as(
+        &self,
+        proof_type: &str,
+        airgroup_id: u64,
+        air_id: u64,
+        d_buffers: *mut std::os::raw::c_void,
+        packed_info: *mut std::os::raw::c_void,
+        exec: Option<&[u64]>,
+    ) {
+        let (exec_ptr, exec_words) = match exec {
+            Some(exec) => (exec.as_ptr() as *mut u64, exec.len() as u64),
+            None => (std::ptr::null_mut(), 0),
+        };
+        load_device_setup_c(
+            airgroup_id,
+            air_id,
+            proof_type,
+            (&self.p_setup).into(),
+            d_buffers,
+            self.verkey.as_ptr() as *mut u8,
+            packed_info,
+            exec_ptr,
+            exec_words,
+        );
+    }
+
     pub fn new(
         setup_path: &Path,
         airgroup_id: usize,
@@ -632,33 +297,44 @@ impl<F: PrimeField64> Setup<F> {
         air_info: &GlobalInfoAir,
         setup_type: &ProofType,
         verify_constraints: bool,
-        preallocate: bool,
-        recursive2_path: Option<&PathBuf>,
-    ) -> Self {
-        let stark_info_path = match setup_type {
-            ProofType::Recursive1 => {
-                let setup_path_recursive2 =
-                    recursive2_path.expect("recursive2_path must be provided for Recursive1 proof type");
-                setup_path_recursive2.display().to_string() + ".starkinfo.json"
-            }
-            _ => setup_path.display().to_string() + ".starkinfo.json",
+        gpu: bool,
+        starkinfo_source_path: Option<&PathBuf>,
+        // Commit name -> packed file, when the caller knows them before the const buffer is
+        // sized. Empty reserves each custom commit's worst case.
+        custom_commits_fixed: &HashMap<String, PathBuf>,
+        // Proved with no global challenge (prove-air): the cm1 root enters the transcript before
+        // stage 2, so the StarkInfo is built as recursive to keep it off the in-place commit.
+        self_contained: bool,
+    ) -> ProofmanResult<Self> {
+        let starkinfo_borrow_path = match setup_type {
+            ProofType::Recursive1 => Some(
+                starkinfo_source_path
+                    .expect("starkinfo_source_path (Recursive2 stem) must be provided for Recursive1")
+                    .clone(),
+            ),
+            ProofType::RecurserAggregator => Some(
+                starkinfo_source_path
+                    .expect("starkinfo_source_path (vadcop_final stem) must be provided for RecurserAggregator")
+                    .clone(),
+            ),
+            _ => None,
+        };
+        let stark_info_path = match &starkinfo_borrow_path {
+            Some(p) => p.display().to_string() + ".starkinfo.json",
+            None => setup_path.display().to_string() + ".starkinfo.json",
         };
 
-        let expressions_bin_path = match setup_type {
-            ProofType::Recursive1 => {
-                let setup_path_recursive2 =
-                    recursive2_path.expect("recursive2_path must be provided for Recursive1 proof type");
-                setup_path_recursive2.display().to_string() + ".bin"
-            }
-            _ => setup_path.display().to_string() + ".bin",
+        let expressions_bin_path = match &starkinfo_borrow_path {
+            Some(p) => p.display().to_string() + ".bin",
+            None => setup_path.display().to_string() + ".bin",
         };
 
-        let const_pols_path = match !cfg!(feature = "gpu") {
+        let const_pols_path = match !gpu {
             true => setup_path.display().to_string() + ".const",
             false => setup_path.display().to_string() + ".const_gpu",
         };
 
-        let const_pols_tree_path = match !cfg!(feature = "gpu") {
+        let const_pols_tree_path = match !gpu {
             true => setup_path.display().to_string() + ".consttree",
             false => setup_path.display().to_string() + ".consttree_gpu",
         };
@@ -667,15 +343,12 @@ impl<F: PrimeField64> Setup<F> {
             stark_info,
             p_stark_info,
             p_expressions_bin,
-            const_pols,
-            const_pols_tree,
             verkey,
             verkey_file,
             const_pols_size,
             const_pols_size_packed,
             const_tree_size,
             prover_buffer_size,
-            contributions_size,
             custom_commits_fixed_buffer_size,
             proof_size,
             pinned_proof_size,
@@ -688,10 +361,7 @@ impl<F: PrimeField64> Setup<F> {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 Vec::new(),
-                Vec::new(),
-                Vec::new(),
                 String::new(),
-                0,
                 0,
                 0,
                 0,
@@ -704,72 +374,57 @@ impl<F: PrimeField64> Setup<F> {
             )
         } else {
             // Otherwise, initialize the pointers with their respective values
-            let stark_info_json =
-                read_to_string_limited(Path::new(&stark_info_path), MAX_STARKINFO_JSON_BYTES, "starkinfo")
-                    .unwrap_or_else(|err| panic!("{err}"));
+            let stark_info_json = std::fs::read_to_string(&stark_info_path)
+                .unwrap_or_else(|_| panic!("Failed to read file {}", stark_info_path));
             let stark_info = StarkInfo::from_json(&stark_info_json);
-            let domain_size = validate_stark_info(&stark_info, &stark_info_path).unwrap_or_else(|err| panic!("{err}"));
-            let recursive = setup_type != &ProofType::Basic;
+            let recursive = setup_type != &ProofType::Basic || self_contained;
             let recursive_final = setup_type == &ProofType::RecursiveF;
-            let preallocate_const = preallocate && cfg!(feature = "gpu");
-            let p_stark_info = stark_info_new_c(
-                stark_info_path.as_str(),
-                recursive_final,
-                recursive,
-                verify_constraints,
-                false,
-                cfg!(feature = "gpu"),
-                preallocate_const,
-            );
+            // The poseidon families' recursivef is a BN128 STARK, with a prover of its own (the
+            // SnarkWrapper's); blake3's is a Goldilocks one, a setup as the vadcop_final's.
+            let bn128_recursive_final = recursive_final && stark_info.stark_struct.verification_hash_type == "BN128";
+            let p_stark_info =
+                stark_info_new_c(stark_info_path.as_str(), recursive_final, recursive, verify_constraints, false, gpu);
             let expressions_bin = expressions_bin_new_c(expressions_bin_path.as_str(), false, false);
-            validate_expressions_bin_c(expressions_bin, p_stark_info);
             let n_max_tmp1 = get_max_n_tmp1_c(expressions_bin);
             let n_max_tmp3 = get_max_n_tmp3_c(expressions_bin);
             set_memory_expressions_c(p_stark_info, n_max_tmp1, n_max_tmp3);
             let prover_buffer_size = get_map_totaln_c(p_stark_info);
-            let contributions_size = get_map_totaln_contributions_c(p_stark_info);
             let custom_commits_fixed_buffer_size = get_map_totaln_custom_commits_fixed_c(p_stark_info);
             let proof_size = get_proof_size_c(p_stark_info);
             let pinned_proof_size = get_proof_pinned_size_c(p_stark_info);
-            let const_pols_size = checked_word_product(stark_info.n_constants, domain_size, "constant polynomials")
-                .unwrap_or_else(|err| panic!("{err}"));
+            let const_pols_size = (stark_info.n_constants * (1 << stark_info.stark_struct.n_bits)) as usize;
 
-            let const_tree_size =
-                usize::try_from(get_const_tree_size_c(p_stark_info)).expect("const tree size does not fit in usize");
-            if const_tree_size > MAX_STARK_VECTOR_WORDS {
-                panic!("const tree size exceeds limit");
-            }
+            let const_tree_size = get_const_tree_size_c(p_stark_info) as usize;
 
             let n_operations_quotient = get_operations_quotient_c(expressions_bin, p_stark_info) as u64;
 
             let verkey_file = setup_path.display().to_string() + ".verkey.json";
 
-            let verkey = if setup_type == &ProofType::RecursiveF {
+            let verkey = if bn128_recursive_final {
                 vec![]
             } else {
-                let json_str = read_to_string_limited(Path::new(&verkey_file), MAX_VERKEY_JSON_BYTES, "verkey")
-                    .unwrap_or_else(|err| panic!("{err}"));
-                parse_goldilocks_verkey(&json_str).unwrap_or_else(|err| panic!("{err}"))
+                let mut file = File::open(&verkey_file).unwrap_or_else(|e| {
+                    panic!("Unable to open verkey file {verkey_file} (setup_type {setup_type:?}): {e}")
+                });
+                let mut json_str = String::new();
+                file.read_to_string(&mut json_str).expect("Unable to read file");
+                let vk: Vec<u64> = serde_json::from_str(&json_str).expect("Unable to parse JSON");
+                vk.iter().map(|&x| F::from_u64(x)).collect::<Vec<F>>()
             };
 
             let n_cols = stark_info.map_sections_n["cm1"];
 
-            if verify_constraints && !cfg!(feature = "gpu") {
-                // SAFETY: the const polynomial loader writes the whole buffer before it is read.
-                let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
+            if verify_constraints && !gpu {
                 (
                     stark_info,
                     p_stark_info,
                     expressions_bin,
-                    const_pols,
-                    Vec::new(),
                     verkey,
                     verkey_file,
                     const_pols_size,
                     0,
                     const_tree_size,
                     prover_buffer_size,
-                    contributions_size,
                     custom_commits_fixed_buffer_size,
                     proof_size,
                     pinned_proof_size,
@@ -777,34 +432,35 @@ impl<F: PrimeField64> Setup<F> {
                     n_operations_quotient,
                 )
             } else {
-                // SAFETY: the const polynomial and const tree loaders write both buffers before they are read.
-                let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
-                let const_pols_tree: Vec<F> = unsafe { create_buffer_fast(const_tree_size) };
                 let mut const_pols_size_packed = 0;
-                if cfg!(feature = "gpu") && setup_type != &ProofType::RecursiveF {
-                    let words_per_row: u64 = if Path::new(&const_pols_path).exists() {
-                        read_first_u64_limited(Path::new(&const_pols_path), "GPU const pols")
-                            .unwrap_or_else(|err| panic!("{err}"))
-                    } else {
-                        calculate_words_per_row_c(p_stark_info, &(setup_path.display().to_string() + ".const"))
-                    };
+                if gpu && !bn128_recursive_final {
+                    let mut header = [0u8; 8];
+                    let words_per_row: u64 =
+                        match File::open(&const_pols_path).and_then(|mut f| f.read_exact(&mut header)) {
+                            Ok(()) => u64::from_le_bytes(header),
+                            // Missing or truncated: regenerated later, size it from the source .const.
+                            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::UnexpectedEof) => {
+                                calculate_words_per_row_c(p_stark_info, &(setup_path.display().to_string() + ".const"))
+                            }
+                            Err(e) => {
+                                return Err(ProofmanError::InvalidSetup(format!(
+                                    "Failed to read GPU const pols header {const_pols_path}: {e}"
+                                )))
+                            }
+                        };
                     const_pols_size_packed =
-                        checked_packed_const_words(words_per_row, domain_size, stark_info.n_constants)
-                            .unwrap_or_else(|err| panic!("{err}"));
+                        (words_per_row * (1 << stark_info.stark_struct.n_bits) + 1 + stark_info.n_constants) as usize;
                 }
                 (
                     stark_info,
                     p_stark_info,
                     expressions_bin,
-                    const_pols,
-                    const_pols_tree,
                     verkey,
                     verkey_file,
                     const_pols_size,
                     const_pols_size_packed,
                     const_tree_size,
                     prover_buffer_size,
-                    contributions_size,
                     custom_commits_fixed_buffer_size,
                     proof_size,
                     pinned_proof_size,
@@ -814,404 +470,171 @@ impl<F: PrimeField64> Setup<F> {
             }
         };
 
-        Self {
+        // Initialize circom circuit and exec data for proof types that need it
+        // Skip compressors that don't exist
+        let needs_circom = match setup_type {
+            ProofType::Compressor => air_info.has_compressor.unwrap_or(false),
+            _ => setup_type != &ProofType::Basic,
+        };
+
+        let (circom_library, circom_circuit, get_witness_trace_fn, total_signal_no, exec_data_path, exec_data) =
+            if needs_circom {
+                let lib_extension = if cfg!(target_os = "macos") { ".dylib" } else { ".so" };
+                let rust_lib_filename = setup_path.display().to_string() + lib_extension;
+                let rust_lib_path = Path::new(rust_lib_filename.as_str());
+
+                if !rust_lib_path.exists() {
+                    return Err(ProofmanError::InvalidSetup(format!(
+                        "Rust lib dynamic library not found at path: {rust_lib_path:?}"
+                    )));
+                }
+
+                let library: Library = unsafe { Library::new(rust_lib_path)? };
+
+                let dat_filename = setup_path.display().to_string() + ".dat";
+                let dat_filename_str = CString::new(dat_filename.as_str()).unwrap();
+                let dat_filename_ptr = dat_filename_str.as_ptr() as *mut std::os::raw::c_char;
+
+                let circom_circuit_ptr = unsafe {
+                    let init_circom_circuit: Symbol<GetCircomCircuitFunc> = library.get(b"initCircuit\0")?;
+                    init_circom_circuit(dat_filename_ptr)
+                };
+                // loadCircuit returns nullptr on a bad .dat; unchecked it segfaults in getWitnessTrace.
+                if circom_circuit_ptr.is_null() {
+                    return Err(ProofmanError::InvalidSetup(format!(
+                        "initCircuit failed for {dat_filename} (see the loadCircuit error above)"
+                    )));
+                }
+
+                // Sizes the pooled signalValues buffers, so it must be exact: a `getSizeWitness`
+                // fallback would under-count (signals >= witness entries) and overflow them.
+                let total_signal_no = unsafe {
+                    let get_total_signal_no: Symbol<GetTotalSignalNoFunc> = library.get(b"getTotalSignalNo\0")?;
+                    get_total_signal_no()
+                };
+
+                let get_witness_trace_fn =
+                    unsafe { library.get::<GetWitnessTraceFunc>(b"getWitnessTrace\0").ok().map(|sym| *sym) };
+
+                // Pre-loaded so every `getWitnessTrace` scatter reads it at RAM speed.
+                let exec_filename = setup_path.display().to_string() + ".exec";
+                let mut exec_data = load_exec_file(&exec_filename, n_cols)?;
+
+                // Best-effort: getWitnessTrace reads the exec map directly if this is absent,
+                // as it is in an older proving key's library.
+                unsafe {
+                    if let Ok(prepare) = library.get::<PrepareSignalMapFunc>(b"prepareSignalMap\0") {
+                        let words = exec_data.len() as u64;
+                        prepare(circom_circuit_ptr, exec_data.as_mut_ptr(), words);
+                    }
+                }
+
+                (
+                    Some(library),
+                    Some(circom_circuit_ptr),
+                    get_witness_trace_fn,
+                    Some(total_signal_no),
+                    Some(exec_filename),
+                    Some(Arc::new(exec_data)),
+                )
+            } else {
+                (None, None, None, None, None, None)
+            };
+
+        // Packed width comes from the commit file header when the caller named it; otherwise
+        // reserve the worst case (one word per column). Registration must not exceed this.
+        let mut custom_commits_words_per_row: Vec<u64> = Vec::new();
+        let custom_commits_reserved_words = match gpu {
+            true => {
+                let widths: Vec<u64> = stark_info
+                    .custom_commits
+                    .iter()
+                    .map(|c| c.stage_widths.first().copied().unwrap_or(0) as u64)
+                    .collect();
+                let n = 1u64 << stark_info.stark_struct.n_bits;
+                let n_extended = 1u64 << stark_info.stark_struct.n_bits_ext;
+                let arity = stark_info.stark_struct.merkle_tree_arity;
+                let packed: Vec<Option<u64>> = stark_info
+                    .custom_commits
+                    .iter()
+                    .zip(&widths)
+                    .map(|(commit, &n_cols)| {
+                        if n_cols == 0 {
+                            return None;
+                        }
+                        let path = custom_commits_fixed.get(&commit.name)?;
+                        match custom_commit_words_per_row(path, n, n_extended, n_cols, arity) {
+                            Ok(words) => Some(words),
+                            // Not fatal: registration validates the file and reports errors.
+                            Err(e) => {
+                                tracing::debug!("custom commit '{}' not sized from its file: {e}", commit.name);
+                                None
+                            }
+                        }
+                    })
+                    .collect();
+                custom_commits_words_per_row = widths
+                    .iter()
+                    .zip(&packed)
+                    .map(|(&n_cols, resolved)| resolved.filter(|&p| p > 0 && p <= n_cols).unwrap_or(n_cols))
+                    .collect();
+                custom_commit_reserved_words(
+                    stark_info.stark_struct.n_bits as u32,
+                    &widths,
+                    &custom_commits_words_per_row.iter().copied().map(Some).collect::<Vec<_>>(),
+                )
+            }
+            false => 0,
+        };
+
+        Ok(Self {
             air_id,
             airgroup_id,
             stark_info,
             p_setup: SetupC { p_stark_info, p_expressions_bin },
             const_pols_size,
             const_pols_size_packed,
+            custom_commits_reserved_words,
+            custom_commits_words_per_row,
             const_tree_size,
-            const_pols,
-            const_pols_tree,
             verkey,
             verkey_file,
             prover_buffer_size,
             custom_commits_fixed_buffer_size,
-            contributions_size,
             proof_size,
             pinned_proof_size,
-            size_witness: RwLock::new(None),
-            circom_circuit: RwLock::new(None),
-            circom_library: RwLock::new(None),
-            native_runtime: RwLock::new(None),
-            exec_data: RwLock::new(None),
-            exec_data_validated: AtomicBool::new(false),
+            total_signal_no,
+            circom_state: RwLock::new(CircomState {
+                library: circom_library,
+                circuit: circom_circuit,
+                get_witness_trace_fn,
+            }),
+            exec_data_path,
+            exec_data,
             setup_path: setup_path.to_path_buf().clone(),
-            setup_type: setup_type.clone(),
+            setup_type: *setup_type,
             air_name: air_info.name.clone(),
             const_pols_path,
             const_pols_tree_path,
             n_cols,
             n_operations_quotient,
-            preallocate,
-            const_pols_loaded: AtomicBool::new(false),
-        }
+            gpu,
+        })
     }
 
-    /// Loads the constant polynomials into this setup's buffer.
-    ///
-    /// # Safety
-    ///
-    /// The loader writes through a shared reference: no reference to `self.const_pols` may be used
-    /// while it runs.
-    pub unsafe fn load_const_pols(&self) {
-        if self.const_pols_loaded.load(Ordering::Acquire) {
-            return;
-        }
-        assert!(
-            self.const_pols.len() >= self.const_pols_size,
-            "const_pols buffer too small: got {}, expected at least {}",
-            self.const_pols.len(),
-            self.const_pols_size
-        );
-        load_const_pols_c(
-            self.const_pols.as_ptr() as *mut u8,
-            self.const_pols_path.as_str(),
-            self.const_pols_size as u64 * 8,
-        );
-        self.const_pols_loaded.store(true, Ordering::Release);
+    /// The poseidon families' recursivef: a BN128 STARK, which the SnarkWrapper proves with its own
+    /// buffers and const tree. blake3's recursivef is a Goldilocks setup like any other.
+    pub fn is_bn128_recursivef(&self) -> bool {
+        self.setup_type == ProofType::RecursiveF && self.stark_info.stark_struct.verification_hash_type == "BN128"
     }
 
-    /// Loads the constant polynomial tree into this setup's buffer.
-    ///
-    /// # Safety
-    ///
-    /// The loader writes through a shared reference: no reference to `self.const_pols_tree` may be
-    /// used while it runs.
-    pub unsafe fn load_const_pols_tree(&self) -> ProofmanResult<()> {
-        let const_pols_tree_size = self.const_tree_size;
-        if self.const_pols_tree.len() < const_pols_tree_size {
-            return Err(invalid_setup(format!(
-                "const tree buffer too small: got {}, expected at least {}",
-                self.const_pols_tree.len(),
-                const_pols_tree_size
-            )));
-        }
-
-        let valid_root = load_const_tree_c(
-            self.p_setup.p_stark_info,
-            self.const_pols_tree.as_ptr() as *mut u8,
-            self.const_pols_tree_path.as_str(),
-            (const_pols_tree_size * 8) as u64,
-            &(self.setup_path.display().to_string() + ".verkey.json"),
-        );
-        if !valid_root {
-            return Err(invalid_setup(format!("failed to load const tree {}", self.const_pols_tree_path)));
-        }
-        Ok(())
+    pub fn get_vk(&self) -> Vec<u64> {
+        self.verkey.iter().map(|x| x.as_canonical_u64()).collect()
     }
-
-    pub fn get_const_pols(&self, first_row: usize, num_rows: usize, offset: Option<usize>) -> Vec<RowInfo> {
-        let offset = offset.unwrap_or(1);
-        let num_rows_available = self.const_pols.len() / self.stark_info.n_constants as usize;
-
-        (0..num_rows)
-            .map(|i| first_row + i * offset)
-            .take_while(|&row| row < num_rows_available)
-            .map(|row| {
-                let start = row * self.stark_info.n_constants as usize;
-                let end = start + self.stark_info.n_constants as usize;
-                let values = self.const_pols[start..end].iter().map(|v| F::as_canonical_u64(v)).collect();
-                RowInfo { row, values }
-            })
-            .collect()
-    }
-
-    pub fn get_const_ptr(&self) -> *mut u8 {
-        self.const_pols.as_ptr() as *mut u8
-    }
-
-    pub fn get_const_tree_ptr(&self) -> *mut u8 {
-        self.const_pols_tree.as_ptr() as *mut u8
-    }
-
-    pub fn get_vk(&self) -> Vec<u8> {
-        let verkey_u64: Vec<u64> = self.verkey.iter().map(|x| x.as_canonical_u64()).collect();
-        cast_slice(&verkey_u64).to_vec()
-    }
-
-    pub fn set_circom_circuit(&self) -> ProofmanResult<()> {
-        let dat_filename = self.setup_path.display().to_string() + ".dat";
-        let runtime_dat_filename = self.setup_path.display().to_string() + ".runtime.dat";
-        let mut native_runtime_errors = Vec::new();
-        for dat_path in [Path::new(dat_filename.as_str()), Path::new(runtime_dat_filename.as_str())] {
-            if dat_path.exists() {
-                match NativeRecursiveRuntime::from_dat_file(dat_path) {
-                    Ok(runtime) => {
-                        *self.size_witness.write().unwrap() = Some(runtime.size_witness_words);
-                        *self.native_runtime.write().unwrap() = Some(runtime);
-                        return Ok(());
-                    }
-                    Err(err) => {
-                        native_runtime_errors.push(format!("{}: {err}", dat_path.display()));
-                    }
-                }
-            }
-        }
-
-        let lib_extension = if cfg!(target_os = "macos") { ".dylib" } else { ".so" };
-        let rust_lib_filename = self.setup_path.display().to_string() + lib_extension;
-        let rust_lib_path = Path::new(rust_lib_filename.as_str());
-
-        if !rust_lib_path.exists() {
-            if !native_runtime_errors.is_empty() {
-                return Err(ProofmanError::InvalidSetup(format!(
-                    "Failed to load native recursive runtime from {}",
-                    native_runtime_errors.join("; ")
-                )));
-            }
-            return Err(ProofmanError::InvalidSetup(format!(
-                "Native recursive runtime not found at paths: {dat_filename:?}, {runtime_dat_filename:?}"
-            )));
-        }
-        if !unsafe_recursive_library_loading_enabled() {
-            let native_error_suffix = if native_runtime_errors.is_empty() {
-                String::new()
-            } else {
-                format!(" Native runtime parse errors: {}", native_runtime_errors.join("; "))
-            };
-            return Err(ProofmanError::InvalidSetup(format!(
-                "Refusing to load recursive setup dynamic library {rust_lib_path:?}; \
-                 use native .dat/.runtime.dat setup artifacts or set \
-                 PROOFMAN_ALLOW_UNSAFE_RECURSIVE_SO=1 for a trusted legacy setup.{native_error_suffix}"
-            )));
-        }
-
-        tracing::warn!(
-            "Loading trusted legacy recursive setup dynamic library {:?}; this executes host code",
-            rust_lib_path
-        );
-        let dat_filename_str = CString::new(dat_filename.as_str()).unwrap();
-        let dat_filename_ptr = dat_filename_str.as_ptr() as *mut std::os::raw::c_char;
-
-        let library: Library = unsafe { Library::new(rust_lib_path)? };
-
-        let circom_circuit = unsafe {
-            let init_circom_circuit: Symbol<GetCircomCircuitFunc> = library.get(b"initCircuit\0")?;
-            Some(init_circom_circuit(dat_filename_ptr))
-        };
-
-        let size_witness = unsafe {
-            let get_size_witness: Symbol<GetSizeWitnessFunc> = library.get(b"getSizeWitness\0")?;
-            Some(get_size_witness())
-        };
-
-        *self.circom_library.write().unwrap() = Some(library);
-        *self.size_witness.write().unwrap() = size_witness;
-        *self.circom_circuit.write().unwrap() = circom_circuit;
-        Ok(())
-    }
-
-    /// Loads the exec file of a recursive setup. Once the circuit is loaded, the exec data is checked
-    /// against its witness size, so the committed polynomials can be gathered without per-index
-    /// checks.
-    pub fn set_exec_file_data(&self) -> ProofmanResult<()> {
-        self.exec_data_validated.store(false, Ordering::Release);
-        let exec_filename = self.setup_path.display().to_string() + ".exec";
-        let mut file = File::open(&exec_filename)?;
-
-        let mut bytes = [0u8; 8];
-
-        file.read_exact(&mut bytes)?;
-        let n_adds = u64::from_le_bytes(bytes);
-
-        file.read_exact(&mut bytes)?;
-        let n_smap = u64::from_le_bytes(bytes);
-
-        let exec_data_size =
-            checked_exec_data_size_words(&exec_filename, n_adds, n_smap, self.n_cols, file.metadata()?.len())?;
-        let mut exec_file_data: Vec<u64> = vec![0; exec_data_size];
-        file.seek(SeekFrom::Start(0))?;
-        file.read_exact(cast_slice_mut(&mut exec_file_data))?;
-
-        let validated = match *self.size_witness.read().unwrap() {
-            Some(size_witness) => {
-                validate_exec_references(&exec_filename, &exec_file_data, size_witness, self.stark_info.n_publics)?;
-                true
-            }
-            None => false,
-        };
-        *self.exec_data.write().unwrap() = Some(exec_file_data);
-        self.exec_data_validated.store(validated, Ordering::Release);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Boundary, CustomCommits, EvMap, PolMap, PublicValues};
-    use std::collections::HashMap;
-
-    fn minimal_valid_stark_info() -> StarkInfo {
-        let mut map_sections_n = HashMap::new();
-        map_sections_n.insert("const".to_string(), 1);
-        map_sections_n.insert("cm1".to_string(), 1);
-        map_sections_n.insert("cm2".to_string(), 1);
-        map_sections_n.insert("cm3".to_string(), FIELD_EXTENSION);
-
-        let mut stark_info = StarkInfo::default();
-        stark_info.stark_struct.n_bits = 4;
-        stark_info.stark_struct.n_bits_ext = 4;
-        stark_info.stark_struct.n_queries = 1;
-        stark_info.n_stages = SUPPORTED_STARK_N_STAGES;
-        stark_info.n_constants = 1;
-        stark_info.q_deg = 1;
-        stark_info.q_dim = FIELD_EXTENSION;
-        stark_info.opening_points = vec![0];
-        stark_info.boundaries = vec![Boundary { name: "everyRow".to_string(), offset_min: None, offset_max: None }];
-        stark_info.challenges_map = Some(vec![PolMap {
-            name: "std_xi".to_string(),
-            stage: u64::from(SUPPORTED_STARK_N_STAGES) + 2,
-            dim: FIELD_EXTENSION,
-            stage_id: 0,
-            ..PolMap::default()
-        }]);
-        stark_info.const_pols_map =
-            Some(vec![PolMap { name: "const".to_string(), dim: 1, stage_id: 0, pols_map_id: 0, ..PolMap::default() }]);
-        stark_info.cm_pols_map = Some(Vec::new());
-        stark_info.map_sections_n = map_sections_n;
-        stark_info
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_bad_bit_order() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.stark_struct.n_bits = 20;
-        stark_info.stark_struct.n_bits_ext = 19;
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_cpp_unsupported_bit_width() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.stark_struct.n_bits = MAX_SAFE_SHIFT_BITS + 1;
-        stark_info.stark_struct.n_bits_ext = MAX_SAFE_SHIFT_BITS + 1;
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_unsupported_stage_count() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.n_stages = SUPPORTED_STARK_N_STAGES + 1;
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_missing_stage_section() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.map_sections_n.remove("cm3");
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_empty_custom_commit_stage_widths() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.custom_commits.push(CustomCommits {
-            name: "custom".to_string(),
-            stage_widths: Vec::new(),
-            public_values: Vec::<PublicValues>::new(),
-        });
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_custom_commit_section_mismatch() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.map_sections_n.insert("custom0".to_string(), 2);
-        stark_info.custom_commits.push(CustomCommits {
-            name: "custom".to_string(),
-            stage_widths: vec![1],
-            public_values: Vec::<PublicValues>::new(),
-        });
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_accepts_custom_commit_section_match() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.map_sections_n.insert("custom0".to_string(), 1);
-        stark_info.custom_commits.push(CustomCommits {
-            name: "custom".to_string(),
-            stage_widths: vec![1],
-            public_values: Vec::<PublicValues>::new(),
-        });
-        stark_info.custom_commits_map.push(Some(Vec::new()));
-        assert!(validate_stark_info(&stark_info, "ok.starkinfo.json").is_ok());
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_bad_q_dim() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.q_dim = 1;
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_opening_point_out_of_domain() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.opening_points = vec![16];
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_bad_ev_map_id() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.ev_map.push(EvMap {
-            type_: EvMapEType::Const,
-            id: 1,
-            prime: 0,
-            opening_pos: Some(0),
-            ..EvMap::default()
-        });
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_empty_boundaries() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.boundaries.clear();
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_rejects_offsets_on_non_frame_boundary() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.boundaries[0].offset_min = Some(1);
-        let err = validate_stark_info(&stark_info, "bad.starkinfo.json").unwrap_err();
-        assert!(matches!(err, ProofmanError::InvalidSetup(_)));
-    }
-
-    #[test]
-    fn stark_info_validation_accepts_frame_boundary_offsets() {
-        let mut stark_info = minimal_valid_stark_info();
-        stark_info.boundaries.push(Boundary {
-            name: "everyFrame".to_string(),
-            offset_min: Some(1),
-            offset_max: Some(1),
-        });
-        assert!(validate_stark_info(&stark_info, "ok.starkinfo.json").is_ok());
-    }
-
-    #[test]
-    fn recursive_library_loading_requires_opt_in_value() {
-        assert!(!recursive_library_loading_allowed(None));
-        assert!(!recursive_library_loading_allowed(Some(OsString::new())));
-        assert!(!recursive_library_loading_allowed(Some(OsString::from("0"))));
-        assert!(!recursive_library_loading_allowed(Some(OsString::from("false"))));
-        assert!(recursive_library_loading_allowed(Some(OsString::from("1"))));
-        assert!(recursive_library_loading_allowed(Some(OsString::from("true"))));
-        assert!(recursive_library_loading_allowed(Some(OsString::from("TRUE"))));
+    /// GPU airs merkelize const pols on device; only CPU and BN128/RecursiveF ever read the
+    /// tree file back.
+    pub fn needs_const_tree_file(&self) -> bool {
+        let goldilocks = self.stark_info.stark_struct.verification_hash_type == "GL";
+        !self.gpu || !goldilocks
     }
 }

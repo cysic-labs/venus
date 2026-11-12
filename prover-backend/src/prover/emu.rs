@@ -1,0 +1,479 @@
+use crate::execute_client::ExecuteClient;
+use crate::guest::ProgramId;
+use crate::GuestProgram;
+use crate::{
+    check_paths_exist,
+    prover::{ProverBackend, ProverEngine, ProverJob, ZiskBackend, ZiskProver},
+    ExecuteOutput, ProveOutput, VerifyConstraintsOutput, ZiskAggPhaseResult, ZiskPhaseResult,
+};
+use crate::{ensure_program_vk, get_rom_bin_path, BackendProverOpts};
+use proofman::{
+    AggProofs, AggProofsRegister, ProofMan, ProvePhase, ProvePhaseInputs, SnarkWrapper, WitnessInfo,
+};
+use proofman_common::{initialize_logger, ProofOptions, ProofmanOptions, RankInfo, RowInfo};
+use proofman_verifier::VadcopFinalProof;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+use zisk_asm_runner::HintsShmem;
+use zisk_cluster_common::LoggingConfig;
+use zisk_common::io::StreamSource;
+use zisk_common::{
+    io::ZiskStdin, AirInstanceCount, ExecutorStatsHandle, ProgramVK, ProofKind, RandomSeed,
+    StatsCostPerType, VadcopKind, ZiskExecutorTime,
+};
+use zisk_core::ZiskRom;
+use zisk_executor::ZiskExecutor;
+use zisk_precomp_hints::HintsProcessor;
+use zisk_transpiler_common::ZiskTranspiler;
+
+use anyhow::Result;
+
+/// Backend marker for the pure-Rust emulator. Selects [`EmuProver`] as the
+/// proving engine.
+pub struct Emu;
+
+impl ZiskBackend for Emu {
+    type Prover = EmuProver;
+}
+
+/// Builder for EMU backend setup (hints not supported).
+pub struct EmuSetupBuilder<'a> {
+    prover: &'a EmuProver,
+    elf: &'a GuestProgram,
+}
+
+impl<'a> EmuSetupBuilder<'a> {
+    fn new(prover: &'a EmuProver, elf: &'a GuestProgram) -> Self {
+        Self { prover, elf }
+    }
+
+    /// Execute the setup and return the program proving and verification keys.
+    pub fn run(self) -> Result<ProgramVK> {
+        self.prover.setup_internal(self.elf, false, false)
+    }
+}
+
+/// Proving engine for the EMU backend. Wraps an [`EmuCoreProver`] and caches
+/// each program's parsed `ZiskRom` so repeated proofs of the same program skip
+/// ELF parsing.
+pub struct EmuProver {
+    pub(crate) core_prover: EmuCoreProver,
+    program_cache: Arc<RwLock<HashMap<ProgramId, Arc<ZiskRom>>>>,
+}
+
+impl EmuProver {
+    /// Build an EMU prover, loading proving keys from `proving_key` (and
+    /// `proving_key_snark` when `snark_wrapper` is set, optionally preloaded).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        snark_wrapper: bool,
+        preload_snark: bool,
+        proving_key: PathBuf,
+        proving_key_snark: PathBuf,
+        shared_tables: bool,
+        options: ProofmanOptions,
+        logging_config: Option<LoggingConfig>,
+    ) -> Result<Self> {
+        let core_prover = EmuCoreProver::new(
+            snark_wrapper,
+            preload_snark,
+            proving_key,
+            proving_key_snark,
+            shared_tables,
+            options,
+            logging_config,
+        )?;
+
+        let program_cache = Arc::new(RwLock::new(HashMap::new()));
+
+        Ok(Self { core_prover, program_cache })
+    }
+}
+
+impl ProverEngine for EmuProver {
+    type Builder<'a> = EmuSetupBuilder<'a>;
+
+    fn setup<'a>(&'a self, elf: &'a GuestProgram) -> Self::Builder<'a> {
+        EmuSetupBuilder::new(self, elf)
+    }
+
+    fn setup_internal(
+        &self,
+        elf: &GuestProgram,
+        _with_hints: bool,
+        _emulator_only: bool,
+    ) -> Result<ProgramVK> {
+        self.core_prover.backend.forget_registered_program();
+        let pctx = self.core_prover.backend.get_pctx()?;
+
+        let program_vk = ensure_program_vk(&pctx, elf)?;
+
+        let rv2zk = ZiskTranspiler::new(elf.elf());
+
+        let zisk_rom = rv2zk.run().unwrap_or_else(|e| panic!("Application error: {e}"));
+        let zisk_rom = Arc::new(zisk_rom);
+
+        self.program_cache.write().unwrap().insert(elf.program_id.clone(), zisk_rom);
+        Ok(program_vk)
+    }
+
+    fn world_rank(&self) -> i32 {
+        self.core_prover.rank_info.world_rank
+    }
+
+    fn n_processes(&self) -> i32 {
+        self.core_prover.rank_info.n_processes
+    }
+
+    fn local_rank(&self) -> i32 {
+        self.core_prover.rank_info.local_rank
+    }
+
+    fn set_stdin_and_random_seed(&self, stdin: ZiskStdin, seed: RandomSeed) -> Result<()> {
+        self.core_prover.backend.set_stdin_and_random_seed(stdin, seed)
+    }
+
+    fn begin_job_for(&self, program_id: &ProgramId, _with_hints: bool) -> Result<ProverJob> {
+        let rom = self
+            .program_cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(program_id).cloned())
+            .ok_or_else(|| {
+            anyhow::anyhow!("Program '{}' not found in cache. Call setup() first.", program_id.name)
+        })?;
+        let pctx = self.core_prover.backend.get_pctx()?;
+        let rom_bin_path = get_rom_bin_path(&pctx, program_id)?;
+        self.core_prover.backend.register_program(rom, &rom_bin_path, false)?;
+        Ok(ProverJob::new(program_id.clone(), false, None))
+    }
+
+    fn executed_steps(&self) -> u64 {
+        self.core_prover
+            .backend
+            .execution_result()
+            .map(|(exec_result, _)| exec_result.steps)
+            .unwrap_or(0)
+    }
+
+    fn execution_cost_per_type(&self) -> StatsCostPerType {
+        self.core_prover
+            .backend
+            .execution_result()
+            .map(|(exec_result, _)| exec_result.cost_per_type)
+            .unwrap_or_default()
+    }
+
+    fn execution_plan(&self) -> Vec<AirInstanceCount> {
+        self.core_prover
+            .backend
+            .execution_result()
+            .map(|(exec_result, _)| exec_result.plan)
+            .unwrap_or_default()
+    }
+
+    fn get_execution_info(&self) -> Result<(WitnessInfo, ZiskExecutorTime)> {
+        self.core_prover.backend.get_execution_info()
+    }
+
+    fn begin_job(&self, program: &GuestProgram) -> Result<ProverJob> {
+        self.begin_job_for(&program.program_id, false)
+    }
+
+    fn execute(
+        &self,
+        _job: &ProverJob,
+        stdin: ZiskStdin,
+        seed: RandomSeed,
+    ) -> Result<ExecuteOutput> {
+        self.core_prover.backend.execute(stdin, seed)
+    }
+
+    fn stats(
+        &self,
+        _job: &ProverJob,
+        stdin: ZiskStdin,
+        seed: RandomSeed,
+        debug_info: Option<Option<String>>,
+        minimal_memory: bool,
+        mpi_node: Option<u32>,
+    ) -> Result<(i32, i32, Option<ExecutorStatsHandle>)> {
+        self.core_prover.backend.stats(stdin, seed, debug_info, minimal_memory, mpi_node)
+    }
+
+    fn get_instance_trace(
+        &self,
+        instance_id: usize,
+        first_row: usize,
+        num_rows: usize,
+        offset: Option<usize>,
+    ) -> Result<Vec<RowInfo>> {
+        self.core_prover.backend.get_instance_trace(instance_id, first_row, num_rows, offset)
+    }
+
+    fn get_instance_air_values(&self, instance_id: usize) -> Result<Vec<u64>> {
+        self.core_prover.backend.get_instance_air_values(instance_id)
+    }
+
+    fn get_instance_fixed(
+        &self,
+        instance_id: usize,
+        first_row: usize,
+        num_rows: usize,
+        offset: Option<usize>,
+    ) -> Result<Vec<RowInfo>> {
+        self.core_prover.backend.get_instance_fixed(instance_id, first_row, num_rows, offset)
+    }
+
+    fn verify_constraints(
+        &self,
+        _job: &ProverJob,
+        stdin: ZiskStdin,
+        seed: RandomSeed,
+        debug_info: Option<Option<String>>,
+    ) -> Result<VerifyConstraintsOutput> {
+        self.core_prover.backend.verify_constraints(stdin, seed, debug_info)
+    }
+
+    fn prove(
+        &self,
+        _job: &ProverJob,
+        stdin: ZiskStdin,
+        seed: RandomSeed,
+        proof_kind: ProofKind,
+        prover_options: BackendProverOpts,
+    ) -> Result<ProveOutput> {
+        self.core_prover.backend.prove(stdin, seed, proof_kind, prover_options)
+    }
+
+    fn wrap_proof(
+        &self,
+        proof: &[u64],
+        publics_full: &[u64],
+        source_kind: VadcopKind,
+        proof_kind: ProofKind,
+        seed: Option<RandomSeed>,
+    ) -> Result<ProveOutput> {
+        match proof_kind {
+            ProofKind::VadcopFinalMinimal => {
+                self.core_prover.backend.minimal(proof, publics_full, source_kind, seed)
+            }
+            ProofKind::Snark => {
+                self.core_prover.backend.snark(proof, publics_full, source_kind, seed)
+            }
+            _ => Err(anyhow::anyhow!("Unsupported proof mode for wrap: {:?}", proof_kind)),
+        }
+    }
+
+    fn prove_phase(
+        &self,
+        phase_inputs: ProvePhaseInputs,
+        options: ProofOptions,
+        phase: ProvePhase,
+    ) -> Result<ZiskPhaseResult> {
+        self.core_prover.backend.prove_phase(phase_inputs, options, phase)
+    }
+
+    fn set_partition(
+        &self,
+        total_compute_units: usize,
+        allocation: Vec<u32>,
+        rank_id: usize,
+    ) -> Result<()> {
+        self.core_prover.backend.set_partition(total_compute_units, allocation, rank_id)
+    }
+
+    fn register_worker_proofs(&self, agg_proofs: Vec<AggProofsRegister>) -> Result<()> {
+        self.core_prover.backend.register_worker_proofs(agg_proofs)
+    }
+
+    fn join_worker_proofs(
+        &self,
+        agg_proofs: Vec<AggProofs>,
+        last_proof: bool,
+        final_proof: bool,
+        keep_resident: bool,
+        options: &ProofOptions,
+    ) -> Result<Option<ZiskAggPhaseResult>> {
+        self.core_prover.backend.join_worker_proofs(
+            agg_proofs,
+            last_proof,
+            final_proof,
+            keep_resident,
+            options,
+        )
+    }
+
+    fn reset_aggregation_state(&self) {
+        self.core_prover.backend.reset_aggregation_state()
+    }
+
+    fn aggregation_arity(&self) -> usize {
+        self.core_prover.backend.aggregation_arity()
+    }
+
+    fn mpi_broadcast(&self, data: &mut Vec<u8>) -> Result<()> {
+        self.core_prover.backend.mpi_broadcast(data)
+    }
+
+    fn notify_cluster_cancellation(&self) {
+        self.core_prover.backend.notify_cluster_cancellation();
+    }
+
+    fn cluster_barrier(&self) {
+        self.core_prover.backend.cluster_barrier();
+    }
+
+    fn get_vadcop_vk(&self, minimal: bool) -> Result<Vec<u64>> {
+        self.core_prover.backend.get_vadcop_vk(minimal)
+    }
+
+    fn register_recurser(&self, output_dir: &str, recurser_id: &str) -> Result<()> {
+        self.core_prover.backend.register_recurser(output_dir, recurser_id)
+    }
+
+    fn prove_recurser(
+        &self,
+        recurser_id: &str,
+        proof_a: &VadcopFinalProof,
+        proof_b: &VadcopFinalProof,
+        free_a: &[u64],
+        free_b: &[u64],
+        root_c_recurser_agg: Option<[u64; 4]>,
+    ) -> Result<VadcopFinalProof> {
+        self.core_prover.backend.prove_recurser(
+            recurser_id,
+            proof_a,
+            proof_b,
+            free_a,
+            free_b,
+            root_c_recurser_agg,
+        )
+    }
+
+    fn hash(&self) -> Result<String> {
+        self.core_prover.backend.hash()
+    }
+
+    fn get_hints_processor(&self) -> Result<Arc<HintsProcessor<HintsShmem>>> {
+        Err(anyhow::anyhow!("EmuProver does not support hints"))
+    }
+
+    fn cancel(&self) -> Result<()> {
+        self.core_prover.backend.cancel();
+        Ok(())
+    }
+
+    fn wait_until_proofman_ready(&self) {
+        self.core_prover.backend.wait_until_proofman_ready();
+    }
+
+    fn abort_cluster(&self, code: i32) -> ! {
+        self.core_prover.backend.abort_cluster(code)
+    }
+
+    fn cluster_all_ok(&self, ok: bool) -> bool {
+        self.core_prover.backend.cluster_all_ok(ok)
+    }
+
+    fn mpi_send(&self, dest: i32, tag: i32, data: &[u8]) {
+        self.core_prover.backend.mpi_send(dest, tag, data);
+    }
+
+    fn mpi_try_receive(&self, tag: i32) -> Option<(i32, Vec<u8>)> {
+        self.core_prover.backend.mpi_try_receive(tag)
+    }
+}
+
+/// Low-level EMU prover holding the initialized `ProofMan` backend and this
+/// process's [`RankInfo`] (for distributed proving).
+pub struct EmuCoreProver {
+    backend: ProverBackend,
+    rank_info: RankInfo,
+}
+
+impl EmuCoreProver {
+    /// Initialize `ProofMan` from `proving_key`, set up logging and the
+    /// distributed barrier, and optionally build the SNARK wrapper from
+    /// `proving_key_snark` when `use_snark_wrapper` is set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        use_snark_wrapper: bool,
+        preload_snark: bool,
+        proving_key: PathBuf,
+        proving_key_snark: PathBuf,
+        shared_tables: bool,
+        options: ProofmanOptions,
+        logging_config: Option<LoggingConfig>,
+    ) -> Result<Self> {
+        check_paths_exist(&proving_key)?;
+        zisk_setup::check_setup_version(&proving_key)?;
+
+        let proofman = ProofMan::new(proving_key.clone(), options.clone())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+        let rank_info = proofman.get_rank_info();
+
+        if logging_config.is_some() {
+            zisk_cluster_common::init(logging_config.as_ref(), Some(&rank_info))?;
+        } else {
+            initialize_logger(options.verbose_mode, Some(&rank_info));
+        }
+
+        proofman.set_barrier();
+
+        let mut snark_wrapper = None;
+        if use_snark_wrapper {
+            check_paths_exist(&proving_key_snark)?;
+            let (aux_trace, d_buffers, reload_fixed_pols_gpu) = proofman.get_preallocated_buffers();
+            snark_wrapper = Some(SnarkWrapper::new_with_preallocated_buffers(
+                &proving_key_snark,
+                options.verbose_mode,
+                Some(aux_trace),
+                Some(d_buffers),
+                Some(reload_fixed_pols_gpu),
+                preload_snark,
+                options.gpu,
+            )?);
+        }
+
+        let executor = ZiskExecutor::new(
+            &proofman.get_wcm(),
+            options.verbose_mode,
+            shared_tables,
+            false,
+            options.packed,
+        )?;
+
+        // No ROM-histogram assembly here, so the collectors own the column. The executor would
+        // apply this anyway, since it never runs on the ASM backend; stated for clarity.
+        executor.set_frops_multiplicity_from_asm(false);
+
+        let core = ProverBackend::new(
+            proofman,
+            snark_wrapper,
+            executor,
+            proving_key,
+            Some(proving_key_snark),
+        );
+
+        Ok(Self { backend: core, rank_info })
+    }
+}
+
+impl ExecuteClient for ZiskProver<Emu> {
+    fn setup(&self, program: &GuestProgram, _with_hints: bool) -> Result<()> {
+        ZiskProver::<Emu>::setup(self, program).run().map(|_| ())
+    }
+
+    fn execute(
+        &self,
+        program: &GuestProgram,
+        stdin: ZiskStdin,
+        _hints: Option<StreamSource>,
+        seed: Option<RandomSeed>,
+    ) -> Result<ExecuteOutput> {
+        ZiskProver::<Emu>::execute(self, program, stdin, seed)
+    }
+}

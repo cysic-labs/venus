@@ -1,6 +1,7 @@
 mod bus_device;
 mod bus_device_metrics;
 mod bus_id;
+mod data_bus;
 mod data_bus_mem;
 mod data_bus_operation;
 mod data_bus_rom;
@@ -13,15 +14,19 @@ use std::{
 pub use bus_device::*;
 pub use bus_device_metrics::*;
 pub use bus_id::*;
+pub use data_bus::*;
 pub use data_bus_mem::*;
 pub use data_bus_operation::*;
 pub use data_bus_rom::*;
 
 use std::fmt::{Formatter, Result};
 
+/// The `DebugBusTime` struct is designed to track and report timing information for bus operations,
 #[derive(Debug, Clone, Default)]
 pub struct DebugBusTime {
+    /// An array of timing values (in nanoseconds) for each of the 12 streaming multiprocessors (SMs).
     pub sm_time: [u64; 12],
+    /// An array of operation counts for each of the 12 streaming multiprocessors (SMs).
     pub sm_count: [u64; 12],
 }
 
@@ -62,7 +67,7 @@ impl Display for DebugBusTime {
         )?;
 
         for (i, (&time, &count)) in self.sm_time.iter().zip(&self.sm_count).enumerate() {
-            let avg = if count > 0 { time / count } else { 0 };
+            let avg = time.checked_div(count).unwrap_or(0);
             let percent =
                 if total_time > 0 { 100.0 * time as f64 / total_time as f64 } else { 0.0 };
             writeln!(f, "SM#{i:<3} {time:>15} {count:>10} {avg:>15} {percent:>9.2}%")?;

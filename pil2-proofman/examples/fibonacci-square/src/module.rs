@@ -1,9 +1,9 @@
 use std::sync::{Arc, RwLock};
 
 use proofman_common::{AirInstance, BufferPool, FromTrace, ProofCtx, ProofmanResult, SetupCtx};
-use witness::{WitnessComponent, execute};
-use pil_std_lib::Std;
-use fields::PrimeField64;
+use proofman_witness::{WitnessComponent, execute};
+use pil2_std_lib::Std;
+use proofman_fields::PrimeField64;
 use rayon::prelude::*;
 use crate::{BuildPublicValues, FibonacciSquareTrace, ModuleAirValues, ModuleTrace};
 
@@ -33,15 +33,10 @@ impl<F: PrimeField64> WitnessComponent<F> for Module<F> {
     ) -> ProofmanResult<()> {
         if stage == 1 {
             tracing::debug!("··· Starting witness computation stage 1");
-            // The publics stay locked while the view is alive, so read them and release the lock.
-            let (module, mut a, mut b) = {
-                let publics = BuildPublicValues::from_vec_guard(pctx.get_publics());
-                (
-                    F::as_canonical_u64(&publics.module),
-                    F::as_canonical_u64(&publics.in1),
-                    F::as_canonical_u64(&publics.in2),
-                )
-            };
+            let publics = BuildPublicValues::from_vec_guard(pctx.get_publics());
+            let module = F::as_canonical_u64(&publics.module);
+            let mut a = F::as_canonical_u64(&publics.in1);
+            let mut b = F::as_canonical_u64(&publics.in2);
 
             //range_check(colu: mod - x_mod, min: 1, max: 2**8-1);
             let range = self.std_lib.get_range_id(1, (1 << 8) - 1, None)?;
@@ -92,12 +87,12 @@ impl<F: PrimeField64> WitnessComponent<F> for Module<F> {
                 air_values.last_segment = F::from_bool(j == num_instances - 1);
 
                 x_mods.par_iter().for_each(|x_mod| {
-                    self.std_lib.range_check(range, (module - x_mod) as i64, 1);
+                    self.std_lib.range_check_one(range, module - x_mod);
                 });
 
                 // Trivial range check for the remaining rows
                 for _ in modules_slice.len()..trace.num_rows() {
-                    self.std_lib.range_check(range, module as i64, 1);
+                    self.std_lib.range_check_one(range, module);
                 }
 
                 let air_instance =

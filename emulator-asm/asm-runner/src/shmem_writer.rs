@@ -1,11 +1,32 @@
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use libc::{mmap, msync, shm_open, MAP_FAILED, MAP_SHARED, MS_SYNC};
+use libc::{msync, MS_SYNC};
 use std::io::{self, Result};
 use std::ptr;
 
-use libc::{c_void, close, munmap, PROT_READ, PROT_WRITE, S_IRUSR, S_IWUSR};
+use libc::{close, munmap, PROT_READ, PROT_WRITE};
+use rayon::prelude::*;
 
-pub struct SharedMemoryWriter {
+use crate::shmem_sys;
+
+/// Below this many bytes one thread zeroes as fast as rayon's, or faster: on a 2-socket host,
+/// spreading the work costs more than the `memset`. Above it, zeroing is bound by memory
+/// bandwidth, which rayon's threads reach 2–5× sooner.
+const PARALLEL_ZERO_BYTES: usize = 64 << 20;
+
+/// The piece of a large range that each rayon task zeroes: a transparent huge page, as proofman
+/// zeroes its pool buffers.
+const ZERO_CHUNK_BYTES: usize = 2 << 20;
+
+/// Zeroes `bytes`, from every rayon thread when they are many.
+fn zero_bytes(bytes: &mut [u8]) {
+    if bytes.len() < PARALLEL_ZERO_BYTES {
+        bytes.fill(0);
+    } else {
+        bytes.par_chunks_mut(ZERO_CHUNK_BYTES).for_each(|chunk| chunk.fill(0));
+    }
+}
+
+pub(crate) struct ShmemWriter {
     ptr: *mut u8,
     current_ptr: *mut u8,
     size: usize,
@@ -13,75 +34,25 @@ pub struct SharedMemoryWriter {
     name: String,
 }
 
-unsafe impl Send for SharedMemoryWriter {}
-unsafe impl Sync for SharedMemoryWriter {}
+// SAFETY: the only non-auto fields are `ptr`/`current_ptr`, raw pointers into an
+// mmap'd shared-memory region whose address is fixed for the handle's lifetime.
+// Moving or sharing the handle across threads is sound; data-race freedom on the
+// mapped bytes is the caller's responsibility (as for any shared memory) — the
+// higher-level wrappers serialize writes where needed.
+unsafe impl Send for ShmemWriter {}
+unsafe impl Sync for ShmemWriter {}
 
-impl SharedMemoryWriter {
+impl ShmemWriter {
+    /// Opens and maps a shared memory region for read/write access.
     pub fn new(name: &str, size: usize, unlock_mapped_memory: bool) -> Result<Self> {
         // Open existing shared memory (read/write)
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        let fd = Self::open_shmem(name, libc::O_RDWR, S_IRUSR | S_IWUSR);
-
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        let fd = Self::open_shmem(name, libc::O_RDWR, S_IRUSR as u32 | S_IWUSR as u32);
+        let fd = shmem_sys::open(name, libc::O_RDWR)?;
 
         // Map the memory region for read/write
-        let ptr = Self::map(fd, size, PROT_READ | PROT_WRITE, unlock_mapped_memory, name);
+        let ptr = shmem_sys::map(fd, size, PROT_READ | PROT_WRITE, !unlock_mapped_memory, name)?;
         let ptr_u8 = ptr as *mut u8;
 
         Ok(Self { ptr: ptr_u8, current_ptr: ptr_u8, size, fd, name: name.to_string() })
-    }
-
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn open_shmem(name: &str, flags: i32, mode: u32) -> i32 {
-        let c_name = std::ffi::CString::new(name).expect("CString::new failed");
-        let fd = unsafe { shm_open(c_name.as_ptr(), flags, mode) };
-        if fd == -1 {
-            let errno_value = unsafe { *libc::__errno_location() };
-            let err = io::Error::from_raw_os_error(errno_value);
-            let err2 = io::Error::last_os_error();
-            panic!("shm_open('{name}') failed: libc::errno:{err} #### last_os_error:{err2}");
-        }
-        fd
-    }
-
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    fn open_shmem(_name: &str, _flags: i32, _mode: u32) -> i32 {
-        0
-    }
-
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn map(fd: i32, size: usize, prot: i32, unlock_mapped_memory: bool, desc: &str) -> *mut c_void {
-        let mut flags = MAP_SHARED;
-        if !unlock_mapped_memory {
-            flags |= libc::MAP_LOCKED;
-        }
-        let mapped = unsafe { mmap(ptr::null_mut(), size, prot, flags, fd, 0) };
-        if mapped == MAP_FAILED {
-            let err = io::Error::last_os_error();
-            panic!("mmap failed for '{desc}': {err:?} ({size} bytes)");
-        }
-        mapped
-    }
-
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-    pub fn map(_: i32, _: usize, _: i32, _: bool, _: &str) -> *mut c_void {
-        ptr::null_mut()
-    }
-
-    /// Checks that `byte_size` bytes starting at `offset` lie inside the shared memory.
-    fn check_range(&self, offset: usize, byte_size: usize) -> Result<()> {
-        match offset.checked_add(byte_size) {
-            Some(end) if end <= self.size => Ok(()),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "Data range of {byte_size} bytes at offset {offset} exceeds shared memory \
-                     capacity ({}) for '{}'",
-                    self.size, self.name
-                ),
-            )),
-        }
     }
 
     unsafe fn unmap(&mut self) {
@@ -92,6 +63,21 @@ impl SharedMemoryWriter {
             self.size = 0;
             tracing::trace!("Unmapped shared memory '{}'", self.name);
         }
+    }
+
+    /// Errors unless `byte_size` bytes from `offset` lie inside the shared memory: a write past
+    /// its end would land in whatever the process maps next.
+    fn check_fits(&self, offset: usize, byte_size: usize) -> Result<()> {
+        if offset.checked_add(byte_size).is_some_and(|end| end <= self.size) {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Writing {} bytes at offset {} exceeds shared memory capacity ({}) for '{}'",
+                byte_size, offset, self.size, self.name
+            ),
+        ))
     }
 
     /// Writes data to the shared memory, starting at the specified offset
@@ -105,10 +91,11 @@ impl SharedMemoryWriter {
     ///
     /// # Returns
     /// * `Ok(())` - If data was successfully written
-    /// * `Err` - If data size exceeds shared memory capacity or msync fails
+    /// * `Err` - If the data does not fit from `offset` to the end of the shared memory, or
+    ///   msync fails
     pub fn write_at<T>(&self, offset: usize, data: &[T]) -> Result<()> {
         let byte_size = std::mem::size_of_val(data);
-        self.check_range(offset, byte_size)?;
+        self.check_fits(offset, byte_size)?;
 
         unsafe {
             ptr::copy_nonoverlapping(data.as_ptr() as *const u8, self.ptr.add(offset), byte_size);
@@ -132,11 +119,11 @@ impl SharedMemoryWriter {
     ///
     /// # Returns
     /// * `Ok(())` - If data was successfully written
-    /// * `Err` - If data size exceeds shared memory capacity or msync fails
+    /// * `Err` - If the data does not fit from the append offset to the end of the shared memory,
+    ///   or msync fails
     pub fn append_input<T>(&mut self, data: &[T]) -> Result<()> {
         let byte_size = std::mem::size_of_val(data);
-        let offset = unsafe { self.current_ptr.offset_from(self.ptr) } as usize;
-        self.check_range(offset, byte_size)?;
+        self.check_fits(self.offset(), byte_size)?;
 
         unsafe {
             ptr::copy_nonoverlapping(data.as_ptr() as *const u8, self.current_ptr, byte_size);
@@ -164,8 +151,6 @@ impl SharedMemoryWriter {
     #[inline]
     pub fn write_ring_buffer<T>(&mut self, data: &[T]) -> Result<()> {
         let byte_size = std::mem::size_of_val(data);
-        // Wrapping around once must be enough to fit the data.
-        self.check_range(0, byte_size)?;
 
         let data_ptr = data.as_ptr() as *const u8;
 
@@ -213,15 +198,16 @@ impl SharedMemoryWriter {
     /// # Arguments
     /// * `offset` - Byte offset from the start of shared memory (must be 8-byte aligned)
     ///
-    /// # Panics
-    /// If `offset + 8` exceeds the shared memory size. The offset should be aligned to 8 bytes.
+    /// # Safety
+    /// This method assumes that:
+    /// - The shared memory contains at least `offset + 8` bytes of valid data
+    /// - The offset should be aligned to 8 bytes
     ///
     /// # Returns
     /// * The u64 value read from the specified offset (in native endianness)
     #[inline]
     pub fn read_u64_at(&self, offset: usize) -> u64 {
         debug_assert_eq!(offset % 8, 0, "Offset must be 8-byte aligned");
-        self.check_range(offset, size_of::<u64>()).expect("read_u64_at() out of bounds");
 
         unsafe { (self.ptr.add(offset) as *const u64).read() }
     }
@@ -232,12 +218,17 @@ impl SharedMemoryWriter {
     /// * `offset` - Byte offset from the start of shared memory (must be 8-byte aligned)
     /// * `value` - The u64 value to write
     ///
-    /// # Panics
-    /// If `offset + 8` exceeds the shared memory size. The offset should be aligned to 8 bytes.
+    /// # Safety
+    /// This method assumes that:
+    /// - The shared memory contains at least `offset + 8` bytes of valid data
+    /// - The offset is 8-byte aligned for optimal performance
+    ///
+    /// # Returns
+    /// * `Ok(())` - If the value was written and flushed
+    /// * `Err` - If the `msync` flushing the write fails (Linux only)
     #[inline]
-    pub fn write_u64_at(&self, offset: usize, value: u64) {
+    pub fn write_u64_at(&self, offset: usize, value: u64) -> Result<()> {
         debug_assert_eq!(offset % 8, 0, "Offset must be 8-byte aligned");
-        self.check_range(offset, size_of::<u64>()).expect("write_u64_at() out of bounds");
 
         unsafe {
             (self.ptr.add(offset) as *mut u64).write(value);
@@ -245,21 +236,188 @@ impl SharedMemoryWriter {
             // Force changes to be flushed to the shared memory
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             if msync(self.ptr as *mut _, self.size, MS_SYNC) != 0 {
-                panic!("msync failed in write_u64_at: {:?}", io::Error::last_os_error());
+                return Err(io::Error::last_os_error());
             }
         }
+
+        Ok(())
     }
 
+    /// Resets the internal pointer used for appending to the start of the buffer.
     pub fn reset(&mut self) {
         self.current_ptr = self.ptr;
     }
+
+    /// The offset, in bytes, that `append_input` writes at next.
+    pub fn offset(&self) -> usize {
+        // SAFETY: `current_ptr` always points into the mapping that starts at `ptr`.
+        unsafe { self.current_ptr.offset_from(self.ptr) as usize }
+    }
+
+    /// Zeroes the bytes `[start, end)` of the shared memory.
+    pub fn zero_range(&mut self, start: usize, end: usize) -> Result<()> {
+        if end <= start {
+            return Ok(());
+        }
+        self.check_fits(start, end - start)?;
+
+        unsafe {
+            // SAFETY: `[start, end)` lies inside the mapping, and `&mut self` keeps this writer
+            // from writing it meanwhile.
+            zero_bytes(std::slice::from_raw_parts_mut(self.ptr.add(start), end - start));
+            // Force changes to be flushed to the shared memory
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            if msync(self.ptr as *mut _, self.size, MS_SYNC) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+
+        Ok(())
+    }
 }
 
-impl Drop for SharedMemoryWriter {
+impl Drop for ShmemWriter {
     fn drop(&mut self) {
         unsafe {
             self.unmap();
             close(self.fd);
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ShmemReader;
+    use std::ffi::CString;
+
+    /// Unique per-test segment name (cargo runs tests as threads in one process).
+    fn seg_name(tag: &str) -> String {
+        format!("ZISK_unittest_{}_{tag}", std::process::id())
+    }
+
+    /// Create a fresh, zero-filled `/dev/shm` segment of `size` bytes.
+    fn create_segment(name: &str, size: usize) {
+        let c = CString::new(name).unwrap();
+        unsafe {
+            libc::shm_unlink(c.as_ptr()); // drop any stale leftover
+            let fd = libc::shm_open(c.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600);
+            assert!(fd >= 0, "shm_open(create) failed for {name}");
+            assert_eq!(libc::ftruncate(fd, size as libc::off_t), 0, "ftruncate failed");
+            libc::close(fd);
+        }
+    }
+
+    fn unlink_segment(name: &str) {
+        let c = CString::new(name).unwrap();
+        unsafe { libc::shm_unlink(c.as_ptr()) };
+    }
+
+    #[test]
+    fn writer_reader_u64_round_trip() {
+        let name = seg_name("u64rt");
+        create_segment(&name, 4096);
+        {
+            let w = ShmemWriter::new(&name, 4096, true).unwrap();
+            w.write_u64_at(0, 0xDEAD_BEEF).unwrap();
+            w.write_u64_at(8, 42).unwrap();
+        }
+        let r = ShmemReader::new(&name, 4096).unwrap();
+        assert_eq!(r.read_u64_at(0), 0xDEAD_BEEF);
+        assert_eq!(r.read_u64_at(8), 42);
+        unlink_segment(&name);
+    }
+
+    #[test]
+    fn write_at_offset_is_visible_to_reader() {
+        let name = seg_name("writeat");
+        create_segment(&name, 4096);
+        let w = ShmemWriter::new(&name, 4096, true).unwrap();
+        w.write_at(16, &[1u64, 2, 3]).unwrap();
+        let r = ShmemReader::new(&name, 4096).unwrap();
+        assert_eq!([r.read_u64_at(16), r.read_u64_at(24), r.read_u64_at(32)], [1, 2, 3]);
+        unlink_segment(&name);
+    }
+
+    #[test]
+    fn write_at_rejects_payload_larger_than_segment() {
+        let name = seg_name("cap");
+        create_segment(&name, 64);
+        let w = ShmemWriter::new(&name, 64, true).unwrap();
+        assert!(w.write_at(0, &[0u8; 128]).is_err());
+        unlink_segment(&name);
+    }
+
+    /// A write that fits the segment's size but not from its offset would land in whatever the
+    /// process maps after the segment.
+    #[test]
+    fn write_at_rejects_a_write_past_the_end() {
+        let name = seg_name("pastend");
+        create_segment(&name, 4096);
+        let w = ShmemWriter::new(&name, 4096, true).unwrap();
+        assert!(w.write_at(4090, &[1u8; 16]).is_err());
+        assert!(w.write_at(usize::MAX, &[1u8; 1]).is_err(), "an offset that overflows");
+        w.write_at(4080, &[1u8; 16]).unwrap();
+        unlink_segment(&name);
+    }
+
+    #[test]
+    fn append_input_rejects_a_write_past_the_end_and_keeps_its_offset() {
+        let name = seg_name("appendend");
+        create_segment(&name, 4096);
+        let mut w = ShmemWriter::new(&name, 4096, true).unwrap();
+        w.append_input(&[1u8; 4000]).unwrap();
+        assert!(w.append_input(&[2u8; 200]).is_err());
+        assert_eq!(w.offset(), 4000);
+        w.append_input(&[3u8; 96]).unwrap();
+        assert_eq!(w.offset(), 4096);
+        unlink_segment(&name);
+    }
+
+    #[test]
+    fn ring_buffer_wraps_around_the_end() {
+        let name = seg_name("ring");
+        create_segment(&name, 32); // 4 u64 slots
+        let mut w = ShmemWriter::new(&name, 32, true).unwrap();
+        w.write_ring_buffer(&[1u64, 2, 3]).unwrap(); // slots 0,8,16; cursor at 24
+        w.write_ring_buffer(&[4u64, 5]).unwrap(); // 4 at 24, wraps, 5 at 0
+        let r = ShmemReader::new(&name, 32).unwrap();
+        assert_eq!(r.read_u64_at(24), 4, "last slot before wrap");
+        assert_eq!(r.read_u64_at(0), 5, "wrapped to start");
+        assert_eq!(r.read_u64_at(8), 2, "untouched from first write");
+        unlink_segment(&name);
+    }
+
+    #[test]
+    fn zero_bytes_clears_ranges_below_and_above_the_parallel_threshold() {
+        for len in [1, 4097, PARALLEL_ZERO_BYTES + ZERO_CHUNK_BYTES / 2 + 3] {
+            let mut bytes = vec![0xABu8; len];
+            zero_bytes(&mut bytes);
+            assert!(bytes.iter().all(|&b| b == 0), "{len} bytes");
+        }
+    }
+
+    #[test]
+    fn zero_range_clears_only_its_range() {
+        let name = seg_name("zero");
+        create_segment(&name, 4096);
+        let mut w = ShmemWriter::new(&name, 4096, true).unwrap();
+        w.write_at(0, &[1u64, 2, 3, 4]).unwrap();
+        w.zero_range(8, 24).unwrap();
+        let r = ShmemReader::new(&name, 4096).unwrap();
+        assert_eq!(
+            [r.read_u64_at(0), r.read_u64_at(8), r.read_u64_at(16), r.read_u64_at(24)],
+            [1, 0, 0, 4]
+        );
+        assert!(w.zero_range(0, 4097).is_err(), "a range past the segment");
+        unlink_segment(&name);
+    }
+
+    #[test]
+    fn new_fails_for_missing_segment() {
+        let name = seg_name("missing");
+        unlink_segment(&name); // ensure it does not exist
+        assert!(ShmemWriter::new(&name, 4096, true).is_err());
     }
 }

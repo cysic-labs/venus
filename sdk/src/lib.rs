@@ -1,34 +1,248 @@
-mod builder;
+//! ZisK prover SDK: client library for proving and verifying ZisK programs.
+//! This crate provides a high-level API for interacting with ZisK proving backends,
+//! including both embedded and remote options.
+
+#![warn(missing_docs)]
+#![warn(rustdoc::all)]
+#![deny(rustdoc::missing_crate_level_docs)]
+
+mod aggregate_proofs;
+mod cancel;
 mod client;
-mod prover;
-mod utils;
-mod verifier;
-mod ziskemu;
+mod embedded;
+mod error;
+mod execute;
+mod hints;
+mod input_source;
+mod input_stream;
+mod job_handle;
+mod lifecycle;
+mod opts;
+mod prove;
+mod recurser;
+mod remote;
+mod setup;
+mod snark;
+mod stdin;
+mod upload;
+mod verify_constraints;
+mod wrap;
+mod zisk_client;
 
-pub use builder::*;
+pub use aggregate_proofs::{AggregateProofsRequest, AggregationInput, ProofExt};
+pub use cancel::CancellationToken;
 pub use client::ProverClient;
-pub use prover::*;
-pub use utils::*;
-pub use verifier::*;
+pub use embedded::{
+    EmbeddedClient, EmbeddedClientBuilder, EmbeddedExecuteOnlyBuilder, EmbeddedExecuteOnlyClient,
+    WitnessBuilderExt,
+};
+pub use error::{Result, SdkError};
+pub use zisk_client::ZiskClient;
 
-pub use ziskemu::*;
+pub use execute::{ExecuteRequest, ExecuteResult};
+pub use hints::{HintsSource, ZiskHints};
+pub use input_source::InputSource;
+pub use input_stream::ZiskStream;
+pub use job_handle::{JobCanceller, JobHandle};
+pub use lifecycle::{SetupTarget, UploadTarget};
+pub use prove::{JobEvent, ProveRequest, ProveResult};
+pub use recurser::{AggregationProgram, AggregationProgramBuilder, Recurser};
+pub use remote::setup::SetupByIdRequest;
+pub use remote::{RemoteClient, RemoteClientBuilder};
+pub use setup::SetupRequest;
+pub use snark::SnarkProtocol;
+pub use stdin::ZiskStdin;
+pub use upload::UploadRequest;
+pub use verify_constraints::{
+    VerifyConstraintsExtension, VerifyConstraintsRequest, VerifyConstraintsResult,
+};
+pub use wrap::WrapRequest;
+pub use zisk_common::ZiskVerifyBuilder as VerifyBuilder;
 
+// The extended metadata API, deprecated now that the remote client's requests take
+// `metadata`; removed in the first non-alpha release.
+#[allow(deprecated)]
+pub use execute::ExecuteRequestExt;
+#[allow(deprecated)]
+pub use prove::ProveRequestExt;
+#[allow(deprecated)]
+pub use remote::RemoteClientExt;
+
+// Re-export guest types from backend (public API for loading programs)
+pub use zisk_prover_backend::{
+    load_circuit, load_program, Asm, AsmOptions, CircomCircuit, Elf, EmuOptions, GuestProgram,
+    HashMode, ProfilingMode, ProgramId,
+};
+
+pub use opts::EmbeddedOpts;
+
+// Re-export result and data types from backend (public outputs)
+pub use zisk_prover_backend::{setup_logger, ExecuteOutput, ProveOutput, VerifyConstraintsOutput};
+
+// Re-export common types
 pub use proofman_common::VerboseMode;
 
-pub use zisk_common::{io::*, ElfBinary, ElfBinaryFromFile};
+// Re-export types from zisk_common
+pub use zisk_common::{
+    PlonkVkBlob, PlonkVkey, ProgramVK, Proof, ProofBody, ProofKind, PublicValues, RandomSeed,
+};
 
 pub use zisk_build::*;
 
-#[macro_export]
-macro_rules! include_elf {
-    ($arg:literal) => {{
-        const WITH_HINTS: bool = option_env!(concat!("ZISK_ELF_", $arg, "_WITH_HINTS")).is_some();
+/// Run the ZisK emulator with the given program and stdin.
+pub fn run(
+    program: &GuestProgram,
+    stdin: ZiskStdin,
+    profiling: Option<ProfilingMode>,
+) -> Result<()> {
+    program.run_emulation(stdin.into_inner(), profiling).map_err(SdkError::backend)
+}
 
-        ElfBinary {
-            elf: include_bytes!(env!(concat!("ZISK_ELF_", $arg))),
-            name: $arg,
-            with_hints: WITH_HINTS,
-            path: Some(env!(concat!("ZISK_ELF_", $arg))),
-        }
-    }};
+use crate::{setup::SetupResult, upload::UploadResult};
+
+/// Executor backend for running programs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecutorKind {
+    /// Emulator: always available.
+    #[default]
+    Emulator,
+    /// Assembly: must be explicitly enabled on the client builder.
+    Assembly,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) trait Client: Clone + Send + Sync + 'static {
+    fn run_upload(&self, program: &GuestProgram) -> Result<UploadResult>;
+
+    fn run_setup(
+        &self,
+        program: &GuestProgram,
+        with_hints: bool,
+        emulator_only: bool,
+        timeout: Option<std::time::Duration>,
+        subs: job_handle::SubscriberList,
+    ) -> Result<job_handle::JobHandle<SetupResult>>;
+
+    fn run_prove(
+        &self,
+        program: &GuestProgram,
+        stdin: InputSource,
+        hints: Option<HintsSource>,
+        seed: Option<RandomSeed>,
+        executor: ExecutorKind,
+        proof_kind: ProofKind,
+        timeout: Option<std::time::Duration>,
+        subs: job_handle::SubscriberList,
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> Result<job_handle::JobHandle<ProveResult>>;
+
+    fn run_execute(
+        &self,
+        program: &GuestProgram,
+        stdin: InputSource,
+        hints: Option<HintsSource>,
+        seed: Option<RandomSeed>,
+        executor: ExecutorKind,
+        timeout: Option<std::time::Duration>,
+        subs: job_handle::SubscriberList,
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> Result<job_handle::JobHandle<ExecuteResult>>;
+
+    fn run_wrap(
+        &self,
+        proof: &Proof,
+        proof_kind: ProofKind,
+        override_publics: Option<PublicValues>,
+        override_program_vk: Option<ProgramVK>,
+        timeout: Option<std::time::Duration>,
+        subs: job_handle::SubscriberList,
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> Result<job_handle::JobHandle<crate::prove::ProveResult>>;
+
+    fn run_upload_aggregation_program(
+        &self,
+        agg: &crate::recurser::Recurser,
+    ) -> Result<UploadResult>;
+
+    fn run_setup_aggregation_program(
+        &self,
+        agg: &crate::recurser::Recurser,
+        timeout: Option<std::time::Duration>,
+        subs: job_handle::SubscriberList,
+    ) -> Result<job_handle::JobHandle<SetupResult>>;
+
+    fn run_aggregate_proofs(
+        &self,
+        agg: &crate::recurser::Recurser,
+        proof_a: &Proof,
+        proof_b: &Proof,
+        free_a: &[u64],
+        free_b: &[u64],
+        root_c_recurser_agg: Option<[u64; 4]>,
+        timeout: Option<std::time::Duration>,
+        subs: job_handle::SubscriberList,
+        metadata: std::collections::BTreeMap<String, String>,
+    ) -> Result<job_handle::JobHandle<crate::prove::ProveResult>>;
+}
+
+/// Synchronous counterpart to [`Client`], implemented only by backends whose
+/// work is genuinely synchronous (currently the embedded client).
+///
+/// Each method mirrors a [`Client`] `run_*` method but runs the job on the
+/// calling thread and returns the result directly — no async runtime required.
+/// Remote backends deliberately do not implement this: a remote call is network
+/// I/O and has no honest synchronous form, so `run_sync()` is unavailable there
+/// at compile time.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not support synchronous execution",
+    note = "`run_sync()` is only available on `EmbeddedClient` — a `RemoteClient` \
+            performs network I/O and has no synchronous form; use `run()` and \
+            `.await` the returned `JobHandle` instead",
+    label = "this client cannot run synchronously"
+)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) trait ClientSync {
+    fn run_setup_sync(
+        &self,
+        program: &GuestProgram,
+        with_hints: bool,
+        emulator_only: bool,
+        subs: job_handle::SubscriberList,
+    ) -> Result<SetupResult>;
+
+    fn run_setup_aggregation_program_sync(
+        &self,
+        agg: &crate::recurser::Recurser,
+        subs: job_handle::SubscriberList,
+    ) -> Result<SetupResult>;
+
+    fn run_prove_sync(
+        &self,
+        program: &GuestProgram,
+        stdin: InputSource,
+        hints: Option<HintsSource>,
+        seed: Option<RandomSeed>,
+        executor: ExecutorKind,
+        proof_kind: ProofKind,
+        subs: job_handle::SubscriberList,
+    ) -> Result<ProveResult>;
+
+    fn run_execute_sync(
+        &self,
+        program: &GuestProgram,
+        stdin: InputSource,
+        hints: Option<HintsSource>,
+        seed: Option<RandomSeed>,
+        executor: ExecutorKind,
+        subs: job_handle::SubscriberList,
+    ) -> Result<ExecuteResult>;
+
+    fn run_wrap_sync(
+        &self,
+        proof: &Proof,
+        proof_kind: ProofKind,
+        override_publics: Option<PublicValues>,
+        override_program_vk: Option<ProgramVK>,
+        subs: job_handle::SubscriberList,
+    ) -> Result<crate::prove::ProveResult>;
 }

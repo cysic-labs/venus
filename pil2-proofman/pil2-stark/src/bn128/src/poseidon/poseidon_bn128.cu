@@ -1,8 +1,9 @@
+#include "grinding_launch.hpp"
 #include "cuda_utils.cuh"
 #include "poseidon_bn128.cuh"
 #include "poseidon_bn128_constants.hpp"  // Shared CPU/GPU constants (binary compatible)
 #include <cuda_runtime.h>
-#include "data_layout.cuh"
+#include "goldilocks_trace_layout.cuh"
 
 // Goldilocks prime constant
 #ifndef GOLDILOCKS_PRIME
@@ -183,7 +184,7 @@ __device__ __forceinline__ void poseidon_bn128_load_fr_from_gl(
         if (col < num_cols) {
             uint64_t idx;
             if constexpr (TILED) {
-                idx = getBufferOffset(row, col, num_rows, num_cols);
+                idx = getBufferOffset(row, col, num_rows, num_cols, Layout::ColMajor);
             } else {
                 idx = row * num_cols + col;
             }
@@ -415,19 +416,19 @@ void PoseidonBN128GPU::merkletreeTiles(FrElement *d_tree, uint64_t *d_input, uin
 
 // Grinding constants for parallel search
 
-// 256 threads keep the register-heavy kernel launchable, and 2^18 nonces per launch keep the grid
-// at the NONCES_LAUNCH_GRID_SIZE blocks the nonce block buffer is sized for.
-#define BN128_GRINDING_LAUNCH_BITS 18
-#define BN128_GRINDING_LAUNCH_BLOCKS_SIZE 256
+#define BN128_GRINDING_LAUNCH_BITS 19
+#define BN128_GRINDING_LAUNCH_BLOCKS_SIZE 512
 #define BN128_GRINDING_LAUNCH_GRID_SIZE \
     (((1ULL << BN128_GRINDING_LAUNCH_BITS) + BN128_GRINDING_LAUNCH_BLOCKS_SIZE - 1) / BN128_GRINDING_LAUNCH_BLOCKS_SIZE)
+static_assert(BN128_GRINDING_LAUNCH_GRID_SIZE <= GRIND_NONCE_BLOCKS_MAX,
+              "BN128 grinding writes one result per block into the nonce_blocks region");
 
 // Shared memory for block-level reduction
 extern __shared__ uint64_t grinding_shared[];
 
 // Grinding kernel: searches for nonce where hash(state || nonce).v[0] < level
 // Uses t=5 state: [0, state[0], state[1], state[2], nonce]
-__global__ void __launch_bounds__(BN128_GRINDING_LAUNCH_BLOCKS_SIZE) grinding_kernel_bn128(
+__global__ void grinding_kernel_bn128(
     uint64_t *d_nonce,
     uint64_t *d_nonceBlock,
     const FrElementGPU *d_state,
@@ -537,6 +538,10 @@ __global__ void __launch_bounds__(BN128_GRINDING_LAUNCH_BLOCKS_SIZE) grinding_ke
 
 
 void PoseidonBN128GPU::grinding(uint64_t *d_nonce, uint64_t *d_nonceBlock, const FrElement *d_state, uint32_t n_bits, cudaStream_t stream) {
+    if (n_bits == 0) {   // every nonce passes, as on the CPU (and 1 << 64 below is UB)
+        CHECKCUDAERR(cudaMemsetAsync(d_nonce, 0, sizeof(uint64_t), stream));
+        return;
+    }
     // Calculate number of iterations needed for 128-bit security
     // Probability of not finding nonce in totalHashes: (1 - 1/2^n_bits)^totalHashes = 2^(-128)
     const uint64_t security = 128;

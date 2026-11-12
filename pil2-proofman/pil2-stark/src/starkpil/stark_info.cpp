@@ -4,244 +4,17 @@
 #include "zklog.hpp"
 #include "exit_process.hpp"
 #include "expressions_pack.hpp"
-#include <cstdlib>
-#include <limits>
-#include <map>
-#include <stdexcept>
+#include "grinding_launch.hpp"
+#include "stir/stir_layout.hpp"
 
-static constexpr uint64_t MAX_SAFE_SHIFT_BITS = 30;
-static constexpr uint64_t MAX_FRI_QUERIES = 4096;
-
-static bool isSupportedArity(uint64_t arity, bool bn128)
-{
-    if (arity == 2 || arity == 3 || arity == 4) return true;
-    return bn128 && arity == 16;
-}
-
-static uint64_t checkedPow2Bits(uint64_t bits, const char *context)
-{
-    if (bits > MAX_SAFE_SHIFT_BITS) {
-        throw std::runtime_error(std::string(context) + ": unsupported power-of-two size");
-    }
-    return 1ULL << bits;
-}
-
-static uint64_t merkleDepthForBits(uint64_t bits, uint64_t arity, const char *context)
-{
-    uint64_t leaves = checkedPow2Bits(bits, context);
-    uint64_t depth = 0;
-    uint64_t capacity = 1;
-    while (capacity < leaves) {
-        capacity *= arity;
-        depth++;
-    }
-    return depth;
-}
-
-// Rejects stark structures whose sizes would overflow the 64-bit domain arithmetic or whose FRI
-// and Merkle parameters cannot describe a proof the prover and verifier agree on.
-static void validateStarkStruct(const StarkStruct &starkStruct)
-{
-    bool bn128 = starkStruct.verificationHashType == "BN128";
-    if (!bn128 && starkStruct.verificationHashType != "GL") {
-        throw std::runtime_error("StarkInfo: unsupported verification hash type");
-    }
-    if (!isSupportedArity(starkStruct.merkleTreeArity, bn128) || !isSupportedArity(starkStruct.transcriptArity, bn128)) {
-        throw std::runtime_error("StarkInfo: unsupported Merkle or transcript arity");
-    }
-    if (starkStruct.nQueries == 0) {
-        throw std::runtime_error("StarkInfo: nQueries must be nonzero");
-    }
-    if (starkStruct.nQueries > MAX_FRI_QUERIES) {
-        throw std::runtime_error("StarkInfo: nQueries exceeds supported limit");
-    }
-    if (starkStruct.nBits > starkStruct.nBitsExt) {
-        throw std::runtime_error("StarkInfo: nBits cannot exceed nBitsExt");
-    }
-    checkedPow2Bits(starkStruct.nBitsExt, "StarkInfo nBitsExt");
-    if (starkStruct.steps.empty()) {
-        throw std::runtime_error("StarkInfo: FRI steps cannot be empty");
-    }
-    if (starkStruct.steps[0].nBits != starkStruct.nBitsExt) {
-        throw std::runtime_error("StarkInfo: first FRI step must match nBitsExt");
-    }
-
-    uint64_t baseDepth = merkleDepthForBits(starkStruct.nBitsExt, starkStruct.merkleTreeArity, "StarkInfo base tree");
-    if (starkStruct.lastLevelVerification > baseDepth) {
-        throw std::runtime_error("StarkInfo: lastLevelVerification exceeds base tree depth");
-    }
-
-    for (uint64_t i = 1; i < starkStruct.steps.size(); ++i) {
-        uint64_t bits = starkStruct.steps[i].nBits;
-        if (starkStruct.steps[i - 1].nBits <= bits) {
-            throw std::runtime_error("StarkInfo: FRI steps must be strictly descending");
-        }
-        uint64_t depth = merkleDepthForBits(bits, starkStruct.merkleTreeArity, "StarkInfo FRI tree");
-        if (starkStruct.lastLevelVerification > depth) {
-            throw std::runtime_error("StarkInfo: lastLevelVerification exceeds a FRI tree depth");
-        }
-    }
-}
-
-static uint64_t requireMapSection(const std::map<std::string, uint64_t> &mapSectionsN, const std::string &section)
-{
-    auto it = mapSectionsN.find(section);
-    if (it == mapSectionsN.end()) {
-        throw std::runtime_error("StarkInfo: missing map section " + section);
-    }
-    return it->second;
-}
-
-static uint64_t absOpeningPoint(int64_t point)
-{
-    if (point == std::numeric_limits<int64_t>::min()) {
-        throw std::runtime_error("StarkInfo: opening point is unsupported");
-    }
-    return point < 0 ? static_cast<uint64_t>(-point) : static_cast<uint64_t>(point);
-}
-
-// Opening points are row offsets on the trace domain; the prover and verifier evaluate at
-// xi * w^point, so an offset must stay inside the domain to address a distinct row.
-static void validateOpeningPoints(const vector<int64_t> &openingPoints, const StarkStruct &starkStruct)
-{
-    if (openingPoints.empty()) {
-        throw std::runtime_error("StarkInfo: openingPoints cannot be empty");
-    }
-    if (openingPoints.size() > MAX_FRI_QUERIES) {
-        throw std::runtime_error("StarkInfo: openingPoints exceeds supported limit");
-    }
-
-    const uint64_t domainSize = 1ULL << starkStruct.nBits;
-    for (int64_t point : openingPoints) {
-        if (absOpeningPoint(point) >= domainSize) {
-            throw std::runtime_error("StarkInfo: opening point exceeds trace domain");
-        }
-    }
-}
-
-static void validatePolMapSpan(const PolMap &polMap, uint64_t sectionColumns, const std::string &context)
-{
-    if (polMap.dim != 1 && polMap.dim != FIELD_EXTENSION) {
-        throw std::runtime_error(context + ": unsupported polynomial dimension");
-    }
-    if (polMap.stagePos > sectionColumns || polMap.dim > sectionColumns - polMap.stagePos) {
-        throw std::runtime_error(context + ": polynomial column span is out of range");
-    }
-}
-
-// The quotient is committed as qDeg field-extension columns in the last stage, and splitting it
-// into qDeg pieces is only sound when the extended domain covers its degree.
-static void validateQMetadata(
-        uint64_t qDeg,
-        uint64_t qDim,
-        uint64_t nStages,
-        const StarkStruct &starkStruct,
-        const std::map<std::string, uint64_t> &mapSectionsN)
-{
-    if (qDim != FIELD_EXTENSION) {
-        throw std::runtime_error("StarkInfo: qDim must match field extension width");
-    }
-    if (qDeg == 0) {
-        throw std::runtime_error("StarkInfo: qDeg must be nonzero");
-    }
-    if (qDeg > (1ULL << (starkStruct.nBitsExt - starkStruct.nBits))) {
-        throw std::runtime_error("StarkInfo: qDeg exceeds quotient blowup");
-    }
-    const std::string qSection = "cm" + to_string(nStages + 1);
-    if (requireMapSection(mapSectionsN, qSection) != qDeg * qDim) {
-        throw std::runtime_error("StarkInfo: " + qSection + " section does not match qDeg*qDim");
-    }
-}
-
-// Every polynomial map entry must address columns that exist in its section; provers and
-// verifiers index commitment buffers with these spans without further checks.
-static void validatePolMaps(
-        uint64_t nStages,
-        uint64_t nConstants,
-        const vector<CustomCommits> &customCommits,
-        const vector<PolMap> &cmPolsMap,
-        const vector<PolMap> &constPolsMap,
-        const vector<vector<PolMap>> &customCommitsMap,
-        const std::map<std::string, uint64_t> &mapSectionsN)
-{
-    if (requireMapSection(mapSectionsN, "const") != nConstants) {
-        throw std::runtime_error("StarkInfo: const section does not match nConstants");
-    }
-
-    for (uint64_t i = 0; i < cmPolsMap.size(); ++i) {
-        const PolMap &polMap = cmPolsMap[i];
-        if (polMap.polsMapId != i) {
-            throw std::runtime_error("StarkInfo: cmPolsMap polsMapId does not match its index");
-        }
-        if (polMap.stage == 0 || polMap.stage > nStages + 1) {
-            throw std::runtime_error("StarkInfo: cmPolsMap has invalid stage");
-        }
-        const std::string section = "cm" + to_string(polMap.stage);
-        validatePolMapSpan(polMap, requireMapSection(mapSectionsN, section), "StarkInfo cmPolsMap");
-    }
-
-    for (uint64_t i = 0; i < constPolsMap.size(); ++i) {
-        const PolMap &polMap = constPolsMap[i];
-        if (polMap.polsMapId != i) {
-            throw std::runtime_error("StarkInfo: constPolsMap polsMapId does not match its index");
-        }
-        if (polMap.stage != 0) {
-            throw std::runtime_error("StarkInfo: constPolsMap has invalid stage");
-        }
-        validatePolMapSpan(polMap, nConstants, "StarkInfo constPolsMap");
-    }
-
-    if (customCommitsMap.size() != customCommits.size()) {
-        throw std::runtime_error("StarkInfo: customCommitsMap size does not match customCommits");
-    }
-    for (uint64_t commitId = 0; commitId < customCommitsMap.size(); ++commitId) {
-        const uint64_t sectionColumns = requireMapSection(mapSectionsN, customCommits[commitId].name + "0");
-        for (uint64_t i = 0; i < customCommitsMap[commitId].size(); ++i) {
-            const PolMap &polMap = customCommitsMap[commitId][i];
-            if (polMap.commitId != commitId || polMap.polsMapId != i) {
-                throw std::runtime_error("StarkInfo: customCommitsMap metadata does not match its index");
-            }
-            validatePolMapSpan(polMap, sectionColumns, "StarkInfo customCommitsMap");
-        }
-    }
-}
-
-static void validateEvalMap(
-        const vector<EvMap> &evMap,
-        const vector<int64_t> &openingPoints,
-        const vector<PolMap> &cmPolsMap,
-        const vector<PolMap> &constPolsMap,
-        const vector<vector<PolMap>> &customCommitsMap)
-{
-    for (const EvMap &ev : evMap) {
-        if (ev.openingPos >= openingPoints.size()) {
-            throw std::runtime_error("StarkInfo: evMap openingPos is out of range");
-        }
-        if (openingPoints[ev.openingPos] != ev.prime) {
-            throw std::runtime_error("StarkInfo: evMap openingPos does not match prime");
-        }
-        if (ev.type == EvMap::eType::cm) {
-            if (ev.id >= cmPolsMap.size()) {
-                throw std::runtime_error("StarkInfo: evMap committed polynomial id is out of range");
-            }
-        } else if (ev.type == EvMap::eType::_const) {
-            if (ev.id >= constPolsMap.size()) {
-                throw std::runtime_error("StarkInfo: evMap const polynomial id is out of range");
-            }
-        } else if (ev.commitId >= customCommitsMap.size() || ev.id >= customCommitsMap[ev.commitId].size()) {
-            throw std::runtime_error("StarkInfo: evMap custom polynomial id is out of range");
-        }
-    }
-}
-
-StarkInfo::StarkInfo(string file, bool final_, bool recursive_, bool verify_constraints_, bool verify_, bool gpu_, bool preallocate_)
+StarkInfo::StarkInfo(string file, bool final_, bool recursive_, bool verify_constraints_, bool verify_, bool gpu_)
 {
 
     recursive = recursive_;
     verify_constraints = verify_constraints_;
     verify = verify_;
     gpu = gpu_;
-    preallocate = preallocate_;
+    inplaceStageCommit = !final_ && !recursive_ && !verify_constraints_ && !verify_;
 
     // Load contents from json file
     json starkInfoJson;
@@ -253,9 +26,7 @@ void StarkInfo::load(json j)
 {   
     starkStruct.nBits = j["starkStruct"]["nBits"];
     starkStruct.nBitsExt = j["starkStruct"]["nBitsExt"];
-    starkStruct.nQueries = j["starkStruct"]["nQueries"];
     starkStruct.verificationHashType = j["starkStruct"]["verificationHashType"];
-    starkStruct.powBits = j["starkStruct"]["powBits"];
     if(starkStruct.verificationHashType == "BN128") {
         if(j["starkStruct"].contains("merkleTreeArity")) {
             starkStruct.merkleTreeArity = j["starkStruct"]["merkleTreeArity"];
@@ -269,7 +40,11 @@ void StarkInfo::load(json j)
         } else {
             starkStruct.merkleTreeCustom = false;
         }
-        starkStruct.lastLevelVerification = 0;
+        if(j["starkStruct"].contains("lastLevelVerification")) {
+            starkStruct.lastLevelVerification = j["starkStruct"]["lastLevelVerification"];
+        } else {
+            starkStruct.lastLevelVerification = 0;
+        }
     } else {
         starkStruct.merkleTreeArity = j["starkStruct"]["merkleTreeArity"];
         starkStruct.transcriptArity = j["starkStruct"]["transcriptArity"];
@@ -282,16 +57,56 @@ void StarkInfo::load(json j)
         starkStruct.hashCommits = false;
     }
 
-    for (uint64_t i = 0; i < j["starkStruct"]["steps"].size(); i++)
-    {
-        StepStruct step;
-        step.nBits = j["starkStruct"]["steps"][i]["nBits"];
-        starkStruct.steps.push_back(step);
+    std::string lowDegreeTest = j["starkStruct"].contains("lowDegreeTest") ? j["starkStruct"]["lowDegreeTest"].get<std::string>() : "FRI";
+    if (lowDegreeTest == "STIR") {
+        starkStruct.lowDegreeTest = LowDegreeTestKind::STIR;
+        if (starkStruct.verificationHashType != "GL") {
+            zklog.error("StarkInfo::load() STIR supports GL verification hashes only, got " + starkStruct.verificationHashType);
+            exitProcess();
+        }
+        json stir = j["starkStruct"];
+        starkStruct.stir.foldingFactors = stir["foldingFactors"].get<vector<uint64_t>>();
+        starkStruct.stir.logDegrees = stir["logDegrees"].get<vector<uint64_t>>();
+        starkStruct.stir.logDomainSizes = stir["logDomainSizes"].get<vector<uint64_t>>();
+        starkStruct.stir.numQueries = stir.contains("numQueries") ? stir["numQueries"].get<vector<uint64_t>>() : vector<uint64_t>();
+        starkStruct.stir.grindingBitsQueries = stir.contains("grindingBitsQueries") ? stir["grindingBitsQueries"].get<vector<uint64_t>>() : vector<uint64_t>();
+        uint64_t M = starkStruct.stir.numIterations();
+        if (starkStruct.stir.logDegrees.size() != M + 1 || starkStruct.stir.logDomainSizes.size() != M + 1 ||
+            starkStruct.stir.numQueries.size() != M || starkStruct.stir.grindingBitsQueries.size() != M) {
+            zklog.error("StarkInfo::load() STIR schedule lengths are inconsistent (M=" + to_string(M) + ")");
+            exitProcess();
+        }
+        // Every quotient round i = 1..M-1 divides by |G_i| = t_{i-1} + s points, so it needs
+        // |G_i| < d_i — the setup enforces this, but a stark info is untrusted input here.
+        for (uint64_t i = 1; i < M; i++) {
+            uint64_t nG = starkStruct.stir.numQueries[i - 1] + starkStruct.stir.numOodSamples;
+            if (nG >= (uint64_t(1) << starkStruct.stir.logDegrees[i])) {
+                zklog.error("StarkInfo::load() invalid STIR schedule: |G_" + to_string(i) + "| = " + to_string(nG) +
+                            " is not below d_" + to_string(i) + " = 2^" + to_string(starkStruct.stir.logDegrees[i]));
+                exitProcess();
+            }
+        }
+        // The stage/constant/custom trees are opened at the round-1 shift queries, t_0 of them —
+        // the STIR counterpart of FRI's nQueries, and what every stage-level consumer keys on.
+        starkStruct.nQueries = starkStruct.stir.numQueries.empty() ? 0 : starkStruct.stir.numQueries[0];
+    } else if (lowDegreeTest == "FRI") {
+        starkStruct.lowDegreeTest = LowDegreeTestKind::FRI;
+        starkStruct.nQueries = j["starkStruct"]["numQueries"];
+        starkStruct.logDomainSizes = j["starkStruct"]["logDomainSizes"].get<vector<uint64_t>>();
+        // The same key holds FRI's scalar grinding budget and STIR's per-round vector,
+        // so it can only be read after the lowDegreeTest dispatch.
+        starkStruct.grindingBitsQueries =
+            j["starkStruct"].contains("grindingBitsQueries") ? j["starkStruct"]["grindingBitsQueries"].get<uint64_t>() : 0;
+    } else {
+        zklog.error("StarkInfo::load() unknown lowDegreeTest: " + lowDegreeTest);
+        exitProcess();
     }
-    validateStarkStruct(starkStruct);
 
     nPublics = j["nPublics"];
     nConstants = j["nConstants"];
+
+    hasCircuitType = j.contains("circuitType");
+    if (hasCircuitType) circuitType = j["circuitType"];
 
     nStages = j["nStages"];
 
@@ -300,7 +115,7 @@ void StarkInfo::load(json j)
 
     nConstraints = j["nConstraints"];
 
-    friExpId = j["friExpId"];
+    deepExpId = j["deepExpId"];
     cExpId = j["cExpId"];
 
 
@@ -319,7 +134,6 @@ void StarkInfo::load(json j)
     for(uint64_t i = 0; i < j["openingPoints"].size(); i++) {
         openingPoints.push_back(j["openingPoints"][i]);
     }
-    validateOpeningPoints(openingPoints, starkStruct);
 
     for(uint64_t i = 0; i < j["boundaries"].size(); i++) {
         Boundary b;
@@ -489,16 +303,12 @@ void StarkInfo::load(json j)
         mapSectionsN[it.key()] = it.value();
     }
 
-    validateQMetadata(qDeg, qDim, nStages, starkStruct, mapSectionsN);
-    validatePolMaps(nStages, nConstants, customCommits, cmPolsMap, constPolsMap, customCommitsMap, mapSectionsN);
-    validateEvalMap(evMap, openingPoints, cmPolsMap, constPolsMap, customCommitsMap);
     getProofSize();
 
     if(verify) {
         gpu = false;
         mapTotalN = 0;
         mapTotalNCustomCommitsFixed = 0;
-        mapTotalNContributions = 0;
         mapOffsets[std::make_pair("const", false)] = 0;
         for(uint64_t stage = 1; stage <= nStages + 1; ++stage) {
             mapOffsets[std::make_pair("cm" + to_string(stage), false)] = mapTotalN;
@@ -523,7 +333,6 @@ void StarkInfo::load(json j)
         }
 
         mapTotalNCustomCommitsFixed = 0;
-        mapTotalNContributions = 0;
 
         // Set offsets for custom commits fixed
         for(uint64_t i = 0; i < customCommits.size(); ++i) {
@@ -570,6 +379,50 @@ void StarkInfo::load(json j)
     }
 }
 
+// The trees the low-degree test commits: FRI's folded oracles (one per step after the first),
+// STIR's T_0..T_{M−1}. Leaf `i` holds one folding coset, so its width is 2^{k_i} cubic elements.
+uint64_t StarkInfo::numLowDegreeTestTrees() const {
+    if (starkStruct.lowDegreeTest == LowDegreeTestKind::STIR) return starkStruct.stir.numIterations();
+    return starkStruct.logDomainSizes.empty() ? 0 : starkStruct.logDomainSizes.size() - 1;
+}
+
+uint64_t StarkInfo::lowDegreeTestTreeWidth(uint64_t i) const {
+    if (starkStruct.lowDegreeTest == LowDegreeTestKind::STIR) {
+        return (uint64_t(1) << starkStruct.stir.foldingFactors[i]) * FIELD_EXTENSION;
+    }
+    uint64_t nGroups = 1 << starkStruct.logDomainSizes[i + 1];
+    uint64_t groupSize = (1 << starkStruct.logDomainSizes[i]) / nGroups;
+    return groupSize * FIELD_EXTENSION;
+}
+
+// The u64 the flat proof buffer spends on the STIR section — exactly what `Proofs::proof2pointer`
+// writes for it. Kept here so the proof-size accounting and the writer share one formula.
+uint64_t StarkInfo::stirProofSectionSize() const {
+    uint64_t M = starkStruct.stir.numIterations();
+    bool bn128 = starkStruct.verificationHashType == std::string("BN128");
+    uint64_t nFieldElements = bn128 ? 1 : HASH_SIZE;
+    uint64_t nSiblingsPerLevel = (starkStruct.merkleTreeArity - 1) * nFieldElements;
+    uint64_t numNodesLevel = starkStruct.lastLevelVerification == 0 ? 0 : (uint64_t)std::pow(starkStruct.merkleTreeArity, starkStruct.lastLevelVerification);
+
+    uint64_t size = 0;
+    size += M * nFieldElements;                                       // roots of T_0..T_{M−1}
+    for (uint64_t i = 0; i < M; ++i) {
+        uint64_t k = uint64_t(1) << starkStruct.stir.foldingFactors[i];
+        uint64_t logLeaves = starkStruct.stir.logDomainSizes[i] - starkStruct.stir.foldingFactors[i];
+        uint64_t nSiblings = merkleProofLevels(logLeaves, starkStruct.merkleTreeArity, starkStruct.lastLevelVerification, bn128);
+        size += starkStruct.stir.numQueries[i] * k * FIELD_EXTENSION;           // opened cosets
+        size += starkStruct.stir.numQueries[i] * nSiblings * nSiblingsPerLevel; // their Merkle paths
+        size += numNodesLevel * nFieldElements;                                 // published last level
+    }
+    size += (M - 1) * starkStruct.stir.numOodSamples * FIELD_EXTENSION;         // β
+    size += (uint64_t(1) << starkStruct.stir.logDegrees[M]) * FIELD_EXTENSION;  // p, in coefficients
+    size += M;                                                                  // one nonce per query message
+    for (uint64_t i = 1; i < M; ++i) {                                          // Âns and shake coefficients, zero-padded
+        size += 2 * (starkStruct.stir.numOodSamples + starkStruct.stir.numQueries[i - 1]) * FIELD_EXTENSION;
+    }
+    return size;
+}
+
 void StarkInfo::getProofSize() {
     proofSize = 0;
     proofSize += airgroupValuesMap.size() * FIELD_EXTENSION;
@@ -579,7 +432,7 @@ void StarkInfo::getProofSize() {
 
     proofSize += evMap.size() * FIELD_EXTENSION; // Evals
 
-    uint64_t nSiblings = std::ceil(starkStruct.steps[0].nBits / std::log2(starkStruct.merkleTreeArity)) - starkStruct.lastLevelVerification;
+    uint64_t nSiblings = merkleProofLevels(starkStruct.nBitsExt, starkStruct.merkleTreeArity, starkStruct.lastLevelVerification, starkStruct.verificationHashType == std::string("BN128"));
     uint64_t nSiblingsPerLevel = (starkStruct.merkleTreeArity - 1) * 4;
 
     proofSize += starkStruct.nQueries * nConstants; // Constants Values
@@ -595,36 +448,48 @@ void StarkInfo::getProofSize() {
         proofSize += starkStruct.nQueries * nSiblings * nSiblingsPerLevel;
     }
 
-    proofSize += (starkStruct.steps.size() - 1) * 4; // Roots
+    if(starkStruct.lowDegreeTest == LowDegreeTestKind::STIR) {
+        if(starkStruct.lastLevelVerification > 0) {
+            uint64_t numNodesLevel = std::pow(starkStruct.merkleTreeArity, starkStruct.lastLevelVerification);
+            proofSize += (nStages + 2 + customCommits.size()) * numNodesLevel * 4;
+        }
+        proofSize += stirProofSectionSize();
+        return;
+    }
+
+    proofSize += (starkStruct.logDomainSizes.size() - 1) * 4; // Roots
 
     if(starkStruct.lastLevelVerification > 0) {
         uint64_t numNodesLevel = std::pow(starkStruct.merkleTreeArity, starkStruct.lastLevelVerification);
-        proofSize += (starkStruct.steps.size() - 1) * numNodesLevel * 4;
+        proofSize += (starkStruct.logDomainSizes.size() - 1) * numNodesLevel * 4;
         proofSize += (nStages + 2 + customCommits.size()) * numNodesLevel * 4;
     }
 
-    for(uint64_t i = 1; i < starkStruct.steps.size(); ++i) {
-        uint64_t nSiblings = std::ceil(starkStruct.steps[i].nBits / std::log2(starkStruct.merkleTreeArity)) - starkStruct.lastLevelVerification;
+    for(uint64_t i = 1; i < starkStruct.logDomainSizes.size(); ++i) {
+        uint64_t nSiblings = merkleProofLevels(starkStruct.logDomainSizes[i], starkStruct.merkleTreeArity, starkStruct.lastLevelVerification, starkStruct.verificationHashType == std::string("BN128"));
         uint64_t nSiblingsPerLevel = (starkStruct.merkleTreeArity - 1) * 4;
-        proofSize += starkStruct.nQueries * (1 << (starkStruct.steps[i-1].nBits - starkStruct.steps[i].nBits))*FIELD_EXTENSION;
+        proofSize += starkStruct.nQueries * (1 << (starkStruct.logDomainSizes[i-1] - starkStruct.logDomainSizes[i]))*FIELD_EXTENSION;
         proofSize += starkStruct.nQueries * nSiblings * nSiblingsPerLevel;
     }
 
-    proofSize += (1 << starkStruct.steps[starkStruct.steps.size()-1].nBits) * FIELD_EXTENSION;
+    proofSize += (1 << starkStruct.logDomainSizes[starkStruct.logDomainSizes.size()-1]) * FIELD_EXTENSION;
     proofSize += 1; // Nonce
 }
 
 uint64_t StarkInfo::getPinnedProofSize() {
+    const bool stirTest = starkStruct.lowDegreeTest == LowDegreeTestKind::STIR;
+    const uint64_t nLdtTrees = numLowDegreeTestTrees();
+
     uint64_t pinnedProofSize = 0;
 
     pinnedProofSize += (nStages + 1) * 4; // Roots
     pinnedProofSize += customCommits.size() * 4; // Custom commits roots
-    pinnedProofSize += (starkStruct.steps.size() - 1) * 4; // Steps roots
+    pinnedProofSize += nLdtTrees * 4; // Low-degree-test roots
 
     if(starkStruct.lastLevelVerification > 0) {
         uint64_t numNodesLevel = std::pow(starkStruct.merkleTreeArity, starkStruct.lastLevelVerification);
         pinnedProofSize += (nStages + 2 + customCommits.size()) * numNodesLevel * 4;
-        pinnedProofSize += (starkStruct.steps.size() - 1) * numNodesLevel * 4;
+        pinnedProofSize += nLdtTrees * numNodesLevel * 4;
     }
     
     uint64_t maxTreeWidth = 0;
@@ -635,24 +500,23 @@ uint64_t StarkInfo::getPinnedProofSize() {
             maxTreeWidth = treeWidth;
         }
     }
-    for(uint64_t i = 0; i < starkStruct.steps.size() - 1; ++i) {
-        uint64_t nGroups = 1 << starkStruct.steps[i + 1].nBits;
-        uint64_t groupSize = (1 << starkStruct.steps[i].nBits) / nGroups;
-        uint64_t treeWidth = groupSize * FIELD_EXTENSION;
+    for(uint64_t i = 0; i < nLdtTrees; ++i) {
+        uint64_t treeWidth = lowDegreeTestTreeWidth(i);
         if(treeWidth > maxTreeWidth) {
             maxTreeWidth = treeWidth;
         }
     }
 
-    uint64_t nSiblings = std::ceil(starkStruct.nBitsExt / std::log2(starkStruct.merkleTreeArity)) - starkStruct.lastLevelVerification;
+    uint64_t nSiblings = merkleProofLevels(starkStruct.nBitsExt, starkStruct.merkleTreeArity, starkStruct.lastLevelVerification, starkStruct.verificationHashType == std::string("BN128"));
     uint64_t nSiblingsPerLevel = (starkStruct.merkleTreeArity - 1) * HASH_SIZE;
     uint64_t maxProofSize = nSiblings * nSiblingsPerLevel;
 
     uint64_t maxProofBuffSize = maxTreeWidth + maxProofSize;
 
+    // FRI opens every tree at the same number of queries; STIR's counts shrink per iteration, so
+    // the first (t_0 = nQueries) is already the largest.
     uint64_t nTrees = nStages + customCommits.size() + 2;
-    uint64_t nTreesFRI = starkStruct.steps.size() - 1;
-    uint64_t queriesProofSize = (nTrees + nTreesFRI) * maxProofBuffSize * starkStruct.nQueries;
+    uint64_t queriesProofSize = (nTrees + nLdtTrees) * maxProofBuffSize * starkStruct.nQueries;
 
     pinnedProofSize += queriesProofSize;
 
@@ -661,10 +525,23 @@ uint64_t StarkInfo::getPinnedProofSize() {
     pinnedProofSize += airgroupValuesSize;
     pinnedProofSize += airValuesSize;
 
-    uint64_t finalPolDegree = 1 << starkStruct.steps[starkStruct.steps.size() - 1].nBits;
-    pinnedProofSize += finalPolDegree * FIELD_EXTENSION; // Final polynomial values
-    pinnedProofSize += 1; // Nonce
+    if(stirTest) {
+        pinnedProofSize += stirLayout().proofSize; // the device proof block, copied as one
+    } else {
+        uint64_t finalPolDegree = 1 << starkStruct.logDomainSizes[starkStruct.logDomainSizes.size() - 1];
+        pinnedProofSize += finalPolDegree * FIELD_EXTENSION; // Final polynomial values
+        pinnedProofSize += 1; // Nonce
+    }
     return pinnedProofSize;
+}
+
+// Every aux_trace region starts on 256 bytes (32 elements), so every column in it does too: columns start
+// at a multiple of the region's row count. Only the reservations whose size is not such a multiple need it.
+static uint64_t alignRegion(uint64_t n) { return (n + 31) & ~uint64_t(31); }
+
+StirLayout StarkInfo::stirLayout() const {
+    StarkInfo *self = const_cast<StarkInfo *>(this); // getNumNodesMT is non-const
+    return makeStirLayout(stirParamsFromStarkInfo(*this), stirBase, [self](uint64_t h) { return self->getNumNodesMT(h); });
 }
 
 void StarkInfo::setMapOffsets() {
@@ -690,20 +567,31 @@ void StarkInfo::setMapOffsets() {
 
     mapTotalN = 0;
 
-    uint64_t numNodes = getNumNodesMT(NExtended);
+    // Level 0 must lie below the last levels, and levels >= 2 must fit the build's leaf scratch.
+    const uint64_t arity = starkStruct.merkleTreeArity;
+    dropLeafLevel = gpu && starkStruct.verificationHashType == "GL" &&
+                    NExtended > (uint64_t)std::pow(arity, starkStruct.lastLevelVerification) &&
+                    NExtended >= arity * arity * arity;
+    uint64_t numNodes = getNumNodesMTCommit(NExtended);
 
-    if(!preallocate && gpu) {    
+    if(gpu) {
         mapOffsets[std::make_pair("const", true)] = mapTotalN;
         MerkleTreeGL mt(starkStruct.merkleTreeArity, starkStruct.lastLevelVerification, starkStruct.merkleTreeCustom, NExtended, nConstants);
         uint64_t constTreeSize = (NExtended * nConstants) + numNodes;
-        mapTotalN += constTreeSize;
+        mapTotalN += alignRegion(constTreeSize);
 
-        if (!recursive && (NExtended * nConstants * 8.0 / (1024 * 1024)) >= 512) {
+        // This air's const tree is rebuilt on device (unpack + extend + merkelize from the
+        // resident packed pols). No consttree file is ever read on GPU, so this is false only
+        // for airs with no constants at all.
+        if (nConstants > 0) {
             calculateFixedExtended = true;
         }
     }
 
     if (gpu) {
+        // Const pols and const tree are always distinct regions. They used to be allowed to
+        // overlap for single-use airs -- valid only because the merkelize was then the last
+        // reader of the small domain, an ordering a pre-proof rebuild cannot honour.
         mapOffsets[std::make_pair("const", false)] = mapTotalN;
         mapTotalN += N * nConstants;
     }
@@ -731,7 +619,7 @@ void StarkInfo::setMapOffsets() {
         mapTotalN += 1;
 
         mapOffsets[std::make_pair("nonce_blocks", false)] = mapTotalN;
-        mapTotalN += NONCES_LAUNCH_GRID_SIZE;
+        mapTotalN += GRIND_NONCE_BLOCKS_MAX;
 
         // Align to 4 Goldilocks elements (32 bytes) for BN128 FrElement alignment
         if (starkStruct.verificationHashType == "BN128") {
@@ -750,11 +638,17 @@ void StarkInfo::setMapOffsets() {
         mapOffsets[std::make_pair("challenges", false)] = mapTotalN;
         mapTotalN += challengesMap.size() * FIELD_EXTENSION;
 
-        mapOffsets[std::make_pair("xdivxsub", false)] = mapTotalN;
-        mapTotalN += openingPoints.size() * FIELD_EXTENSION;
+        // FRI constants (deep_expression.cuh): vf2^c per polynomial (at most one per eval), a_o and K_o per opening.
+        mapOffsets[std::make_pair("fri_constants", false)] = mapTotalN;
+        mapTotalN += (evMap.size() + 2 * openingPoints.size()) * FIELD_EXTENSION;
 
         mapOffsets[std::make_pair("fri_queries", false)] = mapTotalN;
         mapTotalN += starkStruct.nQueries;
+
+        uint64_t permBits = starkStruct.nBitsExt;
+        uint64_t permNFields = (starkStruct.nQueries * permBits + 62) / 63;
+        mapOffsets[std::make_pair("fri_queries_perm", false)] = mapTotalN;
+        mapTotalN += permNFields;        
 
         maxTreeWidth = 0;
         for (auto it = mapSectionsN.begin(); it != mapSectionsN.end(); it++) 
@@ -764,16 +658,14 @@ void StarkInfo::setMapOffsets() {
                 maxTreeWidth = treeWidth;
             }
         }
-        for(uint64_t i = 0; i < starkStruct.steps.size() - 1; ++i) {
-            uint64_t nGroups = 1 << starkStruct.steps[i + 1].nBits;
-            uint64_t groupSize = (1 << starkStruct.steps[i].nBits) / nGroups;
-            uint64_t treeWidth = groupSize * FIELD_EXTENSION;
+        for(uint64_t i = 0; i < numLowDegreeTestTrees(); ++i) {
+            uint64_t treeWidth = lowDegreeTestTreeWidth(i);
             if(treeWidth > maxTreeWidth) {
                 maxTreeWidth = treeWidth;
             }
         }
 
-        uint64_t nSiblings = std::ceil(starkStruct.nBitsExt / std::log2(starkStruct.merkleTreeArity)) - starkStruct.lastLevelVerification;
+        uint64_t nSiblings = merkleProofLevels(starkStruct.nBitsExt, starkStruct.merkleTreeArity, starkStruct.lastLevelVerification, starkStruct.verificationHashType == std::string("BN128"));
         uint64_t nSiblingsPerLevel;
         if (starkStruct.verificationHashType == "BN128") {
             // BN128: all arity siblings per level, each is 4 uint64_t (32 bytes)
@@ -785,12 +677,15 @@ void StarkInfo::setMapOffsets() {
 
         maxProofBuffSize = maxTreeWidth + maxProofSize;
         uint64_t nTrees = 1 + (nStages + 1) + customCommits.size();
-        uint64_t nTreesFRI = starkStruct.steps.size() - 1;
+        uint64_t nTreesFRI = numLowDegreeTestTrees();
     
         uint64_t queriesProofSize = (nTrees + nTreesFRI) * maxProofBuffSize * starkStruct.nQueries;
 
         mapOffsets[std::make_pair("proof_queries", false)] = mapTotalN;
         mapTotalN += queriesProofSize;
+
+        mapOffsets[std::make_pair("query_rows_scratch", false)] = mapTotalN;
+        if (dropLeafLevel) mapTotalN += starkStruct.nQueries * (starkStruct.merkleTreeArity - 1) * (maxTreeWidth + HASH_SIZE);
         
         // TODO: ADD EXPRESSIONS MEM
     }
@@ -798,75 +693,85 @@ void StarkInfo::setMapOffsets() {
     assert(nStages == 2);
 
     uint64_t maxTotalN = 0;
-    
+
+    mapTotalN = alignRegion(mapTotalN);
     mapOffsets[std::make_pair("cm1", true)] = mapTotalN;
     mapTotalN += NExtended * mapSectionsN["cm1"];
     mapOffsets[std::make_pair("mt1", true)] = mapTotalN;
-    mapTotalN += numNodes;
-    
+    mapTotalN += alignRegion(numNodes);
+
+    if (inplaceStageCommit) {
+        mapOffsets[std::make_pair("cm1", false)] = mapOffsets[std::make_pair("cm1", true)];
+        mapOffsets[std::make_pair("cm2", true)] = mapTotalN;
+        mapOffsets[std::make_pair("cm2", false)] = mapTotalN;
+        mapTotalN += NExtended * mapSectionsN["cm2"];
+        mapOffsets[std::make_pair("mt2", true)] = mapTotalN;
+        mapTotalN += alignRegion(numNodes);
+        // On GPU cm3/mt3 go after q's FRI zone (end of this function) so the expression scratch spans them.
+        if (!gpu) {
+            mapOffsets[std::make_pair("cm3", true)] = mapTotalN;
+            mapTotalN += NExtended * mapSectionsN["cm3"];
+            mapOffsets[std::make_pair("mt3", true)] = mapTotalN;
+            mapTotalN += alignRegion(numNodes);
+        }
+    } else {
     mapOffsets[std::make_pair("cm1", false)] = mapTotalN;
-    mapTotalNContributions = recursive ? 0 : mapTotalN + N * mapSectionsN["cm1"];
 
     mapOffsets[std::make_pair("cm2", true)] = mapTotalN;
     mapTotalN += NExtended * mapSectionsN["cm2"];
     mapOffsets[std::make_pair("mt2", true)] = mapTotalN;
-    mapTotalN += numNodes;
+    mapTotalN += alignRegion(numNodes);
     mapTotalN = std::max(mapOffsets[std::make_pair("cm1", false)] + N * mapSectionsN["cm1"], mapTotalN);
 
     mapOffsets[std::make_pair("cm2", false)] = mapTotalN;
-    
+
     mapOffsets[std::make_pair("cm3", true)] = mapTotalN;
     mapTotalN += NExtended * mapSectionsN["cm3"];
     mapOffsets[std::make_pair("mt3", true)] = mapTotalN;
-    mapTotalN += numNodes;
+    mapTotalN += alignRegion(numNodes);
 
-    if(!gpu) {
-        mapOffsets[std::make_pair("evals", true)] = mapTotalN;
-        mapTotalN += evMap.size() * omp_get_max_threads() * FIELD_EXTENSION;
-    }
 
     mapTotalN = std::max(mapOffsets[std::make_pair("cm2", false)] + N * mapSectionsN["cm2"], mapTotalN);
+    }
     mapOffsets[std::make_pair("f", true)] = mapTotalN;
     mapOffsets[std::make_pair("q", true)] = mapTotalN;
     mapTotalN += NExtended * FIELD_EXTENSION;
+
+    mapOffsets[std::make_pair("constraints", false)] = mapOffsets[std::make_pair("q", true)];
 
     uint64_t maxSizeHelper = 0;
     if(gpu) {
         maxSizeHelper += boundaries.size() * NExtended;
         mapOffsets[std::make_pair("zi", true)] = mapTotalN;
-        mapOffsets[std::make_pair("x", true)] = mapTotalN;
     }
     
     maxTotalN = std::max(maxTotalN, mapTotalN + maxSizeHelper);
     mapOffsets[std::make_pair("mem_exps", false)] = mapTotalN + maxSizeHelper;   
 
     uint64_t LEvSize = mapOffsets[std::make_pair("f", true)];
+    // Opening 0's Lagrange vector serves every opening point (evmap).
     mapOffsets[std::make_pair("lev", false)] = LEvSize;
-    uint64_t maxOpenings = std::min(uint64_t(openingPoints.size()), uint64_t(4));
-    LEvSize += maxOpenings * N * FIELD_EXTENSION;
-    if(!gpu) {
-        mapOffsets[std::make_pair("buff_helper_fft_lev", false)] = LEvSize;
-        LEvSize += maxOpenings * N * FIELD_EXTENSION;
-    } else {    
-        mapOffsets[std::make_pair("extra_helper_fft_lev", false)] = LEvSize;
-        LEvSize += FIELD_EXTENSION * N + openingPoints.size() * FIELD_EXTENSION;
+    LEvSize += N * FIELD_EXTENSION;
+    if(gpu) {
+        // Opening 0's point y = xi / s and M(y) (computeLEv_inplace), then the stripe partials.
+        mapOffsets[std::make_pair("lev_helper", false)] = LEvSize;
+        LEvSize += 2 * FIELD_EXTENSION;
+        mapOffsets[std::make_pair("evals_partials", false)] = LEvSize;
+        LEvSize += evMap.size() * EVALS_HELPER_CHUNKS * FIELD_EXTENSION;
     }
 
     maxTotalN = std::max(maxTotalN, LEvSize);
 
-    mapOffsets[std::make_pair("buff_helper", false)] = mapTotalN;
-    mapTotalN += NExtended * FIELD_EXTENSION;
+    // FRI layers follow q directly: zi and the expression tmps are dead once folding starts.
 
     if (!gpu) {
-        uint64_t maxTotalNStage2 = mapOffsets[std::make_pair("cm2", false)] + N * mapSectionsN["cm2"];
-        mapOffsets[std::make_pair("buff_helper_fft_2", false)] = maxTotalNStage2;
-        maxTotalNStage2 += NExtended * mapSectionsN["cm2"];
-        maxTotalN = std::max(maxTotalN, maxTotalNStage2);
-        
-        uint64_t maxTotalNStage1 = mapOffsets[std::make_pair("cm1", false)] + N * mapSectionsN["cm1"];
-        mapOffsets[std::make_pair("buff_helper_fft_1", false)] = maxTotalNStage1;
-        maxTotalNStage1 += NExtended * mapSectionsN["cm1"];
-        maxTotalN = std::max(maxTotalN, maxTotalNStage1);
+        for (uint64_t stage = 1; stage <= nStages; ++stage) {
+            std::string section = "cm" + to_string(stage);
+            uint64_t helper = inplaceStageCommit ? mapOffsets[std::make_pair("cm" + to_string(nStages + 1), true)]
+                                                 : mapOffsets[std::make_pair(section, false)] + N * mapSectionsN[section];
+            mapOffsets[std::make_pair("buff_helper_fft_" + to_string(stage), false)] = helper;
+            maxTotalN = std::max(maxTotalN, helper + NTT_Goldilocks::LDEBlockedScratchSize(NExtended, mapSectionsN[section]));
+        }
 
         uint64_t maxTotalNStageQ = mapOffsets[std::make_pair("q", true)] + NExtended * FIELD_EXTENSION;
         mapOffsets[std::make_pair("buff_helper_fft_" + to_string(nStages + 1), false)] = maxTotalNStageQ;
@@ -875,20 +780,53 @@ void StarkInfo::setMapOffsets() {
     } else {
         uint64_t maxTotalNStageQ = mapOffsets[std::make_pair("q", true)] + NExtended * FIELD_EXTENSION;
         mapOffsets[std::make_pair("extra_helper_fft", false)] = maxTotalNStageQ;
+        // The FRI polynomial's 1/(x - xi) planes: zi and the Q helper are dead by then, and the first fold
+        // (fri_1, placed right after q) overwrites them only once f is complete.
+        mapOffsets[std::make_pair("fri_denominators", true)] = maxTotalNStageQ;
         maxTotalNStageQ += NExtended * FIELD_EXTENSION + qDeg;
         maxTotalN = std::max(maxTotalN, maxTotalNStageQ);
     }
  
-    for(uint64_t step = 0; step < starkStruct.steps.size() - 1; ++step) {
-        uint64_t height = 1 << starkStruct.steps[step + 1].nBits;
-        uint64_t width = ((1 << starkStruct.steps[step].nBits) / height) * FIELD_EXTENSION;
+    // FRI's per-step folded-oracle buffers (fri_i / mt_fri_i). STIR's prover owns its own oracles,
+    // so it needs none of these.
+    for(uint64_t step = 0; starkStruct.lowDegreeTest == LowDegreeTestKind::FRI && step < starkStruct.logDomainSizes.size() - 1; ++step) {
+        uint64_t height = 1 << starkStruct.logDomainSizes[step + 1];
+        uint64_t width = ((1 << starkStruct.logDomainSizes[step]) / height) * FIELD_EXTENSION;
         mapOffsets[std::make_pair("fri_" + to_string(step + 1), true)] = mapTotalN;
         mapTotalN += height * width;
         if(starkStruct.verificationHashType == "GL") {
             uint64_t numNodes = getNumNodesMT(height);
             mapOffsets[std::make_pair("mt_fri_" + to_string(step + 1), true)] = mapTotalN;
-            mapTotalN += numNodes;
+            mapTotalN += alignRegion(numNodes);
         }
+    }
+
+    if (gpu && starkStruct.lowDegreeTest == LowDegreeTestKind::STIR) {
+        if (starkStruct.verificationHashType != "GL") {
+            zklog.error("setMapOffsets: STIR supports GL verification hashes only");
+            exitProcess();
+        }
+        if (starkStruct.stir.logDomainSizes[0] != starkStruct.nBitsExt) {
+            zklog.error("setMapOffsets: GPU STIR expects |L_0| = 2^nBitsExt");
+            exitProcess();
+        }
+        stirBase = alignRegion(mapTotalN);
+        StirLayout l = stirLayout();
+        mapTotalN = l.total;
+        // Rounds reuse fri_queries (t_0 raw indices) and fri_queries_perm; both are sized for t_0·nBitsExt.
+        for (uint64_t i = 0; i < starkStruct.stir.numIterations(); i++) {
+            assert(starkStruct.stir.numQueries[i] * starkStruct.stir.logDomainSizes[i] <= starkStruct.nQueries * starkStruct.nBitsExt);
+        }
+    }
+
+    // cm3/mt3 are first written by the quotient commit, so until then the expression scratch
+    // (from mem_exps) runs through them; FRI/STIR only need q and the zone after it.
+    if (gpu && inplaceStageCommit) {
+        mapTotalN = alignRegion(std::max(mapTotalN, maxTotalN));
+        mapOffsets[std::make_pair("cm3", true)] = mapTotalN;
+        mapTotalN += NExtended * mapSectionsN["cm3"];
+        mapOffsets[std::make_pair("mt3", true)] = mapTotalN;
+        mapTotalN += alignRegion(numNodes);
     }
 
     mapTotalN = std::max(mapTotalN, maxTotalN);
@@ -908,16 +846,12 @@ void StarkInfo::setMemoryExpressions(uint64_t nTmp1, uint64_t nTmp3) {
         } else {
             nrowsPack = 256;
             maxNBlocks = 512;
-            if (const char *maxBlocksEnv = std::getenv("VENUS_EXPR_MAX_BLOCKS")) {
-                char *end = nullptr;
-                unsigned long requested = std::strtoul(maxBlocksEnv, &end, 10);
-                if (end != maxBlocksEnv && requested > 0 && requested < maxNBlocks) {
-                    maxNBlocks = requested;
-                }
-            }
 
             uint64_t tmpsUsed = nTmp1 + (nTmp3 + 2) * FIELD_EXTENSION;
-            uint64_t maxTotal = recursive ? mapTotalN + (1 << 26) : mapTotalN + (1 << 25);
+            // The interpreter's grid is sized as if cm3/mt3 still sat below q: same grid, never more memory.
+            uint64_t NExtended = 1ull << starkStruct.nBitsExt;
+            uint64_t cm3Above = inplaceStageCommit ? NExtended * mapSectionsN["cm3"] + alignRegion(getNumNodesMTCommit(NExtended)) : 0;
+            uint64_t maxTotal = (recursive ? mapTotalN + (1 << 26) : mapTotalN + (1 << 25)) - cm3Above;
             while((mapBuffHelper + tmpsUsed * nrowsPack * maxNBlocks) > maxTotal) {
                 if (nrowsPack > 128) {
                     nrowsPack /= 2;
@@ -946,9 +880,39 @@ void StarkInfo::setMemoryExpressions(uint64_t nTmp1, uint64_t nTmp3) {
         mapBuffHelper += destVals;
     }
 
+    // Everything past mem_exps is dead while the quotient runs and during the stage-2 expressions:
+    // the generated kernels (Q, and the chunked generic ones) use it as scratch, up to the end of
+    // the buffer, and fall back to the interpreter when it cannot hold one wave of theirs.
+    if(gpu && !verify) {
+        mapOffsets[std::make_pair("mem_exps_end", false)] = std::max(mapBuffHelper, mapTotalN);
+    }
+
     if(mapBuffHelper > mapTotalN) {
         mapTotalN = mapBuffHelper;
     }
+}
+
+// In place the small cm1 owns the section's lower half, so the raw trace lands in the upper one.
+uint64_t StarkInfo::getTraceLandingOffset() {
+    uint64_t base = mapOffsets[std::make_pair("cm1", true)];
+    return inplaceStageCommit ? base + (1ull << starkStruct.nBits) * mapSectionsN["cm1"] : base;
+}
+
+uint64_t StarkInfo::getNumNodesMTCommit(uint64_t height) {
+    uint64_t full = getNumNodesMT(height);
+    if (!dropLeafLevel) return full;
+    uint64_t a = starkStruct.merkleTreeArity;
+    return full - (height + (a - height % a) % a) * HASH_SIZE;
+}
+
+uint64_t StarkInfo::getLastLevelOffset(uint64_t height, uint64_t &nNodes) {
+    uint64_t a = starkStruct.merkleTreeArity, offset = 0;
+    nNodes = dropLeafLevel ? (height + a - 1) / a : height;
+    while (nNodes > std::pow(a, starkStruct.lastLevelVerification)) {
+        nNodes = (nNodes + a - 1) / a;
+        offset += nNodes * a * HASH_SIZE;
+    }
+    return offset;
 }
 
 uint64_t StarkInfo::getNumNodesMT(uint64_t height) {

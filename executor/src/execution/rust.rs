@@ -1,0 +1,210 @@
+use std::{collections::HashMap, sync::Arc};
+
+use crate::{
+    pub_outs_collector::PubOutsCollector, BackendArtifacts, CountersChunkMetrics, ExecutionOutput,
+    StaticDataBus, MAX_NUM_STEPS,
+};
+use proofman_fields::PrimeField64;
+use proofman_util::{timer_start_info, timer_stop_and_log_info};
+use rayon::prelude::*;
+use zisk_common::DataBusTrait;
+use zisk_common::{io::ZiskStdin, ChunkId, EmuTrace, RandomSeed};
+use zisk_core::{MemDataSection, ZiskRom};
+use ziskemu::{EmuOptions, ZiskEmulator};
+
+use crate::error::ExecutorResult;
+
+pub struct EmulatorRust {
+    /// Chunk size for processing.
+    chunk_size: u64,
+}
+
+impl EmulatorRust {
+    /// The number of threads to use for parallel processing when computing minimal traces.
+    const NUM_THREADS: usize = 16;
+
+    pub fn new(chunk_size: u64) -> Self {
+        Self { chunk_size }
+    }
+
+    /// Computes minimal traces by processing the ZisK ROM with the given public inputs.
+    ///
+    /// # Arguments
+    /// * `stdin` - Shared standard input source used to feed data into the emulator.
+    /// * `_pctx` - Proof context carrying field-parameterized configuration for execution.
+    /// * `_stats` - Handle to executor statistics collection.
+    /// * `_caller_stats_scope` - Stats scope used to associate collected statistics with the caller.
+    ///
+    /// # Returns
+    /// A [`ExecutionOutput`] whose `backend` is [`BackendArtifacts::Rust`] —
+    /// no async runners on the native path.
+    pub fn execute<F: PrimeField64>(
+        &self,
+        zisk_rom: &ZiskRom,
+        stdin: &ZiskStdin,
+        seed: &RandomSeed,
+    ) -> ExecutorResult<ExecutionOutput> {
+        let min_traces = self.run_emulator(zisk_rom, Self::NUM_THREADS, stdin, seed)?;
+
+        // Store execute steps
+        let steps = min_traces.iter().map(|trace| trace.steps).sum::<u64>();
+
+        timer_start_info!(COUNT);
+        let (counters, pub_outs) = self.count::<F>(zisk_rom, &min_traces)?;
+        timer_stop_and_log_info!(COUNT);
+
+        // There is no ROM-histogram assembly on this path, so the reference the collectors are
+        // checked against is built here instead. Compiled out without `debug_frops`.
+        #[cfg(feature = "debug_frops")]
+        self.arm_frops_reference::<F>(zisk_rom, &min_traces)?;
+
+        // Wrap once at the boundary: downstream (planning, witness, the
+        // progressive main store) shares chunks as Arcs.
+        let min_traces = min_traces.into_iter().map(Arc::new).collect();
+
+        Ok(ExecutionOutput {
+            min_traces,
+            counters,
+            pub_outs,
+            steps,
+            backend: BackendArtifacts::Rust,
+        })
+    }
+
+    /// Builds the FROPS multiplicity column a second time, straight from `zisk_core::frops`, and
+    /// arms the cross-check with it.
+    ///
+    /// This is the emulated path's stand-in for the ROM-histogram assembly: an independent producer
+    /// of the same column over the same execution, so what the collectors go on to claim can be
+    /// checked row by row. It replays the minimal traces once more rather than riding along with
+    /// the counting pass, which keeps it entirely out of the way of the code it is checking.
+    ///
+    /// Sequential on purpose: the column is one counter per table row, tens of millions of them,
+    /// and one per thread would cost more memory than the check is worth.
+    #[cfg(feature = "debug_frops")]
+    fn arm_frops_reference<F: PrimeField64>(
+        &self,
+        zisk_rom: &ZiskRom,
+        min_traces: &[EmuTrace],
+    ) -> ExecutorResult<()> {
+        use crate::error::ExecutorError;
+
+        let mut bus = FropsReferenceBus { mult: zisk_core::frops::FropsMultiplicity::new() };
+        for minimal_trace in min_traces {
+            ZiskEmulator::process_emu_trace::<F, _, _>(zisk_rom, minimal_trace, &mut bus, true);
+        }
+        tracing::info!(
+            "FROPS reference column built in Rust ({} counted over {} chunk(s))",
+            bus.mult.counted(),
+            min_traces.len(),
+        );
+        zisk_core::frops::load_frops_reference(bus.mult.rows()).map_err(ExecutorError::Internal)?;
+        Ok(())
+    }
+
+    fn run_emulator(
+        &self,
+        zisk_rom: &ZiskRom,
+        num_threads: usize,
+        stdin: &ZiskStdin,
+        seed: &RandomSeed,
+    ) -> ExecutorResult<Vec<EmuTrace>> {
+        // Call emulate with these options
+        let input_data = stdin.read_data();
+
+        // Settings for the emulator
+        let emu_options = EmuOptions {
+            chunk_size: Some(self.chunk_size),
+            max_steps: MAX_NUM_STEPS,
+            random_seed: Some(*seed),
+            ..EmuOptions::default()
+        };
+
+        Ok(ZiskEmulator::compute_minimal_traces(zisk_rom, &input_data, &emu_options, num_threads)?)
+    }
+
+    /// Counts metrics for secondary state machines based on minimal traces.
+    ///
+    /// # Arguments
+    /// * `min_traces` - Minimal traces obtained from the ROM execution.
+    ///
+    /// # Returns
+    /// A tuple containing two vectors:
+    /// * A vector of main state machine metrics grouped by chunk ID.
+    /// * A vector of secondary state machine metrics grouped by chunk ID. The vector is nested,
+    ///   with the outer vector representing the secondary state machines and the inner vector
+    ///   containing the metrics for each chunk.
+    fn count<F: PrimeField64>(
+        &self,
+        zisk_rom: &ZiskRom,
+        min_traces: &[EmuTrace],
+    ) -> ExecutorResult<(CountersChunkMetrics, PubOutsCollector)> {
+        let metrics_slices: Vec<_> = min_traces
+            .par_iter()
+            .map(|minimal_trace| {
+                let mut data_bus = if minimal_trace.is_first() {
+                    let mem_sections: &dyn MemDataSection =
+                        zisk_rom as &dyn zisk_core::MemDataSection;
+                    StaticDataBus::<_, F>::build(false, Some(mem_sections))
+                } else {
+                    StaticDataBus::<_, F>::build(false, None)
+                };
+
+                ZiskEmulator::process_emu_trace::<F, _, _>(
+                    zisk_rom,
+                    minimal_trace,
+                    &mut data_bus,
+                    true,
+                );
+
+                let pub_outs_chunk = data_bus.take_pub_outs();
+                let databus_counters = data_bus.into_devices(true);
+
+                let mut counters = Vec::new();
+                for counter in databus_counters.into_iter() {
+                    counters.push(counter);
+                }
+
+                Ok((counters, pub_outs_chunk))
+            })
+            .collect::<ExecutorResult<Vec<_>>>()?;
+
+        let mut counters = HashMap::new();
+        let mut pub_outs = PubOutsCollector::new();
+
+        for (chunk_id, (counter_slice, pub_outs_chunk)) in metrics_slices.into_iter().enumerate() {
+            pub_outs.0.extend(pub_outs_chunk.0);
+            for (idx, counter) in counter_slice.into_iter() {
+                counters.entry(idx).or_insert_with(Vec::new).push((ChunkId(chunk_id), counter));
+            }
+        }
+
+        Ok((counters, pub_outs))
+    }
+}
+
+/// A data bus that does nothing but count frequent operations, for [`EmulatorRust::arm_frops_reference`].
+///
+/// It ignores every bus but the operation one and keeps no devices, so the replay costs the
+/// emulation plus one table lookup per operation.
+#[cfg(feature = "debug_frops")]
+struct FropsReferenceBus {
+    mult: zisk_core::frops::FropsMultiplicity,
+}
+
+#[cfg(feature = "debug_frops")]
+impl DataBusTrait<u64, ()> for FropsReferenceBus {
+    fn write_to_bus(&mut self, bus_id: zisk_common::BusId, data: &[u64], _ext: &[u64]) -> bool {
+        use zisk_common::{A, B, OP, OPERATION_BUS_ID};
+        if bus_id == OPERATION_BUS_ID {
+            self.mult.count(data[OP] as u8, data[A], data[B]);
+        }
+        true
+    }
+
+    fn on_close(&mut self) {}
+
+    fn into_devices(self, _execute_on_close: bool) -> Vec<(usize, ())> {
+        Vec::new()
+    }
+}

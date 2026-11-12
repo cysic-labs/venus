@@ -1,145 +1,145 @@
 #!/bin/bash
+#
+# Build (and optionally install) the ZisK setup (proving key). build/ is cleared
+# first, so a rebuild with a different HASH_MODE never mixes two setups.
+#
+# Env vars (loaded from .env / shell / Cargo.toml via load_env):
+#   USE_CACHE_SETUP              Reuse/populate a local provingKey cache under
+#                                $OUTPUT_DIR, keyed by <platform>/<input-hash>.
+#   FORCE_SETUP_BUILD            Ignore a cache hit and rebuild the setup (the
+#                                fresh build then refreshes the cache entry).
+#   REMOTE_CACHE_SETUP           Cache roots ($OUTPUT_DIR) of other workers, as
+#                                [user@]host:/path, comma separated. A local cache
+#                                miss is looked up there first, in order, and
+#                                pulled over rsync/ssh. Only with USE_CACHE_SETUP=1.
+#   DISABLE_RECURSIVE_SETUP      Build without aggregation (setup without -r).
+#   INSTALL_SETUP                Install the provingKey into $HOME/.zisk, plus the
+#                                provingKeySnark when the build produced one.
+#   INCLUDE_SNARK                After the proving key, also build the snark setup
+#                                (provingKeySnark/), pilfflonk for both hash modes
+#                                (FINAL_SNARK overrides). Needs
+#                                state-machines/publics.json and the powers-of-tau
+#                                file (PTAU_PATH).
+#   DYLIB_INPUT_FILES            After the build, copy the inputs needed to compile
+#                                the macOS dylib files into build/dylib_input.
+#   RECURSIVE_JOBS / SETUP_JOBS  Setup pipeline concurrency.
+#   HASH_MODE                    Hash mode the setup is generated with
+#                                (default: blake3).
+#   PTAU_PATH                    Powers-of-tau file for the snark setup
+#                                (default: ../powersOfTau28_hez_final_24.ptau).
 
-source ./utils.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/utils.sh"
+
+# Copy the inputs needed to compile the macOS dylib files into
+# build_dir/dylib_input, preserving the provingKey/ provingKeySnark/ layout.
+copy_dylib_input() {
+    local build_dir="$1"
+    local dest
+    dest="$(cd "$build_dir" && pwd)/dylib_input"
+    ensure rm -rf "$dest" || return 1
+
+    ( cd "$build_dir" || exit 1
+      for tree in provingKey provingKeySnark; do
+          [ -d "$tree" ] || continue
+          find "$tree" \( -name '*.cpp' -o -name '*.so' -o -name '*.globalInfo.json' -o -name '*.dat' \) -print0 \
+            | while IFS= read -r -d '' f; do
+                mkdir -p "$dest/$(dirname "$f")"
+                cp "$f" "$dest/$f"
+              done
+      done
+    ) || return 1
+}
 
 main() {
     info "▶️  Running $(basename "$0") script..."
 
-    current_dir=$(pwd)
+    local build_dir="build"
+    local local_hash=""
+
+    info "Loading environment variables..."
+    # Load environment variables from .env file (only the ones used by this script)
+    load_env ZISK_REPO_DIR PIL2_COMPILER_BRANCH USE_CACHE_SETUP FORCE_SETUP_BUILD REMOTE_CACHE_SETUP \
+        DISABLE_RECURSIVE_SETUP INSTALL_SETUP HASH_MODE INCLUDE_SNARK DYLIB_INPUT_FILES \
+        HASH_MODE PTAU_PATH RECURSIVE_JOBS SETUP_JOBS || return 1
+
+    # Default the hash mode when neither the shell, .env, nor Cargo.toml set
+    # it. Exported so the setup_build.sh child process inherits it.
+    export HASH_MODE="${HASH_MODE:-blake3}"
 
     current_step=1
-    total_steps=8
+    total_steps=2   # clearing build/ + building setup
+    [[ "${INCLUDE_SNARK}" == "1" ]] && total_steps=$((total_steps + 1))
+    [[ "${DYLIB_INPUT_FILES}" == "1" ]] && total_steps=$((total_steps + 1))
+    [[ "${INSTALL_SETUP}" == "1" ]] && total_steps=$((total_steps + 1))
 
-    step "Loading environment variables..."
-    load_env || return 1
 
-    cd "${WORKSPACE_DIR}"
+    ZISK_REPO="$(get_zisk_repo_dir)"
+    # Export so child tooling resolves the repo root from this, not its own location.
+    export ZISK_REPO_DIR="${ZISK_REPO}"
+    ensure cd "${ZISK_REPO}" || return 1
 
-    step  "Cloning pil2-compiler, pil2-proofman and pil2-proofman-js repos..."
+    # setup_build.sh only clears provingKey/, so the rest would survive from an
+    # earlier build and mix two hash modes in the same tree.
+    step "Clearing previous setup output from ${build_dir}..."
+    ensure rm -rf "${build_dir}/provingKey" "${build_dir}/provingKeySnark" \
+        "${build_dir}/circom" "${build_dir}/build" "${build_dir}/pil" || return 1
 
-    # Remove existing directories if they exist
-    rm -rf pil2-compiler
-    rm -rf pil2-proofman
-    rm -rf pil2-proofman-js
-
-    # Clone pil2-compiler
-    if [[ "$DISABLE_CLONE_REPO" == "1" ]]; then
-        warn "Skipping cloning pil2-compiler repository as DISABLE_CLONE_REPO is set to 1"
-    else
-        ensure git clone https://github.com/0xPolygonHermez/pil2-compiler.git || return 1
-        cd pil2-compiler
-        # If PIL2_COMPILER_BRANCH is defined, check out the specified branch
-        if [[ -n "$PIL2_COMPILER_BRANCH" ]]; then
-            echo "Checking out branch '$PIL2_COMPILER_BRANCH' for pil2-compiler..."
-            ensure git checkout "$PIL2_COMPILER_BRANCH" || return 1
-        fi
-        rm -rf package-lock.json
-        rm -rf node_modules
-        cd ..
-
-        ensure git clone https://github.com/0xPolygonHermez/pil2-proofman.git || return 1
-        cd pil2-proofman
-        # If PIL2_PROOFMAN_BRANCH is defined, check out the specified branch
-        if [[ -n "$PIL2_PROOFMAN_BRANCH" ]]; then
-            echo "Checking out branch '$PIL2_PROOFMAN_BRANCH' for pil2-proofman..."
-            ensure git checkout "$PIL2_PROOFMAN_BRANCH" || return 1
-        fi
-        cd ..
-
-        ensure git clone https://github.com/0xPolygonHermez/pil2-proofman-js.git || return 1
-        cd pil2-proofman-js
-        # If PIL2_PROOFMAN_JS_BRANCH is defined, check out the specified branch
-        if [[ -n "$PIL2_PROOFMAN_JS_BRANCH" ]]; then
-            echo "Checking out branch '$PIL2_PROOFMAN_JS_BRANCH' for pil2-proofman-js..."
-            ensure git checkout "$PIL2_PROOFMAN_JS_BRANCH" || return 1
-        fi
-        rm -rf package-lock.json
-        rm -rf node_modules
-        cd ..
-    fi
-
-    step "Installing npm packages..."
-    cd pil2-compiler
-    ensure npm i || return 1
-    cd ..
-
-    cd pil2-proofman-js
-    ensure npm i || return 1
-    cd ..
-
-    cd "$(get_zisk_repo_dir)"
-
-    step "Generate fixed data..."
-    ensure cargo run --release --bin arith_frops_fixed_gen || return 1
-    ensure cargo run --release --bin binary_basic_frops_fixed_gen || return 1
-    ensure cargo run --release --bin binary_extension_frops_fixed_gen || return 1
-
-    step "Compiling ZisK PIL..."
-    ensure node --max-old-space-size=16384 "${WORKSPACE_DIR}/pil2-compiler/src/pil.js" pil/zisk.pil \
-	-I pil,"${WORKSPACE_DIR}/pil2-proofman/pil2-components/lib/std/pil",state-machines,precompiles \
-	-o pil/zisk.pilout -u tmp/fixed -O fixed-to-file || return 1
-
-    step "Generating setup..."
-    cached=0
+    build_flags=(--build-dir build --gen-exps --exps-arch major)
+    [[ "${DISABLE_RECURSIVE_SETUP}" == "1" ]] && build_flags+=(--no-aggregation)
     if [[ "${USE_CACHE_SETUP}" == "1" ]]; then
-        # Compute setup hash
-        HASH_SUM=$(sha256sum pil/zisk.pilout tmp/fixed/*.fixed state-machines/starkstructs.json \
-        | sort -k2 \
-        | sha256sum \
-        | awk '{print $1}' \
-        | awk '{print substr($0, 1, 4) substr($0, length($0)-3)}')
+        build_flags+=(--cache-dir "${OUTPUT_DIR}")
+        local peer peers="${REMOTE_CACHE_SETUP:-}"
+        for peer in ${peers//,/ }; do
+            build_flags+=(--remote-cache-dir "$peer")
+        done
+    fi
 
-        echo "Setup hash: ${HASH_SUM}"
+    [[ -n "${PIL2_COMPILER_BRANCH}" ]] && build_flags+=(--pil2-compiler-branch "${PIL2_COMPILER_BRANCH}")
+    # setup_build.sh (build / no-aggregation) emits the input hash as its final
+    # stdout line. tee streams the build output to the terminal while we keep a
+    # copy to read that last line from; PIPESTATUS[0] carries setup_build.sh's
+    # real exit status (no pipefail here, so tail's status would otherwise mask it).
+    step "Building setup (hash mode: ${HASH_MODE})..."
+    local setup_log; setup_log="$(mktemp)"
+    "${SCRIPT_DIR}/setup_build.sh" "${build_flags[@]}" | tee "$setup_log"
+    if [[ "${PIPESTATUS[0]}" -ne 0 ]]; then
+        rm -f "$setup_log"
+        err "setup_build.sh failed"
+        return 1
+    fi
+    local_hash="$(tail -n1 "$setup_log")"
+    rm -f "$setup_log"
 
-        cache_setup_folder="${OUTPUT_DIR}/${PLATFORM}/${HASH_SUM}"
+    if [[ "${INCLUDE_SNARK}" == "1" ]]; then
+        step "Building snark setup..."
+        build_flags=(--build-dir build --snark)
+        ensure "${SCRIPT_DIR}/setup_build.sh" "${build_flags[@]}" || return 1
+    fi
 
-        # Check if setup file exists in cache
-        if [[ -d "${cache_setup_folder}" ]]; then
-            info "Found cached setup folder: ${cache_setup_folder}"
-            cached=1
-        else
-            info "No cached setup folder found at ${cache_setup_folder}"
+    if [[ "${DYLIB_INPUT_FILES}" == "1" ]]; then
+        step "Copying dylib input files to $build_dir/dylib_input..."
+        copy_dylib_input "$build_dir" || return 1
+    fi
+
+    if [[ "${INSTALL_SETUP}" == "1" ]]; then
+        step "Copying proving key directories to \$HOME/.zisk directory..."
+        ensure mkdir -p "$HOME/.zisk" || return 1
+        ensure rm -rf "$HOME/.zisk/provingKey" || return 1
+        ensure cp -R "${ZISK_REPO}/build/provingKey" "$HOME/.zisk" || return 1
+
+        # The snark proving key goes with it whenever the build produced one
+        # (INCLUDE_SNARK=1), to the same place `ziskup setup_snark` installs it.
+        if [[ -d "${ZISK_REPO}/build/provingKeySnark" ]]; then
+            ensure rm -rf "$HOME/.zisk/provingKeySnark" || return 1
+            ensure cp -R "${ZISK_REPO}/build/provingKeySnark" "$HOME/.zisk" || return 1
         fi
     fi
-
-    if [[ ${cached} == "0" ]]; then
-        if [[ ${DISABLE_RECURSIVE_SETUP} == "1" ]];  then
-            info "Building non-recursive setup..."
-        else
-            info  "Building recursive setup..."
-            # Add flags for recursive setup command
-            setup_flags="-t ${WORKSPACE_DIR}/pil2-proofman/pil2-components/lib/std/pil -r"
-            # Add -a flag  (aggregation) for check-setup command
-        fi
-
-        rm -rf build/provingKey
-        ensure node --max-old-space-size=16384 --stack-size=8192 \
-            "${WORKSPACE_DIR}/pil2-proofman-js/src/main_setup.js" \
-            -a ./pil/zisk.pilout -b build \
-            -u tmp/fixed ${setup_flags} \
-            -s state-machines/starkstructs.json
-    fi
-
-    if [[ ${USE_CACHE_SETUP} == "1" && ${cached} == "0" ]]; then
-        info "Caching setup to ${cache_setup_folder}..."
-        mkdir -p "${cache_setup_folder}"
-        ensure cp -R build/provingKey "${cache_setup_folder}" || return 1
-    fi
-
-    step "Copy provingKey directory to \$HOME/.zisk directory..."
-    if [[ ${cached} == "1" ]]; then
-        ensure cp -R "${cache_setup_folder}/provingKey" "$HOME/.zisk" || return 1
-    else
-        ensure cp -R build/provingKey "$HOME/.zisk" || return 1
-    fi
-
-    step "Generate constant tree files..."
-    if [[ ${DISABLE_RECURSIVE_SETUP} != "1" ]];  then
-            check_setup_flags=-a
-    fi
-    ensure cargo-zisk check-setup $check_setup_flags || return 1
 
     success "ZisK setup completed successfully!"
+
+    # Emit the setup input hash
+    echo "$local_hash"
 }
 
 main

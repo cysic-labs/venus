@@ -1,0 +1,7 @@
+{
+    "Hashes": {
+        "Blake3": { "initialBlowupFactor": 2 },
+        "Sha2": { "initialBlowupFactor": 1 },
+        "Blake2b": { "initialBlowupFactor": 1 }
+    }
+}

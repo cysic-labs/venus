@@ -86,13 +86,12 @@ pub struct Equation {
 ///   - Converts a string to a `BigInt`, detecting if it's in hexadecimal format.
 ///
 /// - `generate_terms(&mut self, name: &str)`
-///   - Generates terms (sequence of product additions) from the parsed equation, checking that
-///     they fit in the operation cycle unless `force_extra_clocks_zero` is set.
+///   - Generates terms (sequence of product additions) from the parsed equation.
 ///
 /// - `index_to_row_offset(index: usize, row: usize, terms_by_clock: usize) -> i32`
 ///   - Calculates the row offset (relative clock position) for a given index and row.
 ///
-/// - `map_chunks(&self, terms: &[Vec<AdditionTerm>], terms_by_clock: usize, zero_terms: bool, end_of_line: &str, last_end_of_line: &str) -> Vec<String>`
+/// - `map_chunks(&mut self, terms_by_clock: usize, end_of_line: &str, last_end_of_line: &str) -> Vec<String>`
 ///   - Maps the terms into chunks for code generation.
 ///
 /// - `generate_code_header(&self) -> String`
@@ -102,8 +101,7 @@ pub struct Equation {
 ///   - Generates Rust code for the equation.
 ///
 /// - `generate_pil_code(&mut self, const_name: &str) -> String`
-///   - Generates PIL code for the equation: `<const_name>_chunks` for the terms of the cycle and,
-///     if any, `<const_name>_zero_chunks` for the terms beyond it, which must be zero.
+///   - Generates PIL code for the equation.
 ///
 /// - `generate_rust_code_to_file(&mut self, struct_name: &str, args_order: &str, filename: &str)`
 ///   - Generates Rust code and writes it to a file.
@@ -309,20 +307,18 @@ impl Equation {
                 }
             }
         }
-        // Terms beyond the cycle would be added to the next operation's equation, so an equation
-        // must either fit in the cycle or constrain its extra terms to zero.
+
         if !self.config.force_extra_clocks_zero {
+            let clocks = self.terms.len().div_ceil(self.config.terms_by_clock);
             assert!(
-                self.terms.len() <= self.max_cycle_terms(),
-                "[{name}] has {} chunk terms but only {} fit in {} clocks",
-                self.terms.len(),
-                self.max_cycle_terms(),
-                self.config.clocks
+                clocks <= self.config.clocks,
+                "[{name}] exceeded number of clocks, it must be less than or equal {} but got {}",
+                self.config.clocks * self.config.terms_by_clock,
+                self.terms.len()
             );
         }
-    }
-    fn max_cycle_terms(&self) -> usize {
-        self.config.terms_by_clock * self.config.clocks
+
+        // self.add_zero_terms();
     }
     fn push_term_to_col_index(
         terms: &mut Vec<Vec<AdditionTerm>>,
@@ -361,28 +357,60 @@ impl Equation {
     }
 
     fn index_to_row_offset(index: usize, row: usize, terms_by_clock: usize) -> i32 {
-        if terms_by_clock == 0 {
-            0
+        if let Some(irow) = index.checked_div(terms_by_clock) {
+            irow as i32 - row as i32
         } else {
-            (index / terms_by_clock) as i32 - row as i32
+            0
         }
     }
-    /// Renders the chunk terms in `terms`. With `terms_by_clock == 0` (Rust code) the terms use
-    /// plain chunk indexes; otherwise (PIL code) they use row offsets relative to the clock of the
-    /// term, or to the first clock of the cycle when `zero_terms` renders the terms beyond it.
+    #[inline(always)]
     fn map_chunks(
-        &self,
-        terms: &[Vec<AdditionTerm>],
+        &mut self,
         terms_by_clock: usize,
-        zero_terms: bool,
         end_of_line: &str,
         last_end_of_line: &str,
     ) -> Vec<String> {
+        self.inner_map_chunks(terms_by_clock, end_of_line, last_end_of_line, false)
+    }
+
+    #[inline(always)]
+    fn map_zero_chunks(
+        &mut self,
+        terms_by_clock: usize,
+        end_of_line: &str,
+        last_end_of_line: &str,
+    ) -> Vec<String> {
+        self.inner_map_chunks(terms_by_clock, end_of_line, last_end_of_line, true)
+    }
+    // fn add_zero_terms(&mut self) {
+    //     let total_chunks = self.config.chunks * 2;
+    //     while self.terms.len() < total_chunks {
+    //         self.terms.push(vec![]);
+    //     }
+    // }
+    fn inner_map_chunks(
+        &mut self,
+        terms_by_clock: usize,
+        end_of_line: &str,
+        last_end_of_line: &str,
+        map_zero_terms: bool,
+    ) -> Vec<String> {
         let mut output: Vec<String> = Vec::new();
         let mut line = CodeLine::new(terms_by_clock > 0, self.config.comment_col);
-        for (icol, addition_cols) in terms.iter().enumerate() {
+        let (skip, take) = if terms_by_clock == 0 {
+            (0, self.terms.len())
+        } else {
+            let max_terms = terms_by_clock * self.config.clocks;
+            if map_zero_terms {
+                (max_terms, self.terms.len().saturating_sub(max_terms))
+            } else {
+                (0, max_terms)
+            }
+        };
+        for (icol, addition_cols) in self.terms.iter().skip(skip).take(take).enumerate() {
             let mut out = String::new();
-            let clock = if terms_by_clock == 0 || zero_terms { 0 } else { icol / terms_by_clock };
+            let clock =
+                if map_zero_terms { 0 } else { icol.checked_div(terms_by_clock).unwrap_or(0) };
             if addition_cols.is_empty() {
                 output.push(format!("{}{}", 0, last_end_of_line));
                 continue;
@@ -529,7 +557,7 @@ impl Equation {
             }
         }
         out += ") -> i64 {\n\t\tmatch icol {\n";
-        for (icol, col) in self.map_chunks(&self.terms, 0, false, "\n", "").iter().enumerate() {
+        for (icol, col) in self.map_chunks(0, "\n", "").iter().enumerate() {
             out = out + &format!("{icol} => ") + col + ",\n";
         }
         out += "\t\t\t_ => 0,\n\t\t}\n\t}\n}\n";
@@ -542,39 +570,38 @@ impl Equation {
         if self.is_empty() {
             self.generate_terms(const_name);
         }
-
-        let terms_by_clock = self.config.terms_by_clock;
-        let cycle_terms = self.terms.len().min(self.max_cycle_terms());
-        let (terms, extra_terms) = self.terms.split_at(cycle_terms);
-
         let end_of_term = format!("{: <1$}", "\n", 15 + const_name.len());
-        let chunks = self.map_chunks(terms, terms_by_clock, false, &end_of_term, ";");
+        let chunks = self.map_chunks(self.config.terms_by_clock, &end_of_term, ";");
+        // air-scoped so the chunks stay visible when the equation is `include`d inside a conditional
+        // `if (use_X) { ... }` block in arith_eq.pil (block-local consts would not be).
         let mut out = self.generate_code_header()
-            + &format!("\nconst expr {}_chunks[{}];\n\n", const_name, chunks.len());
+            + &format!("\nconst expr air.{}_chunks[{}];\n\n", const_name, chunks.len());
 
         for (icol, col) in chunks.iter().enumerate() {
-            if (icol % terms_by_clock) == 0 {
-                out = out + &format!("// clock #{}\n\n", icol / terms_by_clock);
+            if (icol % self.config.terms_by_clock) == 0 {
+                out = out + &format!("// clock #{}\n\n", icol / self.config.terms_by_clock);
             }
             let label = format!("{const_name}_chunks[{icol:#2}]");
             out = out + &label + " = " + col + "\n\n";
         }
 
-        if !extra_terms.is_empty() {
+        let zero_terms = self.get_zero_terms();
+        if zero_terms > 0 {
             let end_of_term = format!("{: <1$}", "\n", 20 + const_name.len());
-            let zero_chunks = self.map_chunks(extra_terms, terms_by_clock, true, &end_of_term, ";");
-            out += &format!(
-                "// chunks beyond the cycle, relative to its first clock: they must be zero\n\n\
-                 const expr {}_zero_chunks[{}];\n\n",
-                const_name,
-                zero_chunks.len()
-            );
+            let zero_chunks = self.map_zero_chunks(self.config.terms_by_clock, &end_of_term, ";");
+            out =
+                out + &format!("\nconst expr air.{}_zero_chunks[{}];\n\n", const_name, zero_terms);
+
             for (icol, col) in zero_chunks.iter().enumerate() {
                 let label = format!("{const_name}_zero_chunks[{icol:#2}]");
                 out = out + &label + " = " + col + "\n\n";
             }
         }
         out
+    }
+    pub fn get_zero_terms(&self) -> usize {
+        let max_terms = self.config.terms_by_clock * self.config.clocks;
+        self.terms.len().saturating_sub(max_terms)
     }
     pub fn generate_rust_code_to_file(
         &mut self,

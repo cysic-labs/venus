@@ -1,0 +1,192 @@
+//! Witness computation component.
+//!
+//! This module handles the computation of witnesses for main and secondary state machine instances.
+
+use proofman_common::{ProofCtx, SetupCtx};
+use proofman_fields::PrimeField64;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+use zisk_common::{stats_begin, stats_end, BusDevice, Instance, InstanceType, Stats};
+use zisk_pil::{MainTraceRow, MainTraceRowPackedIndexed};
+use zisk_sm_main::{MainInstance, MainPlanner, MainSmError};
+
+use crate::error::{ExecutorError, ExecutorResult, RwLockExt};
+use crate::state::ExecutionState;
+
+/// Component responsible for witness computation.
+///
+/// Handles the computation of witnesses for:
+/// - **Main instances**: Compute from minimal traces with chunk processing
+/// - **Secondary instances**: Compute from collected chunk data
+/// - **Table instances**: Compute static lookup tables
+pub struct WitnessGenerator {
+    /// Chunk size for trace processing.
+    chunk_size: u64,
+
+    /// Packed trace layout. For Main this means the compact indexed row
+    /// ([`MainTraceRowPackedIndexed`]) plus the shared instruction table.
+    packed: AtomicBool,
+}
+
+impl WitnessGenerator {
+    /// Creates a new `WitnessGenerator`.
+    ///
+    /// # Arguments
+    /// * `chunk_size` - Chunk size for processing.
+    pub fn new(chunk_size: u64) -> Self {
+        Self { chunk_size, packed: AtomicBool::new(false) }
+    }
+
+    /// Computes witness for a main state machine instance.
+    ///
+    /// # Arguments
+    /// * `pctx` - Proof context.
+    /// * `state` - Execution state.
+    /// * `main_instance` - The main instance to compute witness for.
+    /// * `trace_buffer` - Buffer for trace data.
+    /// * `caller_stats_id` - Parent stats scope ID.
+    pub fn compute_main_witness<F: PrimeField64>(
+        &self,
+        pctx: &ProofCtx<F>,
+        state: &ExecutionState<F>,
+        main_instance: &MainInstance<F>,
+        trace_buffer: Vec<F>,
+        _caller_stats_id: u64,
+    ) -> ExecutorResult<()> {
+        let witness_start_time = Instant::now();
+
+        let (airgroup_id, air_id) = pctx.dctx_get_instance_info(main_instance.ictx.global_id)?;
+
+        stats_begin!(state.stats, _caller_stats_id, _stats_scope, "AIR_MAIN_WITNESS", air_id);
+
+        let zisk_rom = state.get_rom()?;
+        // Clone only this segment's chunk range (plus the preceding chunk's
+        // `last_c`) under a short read lock: with main-witness advancement the
+        // emulator's reader thread keeps pushing chunks into this store (write
+        // lock) while early segments are being computed.
+        let segment_id =
+            main_instance.ictx.plan.segment_id.ok_or(MainSmError::MissingSegmentId)?.as_usize();
+        let num_within = MainPlanner::traces_per_segment(self.chunk_size)?;
+        let (segment_min_traces, prev_chunk_last_c) = {
+            let min_traces_guard = state.min_traces.read_or_poison("min_traces")?;
+            let store = min_traces_guard.as_ref().ok_or(ExecutorError::MinTracesNotSet)?;
+            let start = segment_id * num_within;
+            let end = (start + num_within).min(store.len());
+            (
+                store.get(start..end).unwrap_or_default().to_vec(),
+                start.checked_sub(1).and_then(|i| store.get(i)).map(|t| t.last_c),
+            )
+        };
+
+        // Packed ⇒ the compact indexed Main row (one index per lane); else the unpacked row.
+        let air_instance = if self.packed.load(Ordering::Relaxed) {
+            main_instance.compute_witness::<MainTraceRowPackedIndexed<F>>(
+                &zisk_rom,
+                &segment_min_traces,
+                prev_chunk_last_c,
+                self.chunk_size,
+                trace_buffer,
+            )?
+        } else {
+            main_instance.compute_witness::<MainTraceRow<F>>(
+                &zisk_rom,
+                &segment_min_traces,
+                prev_chunk_last_c,
+                self.chunk_size,
+                trace_buffer,
+            )?
+        };
+
+        pctx.add_air_instance(air_instance, main_instance.ictx.global_id);
+
+        stats_end!(state.stats, &_stats_scope);
+
+        let stats = Stats::new_main_completed(airgroup_id, air_id, witness_start_time);
+
+        state.stats.insert_witness_stats(main_instance.ictx.global_id, stats);
+
+        Ok(())
+    }
+
+    /// Computes witness for a secondary state machine instance.
+    ///
+    /// # Arguments
+    /// * `pctx` - Proof context.
+    /// * `sctx` - Setup context.
+    /// * `state` - Execution state.
+    /// * `global_id` - Global ID of the instance.
+    /// * `secn_instance` - The secondary instance to compute witness for.
+    /// * `collectors` - Collectors for chunk data.
+    /// * `should_add_instance` - Whether to add the computed AIR instance to the proof
+    /// * `trace_buffer` - Buffer for trace data.
+    /// * `_caller_stats_id` - Parent stats scope ID.
+    ///
+    /// On failure, the trace buffer comes back with the error when the instance handed it back.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compute_secn_witness<F: PrimeField64>(
+        &self,
+        pctx: &ProofCtx<F>,
+        sctx: &SetupCtx<F>,
+        state: &ExecutionState<F>,
+        global_id: usize,
+        secn_instance: &dyn Instance<F>,
+        collectors: Vec<(usize, Box<dyn BusDevice<u64>>)>,
+        trace_buffer: Vec<F>,
+        _caller_stats_id: u64,
+    ) -> Result<(), (ExecutorError, Option<Vec<F>>)> {
+        let witness_start_time = Instant::now();
+
+        let _stats_msg = match secn_instance.instance_type() {
+            InstanceType::Instance => "AIR_SECN_WITNESS",
+            InstanceType::Table => "AIR_WITNESS_TABLE",
+        };
+
+        let (_airgroup_id, _air_id) = match pctx.dctx_get_instance_info(global_id) {
+            Ok(info) => info,
+            Err(e) => return Err((e.into(), Some(trace_buffer))),
+        };
+
+        stats_begin!(state.stats, _caller_stats_id, _stats_scope, _stats_msg, _air_id);
+
+        let air_instance = secn_instance
+            .compute_witness(
+                pctx,
+                sctx,
+                collectors,
+                trace_buffer,
+                self.packed.load(Ordering::Relaxed),
+            )
+            .map_err(|e| {
+                // Closed here too: a device failure is retried on the CPU, with a scope of its own.
+                stats_end!(state.stats, &_stats_scope);
+                (e.error.into(), e.trace_buffer)
+            })?;
+
+        if let Some(air_instance) = air_instance {
+            let should_add_instance = secn_instance.instance_type() == InstanceType::Instance
+                || (secn_instance.instance_type() == InstanceType::Table
+                    && pctx
+                        .dctx_is_my_process_instance(global_id)
+                        .map_err(|e| (e.into(), None))?);
+
+            if should_add_instance {
+                pctx.add_air_instance(air_instance, global_id);
+            }
+        }
+
+        stats_end!(state.stats, &_stats_scope);
+
+        state.stats.set_witness_duration(global_id, witness_start_time.elapsed().as_millis());
+
+        Ok(())
+    }
+
+    pub fn set_packed(&self, packed: bool) {
+        self.packed.store(packed, Ordering::SeqCst);
+    }
+
+    /// Whether traces are built bit-packed.
+    pub fn is_packed(&self) -> bool {
+        self.packed.load(Ordering::Relaxed)
+    }
+}

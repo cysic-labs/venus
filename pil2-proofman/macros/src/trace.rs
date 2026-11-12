@@ -87,7 +87,7 @@ fn trace_impl(input: TokenStream2) -> Result<TokenStream2> {
         use rayon::prelude::*;
 
         pub struct #trace_struct_name<#generics> {
-            pub buffer: common::trace::RowBuffer<#row_struct_name<#generics>>,
+            pub buffer: Vec<#row_struct_name<#generics>>,
             pub num_rows: usize,
             pub row_size: usize,
             pub airgroup_id: usize,
@@ -114,7 +114,7 @@ fn trace_impl(input: TokenStream2) -> Result<TokenStream2> {
                 let buffer: Vec<#row_struct_name<#generics>> = vec![#row_struct_name::<#generics>::default(); num_rows];
 
                 #trace_struct_name {
-                    buffer: common::trace::RowBuffer::owned(buffer),
+                    buffer,
                     num_rows,
                     row_size: #row_struct_name::<#generics>::ROW_SIZE,
                     airgroup_id: Self::AIRGROUP_ID,
@@ -128,21 +128,25 @@ fn trace_impl(input: TokenStream2) -> Result<TokenStream2> {
                 assert!(num_rows >= 2);
                 assert!(num_rows & (num_rows - 1) == 0);
 
-                let mut buffer: Vec<#row_struct_name<#generics>> =
-                    vec![#row_struct_name::<#generics>::default(); num_rows];
+                // Allocate uninitialized memory for performance
+                let mut vec: Vec<std::mem::MaybeUninit<#row_struct_name<#generics>>> = Vec::with_capacity(num_rows);
+                let mut buffer: Vec<#row_struct_name<#generics>> = unsafe {
+                    vec.set_len(num_rows);
+                    std::mem::transmute(vec)
+                };
 
+                // Every u64 word of the rows, whatever the width of their field's elements.
                 #[cfg(feature = "diagnostic")]
                 unsafe {
                     let mut ptr = buffer.as_mut_ptr() as *mut u64;
-                    let expected_len = num_rows;
-                    for _ in 0..expected_len * #row_struct_name::<#generics>::ROW_SIZE {
+                    for _ in 0..num_rows * std::mem::size_of::<#row_struct_name<#generics>>() / std::mem::size_of::<u64>() {
                         ptr.write(u64::MAX - 1);
                         ptr = ptr.add(1);
                     }
                 }
 
                 #trace_struct_name {
-                    buffer: common::trace::RowBuffer::owned(buffer),
+                    buffer,
                     num_rows,
                     row_size: #row_struct_name::<#generics>::ROW_SIZE,
                     airgroup_id: Self::AIRGROUP_ID,
@@ -153,10 +157,9 @@ fn trace_impl(input: TokenStream2) -> Result<TokenStream2> {
             }
 
             pub fn new_from_vec_zeroes(mut buffer: Vec<#generics>) -> Self {
-                Self::assert_layout();
                 let row_size = #row_struct_name::<#generics>::ROW_SIZE;
                 let num_rows = Self::NUM_ROWS;
-                let used_len = num_rows.checked_mul(row_size).expect("Trace buffer length overflows usize");
+                let used_len = num_rows * row_size;
 
                 assert!(
                     buffer.len() >= used_len,
@@ -166,13 +169,16 @@ fn trace_impl(input: TokenStream2) -> Result<TokenStream2> {
                 );
 
                 buffer[..used_len]
-                .par_iter_mut()
-                .for_each(|x| {
-                    *x = <#generics>::default();
+                .par_chunks_mut(8192)
+                .for_each(|chunk| {
+                    chunk.fill(<#generics>::default());
                 });
 
-                // SAFETY: the row layout was checked and the buffer holds `num_rows` rows.
-                let buffer = unsafe { common::trace::RowBuffer::from_field_vec(buffer, num_rows) };
+                let ptr = buffer.as_mut_ptr();
+                std::mem::forget(buffer);
+                let buffer = unsafe {
+                    Vec::from_raw_parts(ptr as *mut #row_struct_name<#generics>, num_rows, num_rows)
+                };
 
                 Self {
                     buffer,
@@ -186,10 +192,9 @@ fn trace_impl(input: TokenStream2) -> Result<TokenStream2> {
             }
 
             pub fn new_from_vec(mut buffer: Vec<#generics>) -> Self {
-                Self::assert_layout();
                 let row_size = #row_struct_name::<#generics>::ROW_SIZE;
                 let num_rows = Self::NUM_ROWS;
-                let expected_len = num_rows.checked_mul(row_size).expect("Trace buffer length overflows usize");
+                let expected_len = num_rows * row_size;
 
                 assert!(buffer.len() >= expected_len, "Flat buffer too small");
                 assert!(num_rows >= 2);
@@ -198,16 +203,18 @@ fn trace_impl(input: TokenStream2) -> Result<TokenStream2> {
                 if cfg!(feature = "diagnostic") {
                     unsafe {
                         let mut ptr = buffer.as_mut_ptr() as *mut u64;
-                        let expected_len = num_rows;
-                        for _ in 0..expected_len * #row_struct_name::<#generics>::ROW_SIZE {
+                        for _ in 0..expected_len * std::mem::size_of::<#generics>() / std::mem::size_of::<u64>() {
                             ptr.write(u64::MAX - 1);
                             ptr = ptr.add(1);
                         }
                     }
                 }
 
-                // SAFETY: the row layout was checked and the buffer holds `num_rows` rows.
-                let buffer = unsafe { common::trace::RowBuffer::from_field_vec(buffer, num_rows) };
+                let ptr = buffer.as_mut_ptr();
+                std::mem::forget(buffer);
+                let buffer = unsafe {
+                    Vec::from_raw_parts(ptr as *mut #row_struct_name<#generics>, num_rows, num_rows)
+                };
 
                 Self {
                     buffer,
@@ -241,33 +248,18 @@ fn trace_impl(input: TokenStream2) -> Result<TokenStream2> {
             }
 
             pub fn get_buffer(&mut self) -> Vec<#generics> {
-                self.take_field_buffer()
+                let mut buffer = std::mem::take(&mut self.buffer);
+
+                let new_len = self.num_rows * self.row_size;
+                let ptr = buffer.as_mut_ptr();
+                std::mem::forget(buffer);
+                unsafe {
+                    Vec::from_raw_parts(ptr as *mut #generics, new_len, new_len)
+                }
             }
 
             pub fn is_shared_buffer(&self) -> bool {
                 self.shared_buffer
-            }
-        }
-
-        impl<#generics> #trace_struct_name<#generics> {
-            /// Checks that a row is exactly `ROW_SIZE` field elements, so rows and field vectors
-            /// can share one allocation.
-            fn assert_layout() {
-                let row_bytes = std::mem::size_of::<#row_struct_name<#generics>>();
-                let field_bytes = std::mem::size_of::<#generics>();
-                assert!(
-                    field_bytes != 0
-                        && #row_size.checked_mul(field_bytes) == Some(row_bytes)
-                        && std::mem::align_of::<#row_struct_name<#generics>>() == std::mem::align_of::<#generics>(),
-                    "trace row layout does not match ROW_SIZE field elements"
-                );
-            }
-
-            fn take_field_buffer(&mut self) -> Vec<#generics> {
-                Self::assert_layout();
-                let len = self.num_rows.checked_mul(self.row_size).expect("Trace buffer length overflows usize");
-                // SAFETY: the row layout was checked and the rows hold `len` field elements.
-                unsafe { std::mem::take(&mut self.buffer).into_field_vec(len) }
             }
         }
 
@@ -307,7 +299,14 @@ fn trace_impl(input: TokenStream2) -> Result<TokenStream2> {
             }
 
             fn get_buffer(&mut self) -> Vec<#generics> {
-                self.take_field_buffer()
+                let mut buffer = std::mem::take(&mut self.buffer);
+
+                let new_len = self.num_rows * self.row_size;
+                let ptr = buffer.as_mut_ptr();
+                std::mem::forget(buffer);
+                unsafe {
+                    Vec::from_raw_parts(ptr as *mut #generics, new_len, new_len)
+                }
             }
 
             fn is_shared_buffer(&self) -> bool {
@@ -416,7 +415,6 @@ fn values_impl(input: TokenStream2) -> Result<TokenStream2> {
 
     let row_struct_name = parsed_input.row_struct_name;
     let values_struct_name = parsed_input.struct_name;
-    let values_storage_name = format_ident!("{}Storage", values_struct_name);
     let generics = parsed_input.generics.params;
     let fields = parsed_input.fields;
 
@@ -448,67 +446,37 @@ fn values_impl(input: TokenStream2) -> Result<TokenStream2> {
     };
 
     let values_struct = quote! {
-        enum #values_storage_name<'a, #generics> {
-            Owned(Vec<#generics>),
-            Guard(std::sync::RwLockWriteGuard<'a, Vec<#generics>>),
-            Taken,
-        }
-
-        /// Typed view of a values buffer. A buffer borrowed through `from_vec_guard` stays locked
-        /// for as long as the view is alive.
         pub struct #values_struct_name<'a, #generics> {
-            storage: #values_storage_name<'a, #generics>,
+            pub buffer: Vec<#generics>,
+            pub slice_values: &'a mut #row_struct_name<#generics>,
         }
 
         impl<'a, #generics: Default + Clone + Copy> #values_struct_name<'a, #generics> {
             pub fn new() -> Self {
-                let buffer = vec![#generics::default(); #row_struct_name::<#generics>::TOTAL_SIZE]; // Interpolate here as well
+                let mut buffer = vec![#generics::default(); #row_struct_name::<#generics>::TOTAL_SIZE]; // Interpolate here as well
 
-                Self::from_storage(#values_storage_name::Owned(buffer))
-            }
+                let slice_values = unsafe {
+                    let ptr = buffer.as_mut_ptr() as *mut #row_struct_name<#generics>;
+                    &mut *ptr
+                };
 
-            pub fn from_vec_guard(
-                external_buffer_rw: std::sync::RwLockWriteGuard<'a, Vec<#generics>>,
-            ) -> Self {
-                Self::from_storage(#values_storage_name::Guard(external_buffer_rw))
-            }
-        }
-
-        impl<'a, #generics> #values_struct_name<'a, #generics> {
-            /// Checks that the row is exactly `TOTAL_SIZE` field elements and that the buffer holds
-            /// a whole row, so the buffer can be viewed as a row.
-            fn from_storage(storage: #values_storage_name<'a, #generics>) -> Self {
-                let row_bytes = std::mem::size_of::<#row_struct_name<#generics>>();
-                let field_bytes = std::mem::size_of::<#generics>();
-                assert!(
-                    field_bytes != 0
-                        && #total_size.checked_mul(field_bytes) == Some(row_bytes)
-                        && std::mem::align_of::<#row_struct_name<#generics>>() == std::mem::align_of::<#generics>(),
-                    "values row layout does not match TOTAL_SIZE field elements"
-                );
-                let values = Self { storage };
-                assert!(
-                    values.buffer().len() >= #total_size,
-                    "Values buffer too small: got {}, expected at least {}",
-                    values.buffer().len(),
-                    #total_size
-                );
-                values
-            }
-
-            fn buffer(&self) -> &[#generics] {
-                match &self.storage {
-                    #values_storage_name::Owned(buffer) => buffer,
-                    #values_storage_name::Guard(buffer) => buffer,
-                    #values_storage_name::Taken => panic!("Values buffer has already been taken"),
+                #values_struct_name {
+                    buffer: buffer,
+                    slice_values,
                 }
             }
 
-            fn buffer_mut(&mut self) -> &mut [#generics] {
-                match &mut self.storage {
-                    #values_storage_name::Owned(buffer) => buffer,
-                    #values_storage_name::Guard(buffer) => buffer,
-                    #values_storage_name::Taken => panic!("Values buffer has already been taken"),
+            pub fn from_vec_guard(
+                mut external_buffer_rw: std::sync::RwLockWriteGuard<Vec<#generics>>,
+            ) -> Self {
+                let slice_values = unsafe {
+                    let ptr = external_buffer_rw.as_mut_ptr() as *mut #row_struct_name<#generics>;
+                    &mut *ptr
+                };
+
+                #values_struct_name {
+                    buffer: Vec::new(),
+                    slice_values,
                 }
             }
         }
@@ -517,31 +485,27 @@ fn values_impl(input: TokenStream2) -> Result<TokenStream2> {
             type Target = #row_struct_name<#generics>;
 
             fn deref(&self) -> &Self::Target {
-                // SAFETY: from_storage checked the row layout and that the buffer holds a row.
-                unsafe { &*(self.buffer().as_ptr() as *const #row_struct_name<#generics>) }
+                &self.slice_values
             }
         }
 
         impl<'a, #generics> std::fmt::Debug for #values_struct_name<'a, #generics>
         where #generics: std::fmt::Debug {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-                std::fmt::Debug::fmt(&**self, f)
+                std::fmt::Debug::fmt(&self.slice_values, f)
             }
         }
 
         impl<'a, #generics> std::ops::DerefMut for #values_struct_name<'a, #generics> {
             fn deref_mut(&mut self) -> &mut Self::Target {
-                // SAFETY: from_storage checked the row layout and that the buffer holds a row.
-                unsafe { &mut *(self.buffer_mut().as_mut_ptr() as *mut #row_struct_name<#generics>) }
+                &mut self.slice_values
             }
         }
 
-        impl<'a, #generics> common::trace::Values<#generics> for #values_struct_name<'a, #generics> {
+        impl<'a, #generics: Send> common::trace::Values<#generics> for #values_struct_name<'a, #generics> {
             fn get_buffer(&mut self) -> Vec<#generics> {
-                match std::mem::replace(&mut self.storage, #values_storage_name::Taken) {
-                    #values_storage_name::Owned(buffer) => buffer,
-                    #values_storage_name::Guard(_) | #values_storage_name::Taken => Vec::new(),
-                }
+                let buffer = std::mem::take(&mut self.buffer);
+                buffer
             }
         }
 

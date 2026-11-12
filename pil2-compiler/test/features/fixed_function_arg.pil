@@ -1,0 +1,59 @@
+#pragma test
+
+// Passing fixed columns (materialized, sequence-backed, temporal) as function
+// arguments and accessing their rows inside the function.
+
+function first_value(col fixed f): int {
+    return f[0];
+}
+
+function value_at(col fixed f, int row): int {
+    return f[row];
+}
+
+function rows_of(col fixed f): int {
+    return Tables.num_rows(f);
+}
+
+function set_first(col fixed f, int v) {
+    f[0] = v;
+}
+
+function first_value_nested(col fixed f): int {
+    return first_value(f);
+}
+
+airtemplate TestFixedArg(int N = 2**4) {
+    // 1) row-materialized fixed
+    col fixed M;
+    M[0] = 42;
+    M[N-1] = 43;
+    assert_eq(first_value(M), 42, "materialized fixed as arg");
+    assert_eq(value_at(M, N-1), 43, "materialized fixed, last row");
+
+    // 2) sequence-backed fixed
+    col fixed S = [7..7+N-1];
+    assert_eq(first_value(S), 7, "sequence fixed as arg");
+    assert_eq(value_at(S, N-1), 7+N-1, "sequence fixed, last row");
+    assert_eq(rows_of(S), N, "sequence fixed row count through arg");
+
+    // 3) temporal (virtual) sequence-backed fixed with its own row count
+    col fixed temporal(8) V = [9..16];
+    assert_eq(first_value(V), 9, "temporal sequence fixed as arg");
+    assert_eq(value_at(V, 7), 16, "temporal sequence fixed, last row");
+    assert_eq(Tables.num_rows(V), 8, "temporal(8) declares its own row count");
+
+    // 4) temporal without init: row count comes from the feature argument
+    col fixed temporal(80) T;
+    assert_eq(Tables.num_rows(T), 80, "temporal(80) uninitialized row count");
+
+    // 5) by-reference semantics: writing through the argument modifies the
+    //    caller's column (no copy is made)
+    set_first(M, 99);
+    assert_eq(M[0], 99, "write through fixed arg reaches the original column");
+
+    // 6) passing the argument through to another function keeps the reference
+    assert_eq(first_value_nested(M), 99, "nested fixed arg pass-through");
+}
+
+airgroup TestFixedArg { TestFixedArg(); }

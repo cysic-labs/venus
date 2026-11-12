@@ -1,0 +1,735 @@
+#include "starks_api.hpp"
+#include "starks_backend.hpp"
+#include <cstdio>
+#include <cstdlib>
+#include <atomic>
+
+// ============================================================================
+// Forward declarations: CPU backend implementations (always available)
+// Only functions with real CPU logic are listed here.
+// No-op stubs are replaced by nullptr in the cpu_backend table.
+// ============================================================================
+
+void calculate_const_tree_cpu(void *pStarkInfo, void *pConstPolsAddress, void *pConstTree, void *unified_buffer_gpu);
+void write_custom_commit_cpu(void *root, uint64_t arity, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, void *d_buffers_, void *buffer, char *bufferFile);
+uint64_t commit_witness_cpu(void *pSetupCtx, void *params, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, void *root, void *d_buffers, char *customCommitsFixedPath);
+void verify_constraints_cpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, void *stepsParams, void *constraintsInfo, void *d_buffers, uint64_t streamId);
+uint64_t gen_proof_cpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *params, void *globalChallenge, uint64_t* proofBuffer, char *proofFile, void *d_buffers, uint64_t streamId, char *constPolsPath, char *constTreePath, char *customCommitsFixedPath, bool selfContained);
+void *gen_device_buffers_cpu(uint32_t node_rank, uint32_t node_size, const int32_t* numa_nodes, uint32_t arity, uint32_t max_n_bits_ext);
+void use_packed_trace_cpu(void *d_buffers_, bool packed);
+void register_instruction_table_cpu(void *d_buffers_, uint64_t airgroupId, uint64_t airId, uint64_t *table, uint64_t num_entries, uint64_t words_per_entry);
+void free_device_buffers_cpu(void *d_buffers);
+void load_device_setup_cpu(uint64_t airgroupId, uint64_t airId, char *proofType, void *pSetupCtx_, void *d_buffers_, void *verkeyRoot_, void *packedInfo, uint64_t *execData, uint64_t execWords);
+uint64_t gen_recursive_proof_cpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* witness, void* aux_trace, void *pConstPols, void *pConstTree, void* pPublicInputs, uint64_t* proofBuffer, char *proof_file, bool vadcop, void *d_buffers, char *constPolsPath, char *constTreePath, char *proofType, bool force_recursive_stream, char *recurser_id, uint64_t streamId_);
+void *gen_recursive_proof_final_cpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* witness, void* aux_trace, void *pConstPols, void *pConstTree, void* pPublicInputs, char* proof_file, uint64_t proverBufferSize, void* d_buffers);
+void *init_final_snark_prover_cpu(char* zkeyFile, void* d_buffers_recursivef);
+void free_final_snark_prover_cpu(void *snark_prover);
+uint64_t get_snark_protocol_id_cpu(void *snark_prover);
+void gen_final_snark_proof_cpu(void *snark_prover, void *circomWitnessFinal, uint8_t* proof, uint8_t* publicsSnark, void* d_buffers_recursivef);
+
+// ============================================================================
+// Forward declarations: GPU backend implementations (only in unified build)
+// ============================================================================
+
+#ifdef __USE_CUDA__
+uint32_t register_host_memory_gpu(void *ptr, uint64_t size);
+void unregister_host_memory_gpu(void *ptr);
+void wait_trace_h2d_done_gpu(void *d_buffers, uint64_t stream_id);
+void init_gpu_setup_gpu(uint64_t arity);
+void tile_const_pols_gpu(void *pStarkInfo, void *pConstPols, char *constFile, void *pConstTree, char *constTreeFile, void *unified_buffer_gpu);
+void prepare_blocks_gpu(uint64_t* pol, uint64_t N, uint64_t nCols, void *unified_buffer_gpu);
+void calculate_const_tree_gpu(void *pStarkInfo, void *pConstPolsAddress, void *pConstTree, void *unified_buffer_gpu);
+void write_custom_commit_gpu(void *root, uint64_t arity, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, void *d_buffers_, void *buffer, char *bufferFile);
+uint64_t initialize_instance_gpu(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* params_, void *d_buffers_, char *customCommitsFixedPath);
+void calculate_trace_instance_gpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, void *stepsParams, void *d_buffers, uint64_t streamId);
+void verify_constraints_gpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, void *stepsParams, void *constraintsInfo, void *d_buffers, uint64_t streamId);
+uint64_t gen_proof_gpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *params, void *globalChallenge, uint64_t* proofBuffer, char *proofFile, void *d_buffers, uint64_t streamId, char *constPolsPath, char *constTreePath, char *customCommitsFixedPath, bool selfContained);
+void get_stream_proofs_gpu(void *d_buffers_);
+void get_stream_proofs_non_blocking_gpu(void *d_buffers_);
+void get_stream_id_proof_gpu(void *d_buffers_, uint64_t streamId);
+uint32_t reserve_best_stream_nonblock_gpu(void *d_buffers_, uint64_t airgroupId, uint64_t airId, char *proofType, bool recursive, bool force_recursive);
+uint32_t reserve_stream_if_free_gpu(void *d_buffers_, uint32_t streamId, uint64_t airgroupId, uint64_t airId, char *proofType, bool force_recursive);
+void release_stream_reservation_gpu(void *d_buffers_, uint32_t streamId);
+uint64_t gen_recursive_proof_gpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* witness, void* aux_trace, void *pConstPols, void *pConstTree, void* pPublicInputs, uint64_t* proofBuffer, char *proof_file, bool vadcop, void *d_buffers, char *constPolsPath, char *constTreePath, char *proofType, bool force_recursive_stream, char *recurser_id, uint64_t streamId_);
+void *gen_recursive_proof_final_gpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* witness, void* aux_trace, void *pConstPols, void *pConstTree, void* pPublicInputs, char* proof_file, uint64_t proverBufferSize, void* d_buffers);
+void calculate_const_tree_fixed_gpu(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, char *proofType, void *d_buffers_);
+void *gen_device_buffers_gpu(uint32_t node_rank, uint32_t node_size, const int32_t* numa_nodes, uint32_t arity, uint32_t max_n_bits_ext);
+void use_packed_trace_gpu(void *d_buffers_, bool packed);
+void register_instruction_table_gpu(void *d_buffers_, uint64_t airgroupId, uint64_t airId, uint64_t *table, uint64_t num_entries, uint64_t words_per_entry);
+void free_device_buffers_gpu(void *d_buffers);
+void *gen_device_buffers_recursivef_gpu(void *pSetupCtx_, uint64_t proverBufferSize, void *d_commit_buffers, char* verkey);
+void free_device_buffers_recursivef_gpu(void *d_buffers);
+void upload_custom_commit_packed_gpu(uint64_t airgroupId, uint64_t airId, char *proofType, char *customFile, uint64_t wordsPerRow, void *pSetupCtx_, void *d_buffers_, bool onlyFirstGPU);
+void reserve_custom_commit_slot_gpu(uint64_t airgroupId, uint64_t airId, char *proofType, uint64_t offset, uint64_t reservedWords, void *d_buffers_, bool onlyFirstGPU);
+void load_device_const_pols_gpu(uint64_t airgroupId, uint64_t airId, uint64_t initial_offset, void *d_buffers, char *constFilename, uint64_t constSize, char* proofType, bool onlyFirstGPU, bool alreadyLoaded);
+void load_device_setup_gpu(uint64_t airgroupId, uint64_t airId, char *proofType, void *pSetupCtx_, void *d_buffers_, void *verkeyRoot_, void *packedInfo, uint64_t *execData, uint64_t execWords);
+uint64_t gen_device_streams_gpu(void *d_buffers_, uint64_t n_streams, uint64_t n_recursive_streams, const uint64_t *auxTraceSizes, uint64_t maxSizeProverBufferAggregation, uint64_t maxProofSize, uint64_t merkleTreeArity);
+void alloc_device_large_buffers_gpu(void *d_buffers_, uint64_t auxTraceRecursiveArea, uint64_t totalConstPols, uint64_t totalConstPolsAggregation, uint64_t unifiedBufferPadArea, uint64_t prefetchRegionArea, uint64_t phaseAAliasOffset, uint64_t lateRegionBytes, uint64_t nSlots, uint64_t slotBytes, uint64_t headroomBytes);
+void reset_device_streams_gpu(void *d_buffers_);
+uint64_t check_device_memory_gpu(uint32_t node_rank, uint32_t node_size);
+uint64_t get_num_gpus_gpu();
+void *get_unified_buffer_gpu_gpu(void *d_buffers_);
+uint64_t get_unified_buffer_gpu_size_gpu(void *d_buffers_);
+void acquire_first_gpu_buffer_gpu(void *d_buffers_);
+void release_first_gpu_buffer_gpu(void *d_buffers_);
+uint32_t is_first_gpu_buffer_borrowed_gpu(void *d_buffers_);
+uint32_t get_first_gpu_id_gpu(void *d_buffers_);
+void *get_first_gpu_buffer_gpu(void *d_buffers_);
+uint64_t get_layout_offset_gpu(void *d_buffers_, uint32_t which);
+void restore_after_carve_gpu(void *d_buffers_);
+void debug_clobber_unified_gpu(void *d_buffers_);
+void invalidate_stream_contexts_gpu(void *d_buffers_);
+uint64_t get_stream_commit_slots_gpu(void *d_buffers_);
+uint64_t get_stream_commit_gpus_gpu(void *d_buffers_);
+uint64_t stream_commit_slot_bytes_gpu(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, uint64_t wordsPerRow, uint64_t inputBytes, uint64_t packed, uint64_t indexed);
+void configure_stream_commit_slots_gpu(void *d_buffers_);
+void configure_prefetch_zone_gpu(void *d_buffers_, uint64_t witnessBytes, uint32_t nUnits);
+int64_t stage_witness_gpu(void *d_buffers_, uint64_t instanceId, void *trace, uint64_t total_size, bool hostSync);
+void release_staged_witness_gpu(void *d_buffers_, uint64_t instanceId);
+uint64_t get_mops_floor_bytes_gpu();
+uint64_t get_post_alloc_headroom_bytes_gpu();
+uint64_t configure_const_slot_cache_gpu(void *d_buffers_, uint64_t bigElems, uint64_t normalElems, uint32_t nLru);
+uint64_t pin_const_slot_gpu(void *d_buffers_, int64_t key, uint64_t elems);
+void set_basic_fixed_on_host_gpu(void *d_buffers_, bool onHost);
+void load_host_const_pols_gpu(uint64_t airgroupId, uint64_t airId, char *proofType, int64_t key, char *constFilename, uint64_t constSize, void *d_buffers_);
+void set_pipeline_mode_gpu(void *d_buffers_, bool enable);
+void configure_phase_b_gpu(void *d_buffers_);
+int64_t set_phase_b_gpu(void *d_buffers_, uint32_t state);
+void harvest_pipeline_gpu(void *d_buffers_);
+void dump_pipeline_state_gpu(void *d_buffers_);
+int64_t commit_witness_streaming_gpu(void *d_buffers_, uint64_t slotIdx, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, void *packed, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, uint64_t wordsPerRow, void *colWidths, void *root, void *params_);
+void stream_commit_pause_gpu();
+void *get_unified_buffer_gpu_for_recursivef_gpu(void *d_buffers_, void *d_buffers_recursivef_);
+void load_fixed_pols_recursivef_gpu(void *pSetupCtx_, void *pConstTree, void *d_buffers_);
+void *init_final_snark_prover_gpu(char* zkeyFile, void* d_buffers_recursivef);
+void free_final_snark_prover_gpu(void *snark_prover);
+uint64_t get_snark_protocol_id_gpu(void *snark_prover);
+void gen_final_snark_proof_gpu(void *snark_prover, void *circomWitnessFinal, uint8_t* proof, uint8_t* publicsSnark, void* d_buffers_recursivef);
+void pre_allocate_final_snark_prover_gpu(void *snark_prover, void* unified_buffer_gpu, void* d_buffers_recursivef);
+void *reserve_recursivef_aux_trace_gpu(void *d_buffers_recursivef, uint64_t bytes, uint64_t *out_bytes);
+#endif
+
+// ============================================================================
+// Backend tables
+// nullptr entries = no-op on CPU (dispatch functions handle the defaults)
+// ============================================================================
+
+StarksBackend cpu_backend = []() {
+    StarksBackend backend{};
+    backend.init_gpu_setup = nullptr;
+    backend.tile_const_pols = nullptr;
+    backend.prepare_blocks = nullptr;
+    backend.calculate_const_tree = calculate_const_tree_cpu;
+    backend.write_custom_commit = write_custom_commit_cpu;
+    backend.commit_witness = commit_witness_cpu;
+    backend.initialize_instance = nullptr;               // default: 0
+    backend.calculate_trace_instance = nullptr;
+    backend.verify_constraints = verify_constraints_cpu;
+    backend.gen_proof = gen_proof_cpu;
+    backend.get_stream_proofs = nullptr;
+    backend.get_stream_proofs_non_blocking = nullptr;
+    backend.get_stream_id_proof = nullptr;
+    backend.reserve_best_stream_nonblock = nullptr;       // default: UINT32_MAX (no streams)
+    backend.reserve_stream_if_free = nullptr;             // default: 0 (not reserved)
+    backend.release_stream_reservation = nullptr;         // default: no-op (nothing to release)
+    backend.gen_recursive_proof = gen_recursive_proof_cpu;
+    backend.gen_recursive_proof_final = gen_recursive_proof_final_cpu;
+    backend.calculate_const_tree_fixed = nullptr;
+    backend.register_host_memory = nullptr;               // CPU: no GPU to pin for
+    backend.unregister_host_memory = nullptr;
+    backend.wait_trace_h2d_done = nullptr;            // CPU: no async stream to wait on
+    backend.gen_device_buffers = gen_device_buffers_cpu;
+    backend.use_packed_trace = use_packed_trace_cpu;
+    backend.register_instruction_table = register_instruction_table_cpu;
+    backend.free_device_buffers = free_device_buffers_cpu;
+    backend.gen_device_buffers_recursivef = nullptr;      // default: nullptr
+    backend.free_device_buffers_recursivef = nullptr;
+    backend.load_device_const_pols = nullptr;
+    backend.reserve_custom_commit_slot = nullptr;
+    backend.upload_custom_commit_packed = nullptr;
+    backend.load_device_setup = load_device_setup_cpu;
+    backend.gen_device_streams = nullptr;                 // default: 1
+    backend.alloc_device_large_buffers = nullptr;
+    backend.reset_device_streams = nullptr;
+    backend.check_device_memory = nullptr;                // default: 0
+    backend.get_num_gpus = nullptr;                       // default: 1
+    backend.get_unified_buffer_gpu = nullptr;             // default: nullptr
+    backend.get_unified_buffer_gpu_size = nullptr;        // default: 0
+    backend.acquire_first_gpu_buffer = nullptr;           // default: no-op
+    backend.release_first_gpu_buffer = nullptr;           // default: no-op
+    backend.is_first_gpu_buffer_borrowed = nullptr;       // default: 0 (free)
+    backend.get_first_gpu_id = nullptr;                   // default: 0
+    backend.get_first_gpu_buffer = nullptr;               // default: nullptr
+    backend.get_layout_offset = nullptr;
+    backend.restore_after_carve = nullptr;     // default: no-op
+    backend.debug_clobber_unified = nullptr;
+    backend.invalidate_stream_contexts = nullptr;
+    backend.get_stream_commit_slots = nullptr;            // default: 0 (disabled)
+    backend.get_stream_commit_gpus = nullptr;
+    backend.stream_commit_slot_bytes = nullptr;          // default: 0 (not committable)
+    backend.configure_stream_commit_slots = nullptr;      // default: no-op
+    backend.configure_prefetch_zone = nullptr;            // default: no-op
+    backend.stage_witness = nullptr;                      // default: no look-ahead
+    backend.release_staged_witness = nullptr;
+    backend.get_mops_floor_bytes = nullptr;               // default: 0 (no floor)
+    backend.get_post_alloc_headroom_bytes = nullptr;      // default: 0
+    backend.configure_const_slot_cache = nullptr;         // default: no-op
+    backend.pin_const_slot = nullptr;
+    backend.load_host_const_pols = nullptr;               // default: no-op
+    backend.set_basic_fixed_on_host = nullptr;
+    backend.set_pipeline_mode = nullptr;                  // default: no-op
+    backend.configure_phase_b = nullptr;
+    backend.set_phase_b = nullptr;
+    backend.harvest_pipeline = nullptr;                   // default: no-op
+    backend.dump_pipeline_state = nullptr;                // default: no-op
+    backend.commit_witness_streaming = nullptr;           // default: error (-1)
+    backend.stream_commit_pause = nullptr;                // default: no-op
+    backend.get_unified_buffer_gpu_for_recursivef = nullptr;
+    backend.load_fixed_pols_recursivef = nullptr;
+    backend.init_final_snark_prover = init_final_snark_prover_cpu;
+    backend.free_final_snark_prover = free_final_snark_prover_cpu;
+    backend.get_snark_protocol_id = get_snark_protocol_id_cpu;
+    backend.gen_final_snark_proof = gen_final_snark_proof_cpu;
+    backend.pre_allocate_final_snark_prover = nullptr;
+    backend.reserve_recursivef_aux_trace = nullptr;       // default: nullptr, 0 bytes
+    return backend;
+}();
+
+#ifdef __USE_CUDA__
+StarksBackend gpu_backend = []() {
+    StarksBackend backend{};
+    backend.init_gpu_setup = init_gpu_setup_gpu;
+    backend.tile_const_pols = tile_const_pols_gpu;
+    backend.prepare_blocks = prepare_blocks_gpu;
+    backend.calculate_const_tree = calculate_const_tree_gpu;
+    backend.write_custom_commit = write_custom_commit_gpu;
+    backend.commit_witness = nullptr;                     // contributions commit on streaming slots
+    backend.initialize_instance = initialize_instance_gpu;
+    backend.calculate_trace_instance = calculate_trace_instance_gpu;
+    backend.verify_constraints = verify_constraints_gpu;
+    backend.gen_proof = gen_proof_gpu;
+    backend.get_stream_proofs = get_stream_proofs_gpu;
+    backend.get_stream_proofs_non_blocking = get_stream_proofs_non_blocking_gpu;
+    backend.get_stream_id_proof = get_stream_id_proof_gpu;
+    backend.reserve_best_stream_nonblock = reserve_best_stream_nonblock_gpu;
+    backend.reserve_stream_if_free = reserve_stream_if_free_gpu;
+    backend.release_stream_reservation = release_stream_reservation_gpu;
+    backend.gen_recursive_proof = gen_recursive_proof_gpu;
+    backend.gen_recursive_proof_final = gen_recursive_proof_final_gpu;
+    backend.calculate_const_tree_fixed = calculate_const_tree_fixed_gpu;
+    backend.register_host_memory = register_host_memory_gpu;
+    backend.unregister_host_memory = unregister_host_memory_gpu;
+    backend.wait_trace_h2d_done = wait_trace_h2d_done_gpu;
+    backend.gen_device_buffers = gen_device_buffers_gpu;
+    backend.use_packed_trace = use_packed_trace_gpu;
+    backend.register_instruction_table = register_instruction_table_gpu;
+    backend.free_device_buffers = free_device_buffers_gpu;
+    backend.gen_device_buffers_recursivef = gen_device_buffers_recursivef_gpu;
+    backend.free_device_buffers_recursivef = free_device_buffers_recursivef_gpu;
+    backend.load_device_const_pols = load_device_const_pols_gpu;
+    backend.reserve_custom_commit_slot = reserve_custom_commit_slot_gpu;
+    backend.upload_custom_commit_packed = upload_custom_commit_packed_gpu;
+    backend.load_device_setup = load_device_setup_gpu;
+    backend.gen_device_streams = gen_device_streams_gpu;
+    backend.alloc_device_large_buffers = alloc_device_large_buffers_gpu;
+    backend.reset_device_streams = reset_device_streams_gpu;
+    backend.check_device_memory = check_device_memory_gpu;
+    backend.get_num_gpus = get_num_gpus_gpu;
+    backend.get_unified_buffer_gpu = get_unified_buffer_gpu_gpu;
+    backend.get_unified_buffer_gpu_size = get_unified_buffer_gpu_size_gpu;
+    backend.acquire_first_gpu_buffer = acquire_first_gpu_buffer_gpu;
+    backend.release_first_gpu_buffer = release_first_gpu_buffer_gpu;
+    backend.is_first_gpu_buffer_borrowed = is_first_gpu_buffer_borrowed_gpu;
+    backend.get_first_gpu_id = get_first_gpu_id_gpu;
+    backend.get_first_gpu_buffer = get_first_gpu_buffer_gpu;
+    backend.get_layout_offset = get_layout_offset_gpu;
+    backend.restore_after_carve = restore_after_carve_gpu;
+    backend.debug_clobber_unified = debug_clobber_unified_gpu;
+    backend.invalidate_stream_contexts = invalidate_stream_contexts_gpu;
+    backend.get_stream_commit_slots = get_stream_commit_slots_gpu;
+    backend.get_stream_commit_gpus = get_stream_commit_gpus_gpu;
+    backend.stream_commit_slot_bytes = stream_commit_slot_bytes_gpu;
+    backend.configure_stream_commit_slots = configure_stream_commit_slots_gpu;
+    backend.configure_prefetch_zone = configure_prefetch_zone_gpu;
+    backend.stage_witness = stage_witness_gpu;
+    backend.release_staged_witness = release_staged_witness_gpu;
+    backend.get_mops_floor_bytes = get_mops_floor_bytes_gpu;
+    backend.get_post_alloc_headroom_bytes = get_post_alloc_headroom_bytes_gpu;
+    backend.configure_const_slot_cache = configure_const_slot_cache_gpu;
+    backend.pin_const_slot = pin_const_slot_gpu;
+    backend.load_host_const_pols = load_host_const_pols_gpu;
+    backend.set_basic_fixed_on_host = set_basic_fixed_on_host_gpu;
+    backend.set_pipeline_mode = set_pipeline_mode_gpu;
+    backend.configure_phase_b = configure_phase_b_gpu;
+    backend.set_phase_b = set_phase_b_gpu;
+    backend.harvest_pipeline = harvest_pipeline_gpu;
+    backend.dump_pipeline_state = dump_pipeline_state_gpu;
+    backend.commit_witness_streaming = commit_witness_streaming_gpu;
+    backend.stream_commit_pause = stream_commit_pause_gpu;
+    backend.get_unified_buffer_gpu_for_recursivef = get_unified_buffer_gpu_for_recursivef_gpu;
+    backend.load_fixed_pols_recursivef = load_fixed_pols_recursivef_gpu;
+    backend.init_final_snark_prover = init_final_snark_prover_gpu;
+    backend.free_final_snark_prover = free_final_snark_prover_gpu;
+    backend.get_snark_protocol_id = get_snark_protocol_id_gpu;
+    backend.gen_final_snark_proof = gen_final_snark_proof_gpu;
+    backend.pre_allocate_final_snark_prover = pre_allocate_final_snark_prover_gpu;
+    backend.reserve_recursivef_aux_trace = reserve_recursivef_aux_trace_gpu;
+    return backend;
+}();
+#endif
+
+// Active backend — defaults to CPU
+std::atomic<StarksBackend*> active_backend(&cpu_backend);
+
+// ============================================================================
+// Runtime backend switch
+// ============================================================================
+
+// Whether the GPU backend is active, which __USE_CUDA__ does not answer: the CUDA build also runs
+// whole proofs on the CPU.
+bool starks_gpu_mode_active() {
+#ifdef __USE_CUDA__
+    return active_backend.load(std::memory_order_acquire) == &gpu_backend;
+#else
+    return false;
+#endif
+}
+
+bool set_gpu_mode(bool use_gpu) {
+#ifdef __USE_CUDA__
+    active_backend.store(use_gpu ? &gpu_backend : &cpu_backend, std::memory_order_release);
+    return true;
+#else
+    if (use_gpu) {
+        return false;
+    }
+    return true;
+#endif
+}
+
+// ============================================================================
+// Public API dispatch functions
+// For nullptr entries, the dispatcher provides the CPU default behavior.
+// ============================================================================
+
+// Const Pols
+void init_gpu_setup(uint64_t arity) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->init_gpu_setup) backend->init_gpu_setup(arity);
+}
+
+void tile_const_pols(void *pStarkInfo, void *pConstPols, char *constFile, void *pConstTree, char *constTreeFile, void *unified_buffer_gpu) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->tile_const_pols) backend->tile_const_pols(pStarkInfo, pConstPols, constFile, pConstTree, constTreeFile, unified_buffer_gpu);
+}
+
+void prepare_blocks(uint64_t* pol, uint64_t N, uint64_t nCols, void *unified_buffer_gpu) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->prepare_blocks) backend->prepare_blocks(pol, N, nCols, unified_buffer_gpu);
+}
+
+void calculate_const_tree(void *pStarkInfo, void *pConstPolsAddress, void *pConstTree, void *unified_buffer_gpu) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    backend->calculate_const_tree(pStarkInfo, pConstPolsAddress, pConstTree, unified_buffer_gpu);
+}
+
+// Witness
+void write_custom_commit(void *root, uint64_t arity, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, void *d_buffers_, void *buffer, char *bufferFile) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    backend->write_custom_commit(root, arity, nBits, nBitsExt, nCols, d_buffers_, buffer, bufferFile);
+}
+
+uint64_t commit_witness(void *pSetupCtx, void *params, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, void *root, void *d_buffers, char *customCommitsFixedPath) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    // The GPU backend has no stream commit: every contribution goes through commit_witness_streaming.
+    if (backend->commit_witness == nullptr) {
+        fprintf(stderr, "commit_witness: the GPU backend commits contributions on streaming slots only\n");
+        abort();
+    }
+    return backend->commit_witness(pSetupCtx, params, instanceId, airgroupId, airId, root, d_buffers, customCommitsFixedPath);
+}
+
+// Constraints
+uint64_t initialize_instance(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* params_, void *d_buffers_, char *customCommitsFixedPath) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->initialize_instance ? backend->initialize_instance(pSetupCtx_, airgroupId, airId, instanceId, params_, d_buffers_, customCommitsFixedPath) : 0;
+}
+
+void calculate_trace_instance(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, void *stepsParams, void *d_buffers, uint64_t streamId) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->calculate_trace_instance) backend->calculate_trace_instance(pSetupCtx, airgroupId, airId, stepsParams, d_buffers, streamId);
+}
+
+void verify_constraints(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, void *stepsParams, void *constraintsInfo, void *d_buffers, uint64_t streamId) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    backend->verify_constraints(pSetupCtx, airgroupId, airId, stepsParams, constraintsInfo, d_buffers, streamId);
+}
+
+// Proof generation
+uint64_t gen_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *params, void *globalChallenge, uint64_t* proofBuffer, char *proofFile, void *d_buffers, uint64_t streamId, char *constPolsPath, char *constTreePath, char *customCommitsFixedPath, bool selfContained) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->gen_proof(pSetupCtx, airgroupId, airId, instanceId, params, globalChallenge, proofBuffer, proofFile, d_buffers, streamId, constPolsPath, constTreePath, customCommitsFixedPath, selfContained);
+}
+
+void get_stream_proofs(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->get_stream_proofs) backend->get_stream_proofs(d_buffers_);
+}
+
+void get_stream_proofs_non_blocking(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->get_stream_proofs_non_blocking) backend->get_stream_proofs_non_blocking(d_buffers_);
+}
+
+void get_stream_id_proof(void *d_buffers_, uint64_t streamId) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->get_stream_id_proof) backend->get_stream_id_proof(d_buffers_, streamId);
+}
+
+// No streams on CPU: report "nothing reserved" so a caller that ever reaches here falls
+// back instead of believing it owns stream 0. Today the Rust scheduler is GPU-only.
+uint32_t reserve_best_stream_nonblock(void *d_buffers_, uint64_t airgroupId, uint64_t airId, char *proofType, bool recursive, bool force_recursive) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (!backend->reserve_best_stream_nonblock) return UINT32_MAX;
+    return backend->reserve_best_stream_nonblock(d_buffers_, airgroupId, airId, proofType, recursive, force_recursive);
+}
+
+uint32_t reserve_stream_if_free(void *d_buffers_, uint32_t streamId, uint64_t airgroupId, uint64_t airId, char *proofType, bool force_recursive) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (!backend->reserve_stream_if_free) return 0;
+    return backend->reserve_stream_if_free(d_buffers_, streamId, airgroupId, airId, proofType, force_recursive);
+}
+
+// Symmetric to the two reserve entries above: hand a reservation back when the caller failed
+// before launching. A no-op on CPU, where nothing was ever reserved.
+void release_stream_reservation(void *d_buffers_, uint32_t streamId) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (!backend->release_stream_reservation) return;
+    backend->release_stream_reservation(d_buffers_, streamId);
+}
+
+uint64_t gen_recursive_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* witness, void* aux_trace, void *pConstPols, void *pConstTree, void* pPublicInputs, uint64_t* proofBuffer, char *proof_file, bool vadcop, void *d_buffers, char *constPolsPath, char *constTreePath, char *proofType, bool force_recursive_stream, char *recurser_id, uint64_t streamId_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->gen_recursive_proof(pSetupCtx, airgroupId, airId, instanceId, witness, aux_trace, pConstPols, pConstTree, pPublicInputs, proofBuffer, proof_file, vadcop, d_buffers, constPolsPath, constTreePath, proofType, force_recursive_stream, recurser_id, streamId_);
+}
+
+void *gen_recursive_proof_final(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* witness, void* aux_trace, void *pConstPols, void *pConstTree, void* pPublicInputs, char* proof_file, uint64_t proverBufferSize, void* d_buffers) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->gen_recursive_proof_final(pSetupCtx, airgroupId, airId, instanceId, witness, aux_trace, pConstPols, pConstTree, pPublicInputs, proof_file, proverBufferSize, d_buffers);
+}
+
+void calculate_const_tree_fixed(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, char *proofType, void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->calculate_const_tree_fixed) backend->calculate_const_tree_fixed(pSetupCtx_, airgroupId, airId, proofType, d_buffers_);
+}
+
+// Device management
+void *gen_device_buffers(uint32_t node_rank, uint32_t node_size, const int32_t* numa_nodes, uint32_t arity, uint32_t max_n_bits_ext) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->gen_device_buffers(node_rank, node_size, numa_nodes, arity, max_n_bits_ext);
+}
+
+void use_packed_trace(void *d_buffers, bool packed) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->use_packed_trace) backend->use_packed_trace(d_buffers, packed);
+}
+
+void register_instruction_table(void *d_buffers, uint64_t airgroupId, uint64_t airId, uint64_t *table, uint64_t num_entries, uint64_t words_per_entry) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->register_instruction_table) backend->register_instruction_table(d_buffers, airgroupId, airId, table, num_entries, words_per_entry);
+}
+
+uint32_t register_host_memory(void *ptr, uint64_t size) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->register_host_memory ? backend->register_host_memory(ptr, size) : 0;
+}
+
+void unregister_host_memory(void *ptr) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->unregister_host_memory) backend->unregister_host_memory(ptr);
+}
+
+void wait_trace_h2d_done(void *d_buffers, uint64_t stream_id) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->wait_trace_h2d_done) backend->wait_trace_h2d_done(d_buffers, stream_id);
+}
+
+void free_device_buffers(void *d_buffers) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    backend->free_device_buffers(d_buffers);
+}
+
+void *gen_device_buffers_recursivef(void *pSetupCtx_, uint64_t proverBufferSize, void *d_commit_buffers, char* verkey) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->gen_device_buffers_recursivef ? backend->gen_device_buffers_recursivef(pSetupCtx_, proverBufferSize, d_commit_buffers, verkey) : nullptr;
+}
+
+void free_device_buffers_recursivef(void *d_buffers) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->free_device_buffers_recursivef) backend->free_device_buffers_recursivef(d_buffers);
+}
+
+void upload_custom_commit_packed(uint64_t airgroupId, uint64_t airId, char *proofType, char *customFile, uint64_t wordsPerRow, void *pSetupCtx_, void *d_buffers_, bool onlyFirstGPU) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->upload_custom_commit_packed) backend->upload_custom_commit_packed(airgroupId, airId, proofType, customFile, wordsPerRow, pSetupCtx_, d_buffers_, onlyFirstGPU);
+}
+
+void reserve_custom_commit_slot(uint64_t airgroupId, uint64_t airId, char *proofType, uint64_t offset, uint64_t reservedWords, void *d_buffers_, bool onlyFirstGPU) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->reserve_custom_commit_slot) backend->reserve_custom_commit_slot(airgroupId, airId, proofType, offset, reservedWords, d_buffers_, onlyFirstGPU);
+}
+
+void load_device_const_pols(uint64_t airgroupId, uint64_t airId, uint64_t initial_offset, void *d_buffers, char *constFilename, uint64_t constSize, char* proofType, bool onlyFirstGPU, bool alreadyLoaded) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->load_device_const_pols) backend->load_device_const_pols(airgroupId, airId, initial_offset, d_buffers, constFilename, constSize, proofType, onlyFirstGPU, alreadyLoaded);
+}
+
+void load_device_setup(uint64_t airgroupId, uint64_t airId, char *proofType, void *pSetupCtx_, void *d_buffers_, void *verkeyRoot_, void *packedInfo, uint64_t *execData, uint64_t execWords) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    backend->load_device_setup(airgroupId, airId, proofType, pSetupCtx_, d_buffers_, verkeyRoot_, packedInfo, execData, execWords);
+}
+
+uint64_t gen_device_streams(void *d_buffers_, uint64_t n_streams, uint64_t n_recursive_streams, const uint64_t *auxTraceSizes, uint64_t maxSizeProverBufferAggregation, uint64_t maxProofSize, uint64_t merkleTreeArity) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->gen_device_streams ? backend->gen_device_streams(d_buffers_, n_streams, n_recursive_streams, auxTraceSizes, maxSizeProverBufferAggregation, maxProofSize, merkleTreeArity) : 1;
+}
+
+void alloc_device_large_buffers(void *d_buffers_, uint64_t auxTraceRecursiveArea, uint64_t totalConstPols, uint64_t totalConstPolsAggregation, uint64_t unifiedBufferPadArea, uint64_t prefetchRegionArea, uint64_t phaseAAliasOffset, uint64_t lateRegionBytes, uint64_t nSlots, uint64_t slotBytes, uint64_t headroomBytes) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->alloc_device_large_buffers) backend->alloc_device_large_buffers(d_buffers_, auxTraceRecursiveArea, totalConstPols, totalConstPolsAggregation, unifiedBufferPadArea, prefetchRegionArea, phaseAAliasOffset, lateRegionBytes, nSlots, slotBytes, headroomBytes);
+}
+
+void reset_device_streams(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->reset_device_streams) backend->reset_device_streams(d_buffers_);
+}
+
+uint64_t check_device_memory(uint32_t node_rank, uint32_t node_size) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->check_device_memory ? backend->check_device_memory(node_rank, node_size) : 0;
+}
+
+uint64_t get_num_gpus() {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_num_gpus ? backend->get_num_gpus() : 1;
+}
+
+void *get_unified_buffer_gpu(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_unified_buffer_gpu ? backend->get_unified_buffer_gpu(d_buffers_) : nullptr;
+}
+
+uint64_t get_unified_buffer_gpu_size(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_unified_buffer_gpu_size ? backend->get_unified_buffer_gpu_size(d_buffers_) : 0;
+}
+
+void acquire_first_gpu_buffer(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->acquire_first_gpu_buffer) backend->acquire_first_gpu_buffer(d_buffers_);
+}
+
+void release_first_gpu_buffer(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->release_first_gpu_buffer) backend->release_first_gpu_buffer(d_buffers_);
+}
+
+uint32_t is_first_gpu_buffer_borrowed(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->is_first_gpu_buffer_borrowed ? backend->is_first_gpu_buffer_borrowed(d_buffers_) : 0;
+}
+
+uint32_t get_first_gpu_id(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_first_gpu_id ? backend->get_first_gpu_id(d_buffers_) : 0;
+}
+
+// CPU backend: 0, there is no carve.
+uint64_t get_layout_offset(void *d_buffers_, uint32_t which) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_layout_offset ? backend->get_layout_offset(d_buffers_, which) : 0;
+}
+
+void restore_after_carve(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->restore_after_carve) backend->restore_after_carve(d_buffers_);
+}
+
+void debug_clobber_unified(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->debug_clobber_unified) backend->debug_clobber_unified(d_buffers_);
+}
+
+void invalidate_stream_contexts(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->invalidate_stream_contexts) backend->invalidate_stream_contexts(d_buffers_);
+}
+
+// Streaming-commit slots: 0 / UINT64_MAX on the CPU backend (no slots, no
+// GPU region for gpu-mops to stay under), same rationale as the const offset.
+uint64_t get_stream_commit_slots(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_stream_commit_slots ? backend->get_stream_commit_slots(d_buffers_) : 0;
+}
+
+// GPUs this process drives, each with its own slots (not the node's device count).
+uint64_t get_stream_commit_gpus(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_stream_commit_gpus ? backend->get_stream_commit_gpus(d_buffers_) : 0;
+}
+
+uint64_t stream_commit_slot_bytes(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, uint64_t wordsPerRow, uint64_t inputBytes, uint64_t packed, uint64_t indexed) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->stream_commit_slot_bytes ? backend->stream_commit_slot_bytes(pSetupCtx, airgroupId, airId, nBits, nBitsExt, nCols, wordsPerRow, inputBytes, packed, indexed) : 0;
+}
+
+void configure_stream_commit_slots(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->configure_stream_commit_slots) backend->configure_stream_commit_slots(d_buffers_);
+}
+
+void configure_prefetch_zone(void *d_buffers_, uint64_t witnessBytes, uint32_t nUnits) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->configure_prefetch_zone)
+        backend->configure_prefetch_zone(d_buffers_, witnessBytes, nUnits);
+}
+
+// -1 when there is no backend, zone or free slot: the caller keeps its buffer and the commit
+// stages for itself.
+int64_t stage_witness(void *d_buffers_, uint64_t instanceId, void *trace, uint64_t total_size, bool hostSync) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (!backend->stage_witness) return -1;
+    return backend->stage_witness(d_buffers_, instanceId, trace, total_size, hostSync);
+}
+
+// Drop a staging whose commit already ran; no-op when there is no backend or no such staging.
+void release_staged_witness(void *d_buffers_, uint64_t instanceId) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->release_staged_witness) backend->release_staged_witness(d_buffers_, instanceId);
+}
+
+uint64_t get_mops_floor_bytes() {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_mops_floor_bytes ? backend->get_mops_floor_bytes() : 0;
+}
+
+uint64_t get_post_alloc_headroom_bytes() {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_post_alloc_headroom_bytes ? backend->get_post_alloc_headroom_bytes() : 0;
+}
+
+uint64_t configure_const_slot_cache(void *d_buffers_, uint64_t bigElems, uint64_t normalElems, uint32_t nLru) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->configure_const_slot_cache
+               ? backend->configure_const_slot_cache(d_buffers_, bigElems, normalElems, nLru)
+               : 0;
+}
+
+uint64_t pin_const_slot(void *d_buffers_, int64_t key, uint64_t elems) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->pin_const_slot ? backend->pin_const_slot(d_buffers_, key, elems) : 0;
+}
+
+void set_basic_fixed_on_host(void *d_buffers_, bool onHost) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->set_basic_fixed_on_host) backend->set_basic_fixed_on_host(d_buffers_, onHost);
+}
+
+void load_host_const_pols(uint64_t airgroupId, uint64_t airId, char *proofType, int64_t key, char *constFilename, uint64_t constSize, void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->load_host_const_pols) backend->load_host_const_pols(airgroupId, airId, proofType, key, constFilename, constSize, d_buffers_);
+}
+
+void set_pipeline_mode(void *d_buffers_, bool enable) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->set_pipeline_mode) backend->set_pipeline_mode(d_buffers_, enable);
+}
+
+void configure_phase_b(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->configure_phase_b) backend->configure_phase_b(d_buffers_);
+}
+
+int64_t set_phase_b(void *d_buffers_, uint32_t state) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->set_phase_b ? backend->set_phase_b(d_buffers_, state) : -1;
+}
+
+void harvest_pipeline(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->harvest_pipeline) backend->harvest_pipeline(d_buffers_);
+}
+
+void dump_pipeline_state(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->dump_pipeline_state) backend->dump_pipeline_state(d_buffers_);
+}
+
+// Quiesce the streaming-commit slots before the gpu-mops final planning
+// phase (no-op on CPU / when slots are disabled).
+void stream_commit_pause() {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->stream_commit_pause) backend->stream_commit_pause();
+}
+
+int64_t commit_witness_streaming(void *d_buffers_, uint64_t slotIdx,
+                                 uint64_t instanceId, uint64_t airgroupId, uint64_t airId,
+                                 void *packed, uint64_t nBits, uint64_t nBitsExt,
+                                 uint64_t nCols, uint64_t wordsPerRow,
+                                 void *colWidths, void *root, void *params_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->commit_witness_streaming
+               ? backend->commit_witness_streaming(d_buffers_, slotIdx, instanceId, airgroupId, airId, packed,
+                                                   nBits, nBitsExt, nCols, wordsPerRow, colWidths, root, params_)
+               : -1;
+}
+
+void *get_first_gpu_buffer(void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_first_gpu_buffer ? backend->get_first_gpu_buffer(d_buffers_) : nullptr;
+}
+
+void *get_unified_buffer_gpu_for_recursivef(void *d_buffers_, void *d_buffers_recursivef_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_unified_buffer_gpu_for_recursivef ? backend->get_unified_buffer_gpu_for_recursivef(d_buffers_, d_buffers_recursivef_) : nullptr;
+}
+
+
+
+void load_fixed_pols_recursivef(void *pSetupCtx_, void *pConstTree, void *d_buffers_) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->load_fixed_pols_recursivef) backend->load_fixed_pols_recursivef(pSetupCtx_, pConstTree, d_buffers_);
+}
+
+// Final SNARK
+void *init_final_snark_prover(char* zkeyFile, void* d_buffers_recursivef) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->init_final_snark_prover(zkeyFile, d_buffers_recursivef);
+}
+
+void free_final_snark_prover(void *snark_prover) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    backend->free_final_snark_prover(snark_prover);
+}
+
+uint64_t get_snark_protocol_id(void *snark_prover) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    return backend->get_snark_protocol_id(snark_prover);
+}
+
+void gen_final_snark_proof(void *snark_prover, void *circomWitnessFinal, uint8_t* proof, uint8_t* publicsSnark, void* d_buffers_recursivef) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    backend->gen_final_snark_proof(snark_prover, circomWitnessFinal, proof, publicsSnark, d_buffers_recursivef);
+}
+
+void pre_allocate_final_snark_prover(void *snark_prover, void* unified_buffer_gpu, void* d_buffers_recursivef) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->pre_allocate_final_snark_prover) backend->pre_allocate_final_snark_prover(snark_prover, unified_buffer_gpu, d_buffers_recursivef);
+}
+
+void *reserve_recursivef_aux_trace(void *d_buffers_recursivef, uint64_t bytes, uint64_t *out_bytes) {
+    auto backend = active_backend.load(std::memory_order_acquire);
+    if (backend->reserve_recursivef_aux_trace) return backend->reserve_recursivef_aux_trace(d_buffers_recursivef, bytes, out_bytes);
+    *out_bytes = 0;
+    return nullptr;
+}

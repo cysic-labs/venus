@@ -3,16 +3,17 @@ use crate::{
     AirGroupMap, AirIdMap, DebugInfo, GlobalInfo, InstanceMap, ModeName, ProofCtx, StdMode, VerboseMode,
     DEFAULT_PRINT_VALS,
 };
-use proofman_starks_lib_c::{set_log_level_c, init_gpu_setup_c, get_num_gpus_c};
+use proofman_starks_lib_c::{set_log_level_c, init_gpu_setup_c, get_num_gpus_c, set_gpu_mode_c};
 use tracing::dispatcher;
 use tracing_subscriber::filter::LevelFilter;
 use std::path::PathBuf;
 use std::collections::HashMap;
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use serde::Deserialize;
 use std::fs;
 use sysinfo::System;
 use rayon::ThreadPool;
+use std::sync::Mutex;
 use rayon::ThreadPoolBuilder;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::fmt::format::Writer;
@@ -20,6 +21,7 @@ use tracing_subscriber::fmt::format::FormatFields;
 use tracing_subscriber::fmt::time::SystemTime;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::fmt::FormatEvent;
+use tracing_subscriber::fmt::FormattedFields;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::fmt;
 use std::sync::OnceLock;
@@ -44,7 +46,7 @@ where
 {
     fn format_event(
         &self,
-        _ctx: &fmt::FmtContext<'_, S, N>,
+        ctx: &fmt::FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &tracing::Event<'_>,
     ) -> std::fmt::Result {
@@ -101,6 +103,31 @@ where
                 write!(writer, "{target} ")?;
             }
             write!(writer, "{level_str}: ")?;
+        }
+
+        // The enclosing spans, outermost first, in tracing's own `name{field=value}` notation. This is
+        // what makes a parallel run readable: with --setup-jobs/--recursive-jobs above 1, several airs
+        // emit interleaved on one stream and the message alone says nothing about which. Rendered here
+        // rather than left to the default formatter because this formatter replaces it, and dropping
+        // `ctx` on the floor made every span in the setup pipeline invisible.
+        if let Some(scope) = ctx.event_scope() {
+            let mut any = false;
+            for span in scope.from_root() {
+                if any {
+                    write!(writer, ":")?;
+                }
+                any = true;
+                write!(writer, "{}", span.name())?;
+                let ext = span.extensions();
+                if let Some(fields) = ext.get::<FormattedFields<N>>() {
+                    if !fields.is_empty() {
+                        write!(writer, "{{{fields}}}")?;
+                    }
+                }
+            }
+            if any {
+                write!(writer, ": ")?;
+            }
         }
 
         let mut visitor = MessageVisitor::new();
@@ -466,6 +493,51 @@ pub fn create_pool(n_cores: usize) -> ThreadPool {
     ThreadPoolBuilder::new().num_threads(n_cores).build().unwrap()
 }
 
+static POOL_CACHE: OnceLock<Mutex<HashMap<usize, Vec<ThreadPool>>>> = OnceLock::new();
+
+/// Caps retained threads if concurrency spikes; beyond it a returned pool is just dropped.
+const POOL_CACHE_MAX_PER_SIZE: usize = 64;
+
+/// A borrowed [`ThreadPool`], returned to the cache when dropped.
+pub struct PoolLease {
+    pool: Option<ThreadPool>,
+    n_cores: usize,
+}
+
+impl std::ops::Deref for PoolLease {
+    type Target = ThreadPool;
+    fn deref(&self) -> &ThreadPool {
+        self.pool.as_ref().expect("PoolLease used after drop")
+    }
+}
+
+impl Drop for PoolLease {
+    fn drop(&mut self) {
+        let Some(pool) = self.pool.take() else { return };
+        let cache = POOL_CACHE.get_or_init(Default::default);
+        // Recover from poisoning rather than panic inside a Drop.
+        let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = map.entry(self.n_cores).or_default();
+        if slot.len() < POOL_CACHE_MAX_PER_SIZE {
+            slot.push(pool);
+        }
+    }
+}
+
+/// Borrow a pool of `n_cores` workers, reusing a cached one when available.
+///
+/// Per-call pools strand freed chunks across glibc malloc arenas (each thread generation gets
+/// a different arena), so RSS climbs; long-lived threads reuse what they freed. One pool per
+/// concurrent borrow, not one shared pool, to preserve the effective parallelism.
+pub fn lease_pool(n_cores: usize) -> PoolLease {
+    let cache = POOL_CACHE.get_or_init(Default::default);
+    let reused = {
+        let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+        map.get_mut(&n_cores).and_then(|v| v.pop())
+    };
+    PoolLease { pool: Some(reused.unwrap_or_else(|| create_pool(n_cores))), n_cores }
+}
+
 pub fn configured_num_threads(n_local_processes: usize) -> usize {
     let num_cores = num_cpus::get_physical();
     tracing::info!("Node has {num_cores} cores");
@@ -501,14 +573,118 @@ pub fn join_thread(handle: std::thread::JoinHandle<ProofmanResult<()>>) -> Proof
     }
 }
 
-pub fn init_gpu_setup(max_n_bits_ext: u64) -> ProofmanResult<()> {
-    if cfg!(feature = "gpu") {
+pub fn init_gpu_setup(hash_family: &str, gpu: bool) -> ProofmanResult<()> {
+    if !set_gpu_mode_c(gpu) {
+        return Err(ProofmanError::InvalidConfiguration(
+            "GPU mode requested but library was built without CUDA support".into(),
+        ));
+    }
+    if gpu {
         let n_gpus = get_num_gpus_c();
         if n_gpus == 0 {
             return Err(ProofmanError::InvalidConfiguration("No GPUs found".into()));
         }
 
-        init_gpu_setup_c(max_n_bits_ext);
+        init_gpu_setup_c(crate::hash_family::merkle_tree_arity(hash_family));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pool_cache_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Thread ids of a pool's workers; `ThreadId::as_u64` is unstable, so use the Debug form.
+    fn worker_thread_ids(pool: &PoolLease) -> HashSet<String> {
+        pool.broadcast(|_| format!("{:?}", std::thread::current().id())).into_iter().collect()
+    }
+
+    #[test]
+    fn lease_reuses_the_same_threads() {
+        let first = worker_thread_ids(&lease_pool(3));
+        let second = worker_thread_ids(&lease_pool(3));
+        assert_eq!(first.len(), 3, "expected 3 distinct workers, got {first:?}");
+        assert_eq!(first, second, "pool was rebuilt instead of reused");
+    }
+
+    #[test]
+    fn concurrent_leases_do_not_share_a_pool() {
+        let a = lease_pool(2);
+        let b = lease_pool(2);
+        let ids_a = worker_thread_ids(&a);
+        let ids_b = worker_thread_ids(&b);
+        assert!(ids_a.is_disjoint(&ids_b), "overlapping leases shared workers");
+    }
+
+    #[test]
+    fn distinct_sizes_are_cached_separately() {
+        let small = lease_pool(1);
+        let large = lease_pool(4);
+        assert_eq!(worker_thread_ids(&small).len(), 1);
+        assert_eq!(worker_thread_ids(&large).len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod rank_formatter_tests {
+    use super::RankFormatter;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    /// The formatter must render the enclosing spans. It replaces the default event format, so a
+    /// `format_event` that ignores its `FmtContext` makes every span in the setup pipeline invisible
+    /// -- the logs then look correct while telling you nothing about which air emitted them.
+    #[test]
+    fn nested_spans_prefix_the_message() {
+        let buf = Buf::default();
+        let layer =
+            tracing_subscriber::fmt::layer().event_format(RankFormatter).with_writer(buf.clone()).with_ansi(false);
+        let subscriber = tracing_subscriber::registry().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _air = tracing::info_span!("air", name = "Keccakf").entered();
+            let _stage = tracing::info_span!("stage", t = "recursive1").entered();
+            tracing::info!("Running starkSetup");
+        });
+
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.contains("air{name=\"Keccakf\"}:stage{t=\"recursive1\"}: Running starkSetup"),
+            "span scope missing from: {out}"
+        );
+    }
+
+    /// A bare event still formats -- the scope block must not emit a stray separator.
+    #[test]
+    fn an_event_outside_every_span_has_no_prefix() {
+        let buf = Buf::default();
+        let layer =
+            tracing_subscriber::fmt::layer().event_format(RankFormatter).with_writer(buf.clone()).with_ansi(false);
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+            tracing::info!("no span here");
+        });
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(out.trim_end().ends_with("INFO: no span here"), "unexpected prefix in: {out}");
+    }
 }

@@ -14,49 +14,60 @@
 //! `|`
 //! `|---------------`
 //! `      ...`
-//! `|--------------- INPUT_ADDR                          (0x40000000)`
+//! `|--------------- INPUT_ADDR = FREE_INPUT_ADDR       (0x10000000)`
 //! `|`
-//! `| Contains program input data.`
+//! `| Contains program input data (2GB).`
+//! `| A load from FREE_INPUT_ADDR returns the free input (fcall result).`
 //! `|`
-//! `|--------------- ROM_ADDR: first program instruction (0x80000000)`
+//! `|--------------- ROM_ADDR: first program instruction (0x90000000)`
 //! `|`
-//! `| Contains program instructions.`
+//! `| Contains program instructions and read-only data (ROM data).`
 //! `| Calls ecalls/system calls when required.`
 //! `|`
-//! `|--- FLOAT_LIB_ROM_ADDR: first float lib instruction (0x87F00000)`
+//! `|--- ZISKLIB_ROM_ADDR: first ZisK lib instruction    (0x97E00000)`
+//! `|`
+//! `|--- FLOAT_LIB_ROM_ADDR: first float lib instruction (0x97F00000)`
 //! `|`
 //! `| Contains float library instructions. 1M before ROM_ADDR_MAX.`
 //! `|`
-//! `|------------- FLOAT_LIB_SP: float lib stack pointer (0xaffffff0)`
-//! `|`
 //! `| Initial value of the float library stack pointer.`
 //! `|`
-//! `|--------------- SYS_ADDR (= RAM_ADDR = REG_FIRST)   (0xa0000000)`
+//! `|--- STACK_GUARD_ADDR (= ROM_ADDR + ROM_SIZE)       (0x98000000)`
+//! `|`
+//! `| UNMAPPED stack guard region, 128MB, running up to the stack bottom.`
+//! `| EF standard 6 requires >= 4kB here; any access traps. The assembly`
+//! `| emulator reserves this same span PROT_NONE (see constants.hpp).`
+//! `|`
+//! `|--------------- RAM_ADDR = STACK_ADDR: stack bottom (0xa0000000)`
+//! `|`
+//! `|--------------- RAM_ADDR + STACK_SIZE - 16          (0xa03ffff0)`
+//! `|`
+//! `|--------------- SYS_ADDR (= RAM_ADDR + STACK_SIZE)  (0xa0400000)`
 //! `|`
 //! `| Contains system address.`
-//! `| The first 256 bytes contain 32 8-byte registers`
-//! `| The address UART_ADDR is used as a stdout at addr = 0xa0000200`
-//! `| The first float register is at         FREG_FIRST = 0xa0001000`
-//! `| The first CSR register is at             CSR_ADDR = 0xa0008000`
+//! `| The first 320 bytes contain 40 8-byte registers (r0..r39)`
+//! `| The address UART_ADDR is used as a stdout at addr = 0xa0400200`
+//! `| The first float register is at         FREG_FIRST = 0xa0401000`
+//! `| The first CSR register is at             CSR_ADDR = 0xa0408000`
 //! `|`
-//! `|--------------- OUTPUT_ADDR                         (0xa0010000)`
+//! `|--------------- OUTPUT_ADDR                         (0xa0410000)`
 //! `|`
 //! `| Contains output data, which is written during`
 //! `| program execution and read during memory finalization`
 //! `|`
-//! `|--------------- AVAILABLE_MEM_ADDR                  (0xa0030000)`
+//! `|--------------- general-purpose RAM                 (0xa0430000)`
 //! `|`
 //! `| Contains program memory, available for normal R/W`
 //! `| used during program execution.`
 //! `|`
-//! `|--------------- FLOAT_LIB_RAM_ADDR = 0xafff0000     (0xc0000000 - 0x10000)`
+//! `|--------------- FLOAT_LIB_RAM_ADDR = 0xbfff0000     (0xc0000000 - 0x10000)`
 //! `|`
 //! `| Contains float library memory, available for normal R/W`
 //! `| used during library execution (bottom-up).`
 //! `|`
 //! `| Contains float library stack memory (top-down).`
 //! `|`
-//! `|--------------- FLOAT_LIB_SP = 0xaffffff0           (0xc0000000 - 16)`
+//! `|--------------- FLOAT_LIB_SP = 0xbffffff0           (0xc0000000 - 16)`
 //! `|`
 //! `|--------------- END OF RAM                          (0xc0000000)`
 //! `      ...`
@@ -84,61 +95,155 @@
 //! * After the data has been written by the setup process, this data can only be read by the
 //!   program execution, i.e. it becomes a read-only (RO) memory region.
 //!
-//! ## SYS_ADDR / OUTPUT_ADDR / AVAILABLE_MEM_ADDR
+//! ## SYS_ADDR / OUTPUT_ADDR / general-purpose RAM
 //! * This memory section can be written and read by the program execution many times, i.e. it is a
 //!   read-write (RW) memory region.
 //! * The first RW memory region going from `SYS_ADDR` to `OUTPUT_ADDR` is reserved for the system
 //!   operation.
-//! * The lower addresses of this region is used to store 32 registers of 8 bytes each, i.e. 256
-//!   bytes in total.  These registers are the equivalent to the RISC-V registers.
+//! * The lower addresses of this region is used to store 40 registers of 8 bytes each, i.e. 320
+//!   bytes in total: the 32 RISC-V registers, then 8 extra registers (r32..r39) that only ZisK
+//!   code uses. All of them but r0 are held in the main trace, not in memory.
 //! * Any data of exactly 1-byte length written to UART_ADDR will be sent to the standard output of
 //!   the system.
-//! * The second RW memory region going from `OUTPUT_ADDR` to `AVAILABLE_MEM_ADDR` is reserved to
-//!   copy the output data during the program execution.
-//! * The third RW memory region going from `AVAILABLE_MEM_ADDR` onwards can be used during the
-//!   program execution as general purpose memory.
+//! * The second RW memory region going from `OUTPUT_ADDR` onwards, up to where the general-purpose
+//!   RAM starts, is reserved to copy the output data during the program execution.
+//! * The third RW memory region, the general-purpose RAM that follows the output region, can be
+//!   used during the program execution as general purpose memory.
 
 use crate::{M16, M3, M32, M8, REG_FIRST, REG_LAST};
 use core::fmt;
 
 /// Fist input data memory address
-pub const INPUT_ADDR: u64 = 0x4000_0000;
+pub const INPUT_ADDR: u64 = 0x1000_0000;
 /// Maximum size of the input data
-pub const MAX_INPUT_SIZE: u64 = 0x4000_0000; // 128M,
+pub const MAX_INPUT_SIZE: u64 = 0x8000_0000; // 2GB
+/// Maximum size of a guest's stdin: the input region less its first word, the free input, and its
+/// last one, as the ASM client checks an input file
+pub const MAX_STDIN_SIZE: u64 = MAX_INPUT_SIZE - 16;
 /// Free input data memory address = first input address
 pub const FREE_INPUT_ADDR: u64 = INPUT_ADDR;
 /// First global RW memory address
 pub const RAM_ADDR: u64 = 0xa0000000;
 /// Size of the global RW memory
 pub const RAM_SIZE: u64 = 0x20000000; // 512M
+/// Program stack addr
+pub const STACK_ADDR: u64 = RAM_ADDR;
+/// Program stack size
+pub const STACK_SIZE: u64 = 0x400000; // 4MB
+
+/// Minimum stack guard size EF zkVM standard 6 demands: "a guard region of at least
+/// 4 kB ... immediately below the bottom of the stack".
+pub const STACK_GUARD_MIN_SIZE: u64 = 0x1000; // 4KB
+
+/// First address of the stack guard region.
+///
+/// The guard is the *entire* unmapped span between the top of ROM and the bottom of
+/// the stack -- 128MB, far more than the 4 kB the standard requires. It satisfies EF
+/// standard 6: not mapped readable or writable, contiguous with the stack bottom and
+/// with no gap between them, and any access aborts.
+///
+/// `emulator-asm/src/constants.hpp` mirrors these two values as `GUARD_ADDR` /
+/// `GUARD_SIZE`, and `server_setup()` reserves exactly this span `PROT_NONE`. That
+/// matters because the assembly emulator has no software bounds check: a guest access
+/// outside the mapped regions traps only because the host has nothing there, and an
+/// unmapped hole is where the kernel would satisfy a later `mmap(NULL, ...)`.
+pub const STACK_GUARD_ADDR: u64 = ROM_ADDR + ROM_SIZE;
+/// Size of the stack guard region (see [`STACK_GUARD_ADDR`]).
+pub const STACK_GUARD_SIZE: u64 = STACK_ADDR - STACK_GUARD_ADDR;
+
+/// Compile-time enforcement of the guard-region invariant.
+///
+/// The guard is a consequence of the address map rather than a declared section, so
+/// it would shrink or vanish silently if a mapped region were grown or moved into it.
+/// These assertions turn that into a build failure instead.
+const _: () = {
+    // The stack must sit at the very bottom of RAM; otherwise the span below it is
+    // mapped RAM, not a guard.
+    assert!(
+        STACK_ADDR == RAM_ADDR,
+        "the stack must start at RAM_ADDR for the guard to be adjacent"
+    );
+    // Adjacency, restated so the intent survives a redefinition above.
+    assert!(
+        STACK_GUARD_ADDR + STACK_GUARD_SIZE == STACK_ADDR,
+        "the stack guard must be adjacent to the stack bottom, with no gap"
+    );
+    // Growing ROM eats into the guard. (Growing it past RAM_ADDR underflows the
+    // STACK_GUARD_SIZE subtraction above, which also fails const evaluation.)
+    assert!(
+        STACK_GUARD_SIZE >= STACK_GUARD_MIN_SIZE,
+        "ROM now reaches into the stack guard: fewer than the 4 kB EF standard 6 requires remain"
+    );
+    // The input window must stay above the BIOS ROM and below the program ROM (and so
+    // below the guard, which starts where the program ROM ends).
+    assert!(MAX_ZISK_OS_ROM_ADDR < INPUT_ADDR, "the input window now overlaps the BIOS ROM");
+    assert!(
+        INPUT_ADDR + MAX_INPUT_SIZE <= ROM_ADDR,
+        "the input window now reaches into the program ROM"
+    );
+};
+
 /// First system RW memory address
-pub const SYS_ADDR: u64 = RAM_ADDR;
+pub const SYS_ADDR: u64 = RAM_ADDR + STACK_SIZE;
 /// Size of the system RW memory
 pub const SYS_SIZE: u64 = 0x10000;
 /// First output RW memory address
 pub const OUTPUT_ADDR: u64 = SYS_ADDR + SYS_SIZE;
 /// Size of the output RW memory
-pub const OUTPUT_MAX_SIZE: u64 = 0x10000; // 64K
+pub const OUTPUT_MAX_SIZE: u64 = 0x20000; // 128K
 /// First general purpose RW memory address
-pub const AVAILABLE_MEM_ADDR: u64 = SYS_ADDR + 0x30000;
-/// Size of the general purpose RW memory address
-pub const AVAILABLE_MEM_SIZE: u64 = RAM_SIZE - OUTPUT_MAX_SIZE - SYS_SIZE;
+pub const GENERAL_RAM_ADDR: u64 = OUTPUT_ADDR + OUTPUT_MAX_SIZE;
 /// First BIOS instruction address, i.e. first instruction executed
 pub const ROM_ENTRY: u64 = 0x1000;
+/// Size of the BIOS instruction area
+pub const ROM_ENTRY_SIZE: u64 = 1 << 20;
 /// Last BIOS instruction address, i.e. last instruction executed
 pub const ROM_EXIT: u64 = 0x1004;
+/// Maximum Zisk OS ROM instruction address, i.e. last instruction of the BIOS
+pub const MAX_ZISK_OS_ROM_ADDR: u64 = 0x10000000 - 1;
 /// First program ROM instruction address, i.e. first RISC-V transpiled instruction
-pub const ROM_ADDR: u64 = 0x80000000;
-/// Size of the program ROM address window, which holds all the transpiled RISC-V code
+pub const ROM_ADDR: u64 = 0x9000_0000;
+/// Size of the program ROM instruction area
 pub const ROM_SIZE: u64 = 0x08000000; // 128M
 /// Maximum program ROM instruction address
 pub const ROM_ADDR_MAX: u64 = ROM_ADDR + ROM_SIZE - 1;
+/// Size of float library ROM
+pub const FLOAT_LIB_ROM_SIZE: u64 = 0x100000; // 1M
 /// First float library ROM instruction address
-pub const FLOAT_LIB_ROM_ADDR: u64 = ROM_ADDR + ROM_SIZE - 0x100000; // 1M before ROM_ADDR_MAX = 0x87F00000
+pub const FLOAT_LIB_ROM_ADDR: u64 = ROM_ADDR + ROM_SIZE - FLOAT_LIB_ROM_SIZE;
+/// Maximum float library ROM instruction address
+pub const FLOAT_LIB_ROM_ADDR_MAX: u64 = FLOAT_LIB_ROM_ADDR + FLOAT_LIB_ROM_SIZE - 1;
+/// Size of float library RAM
+pub const FLOAT_LIB_RAM_SIZE: u64 = 0x10000; // 64K
 /// First float library RAM address
-pub const FLOAT_LIB_RAM_ADDR: u64 = 0xc0000000 - 0x10000; // 0xbfff0000
+pub const FLOAT_LIB_RAM_ADDR: u64 = RAM_ADDR + RAM_SIZE - FLOAT_LIB_RAM_SIZE;
+/// Maximum float library RAM address
+pub const FLOAT_LIB_RAM_ADDR_MAX: u64 = FLOAT_LIB_RAM_ADDR + FLOAT_LIB_RAM_SIZE - 1;
 /// Float library stack pointer address
-pub const FLOAT_LIB_SP: u64 = 0xc0000000 - 16; // 0xbffffff0
+pub const FLOAT_LIB_SP: u64 = RAM_ADDR + RAM_SIZE - 16;
+
+// -------------------------------------------------------------------------
+// ZisK library (`.zisk` routines callable from a RISC-V guest via symbol
+// redirect). Reserved just below the float-library regions; code + ROM
+// constants live in ZISKLIB_ROM, mutable scratch/variables in ZISKLIB_RAM.
+// The guest linker fences these off so guest allocations never collide.
+// -------------------------------------------------------------------------
+/// Size of ZisK library ROM (code + read-only constants)
+pub const ZISKLIB_ROM_SIZE: u64 = 0x100000; // 1M
+/// First ZisK library ROM instruction address (just below the float library)
+pub const ZISKLIB_ROM_ADDR: u64 = FLOAT_LIB_ROM_ADDR - ZISKLIB_ROM_SIZE;
+/// Maximum ZisK library ROM address
+pub const ZISKLIB_ROM_ADDR_MAX: u64 = ZISKLIB_ROM_ADDR + ZISKLIB_ROM_SIZE - 1;
+/// Size of ZisK library RAM (mutable scratch / variables).
+/// Keep in sync with `_zisklib_ram_data_size` in the guest linker scripts
+/// (ziskbuild/zisk_linker_script.ld),
+/// which reserve this same amount below the float-library RAM so the guest heap
+/// never grows into it.
+pub const ZISKLIB_RAM_SIZE: u64 = 0x30000; // 192K
+/// First ZisK library RAM address (just below the float-library RAM)
+pub const ZISKLIB_RAM_ADDR: u64 = FLOAT_LIB_RAM_ADDR - ZISKLIB_RAM_SIZE;
+/// Maximum ZisK library RAM address
+pub const ZISKLIB_RAM_ADDR_MAX: u64 = ZISKLIB_RAM_ADDR + ZISKLIB_RAM_SIZE - 1;
 /// Zisk architecture ID
 pub const ARCH_ID_ZISK: u64 = 0xFFFEEEE;
 /// UART memory address; single bytes written here will be copied to the standard output
@@ -157,6 +262,13 @@ pub const FCSR: u64 = CSR_ADDR + 0x003 * 8;
 pub const ARCH_ID_CSR: u64 = 0xF12;
 /// Architecture ID Control and Status Register address
 pub const ARCH_ID_CSR_ADDR: u64 = CSR_ADDR + (ARCH_ID_CSR * 8);
+
+/// Raw bytes of `data` that will live at `addr` once the ROM has booted.
+#[derive(Debug, Clone)]
+pub struct DataSection {
+    pub addr: u64,
+    pub data: Vec<u8>,
+}
 
 /// Memory section data, including a buffer (a vector of bytes) and start and end program
 /// memory addresses.
@@ -340,6 +452,13 @@ impl Mem {
             return value;
         }
 
+        // Special case for the input address, which is a read-only address that can be read at any
+        // time
+        if addr == INPUT_ADDR && width == 8 {
+            // increment of pointer is done by the fcall_get
+            return self.free_input;
+        }
+
         // Search for the section that contains the address using binary search (dicothomic search).
         // Read sections are ordered by start address to allow this search.
         let section = if let Ok(section) = self.read_sections.binary_search_by(|section| {
@@ -352,16 +471,19 @@ impl Mem {
             }
         }) {
             &self.read_sections[section]
+        } else if addr >= (INPUT_ADDR + 8) && addr <= (INPUT_ADDR + MAX_INPUT_SIZE - width) {
+            // We allow to read from the input address range, even if it has not been set as a read
+            // section, since its default value is 0 for the whole range
+            match width {
+                1 | 2 | 4 | 8 => return 0,
+                _ => panic!("Mem::read() invalid width={width}"),
+            }
         } else {
             panic!("Mem::read() section not found for addr: {addr}={addr:x} with width: {width}");
         };
 
         // Calculate the buffer relative read position
         let read_position: usize = (addr - section.start) as usize;
-        if addr == INPUT_ADDR && width == 8 {
-            // increment of pointer is done by the fcall_get
-            return self.free_input;
-        }
 
         // Read the requested data based on the provided width
         match width {
@@ -377,6 +499,38 @@ impl Mem {
             ),
             _ => panic!("Mem::read() invalid width={width}"),
         }
+    }
+
+    #[inline(always)]
+    pub fn read_slice(&self, addr: u64, count: u64) -> &[u8] {
+        debug_assert!(!Mem::address_is_register(addr));
+
+        // First try to read in the write section
+        if (addr >= self.write_section.start) && ((addr + count) <= self.write_section.end) {
+            // Calculate the read position
+            let read_position: usize = (addr - self.write_section.start) as usize;
+            return &self.write_section.buffer[read_position..read_position + count as usize];
+        }
+
+        // Search for the section that contains the address using binary search (dicothomic search).
+        // Read sections are ordered by start address to allow this search.
+        let section = if let Ok(section) = self.read_sections.binary_search_by(|section| {
+            if addr < section.start {
+                std::cmp::Ordering::Greater
+            } else if addr > section.end - count {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        }) {
+            &self.read_sections[section]
+        } else {
+            panic!("Mem::read() section not found for addr: {addr}={addr:x} with count: {count}");
+        };
+
+        // Calculate the buffer relative read position
+        let read_position: usize = (addr - section.start) as usize;
+        &section.buffer[read_position..read_position + count as usize]
     }
 
     /*
@@ -402,7 +556,7 @@ impl Mem {
         // Calculate how aligned this operation is
         let addr_req_1 = addr & 0xFFFF_FFFF_FFFF_FFF8; // Aligned address of the first 8-bytes chunk
         let addr_req_2 = (addr + width - 1) & 0xFFFF_FFFF_FFFF_FFF8; // Aligned address of the second 8-bytes chunk, if needed
-        let is_full_aligned = Self::is_full_aligned(addr, width);
+        let is_full_aligned = ((addr & 0x07) == 0) && (width == 8);
         let is_single_not_aligned = !is_full_aligned && (addr_req_1 == addr_req_2);
         let is_double_not_aligned = !is_full_aligned && !is_single_not_aligned;
 
@@ -549,6 +703,33 @@ impl Mem {
         (value, Vec::new())
     }
 
+    /// Initializes the memory write section with the data from the provided data section, which is
+    /// expected to be located in the write section address range
+    pub fn init_write_section_data(&mut self, section: &DataSection) {
+        // Check that the section is not empty
+        if section.data.is_empty() {
+            return;
+        }
+
+        // Check that the section start address and size are valid
+        if (section.addr < self.write_section.start)
+            || ((section.addr + section.data.len() as u64) > self.write_section.end)
+        {
+            panic!(
+                "Mem::init_write_section_data() invalid section start={:x} end={:x} write section start={:x} end={:x}",
+                section.addr,
+                section.addr + section.data.len() as u64,
+                self.write_section.start,
+                self.write_section.end
+            );
+        }
+
+        // Write the data into the write section buffer
+        let write_position: usize = (section.addr - self.write_section.start) as usize;
+        self.write_section.buffer[write_position..write_position + section.data.len()]
+            .copy_from_slice(&section.data);
+    }
+
     /// Write a u64 value to the memory write section, based on the provided address and width
     #[inline(always)]
     pub fn write(&mut self, addr: u64, val: u64, width: u64) {
@@ -572,23 +753,7 @@ impl Mem {
         // val);
 
         // Search for the section that contains the address using binary search (dicothomic search)
-        let section = if let Ok(section) = self.read_sections.binary_search_by(|section| {
-            if addr < section.start {
-                std::cmp::Ordering::Greater
-            } else if addr > (section.end - width) {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        }) {
-            &mut self.read_sections[section]
-        } else {
-            /*panic!(
-                "Mem::write_silent() section not found for addr={:x}={} with width: {}",
-                addr, addr, width
-            );*/
-            &mut self.write_section
-        };
+        let section = &mut self.write_section;
 
         // Check that the address and width fall into this section address range
         if (addr < section.start) || ((addr + width) > section.end) {
@@ -650,7 +815,7 @@ impl Mem {
         // Calculate how aligned this operation is
         let addr_req_1 = addr & 0xFFFF_FFFF_FFFF_FFF8; // Aligned address of the first 8-bytes chunk
         let addr_req_2 = (addr + width - 1) & 0xFFFF_FFFF_FFFF_FFF8; // Aligned address of the second 8-bytes chunk, if needed
-        let is_full_aligned = Self::is_full_aligned(addr, width);
+        let is_full_aligned = ((addr & 0x07) == 0) && (width == 8);
         let is_single_not_aligned = !is_full_aligned && (addr_req_1 == addr_req_2);
         let is_double_not_aligned = !is_full_aligned && !is_single_not_aligned;
 

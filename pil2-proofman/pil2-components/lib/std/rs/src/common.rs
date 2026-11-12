@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 
 use proofman_common::{ProofCtx, ProofmanError, ProofmanResult, SetupCtx, Setup};
 use proofman_hints::{
@@ -9,6 +9,19 @@ use proofman_hints::{
 
 pub const STD_MODE_DEFAULT: usize = 0;
 pub const STD_MODE_ONE_INSTANCE: usize = 1;
+
+/// PIOP types on the sum/product bus. They must concide with their value in `std_sum.pil`.
+pub const PIOP_TYPE_ASSUMES: u64 = 0;
+pub const PIOP_TYPE_PROVES: u64 = 1;
+pub const PIOP_TYPE_FREE: u64 = 2;
+
+/// Largest field value treated as a positive (prove) multiplicity under the canonical-half sign
+/// convention used for free PIOPs: values in `[1, (p-1)/2]` are positive, while values strictly
+/// greater (the upper half of the field) are interpreted as negative (assume) counts.
+#[inline]
+pub fn max_positive_multiplicity<F: PrimeField64>() -> u64 {
+    (F::ORDER_U64 - 1) / 2
+}
 
 pub trait AirComponent<F: PrimeField64> {
     fn new(
@@ -110,7 +123,7 @@ pub fn parse_debug_values_to_hashes<F: PrimeField64>(pctx: &Arc<ProofCtx<F>>) ->
                     field_components[i] = F::from_u64(parsed);
                 }
 
-                let ext_field = fields::CubicExtensionField { value: field_components };
+                let ext_field = proofman_fields::CubicExtensionField { value: field_components };
                 parsed_values.push(HintFieldOutput::FieldExtended(ext_field));
             } else {
                 // Parse as simple Field

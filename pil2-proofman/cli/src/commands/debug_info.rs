@@ -5,10 +5,10 @@ use std::{collections::HashMap, path::PathBuf};
 use colored::Colorize;
 use crate::commands::field::Field;
 
-use fields::Goldilocks;
+use proofman_fields::Goldilocks;
 
 use proofman::ProofMan;
-use proofman_common::ParamsGPU;
+use proofman_common::ProofmanOptions;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -60,14 +60,9 @@ impl DebugInfoCmd {
             Some(debug_value) => json_to_debug_instances_map(self.proving_key.clone(), debug_value.clone())?,
         };
 
-        let proofman = ProofMan::<Goldilocks>::new(
-            self.proving_key.clone(),
-            true,
-            false,
-            ParamsGPU::default(),
-            self.verbose.into(),
-            HashMap::new(),
-        )?;
+        let mut options = ProofmanOptions::default();
+        options.verify_constraints();
+        options.verbose_mode(self.verbose.into());
 
         let mut custom_commits_map: HashMap<String, PathBuf> = HashMap::new();
         for commit in &self.custom_commits {
@@ -77,6 +72,11 @@ impl DebugInfoCmd {
                 eprintln!("Invalid commit format: {commit:?}");
             }
         }
+        // Before the constructor: the const buffer reserves each custom commit's real
+        // packed width only when sizing knows the file.
+        options.custom_commits_fixed(custom_commits_map.clone());
+
+        let proofman = ProofMan::<Goldilocks>::new(self.proving_key.clone(), options)?;
         proofman.register_custom_commits(custom_commits_map)?;
 
         match self.field {

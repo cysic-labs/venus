@@ -1,145 +1,388 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 
-use fields::PrimeField64;
-use pil_std_lib::Std;
+use proofman_fields::PrimeField64;
 
-use proofman_common::{AirInstance, FromTrace, ProofmanResult};
+use proofman_common::{AirInstance, FromTrace, GenericTrace, ProofmanResult, SetupCtx};
 use proofman_util::{timer_start_trace, timer_stop_and_log_trace};
 
-#[cfg(not(feature = "packed"))]
-use zisk_pil::{KeccakfTrace, KeccakfTraceRow};
-#[cfg(feature = "packed")]
-use zisk_pil::{KeccakfTracePacked, KeccakfTraceRowPacked};
-
-#[cfg(feature = "packed")]
-type KeccakfTraceType<F> = KeccakfTracePacked<F>;
-#[cfg(feature = "packed")]
-type KeccakfTraceRowType<F> = KeccakfTraceRowPacked<F>;
-
-#[cfg(not(feature = "packed"))]
-type KeccakfTraceType<F> = KeccakfTrace<F>;
-#[cfg(not(feature = "packed"))]
-type KeccakfTraceRowType<F> = KeccakfTraceRow<F>;
-
-use precompiles_helpers::{keccak_f_rounds, keccakf_state_from_linear, keccakf_state_to_linear_1d};
-
-use crate::KeccakfInput;
-
-use super::{keccakf_constants::*, KeccakfTableSM};
+use super::{keccakf_constants::*, KeccakfChiTableSM};
+use zisk_common::OperationKeccakData;
+use zisk_pil::{KeccakfTraceRow, KeccakfTraceRowOps, KeccakfTraceRowPacked, ZISK_AIRGROUP_ID};
 
 use rayon::prelude::*;
 
+/// Per-operation input record assembled from the bus payload.
+#[derive(Debug)]
+pub struct KeccakfInput {
+    pub step_main: u64,
+    pub addr_main: u32,
+    pub state: [u64; 25],
+}
+
+impl KeccakfInput {
+    pub fn from(values: &OperationKeccakData<u64>) -> Self {
+        Self {
+            step_main: values[4],
+            addr_main: values[3] as u32,
+            state: values[5..30].try_into().unwrap(),
+        }
+    }
+}
+
 /// The `KeccakfSM` struct encapsulates the logic of the Keccakf State Machine.
+/// Nothing here depends on the height of the air: the capacity is taken from the trace each call
+/// builds, so a taller sibling would need no change.
 pub struct KeccakfSM<F: PrimeField64> {
-    /// Number of available keccakfs in the trace.
-    pub num_available_keccakfs: usize,
+    _phantom: PhantomData<F>,
+}
 
-    /// Reference to the PIL2 standard library.
-    std: Arc<Std<F>>,
+/// Per-instance round data derived from a clean (bit-valued) state:
+/// column sums (values in [0,5]) and their parities.
+pub type LaneState = [u64; 25];
 
-    /// The table ID for the Keccakf Table State Machine
-    table_id: usize,
+/// Packed-row bit layout, mirroring the generated `KeccakfTraceRow`
+/// declaration: two activation flags, then the group-row's four-bit state
+/// cells, then its four-bit parity cells. Everything else is derived from the
+/// PIL's `lanes_per_row`, so changing it moves these offsets with it.
+const FLAG_BITS: usize = 2;
+const CELL_BITS: usize = 4;
+const CELLS_PER_WORD: usize = LANE_BITS / CELL_BITS;
+const WORDS_PER_LANE: usize = LANE_BITS / CELLS_PER_WORD;
+const STATE_WORDS: usize = LANES_PER_ROW * WORDS_PER_LANE;
+const STATE_BIT_OFFSET: usize = FLAG_BITS;
+const STATE_BIT_LEN: usize = BITS_PER_ROW * CELL_BITS;
+const C_WORDS: usize = C_PER_ROW.div_ceil(CELLS_PER_WORD);
+const C_BIT_OFFSET: usize = STATE_BIT_OFFSET + STATE_BIT_LEN;
+const C_BIT_LEN: usize = C_PER_ROW * CELL_BITS;
+
+/// Spread sixteen bits into the low bit of sixteen consecutive nibbles.
+///
+/// A packed Keccak trace cell is four bits.  Applying this to the A and B
+/// bit-planes separately lets the hot witness path construct sixteen sliced
+/// cells with a handful of word operations instead of sixteen scalar setters.
+#[inline(always)]
+fn spread_16_to_nibbles(mut value: u64) -> u64 {
+    value &= 0xffff;
+    value = (value | (value << 24)) & 0x0000_00ff_0000_00ff;
+    value = (value | (value << 12)) & 0x000f_000f_000f_000f;
+    value = (value | (value << 6)) & 0x0303_0303_0303_0303;
+    (value | (value << 3)) & 0x1111_1111_1111_1111
+}
+
+#[inline(always)]
+fn pack_sliced_lanes(a: &[u64], b: &[u64], out: &mut [u64]) {
+    debug_assert_eq!(a.len(), b.len());
+    debug_assert_eq!(out.len(), a.len() * WORDS_PER_LANE);
+    for lane in 0..a.len() {
+        for chunk in 0..WORDS_PER_LANE {
+            let shift = chunk * 16;
+            let a_bits = spread_16_to_nibbles(a[lane] >> shift);
+            let b_bits = spread_16_to_nibbles(b[lane] >> shift);
+            out[lane * WORDS_PER_LANE + chunk] = a_bits | (b_bits << 3);
+        }
+    }
+}
+
+/// Sliced parity cells of group-row `row`: grid position p = x·64 + z lives at
+/// group-row p / C_PER_ROW, column p % C_PER_ROW. Columns past position 320
+/// (only reachable when ROWS_PER_STATE does not divide 320) stay zero.
+#[inline(always)]
+fn c_cells(row: usize, a: &[u64; 5], b: &[u64; 5]) -> [u8; C_PER_ROW] {
+    let mut cells = [0u8; C_PER_ROW];
+    for (j, cell) in cells.iter_mut().enumerate() {
+        let pos = row * C_PER_ROW + j;
+        if pos < 320 {
+            let (x, z) = (pos / LANE_BITS, pos % LANE_BITS);
+            *cell = ((a[x] >> z) & 1) as u8 + SLOT * ((b[x] >> z) & 1) as u8;
+        }
+    }
+    cells
+}
+
+/// OR `nbits` bits of `src` (little-endian, 64 per word) into `packed` starting
+/// at absolute bit `bit_offset`, leaving every bit outside that range untouched.
+#[inline(always)]
+fn blit_bits(packed: &mut [u64], bit_offset: usize, src: &[u64], nbits: usize) {
+    debug_assert!(nbits <= src.len() * LANE_BITS);
+    let mut done = 0;
+    while done < nbits {
+        let take = (nbits - done).min(LANE_BITS);
+        let mask = if take == LANE_BITS { u64::MAX } else { (1u64 << take) - 1 };
+        let value = src[done / LANE_BITS] & mask;
+        let at = bit_offset + done;
+        let (word, shift) = (at / LANE_BITS, at % LANE_BITS);
+        packed[word] = (packed[word] & !(mask << shift)) | (value << shift);
+        if shift + take > LANE_BITS {
+            let spill = shift + take - LANE_BITS;
+            let spill_mask = (1u64 << spill) - 1;
+            packed[word + 1] = (packed[word + 1] & !spill_mask) | (value >> (take - spill));
+        }
+        done += take;
+    }
+}
+
+/// Keccak-specific bulk writer. A state group spans ROWS_PER_STATE rows, with
+/// group-row k holding lanes [k·LANES_PER_ROW, (k+1)·LANES_PER_ROW) and parity
+/// positions [k·C_PER_ROW, (k+1)·C_PER_ROW); both methods write one such row.
+/// The fallback keeps the generic unpacked representation, while the GPU path
+/// writes the generated packed row directly, at offsets derived from the row
+/// declaration: two flag bits, the row's state cells, then its parity cells.
+#[doc(hidden)]
+pub trait KeccakfTraceWriter<F: PrimeField64>: KeccakfTraceRowOps<F> {
+    fn set_state_lanes(&mut self, row: usize, a: &LaneState, b: &LaneState);
+    fn set_c_parities(&mut self, row: usize, a: &[u64; 5], b: &[u64; 5]);
+}
+
+impl<F: PrimeField64> KeccakfTraceWriter<F> for KeccakfTraceRow<F> {
+    #[inline(always)]
+    fn set_state_lanes(&mut self, row: usize, a: &LaneState, b: &LaneState) {
+        let mut cells = [0u8; BITS_PER_ROW];
+        let first = row * LANES_PER_ROW;
+        for lane in 0..LANES_PER_ROW {
+            for z in 0..LANE_BITS {
+                cells[lane * LANE_BITS + z] =
+                    ((a[first + lane] >> z) & 1) as u8 + SLOT * ((b[first + lane] >> z) & 1) as u8;
+            }
+        }
+        self.set_all_state(&cells);
+    }
+
+    #[inline(always)]
+    fn set_c_parities(&mut self, row: usize, a: &[u64; 5], b: &[u64; 5]) {
+        self.set_all_c(&c_cells(row, a, b));
+    }
+}
+
+impl<F: PrimeField64> KeccakfTraceWriter<F> for KeccakfTraceRowPacked<F> {
+    #[inline(always)]
+    fn set_state_lanes(&mut self, row: usize, a: &LaneState, b: &LaneState) {
+        debug_assert!(self.packed.len() * LANE_BITS >= C_BIT_OFFSET + C_BIT_LEN);
+        let mut words = [0u64; STATE_WORDS];
+        let first = row * LANES_PER_ROW;
+        let lanes = first..first + LANES_PER_ROW;
+        pack_sliced_lanes(&a[lanes.clone()], &b[lanes], &mut words);
+        blit_bits(&mut self.packed, STATE_BIT_OFFSET, &words, STATE_BIT_LEN);
+    }
+
+    #[inline(always)]
+    fn set_c_parities(&mut self, row: usize, a: &[u64; 5], b: &[u64; 5]) {
+        let mut words = [0u64; C_WORDS];
+        if C_PER_ROW % LANE_BITS == 0 {
+            // Each group-row covers whole parity lanes, so the same nibble
+            // spreader that packs the state packs the parities too.
+            let lanes_per_row = C_PER_ROW / LANE_BITS;
+            let first = row * lanes_per_row;
+            let lanes = first..first + lanes_per_row;
+            pack_sliced_lanes(&a[lanes.clone()], &b[lanes], &mut words);
+        } else {
+            for (j, cell) in c_cells(row, a, b).iter().enumerate() {
+                words[j / CELLS_PER_WORD] |= (*cell as u64) << (CELL_BITS * (j % CELLS_PER_WORD));
+            }
+        }
+        blit_bits(&mut self.packed, C_BIT_OFFSET, &words, C_BIT_LEN);
+    }
+}
+
+struct ThetaColumns {
+    sums: [[u8; 64]; 5],
+    parities: [u64; 5],
+}
+
+impl ThetaColumns {
+    #[inline(always)]
+    fn from_state(state: &LaneState) -> Self {
+        let mut sums = [[0u8; 64]; 5];
+        let mut parities = [0u64; 5];
+        for x in 0..5 {
+            let lanes = [state[x], state[x + 5], state[x + 10], state[x + 15], state[x + 20]];
+            parities[x] = lanes.into_iter().reduce(|a, b| a ^ b).unwrap();
+            for (z, sum) in sums[x].iter_mut().enumerate() {
+                *sum = lanes.iter().map(|lane| ((lane >> z) & 1) as u8).sum();
+            }
+        }
+        Self { sums, parities }
+    }
+}
+
+/// Compute the θ output as two bit planes (sum in [0,3]), then apply ρπ.
+/// The low plane is also the clean mod-2 state consumed by χ.
+#[inline(always)]
+fn theta_rho_pi(state: &LaneState, parities: &[u64; 5]) -> (LaneState, LaneState) {
+    let mut lo = [0u64; 25];
+    let mut hi = [0u64; 25];
+    for y in 0..5 {
+        for x in 0..5 {
+            // χ-position (x,y) reads ρπ from source (x+3y,x).
+            let sx = (x + 3 * y) % 5;
+            let sy = x;
+            let a = state[sx + 5 * sy];
+            let b = parities[(sx + 4) % 5];
+            let c = parities[(sx + 1) % 5].rotate_left(1);
+            let rotation = RHO_OFFSETS[sx][sy] as u32;
+            lo[x + 5 * y] = (a ^ b ^ c).rotate_left(rotation);
+            hi[x + 5 * y] = ((a & b) | (a & c) | (b & c)).rotate_left(rotation);
+        }
+    }
+    (lo, hi)
+}
+
+/// Standard lane-wise χ and ι over the clean low θ plane.
+#[inline(always)]
+fn chi_iota(b: &LaneState, round: usize) -> LaneState {
+    let mut next = [0u64; 25];
+    for y in 0..5 {
+        for x in 0..5 {
+            next[x + 5 * y] = b[x + 5 * y] ^ ((!b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]);
+        }
+    }
+    next[0] ^= RC[round];
+    next
 }
 
 impl<F: PrimeField64> KeccakfSM<F> {
-    const NUM_REM: usize = WIDTH % TABLE_CHUNK_SIZE;
-    const NUM_REDUCED: usize = (WIDTH - Self::NUM_REM) / TABLE_CHUNK_SIZE;
-
     /// Creates a new Keccakf State Machine instance.
     ///
-    /// # Arguments
-    /// * `keccakf_table_sm` - An `Arc`-wrapped reference to the Keccakf Table State Machine.
     ///
     /// # Returns
     /// A new `KeccakfSM` instance.
-    pub fn new(std: Arc<Std<F>>) -> Arc<Self> {
-        // Compute some useful values
-        let num_non_usable_rows = KeccakfTraceType::<F>::NUM_ROWS % ROWS_BY_KECCAKF;
-        let num_available_keccakfs = if num_non_usable_rows == 0 {
-            KeccakfTraceType::<F>::NUM_ROWS / ROWS_BY_KECCAKF
-        } else {
-            // Subtract 1 because we can't fit a complete cycle in the remaining rows
-            (KeccakfTraceType::<F>::NUM_ROWS - num_non_usable_rows) / ROWS_BY_KECCAKF - 1
-        };
-
-        // Get the table ID
-        let table_id = std
-            .get_virtual_table_id(KeccakfTableSM::TABLE_ID)
-            .expect("Failed to get Keccakf table ID");
-
-        Arc::new(Self { num_available_keccakfs, std, table_id })
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { _phantom: PhantomData })
     }
 
-    /// Processes a slice of operation data, updating the trace and multiplicities.
+    /// Processes one slot: fills its CLOCKS-row block of the trace with the two
+    /// operations' data and accumulates the lookups into the table histograms.
     ///
-    /// # Arguments
-    /// * `trace` - A mutable reference to the Keccakf trace.
-    /// * `input` - The operation data to process.
+    /// The GROUP_IN_A and GROUP_OUT_A state-groups hold op A's plain input and
+    /// output bits; op B has none, the AIR reads its bits as (v - a) / 8 off the
+    /// round-0 and round-24 groups. The round groups hold the SLICED states
+    /// a + 8·b together with the sliced column parities c. When op B is absent,
+    /// its half runs Keccak-f of the zero state (its memory and bus flags stay off).
     #[inline(always)]
     #[allow(clippy::needless_range_loop)]
-    fn process_trace(
+    fn process_slot<R: KeccakfTraceWriter<F>>(
         &self,
-        trace: &mut [KeccakfTraceRowType<F>],
-        initial_state: &[u64; 25],
-        addr: Option<u32>,
-        step: Option<u64>,
+        trace: &mut [R],
+        input_a: &KeccakfInput,
+        input_b: Option<&KeccakfInput>,
     ) {
-        let lookup_active = addr.is_some() && step.is_some();
-
-        // Fill the states
-        // Convert input state to 5x5x64 representation
-        let initial_state = keccakf_state_from_linear(initial_state);
-        let round_states = keccak_f_rounds(initial_state);
-        for (state_3d, r) in round_states {
-            // Convert 3D state to 1D for processing
-            let state_1d = keccakf_state_to_linear_1d(&state_3d);
-
-            // Fill keccakf_state
-            for i in 0..1600 {
-                trace[r].set_state(i, (state_1d[i] % 2) == 1);
-            }
-
-            // Fill keccakf_reduced
-            for i in 0..Self::NUM_REDUCED {
-                let offset = i * TABLE_CHUNK_SIZE;
-                let mut acc = 0u32;
-                for j in 0..TABLE_CHUNK_SIZE {
-                    let idx = offset + j;
-                    let value = state_1d[idx] as u32;
-                    acc += value * BASE.pow(j as u32);
-                }
-                if r > 0 {
-                    trace[r - 1].set_chunk_acc(i, acc);
-                }
-            }
-
-            // Fill keccakf_rem
-            let offset = Self::NUM_REDUCED * TABLE_CHUNK_SIZE;
-            let mut acc = 0u8;
-            for j in 0..Self::NUM_REM {
-                let idx = offset + j;
-                let bit_value = state_1d[idx] as u8;
-                acc += bit_value * (BASE.pow(j as u32) as u8);
-            }
-            if r > 0 {
-                trace[r - 1].set_rem_acc(acc);
-            }
+        // Fill step and addr of both ops
+        trace[0].set_step_addr(input_a.step_main);
+        trace[1].set_step_addr(input_a.addr_main as u64);
+        if let Some(input_b) = input_b {
+            trace[2].set_step_addr(input_b.step_main);
+            trace[3].set_step_addr(input_b.addr_main as u64);
         }
 
-        if !lookup_active {
-            return;
+        // Fill the activation flags
+        for i in 0..CLOCKS {
+            trace[i].set_in_use_a(true);
+            trace[i].set_in_use_b(input_b.is_some());
         }
 
-        // Fill step and addr
-        trace[0].set_step_addr(step.unwrap_or(0));
-        trace[1].set_step_addr(addr.unwrap_or(0) as u64);
+        // Keep the clean Keccak states in their native 25-lane representation.
+        // The AIR still receives the identical bit-expanded cells below.
+        let mut state_a = input_a.state;
+        let mut state_b = input_b.map_or([0u64; 25], |b| b.state);
 
-        // Fill in_use_clk_0
-        trace[0].set_in_use_clk_0(true);
+        // Boundary input group: op A's plain bits
+        Self::set_lane_group(trace, GROUP_IN_A, &state_a);
 
-        // Fill in_use
-        for i in 0..ROWS_BY_KECCAKF {
-            trace[i].set_in_use(true);
+        // Round groups
+        let mut ta = [0u8; 5];
+        let mut tb = [0u8; 5];
+        let mut chi_accs = [0u32; LANE_BITS];
+        for r in 0..=ROUNDS {
+            // Sliced state-group of round r
+            let group = GROUP_ROUND_0 + r * ROWS_PER_STATE;
+            for row in 0..ROWS_PER_STATE {
+                trace[group + row].set_state_lanes(row, &state_a, &state_b);
+            }
+
+            if r == ROUNDS {
+                break;
+            }
+
+            // θ columns of both instances
+            let cols_a = ThetaColumns::from_state(&state_a);
+            let cols_b = ThetaColumns::from_state(&state_b);
+            let (theta_lo_a, theta_hi_a) = theta_rho_pi(&state_a, &cols_a.parities);
+            let (theta_lo_b, theta_hi_b) = theta_rho_pi(&state_b, &cols_b.parities);
+
+            // Committed sliced parities: position p = x·64+z lives at group-row
+            // p / C_PER_ROW, column p % C_PER_ROW
+            for row in 0..ROWS_PER_STATE {
+                trace[group + row].set_c_parities(row, &cols_a.parities, &cols_b.parities);
+            }
+
+            // xor5 accumulators: MUST mirror the AIR's batching — at each round
+            // row, four c-column slots per lookup, where slot j of group-row `row`
+            // holds position row·C_PER_ROW + j; tail slots are zero-padded and
+            // batches never cross a row boundary. Each holds its batch's sliced
+            // column sums sA + 8·sB packed base XOR5_KEY_BASE. Like chi_acc, xor5_acc
+            // exists only in the narrow layout (LANES_PER_ROW < 25).
+            for row in 0..ROWS_PER_STATE {
+                let mut accs = [0u32; XOR5_GROUPS];
+                for (g, acc) in accs.iter_mut().enumerate() {
+                    for k in (0..XOR5_BATCH).rev() {
+                        let j = g * XOR5_BATCH + k;
+                        let pos = row * C_PER_ROW + j;
+                        let mut sum = 0u32;
+                        if j < C_PER_ROW && pos < 320 {
+                            let (x, z) = (pos / 64, pos % 64);
+                            sum = cols_a.sums[x][z] as u32 + SLOT as u32 * cols_b.sums[x][z] as u32;
+                        }
+                        *acc = *acc * XOR5_KEY_BASE + sum;
+                    }
+                }
+                trace[group + row].set_all_xor5_acc(&accs);
+            }
+
+            // χ-row lookups: one per (y, z); only y = 0 rows carry the ι bit
+            for y in 0..5 {
+                for z in 0..64 {
+                    for x in 0..5 {
+                        let index = x + 5 * y;
+                        ta[x] = (((theta_lo_a[index] >> z) & 1)
+                            | (((theta_hi_a[index] >> z) & 1) << 1))
+                            as u8;
+                        tb[x] = (((theta_lo_b[index] >> z) & 1)
+                            | (((theta_hi_b[index] >> z) & 1) << 1))
+                            as u8;
+                    }
+                    let rc = y == 0 && ((RC[r] >> z) & 1) == 1;
+                    // The committed accumulator holds the packed lookup INPUT
+                    // (base 28), NOT the compact table-row index (base 16)
+                    chi_accs[z] = KeccakfChiTableSM::calculate_table_input(&ta, &tb, rc);
+                }
+
+                // On narrow layouts the packed χ-inputs of χ-row group y are
+                // committed at its anchor row, the group-row holding lane 5y.
+                // chi_acc is declared only in keccakf.pil's ROWS_PER_STATE > 1
+                // branch; the wide layout (LANES_PER_ROW = 25) feeds the χ
+                // lookups from θ-expressions directly and has no such column,
+                // so switching to it drops this write and chi_accs with it.
+                trace[group + (5 * y) / LANES_PER_ROW].set_all_chi_acc(&chi_accs);
+            }
+
+            // Advance both instances one round
+            state_a = chi_iota(&theta_lo_a, r);
+            state_b = chi_iota(&theta_lo_b, r);
+        }
+
+        // Boundary output group: op A's plain bits of the final state
+        Self::set_lane_group(trace, GROUP_OUT_A, &state_a);
+    }
+
+    /// Writes a clean (bit-valued) state into one boundary group.
+    #[inline(always)]
+    fn set_lane_group<R: KeccakfTraceWriter<F>>(
+        trace: &mut [R],
+        first_row: usize,
+        state: &LaneState,
+    ) {
+        for row in 0..ROWS_PER_STATE {
+            trace[first_row + row].set_state_lanes(row, state, &[0u64; LANES]);
         }
     }
 
@@ -150,27 +393,33 @@ impl<F: PrimeField64> KeccakfSM<F> {
     ///
     /// # Returns
     /// An `AirInstance` containing the computed witness data.
-    pub fn compute_witness(
+    /// The air is selected by the `NUM_ROWS` / `AIR_ID` consts of the trace this builds, so one
+    /// body serves every height the air is instantiated at.
+    pub fn compute_witness<R: KeccakfTraceWriter<F>, const NUM_ROWS: usize, const AIR_ID: usize>(
         &self,
+        _sctx: &SetupCtx<F>,
         inputs: &[Vec<KeccakfInput>],
         trace_buffer: Vec<F>,
     ) -> ProofmanResult<AirInstance<F>> {
-        let mut trace = KeccakfTraceType::new_from_vec_zeroes(trace_buffer)?;
+        let mut trace = GenericTrace::<R, NUM_ROWS, ZISK_AIRGROUP_ID, AIR_ID>::new_from_vec_zeroes(
+            trace_buffer,
+        )?;
         let num_rows = trace.num_rows();
 
         // Check that we can fit all the keccakfs in the trace
-        let num_available_keccakfs = self.num_available_keccakfs;
+        // Capacity of the air this call builds, taken from `NUM_ROWS`: deriving it from a
+        // fixed trace alias instead is what breaks the moment the air gains a taller
+        // sibling, since the instance would be measured against the short air's capacity.
+        let num_available_keccakfs = OPS_PER_SLOT * (NUM_ROWS / CLOCKS);
         let num_inputs = inputs.iter().map(|v| v.len()).sum::<usize>();
-        let num_rows_needed = if num_inputs < num_available_keccakfs {
-            num_inputs * ROWS_BY_KECCAKF
-        } else if num_inputs == num_available_keccakfs {
-            num_rows
-        } else {
+        if num_inputs > num_available_keccakfs {
             panic!(
                 "Exceeded available Keccakfs inputs: requested {}, but only {} are available.",
                 num_inputs, num_available_keccakfs
             );
-        };
+        }
+        let num_slots_needed = num_inputs.div_ceil(OPS_PER_SLOT);
+        let num_rows_needed = num_slots_needed * CLOCKS;
 
         tracing::debug!(
             "··· Creating Keccakf instance [{} / {} rows filled {:.2}%]",
@@ -181,70 +430,201 @@ impl<F: PrimeField64> KeccakfSM<F> {
 
         timer_start_trace!(KECCAKF_TRACE);
 
-        // 1] Fill the trace with the provided inputs
-        let mut trace_rows = &mut trace.buffer[..];
-        let mut par_traces = Vec::new();
-        let mut inputs_indexes = Vec::new();
-        for (i, inputs) in inputs.iter().enumerate() {
-            for (j, _) in inputs.iter().enumerate() {
-                let (head, tail) = trace_rows.split_at_mut(ROWS_BY_KECCAKF);
-                par_traces.push(head);
-                inputs_indexes.push((i, j));
-                trace_rows = tail;
-            }
-        }
+        // Walk the trace itself, `CLOCKS` rows to a slot, and take each slot's operations by index.
+        // The shape used to be four vectors -- the flattened inputs, a Vec of trace slices, a Vec of
+        // input pairs, and the two zipped into a third -- because a slot also carried a pair of
+        // lookup histograms that had to live somewhere. The prover derives those multiplicities from
+        // the committed trace now, so the slot owns nothing but its rows and the two ops that fill
+        // them, and the trace can be chunked directly.
+        //
+        // Slots are paired A-first; a trailing odd operation runs with a zero op B.
+        let flat_inputs: Vec<&KeccakfInput> = inputs.iter().flatten().collect();
+        let slots_per_chunk = num_slots_needed.div_ceil(rayon::current_num_threads()).max(1);
 
-        par_traces.par_iter_mut().enumerate().for_each(|(index, trace)| {
-            let input_index = inputs_indexes[index];
-            let input = &inputs[input_index.0][input_index.1];
-            self.process_trace(trace, &input.state, Some(input.addr_main), Some(input.step_main));
-        });
-
-        // 2] Update lookup table
-        let mut table = vec![0u32; TABLE_SIZE as usize];
-        for trace in &par_traces {
-            for r in 1..ROWS_BY_KECCAKF {
-                for i in 0..Self::NUM_REDUCED {
-                    let table_row =
-                        KeccakfTableSM::calculate_table_row(trace[r - 1].get_chunk_acc(i));
-                    table[table_row as usize] += 1;
+        trace.buffer[..num_rows_needed]
+            .par_chunks_mut(CLOCKS * slots_per_chunk)
+            .enumerate()
+            .for_each(|(chunk, chunk_rows)| {
+                for (i, slot_rows) in chunk_rows.chunks_mut(CLOCKS).enumerate() {
+                    let op = (chunk * slots_per_chunk + i) * OPS_PER_SLOT;
+                    self.process_slot::<R>(
+                        slot_rows,
+                        flat_inputs[op],
+                        flat_inputs.get(op + 1).copied(),
+                    );
                 }
-                let table_row =
-                    KeccakfTableSM::calculate_table_row(trace[r - 1].get_rem_acc() as u32);
-                table[table_row as usize] += 1;
-            }
-        }
-        table.into_par_iter().enumerate().for_each(|(row, value)| {
-            if value > 0 {
-                self.std.inc_virtual_row(self.table_id, row as u64, value as u64);
-            }
-        });
+            });
+
+        // Update the lookup table multiplicities
         timer_stop_and_log_trace!(KECCAKF_TRACE);
 
-        timer_start_trace!(KECCAKF_PADDING);
+        Ok(AirInstance::new_from_trace(FromTrace::new(&mut trace)))
+    }
+}
 
-        // 3] Fill the padding rows with Keccakf(0)
-        let padding_rows_start = num_rows_needed;
-        let padding_rows_end =
-            padding_rows_start + ((num_available_keccakfs - num_inputs) * ROWS_BY_KECCAKF);
+#[cfg(all(test, gpu))]
+#[path = "keccakf_gpu_compare.rs"]
+mod gpu_compare;
 
-        // Split the padding trace into padding chunks
-        let padding_trace = &mut trace.buffer[padding_rows_start..padding_rows_end];
-        let mut padding_chunks: Vec<_> = padding_trace.chunks_mut(ROWS_BY_KECCAKF).collect();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proofman_fields::Goldilocks;
+    use zisk_precomp_helpers::{keccak_f_round, keccakf_state_from_linear, KeccakState};
 
-        // Process padding in parallel
-        if let Some((first, rest)) = padding_chunks.split_first_mut() {
-            self.process_trace(first, &[0u64; 25], None, None);
+    fn lanes_from_bits(state: &KeccakState) -> LaneState {
+        let mut lanes = [0u64; 25];
+        for y in 0..5 {
+            for x in 0..5 {
+                for (z, bit) in state[x][y].iter().enumerate() {
+                    lanes[x + 5 * y] |= (*bit as u64) << z;
+                }
+            }
+        }
+        lanes
+    }
 
-            rest.par_iter_mut().for_each(|chunk| {
-                chunk.copy_from_slice(first);
-            });
+    #[test]
+    fn lane_rounds_and_theta_digits_match_bit_reference() {
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        for _ in 0..8 {
+            let mut lanes = [0u64; 25];
+            for lane in &mut lanes {
+                seed ^= seed << 7;
+                seed ^= seed >> 9;
+                seed ^= seed << 8;
+                *lane = seed;
+            }
+            let mut reference = keccakf_state_from_linear(&lanes);
+            for round in 0..ROUNDS {
+                let columns = ThetaColumns::from_state(&lanes);
+                let (lo, hi) = theta_rho_pi(&lanes, &columns.parities);
+                for y in 0..5 {
+                    for x in 0..5 {
+                        let sx = (x + 3 * y) % 5;
+                        let sy = x;
+                        for z in 0..64 {
+                            let sz = (z + 64 - RHO_OFFSETS[sx][sy]) % 64;
+                            let expected = reference[sx][sy][sz]
+                                + ((columns.parities[(sx + 4) % 5] >> sz) & 1) as u8
+                                + ((columns.parities[(sx + 1) % 5] >> ((sz + 63) % 64)) & 1) as u8;
+                            let index = x + 5 * y;
+                            let actual =
+                                (((lo[index] >> z) & 1) | (((hi[index] >> z) & 1) << 1)) as u8;
+                            assert_eq!(actual, expected);
+                        }
+                    }
+                }
+
+                lanes = chi_iota(&lo, round);
+                keccak_f_round(&mut reference, round);
+                reference.iter_mut().flatten().flatten().for_each(|bit| *bit %= 2);
+                assert_eq!(lanes, lanes_from_bits(&reference));
+            }
+        }
+    }
+
+    /// One slot with distinct ops, read back off the rows as the AIR reads them: op A's plain
+    /// bits, op B's (v - a) / 8 at the round-0 and round-24 groups, and every xor5 key against
+    /// the sliced column sums of its own round group.
+    #[test]
+    fn slot_rows_decode_both_ops_and_xor5_keys() {
+        let mut seed = 0x6a09_e667_f3bc_c908u64;
+        let mut lanes = || {
+            core::array::from_fn::<u64, 25, _>(|_| {
+                seed ^= seed << 7;
+                seed ^= seed >> 9;
+                seed ^= seed << 8;
+                seed
+            })
+        };
+        let input_a = KeccakfInput { step_main: 1, addr_main: 0x1000, state: lanes() };
+        let input_b = KeccakfInput { step_main: 2, addr_main: 0x2000, state: lanes() };
+        let (mut out_a, mut out_b) = (input_a.state, input_b.state);
+        tiny_keccak::keccakf(&mut out_a);
+        tiny_keccak::keccakf(&mut out_b);
+
+        let mut rows = vec![KeccakfTraceRow::<Goldilocks>::default(); CLOCKS];
+        KeccakfSM::<Goldilocks>::new().process_slot(&mut rows, &input_a, Some(&input_b));
+
+        // Cell (x, y, z) of the state group at `group`: lane 5y + x sits on group-row y
+        let cell = |group: usize, x: usize, y: usize, z: usize| -> u64 {
+            rows[group + y].get_all_state()[x * LANE_BITS + z] as u64
+        };
+        let bit = |lanes: &[u64; 25], x: usize, y: usize, z: usize| (lanes[x + 5 * y] >> z) & 1;
+        let group_round_last = GROUP_ROUND_0 + ROUNDS * ROWS_PER_STATE;
+        for (x, y, z) in
+            (0..5).flat_map(|x| (0..5).flat_map(move |y| (0..64).map(move |z| (x, y, z))))
+        {
+            let (a_in, a_out) = (cell(GROUP_IN_A, x, y, z), cell(GROUP_OUT_A, x, y, z));
+            assert_eq!(a_in, bit(&input_a.state, x, y, z), "op A input ({x},{y},{z})");
+            assert_eq!(a_out, bit(&out_a, x, y, z), "op A output ({x},{y},{z})");
+            assert_eq!(
+                (cell(GROUP_ROUND_0, x, y, z) - a_in) / SLOT as u64,
+                bit(&input_b.state, x, y, z)
+            );
+            assert_eq!(
+                (cell(group_round_last, x, y, z) - a_out) / SLOT as u64,
+                bit(&out_b, x, y, z)
+            );
         }
 
-        // 4] The non-usable rows should be zeroes, which are already set at initialization
+        // Row k of round r's group holds the keys of column x = k (C_PER_ROW == 64)
+        for r in 0..ROUNDS {
+            let group = GROUP_ROUND_0 + r * ROWS_PER_STATE;
+            for k in 0..ROWS_PER_STATE {
+                for (g, &key) in rows[group + k].get_all_xor5_acc().iter().enumerate() {
+                    for d in 0..XOR5_BATCH {
+                        let z = g * XOR5_BATCH + d;
+                        let sum: u64 = (0..5).map(|y| cell(group, k, y, z)).sum();
+                        let digit = (key as u64 / (XOR5_KEY_BASE as u64).pow(d as u32))
+                            % XOR5_KEY_BASE as u64;
+                        assert_eq!(digit, sum, "round {r}, column {k}, z {z}");
+                    }
+                }
+            }
+        }
+    }
 
-        timer_stop_and_log_trace!(KECCAKF_PADDING);
+    #[test]
+    fn packed_bulk_writer_matches_generated_setters() {
+        let mut seed = 0xd1b5_4a32_d192_ed03u64;
+        for _ in 0..8 {
+            let mut a = [0u64; LANES];
+            let mut b = [0u64; LANES];
+            for lane in a.iter_mut().chain(b.iter_mut()) {
+                seed ^= seed << 7;
+                seed ^= seed >> 9;
+                seed ^= seed << 8;
+                *lane = seed;
+            }
+            let parity_a = ThetaColumns::from_state(&a).parities;
+            let parity_b = ThetaColumns::from_state(&b).parities;
 
-        Ok(AirInstance::new_from_trace(FromTrace::new(&mut trace)))
+            let mut expected = KeccakfTraceRowPacked::<Goldilocks>::default();
+            let mut actual = KeccakfTraceRowPacked::<Goldilocks>::default();
+            for row in [&mut expected, &mut actual] {
+                row.set_in_use_a(true);
+                row.set_in_use_b(true);
+                row.set_step_addr(0x00ab_cdef_1234);
+            }
+
+            for row in 0..ROWS_PER_STATE {
+                let mut state_cells = [0u8; BITS_PER_ROW];
+                let first = row * LANES_PER_ROW;
+                for lane in 0..LANES_PER_ROW {
+                    for z in 0..LANE_BITS {
+                        state_cells[lane * LANE_BITS + z] = ((a[first + lane] >> z) & 1) as u8
+                            + SLOT * ((b[first + lane] >> z) & 1) as u8;
+                    }
+                }
+                expected.set_all_state(&state_cells);
+                expected.set_all_c(&c_cells(row, &parity_a, &parity_b));
+                actual.set_state_lanes(row, &a, &b);
+                actual.set_c_parities(row, &parity_a, &parity_b);
+
+                assert_eq!(actual.packed, expected.packed, "group-row {row}");
+            }
+        }
     }
 }

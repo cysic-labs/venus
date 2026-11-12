@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use witness::{WitnessComponent, execute, define_wc};
+use proofman_witness::{WitnessComponent, execute, define_wc};
 use proofman_common::{BufferPool, FromTrace, AirInstance, ProofCtx, SetupCtx, ProofmanResult};
 
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 
 use crate::SimpleRightTrace;
 
@@ -35,7 +35,7 @@ impl<F: PrimeField64> WitnessComponent<F> for SimpleRight {
                 trace[i].c = F::from_usize(i);
                 trace[i].d = F::from_usize(num_rows - i - 1);
 
-                trace[i].mul = F::from_usize(1);
+                trace[i].mul = F::from_usize(i);
             }
 
             let air_instance = AirInstance::new_from_trace(FromTrace::new(&mut trace));

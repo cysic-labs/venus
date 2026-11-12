@@ -1,0 +1,60 @@
+#pragma test
+
+// Tables.get_value(table, index) over the different ways a fixed column can
+// reach the builtin as an alone expression, virtual (temporal) or not.
+
+function value_at(col fixed f, int row): int {
+    return Tables.get_value(f, row);
+}
+
+airtemplate TestGetValue(int N = 2**4) {
+    // ---- plain (non-virtual) fixed, sequence-backed ----
+    col fixed S = [10..10+N-1];
+    assert_eq(Tables.get_value(S, 0), 10, "sequence fixed, first row");
+    assert_eq(Tables.get_value(S, 3), 13, "sequence fixed, middle row");
+    assert_eq(Tables.get_value(S, N-1), 10+N-1, "sequence fixed, last row");
+
+    // ---- plain fixed, row-materialized ----
+    col fixed M;
+    Tables.fill(0, M, 0, N);
+    M[5] = 42;
+    assert_eq(Tables.get_value(M, 5), 42, "materialized fixed");
+    assert_eq(Tables.get_value(M, 6), 0, "materialized fixed, untouched row");
+
+    // ---- virtual/temporal fixed with its own row count ----
+    col fixed temporal(8) V = [100..107];
+    assert_eq(Tables.get_value(V, 0), 100, "temporal fixed, first row");
+    assert_eq(Tables.get_value(V, 7), 107, "temporal fixed, last row");
+
+    // ---- temporal fixed without init, filled afterwards ----
+    col fixed temporal(8) T;
+    Tables.fill(77, T, 0, 8);
+    assert_eq(Tables.get_value(T, 3), 77, "temporal fixed filled");
+
+    // ---- index given by an expression / variable ----
+    int i = 4;
+    assert_eq(Tables.get_value(S, i), 14, "index from a variable");
+    assert_eq(Tables.get_value(S, i + 2), 16, "index from an expression");
+    assert_eq(Tables.get_value(S, 2*i - 3), 15, "index from a computed expression");
+
+    // ---- the column reached through an alone expression ----
+    expr e = S;
+    assert_eq(Tables.get_value(e, 3), 13, "column through an expr variable");
+
+    // ---- element of an array of fixed columns ----
+    col fixed A[2];
+    Tables.fill(1, A[0], 0, N);
+    Tables.fill(2, A[1], 0, N);
+    assert_eq(Tables.get_value(A[0], 0), 1, "array element [0]");
+    assert_eq(Tables.get_value(A[1], 0), 2, "array element [1]");
+
+    // ---- through a function argument (passed by reference) ----
+    assert_eq(value_at(S, 3), 13, "sequence fixed through function arg");
+    assert_eq(value_at(V, 7), 107, "temporal fixed through function arg");
+    assert_eq(value_at(A[1], 9), 2, "array element through function arg");
+
+    // ---- consistency with direct indexing ----
+    assert_eq(Tables.get_value(S, 7) == S[7], 1, "get_value matches direct indexing");
+}
+
+airgroup TestGetValue { TestGetValue(); }

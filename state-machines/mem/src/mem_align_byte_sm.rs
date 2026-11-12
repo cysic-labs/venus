@@ -1,55 +1,16 @@
 use std::sync::Arc;
 
-#[cfg(feature = "debug_mem_align")]
-use std::sync::Mutex;
-
-use fields::PrimeField64;
-use pil_std_lib::Std;
+use proofman_fields::PrimeField64;
 use rayon::prelude::*;
 
 use crate::MemAlignInput;
 use proofman_common::{AirInstance, FromTrace, ProofmanResult};
 use zisk_pil::{
-    MemAlignByteAirValues, MemAlignReadByteAirValues, MemAlignWriteByteAirValues,
-    DUAL_RANGE_BYTE_ID,
+    MemAlignByteAirValues, MemAlignByteLargeAirValues, MemAlignByteLargeTrace, MemAlignByteTrace,
+    MemAlignByteTraceRowOps, MemAlignReadByteAirValues, MemAlignReadByteLargeAirValues,
+    MemAlignReadByteLargeTrace, MemAlignReadByteTrace, MemAlignReadByteTraceRowOps,
+    MemAlignWriteByteAirValues, MemAlignWriteByteTrace, MemAlignWriteByteTraceRowOps,
 };
-
-#[cfg(not(feature = "packed"))]
-use zisk_pil::{
-    MemAlignByteTrace, MemAlignByteTraceRow, MemAlignReadByteTrace, MemAlignReadByteTraceRow,
-    MemAlignWriteByteTrace, MemAlignWriteByteTraceRow,
-};
-#[cfg(feature = "packed")]
-use zisk_pil::{
-    MemAlignByteTracePacked, MemAlignByteTraceRowPacked, MemAlignReadByteTracePacked,
-    MemAlignReadByteTraceRowPacked, MemAlignWriteByteTracePacked, MemAlignWriteByteTraceRowPacked,
-};
-
-#[cfg(feature = "packed")]
-pub type MemAlignByteTraceRowType<F> = MemAlignByteTraceRowPacked<F>;
-#[cfg(feature = "packed")]
-pub type MemAlignByteTraceType<F> = MemAlignByteTracePacked<F>;
-#[cfg(feature = "packed")]
-pub type MemAlignReadByteTraceRowType<F> = MemAlignReadByteTraceRowPacked<F>;
-#[cfg(feature = "packed")]
-pub type MemAlignReadByteTraceType<F> = MemAlignReadByteTracePacked<F>;
-#[cfg(feature = "packed")]
-pub type MemAlignWriteByteTraceRowType<F> = MemAlignWriteByteTraceRowPacked<F>;
-#[cfg(feature = "packed")]
-pub type MemAlignWriteByteTraceType<F> = MemAlignWriteByteTracePacked<F>;
-
-#[cfg(not(feature = "packed"))]
-pub type MemAlignByteTraceRowType<F> = MemAlignByteTraceRow<F>;
-#[cfg(not(feature = "packed"))]
-pub type MemAlignByteTraceType<F> = MemAlignByteTrace<F>;
-#[cfg(not(feature = "packed"))]
-pub type MemAlignReadByteTraceRowType<F> = MemAlignReadByteTraceRow<F>;
-#[cfg(not(feature = "packed"))]
-pub type MemAlignReadByteTraceType<F> = MemAlignReadByteTrace<F>;
-#[cfg(not(feature = "packed"))]
-pub type MemAlignWriteByteTraceRowType<F> = MemAlignWriteByteTraceRow<F>;
-#[cfg(not(feature = "packed"))]
-pub type MemAlignWriteByteTraceType<F> = MemAlignWriteByteTrace<F>;
 
 pub trait MemAlignByteRow<F: PrimeField64, T> {
     #[allow(clippy::too_many_arguments)]
@@ -104,209 +65,160 @@ pub trait MemAlignByteRow<F: PrimeField64, T> {
 //     AirInstance::new_from_trace(FromTrace::new(trace).with_air_values(&mut air_values))
 // }
 
-// Implement the common trait for all trace types
-impl<F: PrimeField64> MemAlignByteRow<F, MemAlignByteTraceType<F>> for MemAlignByteTraceRowType<F> {
-    #[inline(always)]
-    fn set_common_fields(
-        &mut self,
-        sel_high_4b: bool,
-        sel_high_2b: bool,
-        sel_high_b: bool,
-        direct_value: u32,
-        composed_value: u32,
-        value_16b: u16,
-        value_8b: u8,
-        byte_value: u8,
-        addr_w: u32,
-        step: u64,
-    ) {
-        self.set_sel_high_4b(sel_high_4b);
-        self.set_sel_high_2b(sel_high_2b);
-        self.set_sel_high_b(sel_high_b);
-        self.set_direct_value(direct_value);
-        self.set_composed_value(composed_value);
-        self.set_value_16b(value_16b);
-        self.set_value_8b(value_8b);
-        self.set_byte_value(byte_value);
-        self.set_addr_w(addr_w);
-        self.set_step(step);
-    }
-    #[inline(always)]
-    fn set_write_fields(
-        &mut self,
-        is_write: bool,
-        written_composed_value: u32,
-        written_byte_value: u8,
-        mem_write_values: [u32; 2],
-    ) {
-        self.set_is_write(is_write);
-        self.set_written_composed_value(written_composed_value);
-        self.set_written_byte_value(written_byte_value);
-        self.set_bus_byte(if is_write {
-            self.get_written_byte_value()
-        } else {
-            self.get_byte_value()
-        });
-        self.set_mem_write_values(0, mem_write_values[0]);
-        self.set_mem_write_values(1, mem_write_values[1]);
-    }
-    #[inline(always)]
-    fn valid_for_read() -> bool {
-        true
-    }
-    #[inline(always)]
-    fn valid_for_write() -> bool {
-        true
-    }
-    fn create_trace(trace_buffer: Vec<F>) -> ProofmanResult<MemAlignByteTraceType<F>> {
-        MemAlignByteTraceType::new_from_vec(trace_buffer)
-    }
-    fn get_num_rows(trace: &MemAlignByteTraceType<F>) -> usize {
-        trace.num_rows()
-    }
-    fn name() -> &'static str {
-        "MemAlignByteTraceType"
-    }
-    fn get_row_mut(trace: &mut MemAlignByteTraceType<F>, index: usize) -> &mut Self {
-        &mut trace[index]
-    }
-    fn create_instance_from_trace(
-        trace: &mut MemAlignByteTraceType<F>,
-        padding_row: usize,
-    ) -> AirInstance<F> {
-        let num_rows = trace.num_rows();
-        let padding_size = num_rows - padding_row;
-        if padding_size > 0 {
-            let padding = trace[padding_row];
-            trace.buffer[padding_row + 1..num_rows].par_iter_mut().for_each(|slot| *slot = padding);
+// Implement the common trait for all trace types.
+//
+// Each of the read-write and read-only airs comes in two heights — `MemAlignByte` /
+// `MemAlignByteLarge` and `MemAlignReadByte` / `MemAlignReadByteLarge` — that commit exactly the same
+// columns, so they share the row type and only the trace alias (and with it `NUM_ROWS` and `AIR_ID`)
+// differs. The bodies are emitted once per air by the macros below.
+
+/// The trace lifecycle, identical for every air of the family.
+macro_rules! impl_trace_lifecycle {
+    ($trace:ident, $air_values:ident, $name:literal) => {
+        fn create_trace(trace_buffer: Vec<F>) -> ProofmanResult<$trace<R>> {
+            $trace::<R>::new_from_vec(trace_buffer)
         }
-        let mut air_values = MemAlignByteAirValues::<F>::new();
-        air_values.padding_size = F::from_usize(padding_size);
-        AirInstance::new_from_trace(FromTrace::new(trace).with_air_values(&mut air_values))
-    }
-    // fn create_instance_from_trace(
-    //     trace: &mut MemAlignByteTrace<F>,
-    //     padding_row: usize,
-    // ) -> AirInstance<F> {
-    //     create_instance_from_trace_helper(
-    //         trace,
-    //         padding_row,
-    //         MemAlignByteAirValues::<F>::new(),
-    //         |air_values, size| air_values.padding_size = size,
-    //     )
-    // }
+        fn get_num_rows(trace: &$trace<R>) -> usize {
+            trace.num_rows()
+        }
+        fn name() -> &'static str {
+            $name
+        }
+        fn get_row_mut(trace: &mut $trace<R>, index: usize) -> &mut Self {
+            &mut trace[index]
+        }
+        fn create_instance_from_trace(trace: &mut $trace<R>, padding_row: usize) -> AirInstance<F> {
+            let num_rows = trace.num_rows();
+            let padding_size = num_rows - padding_row;
+            if padding_size > 0 {
+                let padding = trace[padding_row];
+                trace.buffer[padding_row + 1..num_rows]
+                    .par_iter_mut()
+                    .for_each(|slot| *slot = padding);
+            }
+            let mut air_values = $air_values::<F>::new();
+            air_values.padding_size = F::from_usize(padding_size);
+            AirInstance::new_from_trace(FromTrace::new(trace).with_air_values(&mut air_values))
+        }
+    };
 }
 
-impl<F: PrimeField64> MemAlignByteRow<F, MemAlignReadByteTraceType<F>>
-    for MemAlignReadByteTraceRowType<F>
-{
-    fn set_common_fields(
-        &mut self,
-        sel_high_4b: bool,
-        sel_high_2b: bool,
-        sel_high_b: bool,
-        direct_value: u32,
-        composed_value: u32,
-        value_16b: u16,
-        value_8b: u8,
-        byte_value: u8,
-        addr_w: u32,
-        step: u64,
-    ) {
-        self.set_sel_high_4b(sel_high_4b);
-        self.set_sel_high_2b(sel_high_2b);
-        self.set_sel_high_b(sel_high_b);
-        self.set_direct_value(direct_value);
-        self.set_composed_value(composed_value);
-        self.set_value_16b(value_16b);
-        self.set_value_8b(value_8b);
-        self.set_byte_value(byte_value);
-        self.set_addr_w(addr_w);
-        self.set_step(step);
-    }
-    #[inline(always)]
-    fn set_write_fields(
-        &mut self,
-        _is_write: bool,
-        _written_composed_value: u32,
-        _written_byte_value: u8,
-        _mem_write_values: [u32; 2],
-    ) {
-    }
-    #[inline(always)]
-    fn valid_for_read() -> bool {
-        true
-    }
-    #[inline(always)]
-    fn valid_for_write() -> bool {
-        false
-    }
-    fn create_trace(trace_buffer: Vec<F>) -> ProofmanResult<MemAlignReadByteTraceType<F>> {
-        MemAlignReadByteTraceType::new_from_vec(trace_buffer)
-    }
-    fn get_num_rows(trace: &MemAlignReadByteTraceType<F>) -> usize {
-        trace.num_rows()
-    }
-    fn name() -> &'static str {
-        "MemAlignReadByteTraceType"
-    }
-    fn get_row_mut(trace: &mut MemAlignReadByteTraceType<F>, index: usize) -> &mut Self {
-        &mut trace[index]
-    }
-    fn create_instance_from_trace(
-        trace: &mut MemAlignReadByteTraceType<F>,
-        padding_row: usize,
-    ) -> AirInstance<F> {
-        let num_rows = trace.num_rows();
-        let padding_size = num_rows - padding_row;
-        if padding_size > 0 {
-            let padding = trace[padding_row];
-            trace.buffer[padding_row + 1..num_rows].par_iter_mut().for_each(|slot| *slot = padding);
+/// The columns every air of the family commits.
+macro_rules! impl_common_fields {
+    () => {
+        #[inline(always)]
+        fn set_common_fields(
+            &mut self,
+            sel_high_4b: bool,
+            sel_high_2b: bool,
+            sel_high_b: bool,
+            direct_value: u32,
+            composed_value: u32,
+            value_16b: u16,
+            value_8b: u8,
+            byte_value: u8,
+            addr_w: u32,
+            step: u64,
+        ) {
+            self.set_sel_high_4b(sel_high_4b);
+            self.set_sel_high_2b(sel_high_2b);
+            self.set_sel_high_b(sel_high_b);
+            self.set_direct_value(direct_value);
+            self.set_composed_value(composed_value);
+            self.set_value_16b(value_16b);
+            self.set_value_8b(value_8b);
+            self.set_byte_value(byte_value);
+            self.set_addr_w(addr_w);
+            self.set_step(step);
         }
-        let mut air_values = MemAlignReadByteAirValues::<F>::new();
-        air_values.padding_size = F::from_usize(padding_size);
-        AirInstance::new_from_trace(FromTrace::new(trace).with_air_values(&mut air_values))
-    }
-    // fn create_instance_from_trace(
-    //     trace: &mut MemAlignReadByteTrace<F>,
-    //     padding_row: usize,
-    // ) -> AirInstance<F> {
-    //     create_instance_from_trace_helper(
-    //         trace,
-    //         padding_row,
-    //         MemAlignReadByteAirValues::<F>::new(),
-    //         |air_values, size| air_values.padding_size = size,
-    //     )
-    // }
+    };
 }
 
-impl<F: PrimeField64> MemAlignByteRow<F, MemAlignWriteByteTraceType<F>>
-    for MemAlignWriteByteTraceRowType<F>
+/// One read-write air: it proves both directions and carries the `is_write` selector.
+macro_rules! impl_read_write_air {
+    ($trace:ident, $air_values:ident, $name:literal) => {
+        impl<F: PrimeField64, R: MemAlignByteTraceRowOps<F>> MemAlignByteRow<F, $trace<R>> for R {
+            impl_common_fields!();
+
+            #[inline(always)]
+            fn set_write_fields(
+                &mut self,
+                is_write: bool,
+                written_composed_value: u32,
+                written_byte_value: u8,
+                mem_write_values: [u32; 2],
+            ) {
+                self.set_is_write(is_write);
+                self.set_written_composed_value(written_composed_value);
+                self.set_written_byte_value(written_byte_value);
+                self.set_bus_byte(if is_write {
+                    self.get_written_byte_value()
+                } else {
+                    self.get_byte_value()
+                });
+                self.set_all_mem_write_values(&mem_write_values);
+            }
+            #[inline(always)]
+            fn valid_for_read() -> bool {
+                true
+            }
+            #[inline(always)]
+            fn valid_for_write() -> bool {
+                true
+            }
+
+            impl_trace_lifecycle!($trace, $air_values, $name);
+        }
+    };
+}
+
+/// One read-only air: the write columns are absent, so setting them is a no-op.
+macro_rules! impl_read_air {
+    ($trace:ident, $air_values:ident, $name:literal) => {
+        impl<F: PrimeField64, R: MemAlignReadByteTraceRowOps<F>> MemAlignByteRow<F, $trace<R>>
+            for R
+        {
+            impl_common_fields!();
+
+            #[inline(always)]
+            fn set_write_fields(
+                &mut self,
+                _is_write: bool,
+                _written_composed_value: u32,
+                _written_byte_value: u8,
+                _mem_write_values: [u32; 2],
+            ) {
+            }
+            #[inline(always)]
+            fn valid_for_read() -> bool {
+                true
+            }
+            #[inline(always)]
+            fn valid_for_write() -> bool {
+                false
+            }
+
+            impl_trace_lifecycle!($trace, $air_values, $name);
+        }
+    };
+}
+
+impl_read_write_air!(MemAlignByteTrace, MemAlignByteAirValues, "MemAlignByteTrace");
+impl_read_write_air!(MemAlignByteLargeTrace, MemAlignByteLargeAirValues, "MemAlignByteLargeTrace");
+
+impl_read_air!(MemAlignReadByteTrace, MemAlignReadByteAirValues, "MemAlignReadByteTrace");
+impl_read_air!(
+    MemAlignReadByteLargeTrace,
+    MemAlignReadByteLargeAirValues,
+    "MemAlignReadByteLargeTrace"
+);
+
+// The write-only air has no `Large` sibling, so it is written out directly.
+impl<F: PrimeField64, R: MemAlignWriteByteTraceRowOps<F>>
+    MemAlignByteRow<F, MemAlignWriteByteTrace<R>> for R
 {
-    fn set_common_fields(
-        &mut self,
-        sel_high_4b: bool,
-        sel_high_2b: bool,
-        sel_high_b: bool,
-        direct_value: u32,
-        composed_value: u32,
-        value_16b: u16,
-        value_8b: u8,
-        byte_value: u8,
-        addr_w: u32,
-        step: u64,
-    ) {
-        self.set_sel_high_4b(sel_high_4b);
-        self.set_sel_high_2b(sel_high_2b);
-        self.set_sel_high_b(sel_high_b);
-        self.set_direct_value(direct_value);
-        self.set_composed_value(composed_value);
-        self.set_value_16b(value_16b);
-        self.set_value_8b(value_8b);
-        self.set_byte_value(byte_value);
-        self.set_addr_w(addr_w);
-        self.set_step(step);
-    }
+    impl_common_fields!();
+
     #[inline(always)]
     fn set_write_fields(
         &mut self,
@@ -317,8 +229,7 @@ impl<F: PrimeField64> MemAlignByteRow<F, MemAlignWriteByteTraceType<F>>
     ) {
         self.set_written_composed_value(written_composed_value);
         self.set_written_byte_value(written_byte_value);
-        self.set_mem_write_values(0, mem_write_values[0]);
-        self.set_mem_write_values(1, mem_write_values[1]);
+        self.set_all_mem_write_values(&mem_write_values);
     }
     #[inline(always)]
     fn valid_for_read() -> bool {
@@ -328,65 +239,24 @@ impl<F: PrimeField64> MemAlignByteRow<F, MemAlignWriteByteTraceType<F>>
     fn valid_for_write() -> bool {
         true
     }
-    fn create_trace(trace_buffer: Vec<F>) -> ProofmanResult<MemAlignWriteByteTraceType<F>> {
-        MemAlignWriteByteTraceType::new_from_vec(trace_buffer)
-    }
-    fn get_num_rows(trace: &MemAlignWriteByteTraceType<F>) -> usize {
-        trace.num_rows()
-    }
 
-    fn name() -> &'static str {
+    impl_trace_lifecycle!(
+        MemAlignWriteByteTrace,
+        MemAlignWriteByteAirValues,
         "MemAlignWriteByteTrace"
-    }
-    fn get_row_mut(trace: &mut MemAlignWriteByteTraceType<F>, index: usize) -> &mut Self {
-        &mut trace[index]
-    }
-    fn create_instance_from_trace(
-        trace: &mut MemAlignWriteByteTraceType<F>,
-        padding_row: usize,
-    ) -> AirInstance<F> {
-        let num_rows = trace.num_rows();
-        let padding_size = num_rows - padding_row;
-        if padding_size > 0 {
-            let padding = trace[padding_row];
-            trace.buffer[padding_row + 1..num_rows].par_iter_mut().for_each(|slot| *slot = padding);
-        }
-        let mut air_values = MemAlignWriteByteAirValues::<F>::new();
-        air_values.padding_size = F::from_usize(padding_size);
-        AirInstance::new_from_trace(FromTrace::new(trace).with_air_values(&mut air_values))
-    }
+    );
 }
 
 const OFFSET_MASK: u32 = 0x07;
 const OFFSET_BITS: u32 = 3;
 
 pub struct MemAlignByteSM<F: PrimeField64> {
-    /// PIL2 standard library
-    std: Arc<Std<F>>,
-
-    #[cfg(feature = "debug_mem_align")]
-    num_computed_rows: Mutex<usize>,
-
-    /// The table ID for the Mem Align ROM State Machine
-    table_dual_byte_id: usize,
-
-    table_16b_id: usize,
-    table_8b_id: usize,
+    _phantom: std::marker::PhantomData<F>,
 }
 
 impl<F: PrimeField64> MemAlignByteSM<F> {
-    pub fn new(std: Arc<Std<F>>) -> Arc<Self> {
-        // Get the table ID
-        Arc::new(Self {
-            std: std.clone(),
-            table_dual_byte_id: std
-                .get_virtual_table_id(DUAL_RANGE_BYTE_ID)
-                .expect("Failed to get dual byte table ID"),
-            table_16b_id: std.get_range_id(0, 0xFFFF, None).expect("Failed to get 16b table ID"),
-            table_8b_id: std.get_range_id(0, 0xFF, None).expect("Failed to get 8b table ID"),
-            #[cfg(feature = "debug_mem_align")]
-            num_computed_rows: Mutex::new(0),
-        })
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { _phantom: std::marker::PhantomData })
     }
 
     pub fn compute_witness<T, R: MemAlignByteRow<F, T>>(
@@ -429,17 +299,13 @@ impl<F: PrimeField64> MemAlignByteSM<F> {
                 irow,
                 padding_row,
             );
-            // padding_size - 1, because compute_row_witness call range_check
-            self.std.inc_virtual_row(self.table_dual_byte_id, 0, padding_size - 1);
-            self.std.range_check(self.table_16b_id, 0, padding_size - 1);
-            if R::valid_for_write() {
-                self.std.range_check(self.table_8b_id, 0, padding_size - 1);
-            }
         }
+
         Ok(R::create_instance_from_trace(&mut trace, irow))
     }
 
     /// Common logic for computing witness that can be shared across different trace types
+    #[allow(clippy::too_many_arguments)]
     fn compute_row_witness<T, R: MemAlignByteRow<F, T>>(
         &self,
         input: &MemAlignInput,
@@ -559,12 +425,6 @@ impl<F: PrimeField64> MemAlignByteSM<F> {
             addr_w,
             step,
         );
-        self.std.inc_virtual_row(
-            self.table_dual_byte_id,
-            (value_8b as u16 + ((byte_value as u16) << 8)) as u64,
-            1,
-        );
-        self.std.range_check(self.table_16b_id, value_16b as i64, 1);
 
         let written_byte_value = input.value as u8;
         let written_composed_value = match offset {
@@ -584,9 +444,6 @@ impl<F: PrimeField64> MemAlignByteSM<F> {
             [low_value, written_composed_value]
         };
 
-        if R::valid_for_write() {
-            self.std.range_check(self.table_8b_id, written_byte_value as i64, 1);
-        }
         row.set_write_fields(
             input.is_write,
             written_composed_value,

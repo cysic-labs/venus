@@ -1,7 +1,6 @@
 use core::fmt::{Debug, Display};
 use core::hash::Hash;
-use core::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Sub, SubAssign};
-use std::ops::DivAssign;
+use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 use num_bigint::BigUint;
 use serde::Serialize;
@@ -63,6 +62,17 @@ pub trait Field:
     #[inline]
     fn is_one(&self) -> bool {
         *self == Self::ONE
+    }
+
+    /// `sum(a[i] * b[i])`. A field with a cheaper deferred reduction overrides it.
+    #[must_use]
+    #[inline(always)]
+    fn dot<const N: usize>(a: [Self; N], b: [Self; N]) -> Self {
+        let mut acc = Self::ZERO;
+        for i in 0..N {
+            acc += a[i] * b[i];
+        }
+        acc
     }
 
     #[must_use]

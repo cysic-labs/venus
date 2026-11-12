@@ -2,8 +2,8 @@
 use clap::{Arg, Command};
 use std::error::Error;
 
-use fields::{Field, Goldilocks, PrimeField64};
 use proofman_common::{write_fixed_cols_bin, FixedColsInfo};
+use proofman_fields::{Field, Goldilocks, PrimeField64};
 use zisk_core::zisk_ops::ZiskOp;
 
 type F = Goldilocks;
@@ -107,7 +107,7 @@ impl FrequentOpsHelpers {
     pub fn print_table_offsets(&self) {
         let (start, offsets) = self.generate_table_offsets();
         println!("const OP_TABLE_OFFSETS_START: usize = {start};");
-        println!("const OP_TABLE_OFFSETS: [usize; {}] = {:?};", offsets.len(), &offsets);
+        println!("const OP_TABLE_OFFSETS: [usize; {}] = {:?};", offsets.len(), offsets);
     }
 
     /// Generates opcode offset information for efficient table lookups.
@@ -239,7 +239,7 @@ impl FrequentOpsHelpers {
     /// - `usize`: The number of operand pairs for this opcode
     pub fn get_top(&self, num: usize) -> Vec<(u8, usize)> {
         let mut list = self.get_list();
-        list.sort_by(|a, b| b.1.cmp(&a.1));
+        list.sort_by_key(|a| std::cmp::Reverse(a.1));
         list.truncate(num);
         list
     }
@@ -281,17 +281,6 @@ impl FrequentOpsHelpers {
 
         let output_file = matches.get_one::<String>("output").unwrap().as_str();
 
-        self.generate_file(airgroup_name, air_name, output_file, table, num_rows)
-    }
-
-    pub fn generate_file(
-        &self,
-        airgroup_name: &str,
-        air_name: &str,
-        output_file: &str,
-        table: Vec<(u8, u64, u64, u64, bool)>,
-        num_rows: usize,
-    ) -> Result<(), Box<dyn Error>> {
         // Generate the columns
         let (op, a0, a1, b0, b1, c0, c1, flag) = Self::cols_gen(table, num_rows);
 
@@ -311,7 +300,7 @@ impl FrequentOpsHelpers {
             air_name,
             num_rows as u64,
             &mut [op, a0, a1, b0, b1, c0, c1, flag],
-        )?;
+        );
         println!("OP, A, B, C and FLAG columns written to {output_file}");
 
         Ok(())

@@ -1,8 +1,14 @@
 #ifndef MERKLETREEGL
 #define MERKLETREEGL
 
+#include <cstdio>
+#include <cstdlib>
 #include "goldilocks_base_field.hpp"
+#include "starks_api_internal.hpp"
+#include "poseidon_goldilocks.hpp"
 #include "poseidon2_goldilocks.hpp"
+#include "blake3_goldilocks.hpp"
+#include "goldilocks_tooling.hpp"
 #include "zklog.hpp"
 #include <math.h>
 
@@ -22,8 +28,11 @@ public:
     uint64_t height;
     uint64_t width;
 
-    Goldilocks::Element *source;
-    Goldilocks::Element *nodes;
+    // Set by the owner before use (setSource/setNodes or the allocating ctor). Left null so a
+    // consumer that runs before its setter -- e.g. host code skipped by a CUDA-graph replay --
+    // fails loudly instead of reading through a recycled heap value.
+    Goldilocks::Element *source = nullptr;
+    Goldilocks::Element *nodes = nullptr;
 
     uint64_t arity;
     uint64_t last_level_verification;
@@ -48,6 +57,11 @@ public:
         return height;
     }
 
+    static inline uint64_t getTreeNumElements(uint64_t degree, uint32_t arity = 2)
+    {
+        return ::getTreeNumElements(degree, arity);
+    }
+
     uint64_t getNumNodes(uint64_t height);
     void getLevel(Goldilocks::Element *level);
     void getRoot(Goldilocks::Element *root);
@@ -62,6 +76,10 @@ public:
     void merkelize();
     void *get_nodes_ptr()
     {
+        if (nodes == nullptr) {
+            fprintf(stderr, "MerkleTreeGL::get_nodes_ptr: nodes not set\n");
+            std::abort();
+        }
         return nodes;
     }
 
@@ -73,20 +91,30 @@ public:
             numNodesLevel = (numNodesLevel + (arity - 1)) / arity;
         }
         Goldilocks::Element computedRoot[nFieldElements];
-        switch(arity) {
-            case 2:
-                Poseidon2Goldilocks<8>::partial_merkle_tree(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity);
-                break;
-            case 3:
-                Poseidon2Goldilocks<12>::partial_merkle_tree(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity);
-                break;
-            case 4:
-                Poseidon2Goldilocks<16>::partial_merkle_tree(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity);
-                break;
-            default:
-                zklog.error("MerkleTreeGL::verifyMerkleRoot: Unsupported arity");
-                exitProcess();
-                exit(-1);
+        switch (get_hash_family()) {
+        case HashFamily::Poseidon1:
+            switch(arity) {
+                case 2: PoseidonGoldilocks<8>::merkletreeReduce(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity);  break;
+                case 3: PoseidonGoldilocks<12>::merkletreeReduce(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity); break;
+                case 4: PoseidonGoldilocks<16>::merkletreeReduce(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity); break;
+                default:
+                    zklog.error("MerkleTreeGL::verifyMerkleRoot: Unsupported arity (Poseidon1 supports 2, 3, 4)");
+                    exitProcess(); exit(-1);
+            }
+            break;
+        case HashFamily::Poseidon2:
+            switch(arity) {
+                case 2: Poseidon2Goldilocks<8>::merkletreeReduce(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity);  break;
+                case 3: Poseidon2Goldilocks<12>::merkletreeReduce(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity); break;
+                case 4: Poseidon2Goldilocks<16>::merkletreeReduce(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity); break;
+                default:
+                    zklog.error("MerkleTreeGL::verifyMerkleRoot: Unsupported arity (Poseidon2 supports 2, 3, 4)");
+                    exitProcess(); exit(-1);
+            }
+            break;
+        case HashFamily::Blake3:
+            Blake3Goldilocks::merkletreeReduce(computedRoot, (Goldilocks::Element *)level, numNodesLevel, arity);
+            break;
         }
 
         for (uint64_t i = 0; i < nFieldElements; ++i) {

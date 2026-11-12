@@ -8,15 +8,22 @@ use zisk_core::zisk_ops::ZiskOp;
 use crate::arith_range_table_helpers::*;
 use std::fmt;
 
+/// Range id (rid) tables for the compressed range-id layout of `ArithRangeTable`. A rid encodes
+/// the range types of four chunks at once; the index is `3 * range(x) + range(y)` with
+/// `0` = no constraint, `1` = POS, `2` = NEG. Mirrors `RID_HIGH`/`RID_LOW` in
+/// `pil/arith_table.pil`.
+const RID_HIGH: [u8; 9] = [3, 11, 5, 9, 13, 15, 2, 7, 0]; // (x3, y3) constrained
+const RID_LOW: [u8; 9] = [3, 10, 4, 8, 12, 14, 1, 6, 16]; // (x1, y1) constrained
+
 /// Represents an arithmetic operation, including its inputs, results, and intermediate flags.
 pub struct ArithOperation {
     pub op: u8,
     pub input_a: u64,
     pub input_b: u64,
-    pub a: [u64; 4],
-    pub b: [u64; 4],
-    pub c: [u64; 4],
-    pub d: [u64; 4],
+    pub a: [u16; 4],
+    pub b: [u16; 4],
+    pub c: [u16; 4],
+    pub d: [u16; 4],
     pub carry: [i64; 7],
     pub m32: bool,
     pub div: bool,
@@ -32,6 +39,8 @@ pub struct ArithOperation {
     pub range_cd: u8,
     pub div_by_zero: bool,
     pub div_overflow: bool,
+    pub result_is_zero: bool,
+    pub remainder_is_zero: bool,
 }
 
 /// Provides a default implementation for `ArithOperation`.
@@ -71,6 +80,12 @@ impl fmt::Debug for ArithOperation {
         if self.div_overflow {
             flags += "div_overflow "
         };
+        if self.result_is_zero {
+            flags += "result_is_zero "
+        };
+        if self.remainder_is_zero {
+            flags += "remainder_is_zero "
+        };
         if self.main_mul {
             flags += "main_mul "
         };
@@ -105,7 +120,7 @@ impl fmt::Debug for ArithOperation {
 
 impl ArithOperation {
     /// Dumps the chunks of a specified value into the provided formatter.
-    fn dump_chunks(&self, f: &mut fmt::Formatter, name: &str, value: &[u64; 4]) -> fmt::Result {
+    fn dump_chunks(&self, f: &mut fmt::Formatter, name: &str, value: &[u16; 4]) -> fmt::Result {
         writeln!(
             f,
             "{0}: [0x{1:X}({1}), 0x{2:X}({2}), 0x{3:X}({3}), 0x{4:X}({4})]",
@@ -133,6 +148,8 @@ impl ArithOperation {
             sext: false,
             div_by_zero: false,
             div_overflow: false,
+            result_is_zero: false,
+            remainder_is_zero: false,
             main_mul: false,
             main_div: false,
             signed: false,
@@ -147,19 +164,19 @@ impl ArithOperation {
         self.input_a = input_a;
         self.input_b = input_b;
         self.div_by_zero = input_b == 0
-            && (op == ZiskOp::Div.code()
-                || op == ZiskOp::Rem.code()
-                || op == ZiskOp::DivW.code()
-                || op == ZiskOp::RemW.code()
-                || op == ZiskOp::Divu.code()
-                || op == ZiskOp::Remu.code()
-                || op == ZiskOp::DivuW.code()
-                || op == ZiskOp::RemuW.code());
+            && (op == ZiskOp::DIV
+                || op == ZiskOp::REM
+                || op == ZiskOp::DIV_W
+                || op == ZiskOp::REM_W
+                || op == ZiskOp::DIVU
+                || op == ZiskOp::REMU
+                || op == ZiskOp::DIVU_W
+                || op == ZiskOp::REMU_W);
 
-        self.div_overflow = ((op == ZiskOp::Div.code() || op == ZiskOp::Rem.code())
+        self.div_overflow = ((op == ZiskOp::DIV || op == ZiskOp::REM)
             && input_a == 0x8000_0000_0000_0000
             && input_b == 0xFFFF_FFFF_FFFF_FFFF)
-            || ((op == ZiskOp::DivW.code() || op == ZiskOp::RemW.code())
+            || ((op == ZiskOp::DIV_W || op == ZiskOp::REM_W)
                 && input_a == 0x8000_0000
                 && input_b == 0xFFFF_FFFF);
 
@@ -254,12 +271,11 @@ impl ArithOperation {
     fn calculate_div(a: u64, b: u64) -> u64 {
         let [abs_a, na] = Self::abs64(a);
         let [abs_b, nb] = Self::abs64(b);
-        if abs_b == 0 {
-            0xFFFF_FFFF_FFFF_FFFF
-        } else {
-            let abs_c = abs_a / abs_b;
+        if let Some(abs_c) = abs_a.checked_div(abs_b) {
             let nc = if na != nb && abs_c != 0 { 1 } else { 0 };
             Self::sign64(abs_c, nc == 1)
+        } else {
+            0xFFFF_FFFF_FFFF_FFFF
         }
     }
 
@@ -267,31 +283,22 @@ impl ArithOperation {
     fn calculate_div_w(a: u64, b: u64) -> u64 {
         let [abs_a, na] = Self::abs32(a);
         let [abs_b, nb] = Self::abs32(b);
-        if abs_b == 0 {
-            0xFFFF_FFFF
-        } else {
-            let abs_c = abs_a / abs_b;
+        if let Some(abs_c) = abs_a.checked_div(abs_b) {
             let nc = if na != nb && abs_c != 0 { 1 } else { 0 };
             Self::sign32(abs_c, nc == 1)
+        } else {
+            0xFFFF_FFFF
         }
     }
 
     /// Computes the unsigned division of two 64-bit values.
     fn calculate_divu(a: u64, b: u64) -> u64 {
-        if b == 0 {
-            0xFFFF_FFFF_FFFF_FFFF
-        } else {
-            a / b
-        }
+        a.checked_div(b).unwrap_or(0xFFFF_FFFF_FFFF_FFFF)
     }
 
     /// Computes the unsigned division of two 32-bit values.
     fn calculate_divu_w(a: u64, b: u64) -> u64 {
-        if b == 0 {
-            0xFFFF_FFFF
-        } else {
-            a / b
-        }
+        a.checked_div(b).unwrap_or(0xFFFF_FFFF)
     }
 
     /// Computes the unsigned remainder of two 64-bit values.
@@ -593,40 +600,52 @@ impl ArithOperation {
         // range_ab / range_cd
         //
         //     a3 a1 b3 b1
-        // rid c3 c1 d3 d1 range 2^16 2^15 notes
-        // --- -- -- -- -- ----- ---- ---- -------------------------
-        //   0  F  F  F  F ab cd    4    0
-        //   1  F  F  +  F    cd    3    1 b3 sign => a3 sign
-        //   2  F  F  -  F    cd    3    1 b3 sign => a3 sign
-        //   3  +  F  F  F ab       3    1 c3 sign => d3 sign
-        //   4  +  F  +  F ab cd    2    2
-        //   5  +  F  -  F ab cd    2    2
-        //   6  -  F  F  F ab       3    1 c3 sign => d3 sign
-        //   7  -  F  +  F ab cd    2    2
-        //   8  -  F  -  F ab cd    2    2
-        //   9  F  F  F  +    cd           a1 sign <=> b1 sign / d1 sign => c1 sign
-        //  10  F  F  F  -    cd           a1 sign <=> b1 sign / d1 sign => c1 sign
-        //  11  F  +  F  F    cd    3    1 a1 sign <=> b1 sign
-        //  12  F  +  F  + ab cd    2    2
-        //  13  F  +  F  - ab cd    2    2
-        //  14  F  -  F  F    cd    3    1 a1 sign <=> b1 sign
-        //  15  F  -  F  + ab cd    2    2
-        //  16  F  -  F  - ab cd    2    2
+        // rid c3 c1 d3 d1  notes
+        // --- -- -- -- --  -----------------------------------------
+        //   0  -  F  -  F
+        //   1  F  -  F  F  a1 sign <=> b1 sign
+        //   2  -  F  F  F  c3 sign => d3 sign
+        //   3  F  F  F  F
+        //   4  F  F  F  -  a1 sign <=> b1 sign / d1 sign => c1 sign
+        //   5  F  F  -  F  b3 sign => a3 sign
+        //   6  F  -  F  +
+        //   7  -  F  +  F
+        //   8  F  +  F  F  a1 sign <=> b1 sign
+        //   9  +  F  F  F  c3 sign => d3 sign
+        //  10  F  F  F  +  a1 sign <=> b1 sign / d1 sign => c1 sign
+        //  11  F  F  +  F  b3 sign => a3 sign
+        //  12  F  +  F  +
+        //  13  +  F  +  F
+        //  14  F  +  F  -
+        //  15  +  F  -  F
+        //  16  F  -  F  -
 
         assert!(range_a1 == 0 || range_a3 == 0, "range_a1:{range_a1} range_a3:{range_a3}");
         assert!(range_b1 == 0 || range_b3 == 0, "range_b1:{range_b1} range_b3:{range_b3}");
         assert!(range_c1 == 0 || range_c3 == 0, "range_c1:{range_c1} range_c3:{range_c3}");
         assert!(range_d1 == 0 || range_d3 == 0, "range_d1:{range_d1} range_d3:{range_d3}");
 
-        self.range_ab = (range_a3 + range_a1) * 3
-            + range_b3
-            + range_b1
-            + if (range_a1 + range_b1) > 0 { 8 } else { 0 };
+        // Exactly one half is constrained: the "3" chunks for 64-bit ops, the "1" chunks for the
+        // _W ops. With nothing constrained both tables give the all-FULL rid, so either branch
+        // works. Must stay in sync with RID_HIGH/RID_LOW in pil/arith_table.pil.
+        self.range_ab = if (range_a1 + range_b1) > 0 {
+            RID_LOW[(range_a1 * 3 + range_b1) as usize]
+        } else {
+            RID_HIGH[(range_a3 * 3 + range_b3) as usize]
+        };
 
-        self.range_cd = (range_c3 + range_c1) * 3
-            + range_d3
-            + range_d1
-            + if (range_c1 + range_d1) > 0 { 8 } else { 0 };
+        self.range_cd = if (range_c1 + range_d1) > 0 {
+            RID_LOW[(range_c1 * 3 + range_d1) as usize]
+        } else {
+            RID_HIGH[(range_c3 * 3 + range_d3) as usize]
+        };
+
+        // For a division the "result" is the quotient (a) and the remainder is d; for a
+        // multiplication the result is the whole 128-bit product (c|d) and there is no remainder.
+        // Both flags are one-directional in the AIR (setting them forces the value to zero), so the
+        // executor sets them whenever the value really is zero. Must match arith.pil.
+        self.result_is_zero = if self.div { a == 0 } else { c == 0 && d == 0 };
+        self.remainder_is_zero = self.div && d == 0;
     }
 
     /// Calculates the operation's output chunks for further processing.
@@ -734,7 +753,7 @@ impl ArithOperation {
     }
 
     /// Converts a 64-bit value into its four 16-bit chunks.
-    fn u64_to_chunks(a: u64) -> [u64; 4] {
-        [a & 0xFFFF, (a >> 16) & 0xFFFF, (a >> 32) & 0xFFFF, (a >> 48) & 0xFFFF]
+    fn u64_to_chunks(a: u64) -> [u16; 4] {
+        [a as u16, (a >> 16) as u16, (a >> 32) as u16, (a >> 48) as u16]
     }
 }

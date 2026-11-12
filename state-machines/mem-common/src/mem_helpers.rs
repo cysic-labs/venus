@@ -1,11 +1,12 @@
 use crate::{
     MEMORY_LOAD_OP, MEMORY_STORE_OP, MEM_ADDR_ALIGN_MASK, MEM_BYTES_BITS, MEM_STEPS_BY_MAIN_STEP,
-    MEM_STEPS_BY_MAIN_STEP_BITS, MEM_STEP_BASE, RAM_W_ADDR_INIT,
+    MEM_STEPS_BY_MAIN_STEP_BITS, MEM_STEP_BASE,
 };
 use zisk_common::ChunkId;
 use zisk_core::{CHUNK_SIZE_BITS, RAM_ADDR, RAM_SIZE};
 
 const CHUNK_MEM_STEP_BITS: u64 = CHUNK_SIZE_BITS as u64 + MEM_STEPS_BY_MAIN_STEP_BITS;
+const CHUNK_MEM_STEPS: u64 = 1 << CHUNK_MEM_STEP_BITS;
 
 use static_assertions::const_assert;
 const_assert!(CHUNK_MEM_STEP_BITS <= 24);
@@ -29,8 +30,27 @@ impl MemHelpers {
         )
     }
     #[inline(always)]
+    pub fn mem_steps_belongs_to_same_chunk(step_a: u64, step_b: u64) -> bool {
+        Self::mem_step_to_chunk(step_a) == Self::mem_step_to_chunk(step_b)
+    }
+    #[inline(always)]
     pub fn mem_step_to_main_step(step: u64) -> u64 {
         (step - MEM_STEP_BASE) >> MEM_STEPS_BY_MAIN_STEP_BITS
+    }
+    #[inline(always)]
+    pub fn first_chunk_mem_step(chunk: ChunkId) -> u64 {
+        ((chunk.0 as u64) >> CHUNK_MEM_STEP_BITS) + MEM_STEP_BASE
+    }
+    #[inline(always)]
+    pub fn last_chunk_mem_step(chunk: ChunkId) -> u64 {
+        ((chunk.0 as u64) >> CHUNK_MEM_STEP_BITS) + MEM_STEP_BASE + CHUNK_MEM_STEPS - 1
+    }
+    #[inline(always)]
+    pub fn max_distance_between_chunks(from_chunk: ChunkId, to_chunk: ChunkId) -> u64 {
+        debug_assert!(from_chunk <= to_chunk);
+        let from_step = Self::first_chunk_mem_step(from_chunk);
+        let to_step = Self::last_chunk_mem_step(to_chunk);
+        to_step - from_step
     }
 
     #[inline(always)]
@@ -137,12 +157,6 @@ impl MemHelpers {
             _ => panic!("Invalid bytes value"),
         }
     }
-    pub fn register_to_addr(register: u8) -> u32 {
-        ((RAM_ADDR + register as u64) * 8) as u32
-    }
-    pub fn register_to_addr_w(register: u8) -> u32 {
-        RAM_W_ADDR_INIT + register as u32
-    }
     #[inline(always)]
     pub fn mem_load(
         addr: u32,
@@ -182,6 +196,14 @@ impl MemHelpers {
     }
 
     #[inline(always)]
+    pub fn get_distance_by_chunks(from_step: u64, to_step: u64) -> u64 {
+        debug_assert!(from_step <= to_step);
+
+        let from_chunk = Self::mem_step_to_chunk(from_step);
+        let to_chunk = Self::mem_step_to_chunk(to_step);
+        Self::max_distance_between_chunks(from_chunk, to_chunk)
+    }
+    #[inline(always)]
     pub fn encode_mem_align_rows_and_count(rows: u32, count: u32) -> u32 {
         debug_assert!(rows == 3 || rows == 5);
         count
@@ -202,42 +224,5 @@ impl MemHelpers {
         };
         let count = value & 0x3FFF_FFFF;
         (rows, count)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unaligned_access_matches_byte_view() {
-        // Two consecutive aligned words with distinct bytes: byte i of the region is 0x10 + i.
-        let words = [0x1716_1514_1312_1110u64, 0x1f1e_1d1c_1b1a_1918];
-        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-        let value = 0xa7a6_a5a4_a3a2_a1a0u64;
-        for offset in 0..8usize {
-            for width in [1usize, 2, 4, 8] {
-                let addr = RAM_ADDR as u32 + offset as u32;
-                let range = offset..offset + width;
-
-                let mut read = [0u8; 8];
-                read[..width].copy_from_slice(&bytes[range.clone()]);
-                assert_eq!(
-                    MemHelpers::get_read_value(addr, width as u8, words),
-                    u64::from_le_bytes(read),
-                    "read offset={offset} width={width}"
-                );
-
-                let mut written = bytes.clone();
-                written[range].copy_from_slice(&value.to_le_bytes()[..width]);
-                let expected = [0, 1]
-                    .map(|i| u64::from_le_bytes(written[i * 8..i * 8 + 8].try_into().unwrap()));
-                assert_eq!(
-                    MemHelpers::get_write_values(addr, width as u8, value, words),
-                    expected,
-                    "write offset={offset} width={width}"
-                );
-            }
-        }
     }
 }

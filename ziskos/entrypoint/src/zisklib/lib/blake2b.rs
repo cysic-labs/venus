@@ -1,4 +1,6 @@
-use crate::syscalls::{syscall_blake2b_round, SyscallBlake2bRoundParams};
+//! BLAKE2b hash function.
+
+use crate::syscalls::syscall_blake2b_rounds_chain;
 
 /// BLAKE2b initialization vectors
 const IV: [u64; 8] = [
@@ -12,6 +14,10 @@ const IV: [u64; 8] = [
     0x5BE0CD19137E2179,
 ];
 
+/// BLAKE2b compression function F as defined in RFC 7693.
+///
+/// Updates the hash state `h` in place by mixing the message block `m`
+/// over `rounds` iterations using counter `t` and finalization flag `f`.
 pub fn blake2b_compress(
     rounds: u32,
     h: &mut [u64; 8],
@@ -23,42 +29,23 @@ pub fn blake2b_compress(
     let mut v = [0u64; 16];
 
     v[..8].copy_from_slice(h);
-    v[8..16].copy_from_slice(&IV);
+    v[8..12].copy_from_slice(&IV[..4]);
+    v[12] = t[0] ^ IV[4];
+    v[13] = t[1] ^ IV[5];
+    v[14] = IV[6] ^ if f { u64::MAX } else { 0 };
+    v[15] = IV[7];
 
-    v[12] ^= t[0];
-    v[13] ^= t[1];
-
-    if f {
-        v[14] = !v[14];
-    }
-
-    for r in 0..rounds {
-        blake2b_round(
-            &mut v,
-            m,
-            r,
-            #[cfg(feature = "hints")]
-            hints,
-        );
-    }
+    syscall_blake2b_rounds_chain(
+        rounds,
+        &mut v,
+        m,
+        #[cfg(feature = "hints")]
+        hints,
+    );
 
     for i in 0..8 {
         h[i] ^= v[i] ^ v[i + 8];
     }
-}
-
-fn blake2b_round(
-    v: &mut [u64; 16],
-    m: &[u64; 16],
-    round: u32,
-    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
-) {
-    let mut params = SyscallBlake2bRoundParams { index: (round % 10) as u64, state: v, input: m };
-    syscall_blake2b_round(
-        &mut params,
-        #[cfg(feature = "hints")]
-        hints,
-    );
 }
 
 /// C-compatible wrapper for full Blake2b compression function
@@ -67,9 +54,9 @@ fn blake2b_round(
 /// - `state` must point to a writable buffer of at least 8 `u64`s
 /// - `message` must point to at least 16 `u64`s
 /// - `offset` must point to at least 2 `u64`s
-#[cfg_attr(not(feature = "hints"), no_mangle)]
-#[cfg_attr(feature = "hints", export_name = "hints_blake2b_compress_c")]
-pub unsafe extern "C" fn blake2b_compress_c(
+#[allow(dead_code)]
+#[inline]
+pub(crate) unsafe fn blake2b_compress_c(
     rounds: u32,
     state: *mut u64,
     message: *const u64,

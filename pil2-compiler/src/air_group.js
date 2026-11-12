@@ -28,7 +28,7 @@ module.exports = class AirGroup {
         }
     }
     getAir(id) {
-        return id >= BASE_VIRTUAL_ID ? this.virtualAirs[id - BASE_VIRTUAL_ID] : this.airs[id];
+        return  id >= BASE_VIRTUAL_ID ? (this.virtualAirs[id - BASE_VIRTUAL_ID] ?? false) : (this.airs[id] ?? false);
     }
     getId(id) {
         return this.id;
@@ -51,8 +51,15 @@ module.exports = class AirGroup {
     airStart(airId) {
         ++this.openedAirIds;
     }
+    getAir(airId) {
+        return this.virtualAirs.find(air => air.id === airId) ?? this.airs.find(air => air.id === airId);
+    }
     airEnd(airId, virtual = false) {
         assert.typeOf(airId, 'number');
+        let air = this.getAir(airId);
+        if (air instanceof Air) {
+            air.onEnd();
+        }
         if (!virtual) this.checkAirGroupValues(airId);
         --this.openedAirIds;
     }

@@ -4,13 +4,12 @@ use crate::zisklib::{
 };
 
 use super::{
-    constants::{G1_GENERATOR, G1_IDENTITY, G2_GENERATOR, G2_IDENTITY, R, TRUSTED_SETUP_TAU_G2},
-    curve::{decompress_bls12_381, scalar_mul_bls12_381, sub_bls12_381},
-    pairing::pairing_batch_bls12_381,
-    twist::{
-        decompress_twist_bls12_381, neg_twist_bls12_381, scalar_mul_twist_bls12_381,
-        sub_twist_bls12_381,
+    constants::{G1_GENERATOR, G1_IDENTITY, G2_GENERATOR, R, TRUSTED_SETUP_TAU_G2},
+    curve::{
+        add_complete_bls12_381, decompress_bls12_381, scalar_mul_bls12_381, sub_complete_bls12_381,
     },
+    pairing::pairing_batch_bls12_381,
+    twist::neg_twist_bls12_381,
 };
 
 /// Verify KZG proof using BLS12-381 implementation.
@@ -22,15 +21,15 @@ pub fn verify_kzg_proof(
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> bool {
     // Parse the commitment
-    let commitment = match decompress_bls12_381(
+    let (commitment, commitment_is_inf) = match decompress_bls12_381(
         commitment_bytes,
         #[cfg(feature = "hints")]
         hints,
     ) {
-        Ok(result) => result,
+        Ok((result, is_infinity)) => (result, is_infinity),
         Err(_) => return false,
     };
-    if !eq(&commitment, &G1_IDENTITY)
+    if !commitment_is_inf
         && !is_on_subgroup_bls12_381(
             &commitment,
             #[cfg(feature = "hints")]
@@ -41,15 +40,15 @@ pub fn verify_kzg_proof(
     }
 
     // Parse the proof
-    let proof = match decompress_bls12_381(
+    let (proof, proof_is_inf) = match decompress_bls12_381(
         proof_bytes,
         #[cfg(feature = "hints")]
         hints,
     ) {
-        Ok(result) => result,
+        Ok((result, is_infinity)) => (result, is_infinity),
         Err(_) => return false,
     };
-    if !eq(&proof, &G1_IDENTITY)
+    if !proof_is_inf
         && !is_on_subgroup_bls12_381(
             &proof,
             #[cfg(feature = "hints")]
@@ -70,77 +69,58 @@ pub fn verify_kzg_proof(
         None => return false,
     };
 
-    // The verification equation is:
-    // e(C - [y]G₁, G₂) = e(π, [τ]₂ - [z]G₂)
-
-    // Get the trusted setup G2 point [τ]₂
-    let tau_g2 = TRUSTED_SETUP_TAU_G2;
-
-    // Get generators
-    let g1 = G1_GENERATOR;
-    let g2 = G2_GENERATOR;
+    // The verification equation e(C - [y]G₁, -G₂) · e(π, [τ]₂ - [z]G₂) = 1 is checked as
+    // e(C - [y]G₁ + [z]π, -G₂) · e(π, [τ]₂) = 1, since e(π, [τ]₂ - [z]G₂) =
+    // e(π, [τ]₂) · e([z]π, -G₂): a G1 scalar mul instead of a G2 one. This must emit the
+    // same precompile and fcall sequence as kzg.zisk, which reads it back in hints mode.
 
     // Compute c_minus_y = C - [y]G₁
     let y_g1 = scalar_mul_bls12_381(
-        &g1,
+        &G1_GENERATOR,
         &y,
         #[cfg(feature = "hints")]
         hints,
     );
-    let c_minus_y = sub_bls12_381(
+    let c_minus_y = sub_complete_bls12_381(
         &commitment,
         &y_g1,
         #[cfg(feature = "hints")]
         hints,
     );
 
-    // Compute t_minus_z = [τ]₂ - [z]G₂
-    let z_g2 = scalar_mul_twist_bls12_381(
-        &g2,
+    // π = O: the product is e(C - [y]G₁, -G₂), 1 iff C - [y]G₁ = O
+    if eq(&proof, &G1_IDENTITY) {
+        return eq(&c_minus_y, &G1_IDENTITY);
+    }
+
+    // P1 = (C - [y]G₁) + [z]π
+    let z_proof = scalar_mul_bls12_381(
+        &proof,
         &z,
         #[cfg(feature = "hints")]
         hints,
     );
-    let t_minus_z = sub_twist_bls12_381(
-        &tau_g2,
-        &z_g2,
+    let p1 = add_complete_bls12_381(
+        &c_minus_y,
+        &z_proof,
         #[cfg(feature = "hints")]
         hints,
     );
 
-    // LHS: e(C - [y]G₁, G₂) - G₂ is never infinity
-    // RHS: e(π, [τ]₂ - [z]G₂)
-    let c_minus_y_is_inf = eq(&c_minus_y, &G1_IDENTITY);
-    let proof_is_inf = eq(&proof, &G1_IDENTITY);
-    let t_minus_z_is_inf = eq(&t_minus_z, &G2_IDENTITY);
-
-    // If c_minus_y = O: LHS = e(O, G₂) = 1
-    //   => RHS must equal 1, i.e., e(π, [τ]₂ - [z]G₂) = 1
-    //   => π = O or [τ]₂ - [z]G₂ = O
-    if c_minus_y_is_inf {
-        return proof_is_inf || t_minus_z_is_inf;
-    }
-
-    // If π = O or [τ]₂ - [z]G₂ = O: RHS = 1
-    //   => LHS must equal 1, i.e., e(C - [y]G₁, G₂) = 1
-    //   => C - [y]G₁ = O (but we already handled that above)
-    //   => This means c_minus_y ≠ O but RHS = 1, so verification fails
-    if proof_is_inf || t_minus_z_is_inf {
+    // P1 = O leaves e(π, [τ]₂), never 1 for π ≠ O
+    if eq(&p1, &G1_IDENTITY) {
         return false;
     }
 
-    // General case: no infinities, proceed with pairing check
-    // The check is equivalent to:
-    // e(C - [y]G₁, -G₂) · e(π, [τ]₂ - [z]G₂) = 1
     let neg_g2 = neg_twist_bls12_381(
-        &g2,
+        &G2_GENERATOR,
         #[cfg(feature = "hints")]
         hints,
     );
 
     // Batch pairing check
-    let g1_points = [c_minus_y, proof];
-    let g2_points = [neg_g2, t_minus_z];
+    let g1_points = [p1, proof];
+    let g2_points = [neg_g2, TRUSTED_SETUP_TAU_G2];
 
     // Check if the pairing result equals 1
     is_one(&pairing_batch_bls12_381(
@@ -166,9 +146,9 @@ pub fn verify_kzg_proof(
 /// * 1 if the proof is valid
 /// * 0 if the proof is invalid
 /// * 2 if there was a parsing error (invalid input)
-#[cfg_attr(not(feature = "hints"), no_mangle)]
-#[cfg_attr(feature = "hints", export_name = "hints_verify_kzg_proof_c")]
-pub unsafe extern "C" fn verify_kzg_proof_c(
+#[allow(dead_code)]
+#[inline]
+pub(crate) unsafe fn verify_kzg_proof_c(
     z: *const u8,
     y: *const u8,
     commitment: *const u8,

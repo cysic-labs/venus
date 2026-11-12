@@ -60,6 +60,3 @@ dkms.conf
 # Rust build 
 Cargo.lock
 target
-!go.mod
-!poc/go/go.mod
-!poc/ntt-cuda/go.mod

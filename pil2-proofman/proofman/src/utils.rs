@@ -1,4 +1,4 @@
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::{
@@ -10,11 +10,14 @@ use std::os::raw::c_void;
 use colored::*;
 
 use proofman_common::{
-    format_bytes, MpiCtx, ParamsGPU, ProofCtx, ProofType, ProofmanError, ProofmanResult, Setup, SetupCtx, SetupsVadcop,
+    format_bytes, CacheSetKind, FixedGroup, MpiCtx, ProofCtx, ProofmanError, ProofmanResult, Setup, SetupCtx,
+    SetupsVadcop,
 };
-use proofman_starks_lib_c::load_device_const_pols_c;
-use proofman_starks_lib_c::load_device_setup_c;
-use proofman_starks_lib_c::get_unified_buffer_gpu_c;
+use proofman_starks_lib_c::{
+    configure_const_slot_cache_c, load_device_const_pols_c, load_host_const_pols_c, pin_const_slot_c,
+    reserve_custom_commit_slot_c,
+};
+use proofman_starks_lib_c::{get_layout_offset_c, get_unified_buffer_gpu_c, invalidate_stream_contexts_c, LayoutBoundary};
 use proofman_starks_lib_c::verify_root_bn128_from_tree_c;
 use proofman_starks_lib_c::pack_const_pols_c;
 use proofman_starks_lib_c::{
@@ -22,10 +25,10 @@ use proofman_starks_lib_c::{
     prepare_blocks_c, tile_const_pols_c, load_const_pols_c,
 };
 use proofman_util::create_buffer_fast;
-use proofman_common::{PackedInfo, VerboseMode, GlobalInfo};
+use proofman_common::{GpuWitnessAirs, PackedInfo, VerboseMode, GlobalInfo};
 
-use pil_std_lib::Std;
-use witness::WitnessManager;
+use pil2_std_lib::Std;
+use proofman_witness::WitnessManager;
 
 pub fn print_summary_info<F: PrimeField64>(
     pctx: &ProofCtx<F>,
@@ -34,28 +37,47 @@ pub fn print_summary_info<F: PrimeField64>(
     packed_info: &HashMap<(usize, usize), PackedInfo>,
     verbose_mode: VerboseMode,
 ) -> ProofmanResult<String> {
-    let summary = print_summary(pctx, sctx, packed_info, true, verbose_mode, mpi_ctx.rank == 0)?;
+    let n_partitions = pctx.get_n_partitions();
+    let summary = print_summary(
+        pctx,
+        sctx,
+        packed_info,
+        true,
+        mpi_ctx.rank,
+        mpi_ctx.n_processes,
+        verbose_mode,
+        n_partitions == 1 && mpi_ctx.rank == 0,
+    )?;
+
+    let _ = print_summary(
+        pctx,
+        sctx,
+        packed_info,
+        false,
+        mpi_ctx.rank,
+        mpi_ctx.n_processes,
+        verbose_mode,
+        n_partitions != 1 || mpi_ctx.n_processes > 1,
+    )?;
 
     if mpi_ctx.n_processes > 1 {
         let (average_weight, max_weight, min_weight, max_deviation) = pctx.dctx_load_balance_info_process();
         tracing::info!(
-            "Load balance. Average: {} max: {} min: {} deviation: {}",
-            average_weight,
-            max_weight,
-            min_weight,
-            max_deviation
+            "Load balance (processes). Average: {average_weight} max: {max_weight} min: {min_weight} deviation: {max_deviation:.2}%"
         );
-
-        let _ = print_summary(pctx, sctx, packed_info, false, verbose_mode, true)?;
     }
+
     Ok(summary)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn print_summary<F: PrimeField64>(
     pctx: &ProofCtx<F>,
     sctx: &SetupCtx<F>,
     packed_info: &HashMap<(usize, usize), PackedInfo>,
     global: bool,
+    rank: i32,
+    n_processes: i32,
     verbose_mode: VerboseMode,
     print_output: bool,
 ) -> ProofmanResult<String> {
@@ -66,25 +88,31 @@ pub fn print_summary<F: PrimeField64>(
     let mut air_instances = HashMap::new();
 
     let instances = pctx.dctx_get_instances();
-    let mut n_instances = instances.len();
 
-    let mut print = vec![global; instances.len()];
-
-    if !global {
+    let (print, n_instances) = if global {
+        let n = instances.len();
+        (vec![true; n], n)
+    } else {
         let my_instances = pctx.dctx_get_process_instances();
-        for instance_id in my_instances.iter() {
-            print[*instance_id] = true;
+        let n = my_instances.len();
+        let mut print = vec![false; instances.len()];
+        for id in my_instances {
+            print[id] = true;
         }
-        n_instances = my_instances.len();
-    }
+        (print, n)
+    };
 
     let max_prover_memory = sctx.max_prover_buffer_size as f64 * 8.0;
 
     let mut memory_tables = 0 as f64;
+    let mut total_weight: u64 = 0;
     for (instance_id, &instance_info) in instances.iter().enumerate() {
         let (airgroup_id, air_id, is_table) = (instance_info.airgroup_id, instance_info.air_id, instance_info.table);
         if !print[instance_id] {
             continue;
+        }
+        if !global {
+            total_weight += pctx.get_weight(airgroup_id, air_id);
         }
         let air_name = pctx.global_info.airs[airgroup_id][air_id].clone().name;
         let air_group_name = pctx.global_info.air_groups[airgroup_id].clone();
@@ -92,15 +120,11 @@ pub fn print_summary<F: PrimeField64>(
         if !air_instance_map.contains_key(&air_name.clone()) {
             let setup = sctx.get_setup(airgroup_id, air_id)?;
             let n_bits = setup.stark_info.stark_struct.n_bits;
-            let memory_trace = if cfg!(feature = "gpu") && cfg!(feature = "packed") {
-                let num_packed_words = packed_info.get(&(airgroup_id, air_id)).map(|info| info.num_packed_words);
-                if let Some(num_packed_words) = num_packed_words {
-                    (num_packed_words * (1 << setup.stark_info.stark_struct.n_bits)) as f64 * 8.0
-                } else {
-                    (setup.stark_info.map_sections_n["cm1"] * (1 << setup.stark_info.stark_struct.n_bits)) as f64 * 8.0
-                }
+            let num_packed_words = packed_info.get(&(airgroup_id, air_id)).map(|info| info.num_packed_words);
+            let memory_trace = if let Some(num_packed_words) = num_packed_words {
+                (num_packed_words * (1 << setup.stark_info.stark_struct.n_bits)) as f64 * 8.0
             } else {
-                (setup.stark_info.map_sections_n["cm1"] * (1 << (setup.stark_info.stark_struct.n_bits))) as f64 * 8.0
+                (setup.stark_info.map_sections_n["cm1"] * (1 << setup.stark_info.stark_struct.n_bits)) as f64 * 8.0
             };
             let memory_instance = setup.prover_buffer_size as f64 * 8.0;
             let memory_fixed =
@@ -126,7 +150,12 @@ pub fn print_summary<F: PrimeField64>(
 
     if verbose_mode != VerboseMode::Info {
         if print_output {
-            tracing::info!("{}", "--- TOTAL PROOF INSTANCES SUMMARY ------------------------".bright_white().bold());
+            let header = if global {
+                "--- TOTAL PROOF INSTANCES SUMMARY ------------------------".to_string()
+            } else {
+                format!("--- PROOF INSTANCES SUMMARY [Process {rank}/{n_processes}] -------")
+            };
+            tracing::info!("{}", header.bright_white().bold());
             tracing::info!("    ► {} Air instances found:", n_instances);
         }
         for air_group in &air_groups {
@@ -159,9 +188,8 @@ pub fn print_summary<F: PrimeField64>(
             for air_name in air_names {
                 let count = air_group_instances.get(air_name).unwrap();
                 let (_, _, _, memory_trace, memory_instance) = air_info.get(air_name).unwrap();
-                let gpu = cfg!(feature = "gpu");
                 if print_output {
-                    if gpu {
+                    if pctx.gpu {
                         tracing::info!(
                             "      · {}: {} GPU per each of {} instance | Witness CPU: {}",
                             air_name,
@@ -186,10 +214,19 @@ pub fn print_summary<F: PrimeField64>(
             tracing::info!("----------------------------------------------------------");
             tracing::info!("      Extra memory tables (CPU): {}", format_bytes(memory_tables));
             tracing::info!("----------------------------------------------------------");
+            if !global {
+                tracing::info!("      Total weight [Process {rank}/{n_processes}]: {total_weight}");
+                tracing::info!("----------------------------------------------------------");
+            }
         }
     } else {
         if print_output {
-            tracing::info!("{}", "--- PROOF INSTANCES SUMMARY ---".bright_white().bold());
+            let header = if global {
+                "--- PROOF INSTANCES SUMMARY ---".to_string()
+            } else {
+                format!("--- PROOF INSTANCES SUMMARY [Process {rank}/{n_processes}] ---")
+            };
+            tracing::info!("{}", header.bright_white().bold());
         }
 
         for air_group in &air_groups {
@@ -205,7 +242,11 @@ pub fn print_summary<F: PrimeField64>(
                 })
                 .collect();
 
-            summary.push(format!("Total {} instances: {}", if global { "global" } else { "local" }, n_instances));
+            let scope = if global { "global" } else { "process" };
+            summary.push(format!("Total {scope} instances: {n_instances}"));
+            if !global {
+                summary.push(format!("Total weight: {total_weight}"));
+            }
 
             if print_output {
                 tracing::info!("{} | {}", air_group.bright_white().bold(), summary.join(" | "));
@@ -217,6 +258,9 @@ pub fn print_summary<F: PrimeField64>(
         }
 
         if print_output {
+            if !global {
+                tracing::info!("Total weight [Process {rank}/{n_processes}]: {total_weight}");
+            }
             tracing::info!("{}", "--------------------------------".bright_white().bold());
         }
     }
@@ -225,6 +269,10 @@ pub fn print_summary<F: PrimeField64>(
 }
 
 pub fn needs_const_tree_regeneration<F: PrimeField64>(setup: &Setup<F>) -> ProofmanResult<bool> {
+    if !setup.needs_const_tree_file() {
+        return Ok(false);
+    }
+
     let const_pols_tree_path = &setup.const_pols_tree_path;
     let const_pols_tree_size = setup.const_tree_size;
 
@@ -251,7 +299,7 @@ pub fn needs_const_tree_regeneration<F: PrimeField64>(setup: &Setup<F>) -> Proof
     let mut buffer = [0u8; 32];
     file.read_exact(&mut buffer)?;
 
-    if setup.setup_type != ProofType::RecursiveF {
+    if !setup.is_bn128_recursivef() {
         let verkey_path = setup.verkey_file.clone();
         let mut contents = String::new();
         let mut file = File::open(verkey_path).unwrap();
@@ -283,7 +331,42 @@ pub fn needs_const_tree_regeneration<F: PrimeField64>(setup: &Setup<F>) -> Proof
     Ok(false)
 }
 
+/// Device scratch for the const-tree regeneration helpers: the aux area of the unified buffer.
+fn const_tree_scratch<F: PrimeField64>(setup: &Setup<F>, d_buffers: *mut c_void) -> ProofmanResult<*mut c_void> {
+    let base = get_unified_buffer_gpu_c(d_buffers);
+    if base.is_null() {
+        return Ok(base);
+    }
+    let ss = &setup.stark_info.stark_struct;
+    let n_const = setup.stark_info.n_constants;
+    let (n, n_ext) = (1u64 << ss.n_bits, 1u64 << ss.n_bits_ext);
+    // GL: prepare_blocks then calculate_const_tree; BN128: tile_const_pols.
+    let need = 8 * if ss.verification_hash_type == "GL" {
+        (2 * n * n_const).max(n_ext * n_const + setup.const_tree_size as u64)
+    } else {
+        2 * n_ext * n_const
+    };
+    let (aux, agg) = (
+        get_layout_offset_c(d_buffers, LayoutBoundary::AuxBase),
+        get_layout_offset_c(d_buffers, LayoutBoundary::AggBase),
+    );
+    if need > agg.saturating_sub(aux) {
+        return Err(ProofmanError::InvalidConfiguration(format!(
+            "const-tree regeneration of {} needs {} of device scratch but the aux area holds {}",
+            setup.setup_path.display(),
+            format_bytes(need as f64),
+            format_bytes(agg.saturating_sub(aux) as f64),
+        )));
+    }
+    // Byte 0 holds the basic fixed pols; aux is idle here.
+    Ok((base as *mut u8).wrapping_add(aux as usize) as *mut c_void)
+}
+
 pub fn check_const_tree<F: PrimeField64>(setup: &Setup<F>, d_buffers: &Option<*mut c_void>) -> ProofmanResult<()> {
+    if !setup.needs_const_tree_file() {
+        return Ok(());
+    }
+
     let const_pols_tree_path = &setup.const_pols_tree_path;
     let const_pols_tree_size = setup.const_tree_size;
 
@@ -311,7 +394,7 @@ pub fn check_const_tree<F: PrimeField64>(setup: &Setup<F>, d_buffers: &Option<*m
                     let mut buffer = [0u8; 32];
                     file.read_exact(&mut buffer)?;
 
-                    if setup.setup_type != ProofType::RecursiveF {
+                    if !setup.is_bn128_recursivef() {
                         let verkey_path = setup.verkey_file.clone();
                         let mut contents = String::new();
                         let mut file = File::open(verkey_path).unwrap();
@@ -367,23 +450,34 @@ pub fn check_const_tree<F: PrimeField64>(setup: &Setup<F>, d_buffers: &Option<*m
         needs_regeneration = true;
     }
 
+    if setup.gpu && setup.is_bn128_recursivef() && !needs_regeneration {
+        let expected_const_gpu_size = setup.const_pols_size * 8;
+        let const_gpu_valid = PathBuf::from(&setup.const_pols_path).exists()
+            && fs::metadata(&setup.const_pols_path)
+                .map(|m| m.len() as usize == expected_const_gpu_size)
+                .unwrap_or(false);
+        if !const_gpu_valid {
+            needs_regeneration = true;
+        }
+    }
+
     // Regenerate the const tree if needed
     if needs_regeneration {
         let const_pols_size = (setup.stark_info.n_constants * (1 << setup.stark_info.stark_struct.n_bits)) as usize;
-        // SAFETY: the const polynomial loader writes the whole buffer before it is read.
-        let mut const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
+        let mut const_pols: Vec<F> = create_buffer_fast(const_pols_size);
         let const_pols_path = setup.setup_path.display().to_string() + ".const";
         load_const_pols_c(const_pols.as_ptr() as *mut u8, const_pols_path.as_str(), const_pols.len() as u64 * 8);
 
-        // SAFETY: the const tree calculation writes the whole buffer before it is read.
-        let const_tree: Vec<F> = unsafe { create_buffer_fast(const_pols_tree_size) };
+        let const_tree: Vec<F> = create_buffer_fast(const_pols_tree_size);
         let p_stark_info = setup.p_setup.p_stark_info;
 
-        let unified_buffer_gpu =
-            if let Some(d_buffers) = d_buffers { get_unified_buffer_gpu_c(*d_buffers).0 } else { std::ptr::null_mut() };
+        let unified_buffer_gpu = match d_buffers {
+            Some(d) => const_tree_scratch(setup, *d)?,
+            None => std::ptr::null_mut(),
+        };
 
         if setup.stark_info.stark_struct.verification_hash_type == "GL" {
-            if cfg!(feature = "gpu") {
+            if setup.gpu {
                 prepare_blocks_c(
                     const_pols.as_mut_ptr() as *mut u64,
                     1 << setup.stark_info.stark_struct.n_bits,
@@ -415,7 +509,7 @@ pub fn check_const_tree<F: PrimeField64>(setup: &Setup<F>, d_buffers: &Option<*m
             write_const_tree_bn128_c(p_stark_info, const_tree.as_ptr() as *mut u8, const_pols_tree_path_cpu.as_str());
 
             // For GPU, use tile_const_pols_c to create both GPU const pols and GPU const tree
-            if cfg!(feature = "gpu") {
+            if setup.gpu {
                 tile_const_pols_c(
                     p_stark_info,
                     const_pols.as_ptr() as *mut u8,
@@ -427,14 +521,33 @@ pub fn check_const_tree<F: PrimeField64>(setup: &Setup<F>, d_buffers: &Option<*m
             }
         }
 
+        // The scratch overwrote aux, where streams keep their cached const pols/trees.
+        if let (Some(d), false) = (d_buffers, unified_buffer_gpu.is_null()) {
+            invalidate_stream_contexts_c(*d);
+        }
+
         tracing::trace!("Successfully generated constant tree file '{}'", const_pols_tree_path);
     }
 
     Ok(())
 }
 
+/// Is `.const_gpu` *provably* older than the `.const` it was packed from?
+///
+/// The size check cannot tell: the expected size is pure AIR geometry, so changed
+/// fixed-polynomial *values* leave it byte-identical. `.consttree` checks its root
+/// against the verkey instead; a flat repack has no root. Unreadable metadata answers
+/// "no": a GPU key needs no `.const`, and the repack this would trigger reads it.
+fn const_gpu_older_than_source(const_path: &Path, const_gpu_path: &Path) -> bool {
+    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    match (modified(const_path), modified(const_gpu_path)) {
+        (Some(src), Some(derived)) => src > derived,
+        _ => false,
+    }
+}
+
 pub fn needs_const_pols_gpu_regeneration<F: PrimeField64>(setup: &Setup<F>) -> ProofmanResult<bool> {
-    if !cfg!(feature = "gpu") {
+    if !setup.gpu {
         return Ok(false);
     }
 
@@ -464,11 +577,16 @@ pub fn needs_const_pols_gpu_regeneration<F: PrimeField64>(setup: &Setup<F>) -> P
         Err(_) => return Ok(true),
     }
 
+    let source = setup.setup_path.display().to_string() + ".const";
+    if const_gpu_older_than_source(Path::new(&source), Path::new(&setup.const_pols_path)) {
+        return Ok(true);
+    }
+
     Ok(false)
 }
 
-fn check_const_pols_gpu<F: PrimeField64>(setup: &Setup<F>) -> ProofmanResult<()> {
-    if !cfg!(feature = "gpu") {
+pub fn check_const_pols_gpu<F: PrimeField64>(setup: &Setup<F>) -> ProofmanResult<()> {
+    if !setup.gpu {
         return Ok(());
     }
 
@@ -511,10 +629,19 @@ fn check_const_pols_gpu<F: PrimeField64>(setup: &Setup<F>) -> ProofmanResult<()>
         needs_regeneration = true;
     }
 
+    let source = setup.setup_path.display().to_string() + ".const";
+    if !needs_regeneration && const_gpu_older_than_source(Path::new(&source), Path::new(&setup.const_pols_path)) {
+        tracing::trace!(
+            "GPU constant polynomials file '{}' is older than '{}'. Regenerating...",
+            setup.const_pols_path,
+            source
+        );
+        needs_regeneration = true;
+    }
+
     if needs_regeneration {
         let const_pols_size = (setup.stark_info.n_constants * (1 << setup.stark_info.stark_struct.n_bits)) as usize;
-        // SAFETY: the const polynomial loader writes the whole buffer before it is read.
-        let const_pols: Vec<F> = unsafe { create_buffer_fast(const_pols_size) };
+        let const_pols: Vec<F> = create_buffer_fast(const_pols_size);
         let const_pols_path = setup.setup_path.display().to_string() + ".const";
 
         load_const_pols_c(const_pols.as_ptr() as *mut u8, const_pols_path.as_str(), const_pols.len() as u64 * 8);
@@ -544,6 +671,14 @@ pub fn needs_regeneration_fixed<F: PrimeField64>(
             if needs_const_tree_regeneration(setup)? {
                 needs_tree_regen = true;
                 tracing::debug!("Const tree regeneration needed for [{}:{}]", airgroup_id, air_id);
+                if setup.gpu {
+                    needs_const_regen = true;
+                    tracing::debug!(
+                        "GPU const pols regeneration also needed for [{}:{}] due to tree regeneration",
+                        airgroup_id,
+                        air_id
+                    );
+                }
             }
         }
     }
@@ -584,6 +719,10 @@ pub fn needs_regeneration_vadcop_fixed<F: PrimeField64>(
                 if needs_const_tree_regeneration(setup)? {
                     needs_tree_regen = true;
                     tracing::debug!("Vadcop compressor tree regeneration needed for [{}:{}]", airgroup_id, air_id);
+                    if setup.gpu {
+                        needs_const_regen = true;
+                        tracing::debug!("Vadcop compressor const pols regeneration also needed for [{}:{}] due to tree regeneration", airgroup_id, air_id);
+                    }
                 }
             }
         }
@@ -600,6 +739,14 @@ pub fn needs_regeneration_vadcop_fixed<F: PrimeField64>(
             if needs_const_tree_regeneration(setup)? {
                 needs_tree_regen = true;
                 tracing::debug!("Vadcop recursive1 tree regeneration needed for [{}:{}]", airgroup_id, air_id);
+                if setup.gpu {
+                    needs_const_regen = true;
+                    tracing::debug!(
+                        "Vadcop recursive1 const pols regeneration also needed for [{}:{}] due to tree regeneration",
+                        airgroup_id,
+                        air_id
+                    );
+                }
             }
         }
     }
@@ -615,6 +762,13 @@ pub fn needs_regeneration_vadcop_fixed<F: PrimeField64>(
         if needs_const_tree_regeneration(setup)? {
             needs_tree_regen = true;
             tracing::debug!("Vadcop recursive2 tree regeneration needed for airgroup {}", airgroup);
+            if setup.gpu {
+                needs_const_regen = true;
+                tracing::debug!(
+                    "Vadcop recursive2 const pols regeneration also needed for airgroup {} due to tree regeneration",
+                    airgroup
+                );
+            }
         }
     }
 
@@ -626,16 +780,42 @@ pub fn needs_regeneration_vadcop_fixed<F: PrimeField64>(
     if needs_const_tree_regeneration(setup_vadcop_final)? {
         needs_tree_regen = true;
         tracing::debug!("Vadcop final tree regeneration needed");
+        if setup_vadcop_final.gpu {
+            needs_const_regen = true;
+            tracing::debug!("Vadcop final const pols regeneration also needed due to tree regeneration");
+        }
     }
 
-    let setup_vadcop_final_compressed = setups.setup_vadcop_final_compressed.as_ref().unwrap();
-    if needs_const_pols_gpu_regeneration(setup_vadcop_final_compressed)? {
-        needs_const_regen = true;
-        tracing::debug!("Vadcop final compressed const pols regeneration needed");
+    // Skipped entirely when the key carries no compressed final: there are no const pols or tree
+    // for a stage that was never generated.
+    if let Some(setup_vadcop_final_compressed) = setups.setup_vadcop_final_compressed.as_ref() {
+        if needs_const_pols_gpu_regeneration(setup_vadcop_final_compressed)? {
+            needs_const_regen = true;
+            tracing::debug!("Vadcop final compressed const pols regeneration needed");
+        }
+        if needs_const_tree_regeneration(setup_vadcop_final_compressed)? {
+            needs_tree_regen = true;
+            tracing::debug!("Vadcop final compressed tree regeneration needed");
+            if setup_vadcop_final_compressed.gpu {
+                needs_const_regen = true;
+                tracing::debug!("Vadcop final compressed const pols regeneration also needed due to tree regeneration");
+            }
+        }
     }
-    if needs_const_tree_regeneration(setup_vadcop_final_compressed)? {
-        needs_tree_regen = true;
-        tracing::debug!("Vadcop final compressed tree regeneration needed");
+    // Only for a run that may prove the key's recursivef: it is loaded only then.
+    if let Some(setup_recursivef) = setups.setup_recursivef.as_ref() {
+        if needs_const_pols_gpu_regeneration(setup_recursivef)? {
+            needs_const_regen = true;
+            tracing::debug!("Recursivef const pols regeneration needed");
+        }
+        if needs_const_tree_regeneration(setup_recursivef)? {
+            needs_tree_regen = true;
+            tracing::debug!("Recursivef tree regeneration needed");
+            if setup_recursivef.gpu {
+                needs_const_regen = true;
+                tracing::debug!("Recursivef const pols regeneration also needed due to tree regeneration");
+            }
+        }
     }
 
     Ok((needs_const_regen, needs_tree_regen))
@@ -670,8 +850,12 @@ pub fn check_const_paths_vadcop<F: PrimeField64>(pctx: &ProofCtx<F>, setups: &Se
     let setup_vadcop_final = setups.setup_vadcop_final.as_ref().unwrap();
     check_const_pols_gpu(setup_vadcop_final)?;
 
-    let setup_vadcop_final_compressed = setups.setup_vadcop_final_compressed.as_ref().unwrap();
-    check_const_pols_gpu(setup_vadcop_final_compressed)?;
+    if let Some(setup_vadcop_final_compressed) = setups.setup_vadcop_final_compressed.as_ref() {
+        check_const_pols_gpu(setup_vadcop_final_compressed)?;
+    }
+    if let Some(setup_recursivef) = setups.setup_recursivef.as_ref() {
+        check_const_pols_gpu(setup_recursivef)?;
+    }
     Ok(())
 }
 
@@ -679,7 +863,7 @@ pub fn check_tree_paths<F: PrimeField64>(pctx: &ProofCtx<F>, sctx: &SetupCtx<F>)
     for (airgroup_id, air_group) in pctx.global_info.airs.iter().enumerate() {
         for (air_id, _) in air_group.iter().enumerate() {
             let setup = sctx.get_setup(airgroup_id, air_id)?;
-            let d_buffers = if cfg!(feature = "gpu") { Some(pctx.get_device_buffers_ptr()) } else { None };
+            let d_buffers = if pctx.gpu { Some(pctx.get_device_buffers_ptr()) } else { None };
             check_const_tree(setup, &d_buffers)?;
         }
     }
@@ -687,7 +871,7 @@ pub fn check_tree_paths<F: PrimeField64>(pctx: &ProofCtx<F>, sctx: &SetupCtx<F>)
 }
 
 pub fn check_tree_paths_vadcop<F: PrimeField64>(pctx: &ProofCtx<F>, setups: &SetupsVadcop<F>) -> ProofmanResult<()> {
-    let d_buffers = if cfg!(feature = "gpu") { Some(pctx.get_device_buffers_ptr()) } else { None };
+    let d_buffers = if pctx.gpu { Some(pctx.get_device_buffers_ptr()) } else { None };
     let sctx_compressor = setups.sctx_compressor.as_ref().unwrap();
     for (airgroup_id, air_group) in pctx.global_info.airs.iter().enumerate() {
         for (air_id, _) in air_group.iter().enumerate() {
@@ -716,37 +900,51 @@ pub fn check_tree_paths_vadcop<F: PrimeField64>(pctx: &ProofCtx<F>, setups: &Set
     let setup_vadcop_final = setups.setup_vadcop_final.as_ref().unwrap();
     check_const_tree(setup_vadcop_final, &d_buffers)?;
 
-    let setup_vadcop_final_compressed = setups.setup_vadcop_final_compressed.as_ref().unwrap();
-    check_const_tree(setup_vadcop_final_compressed, &d_buffers)?;
+    if let Some(setup_vadcop_final_compressed) = setups.setup_vadcop_final_compressed.as_ref() {
+        check_const_tree(setup_vadcop_final_compressed, &d_buffers)?;
+    }
+    if let Some(setup_recursivef) = setups.setup_recursivef.as_ref() {
+        check_const_tree(setup_recursivef, &d_buffers)?;
+    }
 
     Ok(())
 }
 
+/// Size the host trace pool: the largest thing the host still has to hold.
+///
+/// A `gpu_witness_airs` air counts by its staged *inputs*, not its trace: it still takes a
+/// (pinned) pool buffer to stage them from. Taking the max keeps this correct if inputs ever
+/// exceed every remaining trace.
 pub fn calculate_max_witness_trace_size<F: PrimeField64>(
     pctx: &ProofCtx<F>,
     sctx: &SetupCtx<F>,
     packed_info: &HashMap<(usize, usize), PackedInfo>,
-    gpu_params: &ParamsGPU,
-) -> ProofmanResult<usize> {
+    gpu_witness_airs: &GpuWitnessAirs,
+) -> ProofmanResult<(usize, usize)> {
     let mut max_witness_trace_size = 0;
+    let mut max_witness_trace_size_packed = 0;
     for (airgroup_id, air_group) in pctx.global_info.airs.iter().enumerate() {
         for (air_id, _) in air_group.iter().enumerate() {
+            if gpu_witness_airs.contains(airgroup_id, air_id) {
+                continue;
+            }
             let setup = sctx.get_setup(airgroup_id, air_id)?;
+
             let n = 1 << setup.stark_info.stark_struct.n_bits;
-            // Packed words only size the trace of an AIR whose trace is packed.
-            let packed_words =
-                packed_info.get(&(airgroup_id, air_id)).filter(|info| info.is_packed).map(|info| info.num_packed_words);
-            let is_packed =
-                cfg!(feature = "gpu") && cfg!(feature = "packed") && gpu_params.pack_trace && packed_words.is_some();
-            let trace_size = match packed_words {
-                Some(num_packed_words) if is_packed => n * num_packed_words,
-                _ => n * setup.stark_info.map_sections_n["cm1"],
-            };
+            let num_packed_words =
+                packed_info.get(&(airgroup_id, air_id)).map(|info| info.num_packed_words).unwrap_or(0);
+            let n_cols = setup.stark_info.map_sections_n["cm1"];
+
+            let trace_size = n * n_cols;
+            let trace_size_packed = if num_packed_words == 0 { n * n_cols } else { n * num_packed_words };
 
             max_witness_trace_size = max_witness_trace_size.max(trace_size as usize);
+            max_witness_trace_size_packed = max_witness_trace_size_packed.max(trace_size_packed as usize);
         }
     }
-    Ok(max_witness_trace_size)
+    // In elements (8-byte F), like the traces above.
+    let input_elems = gpu_witness_airs.max_input_bytes().div_ceil(8) as usize;
+    Ok((max_witness_trace_size.max(input_elems), max_witness_trace_size_packed.max(input_elems)))
 }
 
 pub fn load_device_setups<F: PrimeField64>(
@@ -760,34 +958,13 @@ pub fn load_device_setups<F: PrimeField64>(
     for (airgroup_id, air_group) in pctx.global_info.airs.iter().enumerate() {
         for (air_id, _) in air_group.iter().enumerate() {
             let setup = sctx.get_setup(airgroup_id, air_id)?;
-            let proof_type: &str = setup.setup_type.clone().into();
-            if cfg!(feature = "gpu") {
+            let proof_type: &str = setup.setup_type.into();
+            if setup.gpu {
                 tracing::debug!(airgroup_id, air_id, proof_type, "Loading expressions setup in GPU");
             }
-            let packed_info_air = match packed_info.get(&(airgroup_id, air_id)) {
-                Some(info) => {
-                    // C++ validates the column widths, but reads one width per trace column from
-                    // unpack_info, whose length only Rust knows.
-                    let n_cols = setup.stark_info.map_sections_n["cm1"];
-                    if info.is_packed && info.unpack_info.len() as u64 != n_cols {
-                        return Err(ProofmanError::InvalidSetup(format!(
-                            "Packed info for airgroup_id={airgroup_id}, air_id={air_id} has {} column widths, expected {n_cols}",
-                            info.unpack_info.len()
-                        )));
-                    }
-                    info.clone()
-                }
-                None => PackedInfo::new(false, 0, vec![]),
-            };
-            load_device_setup_c(
-                airgroup_id as u64,
-                air_id as u64,
-                proof_type,
-                (&setup.p_setup).into(),
-                d_buffers,
-                setup.verkey.as_ptr() as *mut u8,
-                packed_info_air.as_ffi().get_ptr(),
-            );
+            let packed_info_air =
+                packed_info.get(&(airgroup_id, air_id)).cloned().unwrap_or_else(|| PackedInfo::new(false, 0, vec![]));
+            setup.load_device(airgroup_id as u64, air_id as u64, d_buffers, packed_info_air.as_ffi().get_ptr());
         }
     }
 
@@ -796,19 +973,11 @@ pub fn load_device_setups<F: PrimeField64>(
             for (air_id, _) in air_group.iter().enumerate() {
                 if pctx.global_info.get_air_has_compressor(airgroup_id, air_id) {
                     let setup = setups.sctx_compressor.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
-                    let proof_type: &str = setup.setup_type.clone().into();
-                    if cfg!(feature = "gpu") {
+                    let proof_type: &str = setup.setup_type.into();
+                    if setup.gpu {
                         tracing::debug!(airgroup_id, air_id, proof_type, "Loading expressions setup in GPU");
                     }
-                    load_device_setup_c(
-                        airgroup_id as u64,
-                        air_id as u64,
-                        proof_type,
-                        (&setup.p_setup).into(),
-                        d_buffers,
-                        setup.verkey.as_ptr() as *mut u8,
-                        std::ptr::null_mut(),
-                    );
+                    setup.load_device(airgroup_id as u64, air_id as u64, d_buffers, std::ptr::null_mut());
                 }
             }
         }
@@ -816,305 +985,205 @@ pub fn load_device_setups<F: PrimeField64>(
         for (airgroup_id, air_group) in pctx.global_info.airs.iter().enumerate() {
             for (air_id, _) in air_group.iter().enumerate() {
                 let setup = setups.sctx_recursive1.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
-                let proof_type: &str = setup.setup_type.clone().into();
-                if cfg!(feature = "gpu") {
+                let proof_type: &str = setup.setup_type.into();
+                if setup.gpu {
                     tracing::debug!(airgroup_id, air_id, proof_type, "Loading expressions setup in GPU");
                 }
-                load_device_setup_c(
-                    airgroup_id as u64,
-                    air_id as u64,
-                    proof_type,
-                    (&setup.p_setup).into(),
-                    d_buffers,
-                    setup.verkey.as_ptr() as *mut u8,
-                    std::ptr::null_mut(),
-                );
+                setup.load_device(airgroup_id as u64, air_id as u64, d_buffers, std::ptr::null_mut());
             }
         }
 
         let n_airgroups = pctx.global_info.air_groups.len();
         for airgroup_id in 0..n_airgroups {
             let setup = setups.sctx_recursive2.as_ref().unwrap().get_setup(airgroup_id, 0)?;
-            let proof_type: &str = setup.setup_type.clone().into();
-            if cfg!(feature = "gpu") {
+            let proof_type: &str = setup.setup_type.into();
+            if setup.gpu {
                 tracing::debug!(airgroup_id, air_id = 0, proof_type, "Loading expressions setup in GPU");
             }
-            load_device_setup_c(
-                airgroup_id as u64,
-                0_u64,
-                proof_type,
-                (&setup.p_setup).into(),
-                d_buffers,
-                setup.verkey.as_ptr() as *mut u8,
-                std::ptr::null_mut(),
-            );
+            setup.load_device(airgroup_id as u64, 0, d_buffers, std::ptr::null_mut());
         }
 
         let setup_vadcop_final = setups.setup_vadcop_final.as_ref().unwrap();
-        let proof_type: &str = setup_vadcop_final.setup_type.clone().into();
-        if cfg!(feature = "gpu") {
+        let proof_type: &str = setup_vadcop_final.setup_type.into();
+        if setup_vadcop_final.gpu {
             tracing::debug!(airgroup_id = 0, air_id = 0, proof_type, "Loading expressions setup in GPU");
         }
-        load_device_setup_c(
-            0_u64,
-            0_u64,
-            proof_type,
-            (&setup_vadcop_final.p_setup).into(),
-            d_buffers,
-            setup_vadcop_final.verkey.as_ptr() as *mut u8,
-            std::ptr::null_mut(),
-        );
+        setup_vadcop_final.load_device(0, 0, d_buffers, std::ptr::null_mut());
 
-        let setup_vadcop_final_compressed = setups.setup_vadcop_final_compressed.as_ref().unwrap();
-        let proof_type: &str = setup_vadcop_final_compressed.setup_type.clone().into();
-        if cfg!(feature = "gpu") {
-            tracing::debug!(airgroup_id = 0, air_id = 0, proof_type, "Loading expressions setup in GPU");
+        // Nothing to load when the key carries no compressed final.
+        if let Some(setup_vadcop_final_compressed) = setups.setup_vadcop_final_compressed.as_ref() {
+            let proof_type: &str = setup_vadcop_final_compressed.setup_type.into();
+            if setup_vadcop_final_compressed.gpu {
+                tracing::debug!(airgroup_id = 0, air_id = 0, proof_type, "Loading expressions setup in GPU");
+            }
+            setup_vadcop_final_compressed.load_device(0, 0, d_buffers, std::ptr::null_mut());
         }
-        load_device_setup_c(
-            0_u64,
-            0_u64,
-            proof_type,
-            (&setup_vadcop_final_compressed.p_setup).into(),
-            d_buffers,
-            setup_vadcop_final_compressed.verkey.as_ptr() as *mut u8,
-            std::ptr::null_mut(),
-        );
+        if let Some(setup_recursivef) = setups.setup_recursivef.as_ref() {
+            let proof_type: &str = setup_recursivef.setup_type.into();
+            if setup_recursivef.gpu {
+                tracing::debug!(airgroup_id = 0, air_id = 0, proof_type, "Loading expressions setup in GPU");
+            }
+            setup_recursivef.load_device(0, 0, d_buffers, std::ptr::null_mut());
+        }
     }
     Ok(())
+}
+
+/// Uploads one air's packed const pols at `*offset`, then advances past the slot (the const
+/// tree is rebuilt on device). Only a group owner transfers anything; later
+/// members are just pointed at its offset. `slots` is per const buffer. Must stay in lockstep
+/// with the sizing in `SetupRepository::new`, which walks the same airs in the same order.
+#[allow(clippy::too_many_arguments)]
+fn load_const_pols_slot<F: PrimeField64>(
+    d_buffers: *mut c_void,
+    setup: &Setup<F>,
+    group: FixedGroup,
+    airgroup_id: usize,
+    air_id: usize,
+    only_first_gpu: bool,
+    slots: &mut HashMap<(usize, usize), u64>,
+    offset: &mut u64,
+) {
+    let proof_type: &str = setup.setup_type.into();
+
+    let shared_slot = slots.get(&group.owner).copied();
+    let slot_offset = shared_slot.unwrap_or(*offset);
+    tracing::debug!(
+        airgroup_id,
+        air_id,
+        proof_type,
+        slot_offset,
+        shared = shared_slot.is_some(),
+        "Loading const pols in GPU"
+    );
+    load_device_const_pols_c(
+        airgroup_id as u64,
+        air_id as u64,
+        slot_offset,
+        d_buffers,
+        &setup.const_pols_path,
+        setup.const_pols_size_packed as u64,
+        proof_type,
+        only_first_gpu,
+        shared_slot.is_some(),
+    );
+
+    // Every air, shared or not: a slot-sharing air must learn the offset too. Must mirror the
+    // order SetupRepository::new sizes them in -- const pols, then custom commits.
+    if setup.custom_commits_reserved_words > 0 {
+        let custom_offset = slot_offset + setup.const_pols_size_packed as u64;
+        // The group's slot size, not this air's: members upload their own files into the one slot.
+        let reserved = group.custom_words.unwrap_or(setup.custom_commits_reserved_words);
+        reserve_custom_commit_slot_c(
+            airgroup_id as u64,
+            air_id as u64,
+            proof_type,
+            custom_offset,
+            reserved as u64,
+            d_buffers,
+            only_first_gpu,
+        );
+    }
+
+    if shared_slot.is_none() {
+        slots.insert(group.owner, slot_offset);
+        *offset += setup.const_pols_size_packed as u64;
+        *offset += group.custom_words.unwrap_or(setup.custom_commits_reserved_words) as u64;
+    }
+}
+
+/// Defaults to a group of its own for an air the repository did not fingerprint (no verkey).
+fn fixed_group_or_own<F: PrimeField64>(sctx: &SetupCtx<F>, airgroup_id: usize, air_id: usize) -> FixedGroup {
+    sctx.get_fixed_group(airgroup_id, air_id).unwrap_or(FixedGroup { owner: (airgroup_id, air_id), custom_words: None })
 }
 
 pub fn load_device_const_pols<F: PrimeField64>(
     pctx: &ProofCtx<F>,
     sctx: &SetupCtx<F>,
     setups: &SetupsVadcop<F>,
-    verify_constraints: bool,
     aggregation: bool,
     only_first_gpu: bool,
 ) -> ProofmanResult<()> {
     let d_buffers = pctx.get_device_buffers_ptr();
 
-    // Phase 2: Load all constant polynomials
+    // Phase 2: Load all constant polynomials. One slot map per const buffer -- basic lives in
+    // d_constPols, everything below in d_constPolsAggregation, and their offsets are unrelated.
     let mut offset = 0;
+    let mut basic_slots: HashMap<(usize, usize), u64> = HashMap::new();
     for (airgroup_id, air_group) in pctx.global_info.airs.iter().enumerate() {
         for (air_id, _) in air_group.iter().enumerate() {
             let setup = sctx.get_setup(airgroup_id, air_id)?;
-            let proof_type: &str = setup.setup_type.clone().into();
-            if cfg!(feature = "gpu") {
-                let const_pols_path = &setup.const_pols_path;
-                tracing::debug!(airgroup_id, air_id, proof_type, "Loading const pols in GPU");
-                let load_tree = setup.preallocate && !verify_constraints;
-                let tree_path = match load_tree {
-                    true => &setup.const_pols_tree_path,
-                    false => "",
-                };
-                load_device_const_pols_c(
-                    airgroup_id as u64,
-                    air_id as u64,
-                    offset,
+            if setup.gpu {
+                let group = fixed_group_or_own(sctx, airgroup_id, air_id);
+                load_const_pols_slot(
                     d_buffers,
-                    const_pols_path,
-                    setup.const_pols_size_packed as u64,
-                    tree_path,
-                    setup.const_tree_size as u64,
-                    proof_type,
+                    setup,
+                    group,
+                    airgroup_id,
+                    air_id,
                     only_first_gpu,
+                    &mut basic_slots,
+                    &mut offset,
                 );
-                offset += setup.const_pols_size_packed as u64;
-                if load_tree {
-                    offset += setup.const_tree_size as u64;
-                }
             }
         }
     }
 
-    let mut _offset_aggregation = 0;
+    if aggregation && pctx.gpu && pctx.const_cache_lru_slots == 0 {
+        return Err(ProofmanError::InvalidSetup(
+            "GPU aggregation needs the const cache, but no recursive1 setup has const pols to size it".into(),
+        ));
+    }
     if aggregation {
-        for (airgroup_id, air_group) in pctx.global_info.airs.iter().enumerate() {
-            for (air_id, _) in air_group.iter().enumerate() {
-                if pctx.global_info.get_air_has_compressor(airgroup_id, air_id) {
-                    let setup = setups.sctx_compressor.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
-                    let proof_type: &str = setup.setup_type.clone().into();
-                    if cfg!(feature = "gpu") {
-                        let const_pols_path = &setup.const_pols_path;
-                        tracing::debug!(airgroup_id, air_id, proof_type, "Loading const pols in GPU");
-                        let load_tree = setup.preallocate && !verify_constraints;
-                        let tree_path = match load_tree {
-                            true => &setup.const_pols_tree_path,
-                            false => "",
-                        };
-                        load_device_const_pols_c(
-                            airgroup_id as u64,
-                            air_id as u64,
-                            _offset_aggregation,
-                            d_buffers,
-                            const_pols_path,
-                            setup.const_pols_size_packed as u64,
-                            tree_path,
-                            setup.const_tree_size as u64,
-                            proof_type,
-                            only_first_gpu,
-                        );
-                        _offset_aggregation += setup.const_pols_size_packed as u64;
-                        if load_tree {
-                            _offset_aggregation += setup.const_tree_size as u64;
-                        }
-                    }
-                }
-            }
+        let sets = setups.cache_sets(&pctx.global_info)?;
+        for set in sets.iter().filter(|s| s.setup.gpu) {
+            load_host_const_pols_c(
+                set.airgroup_id as u64,
+                set.air_id as u64,
+                set.setup.setup_type.into(),
+                const_set_key(&set.setup.const_pols_path),
+                &set.setup.const_pols_path,
+                set.setup.const_pols_size_packed as u64,
+                d_buffers,
+            );
         }
 
-        for (airgroup_id, air_group) in pctx.global_info.airs.iter().enumerate() {
-            for (air_id, _) in air_group.iter().enumerate() {
-                let setup = setups.sctx_recursive1.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
-                let proof_type: &str = setup.setup_type.clone().into();
-                if cfg!(feature = "gpu") {
-                    let const_pols_path = &setup.const_pols_path;
-                    tracing::debug!(airgroup_id, air_id, proof_type, "Loading const pols in GPU");
-                    let load_tree = setup.preallocate && !verify_constraints;
-                    let tree_path = match load_tree {
-                        true => &setup.const_pols_tree_path,
-                        false => "",
-                    };
-                    load_device_const_pols_c(
-                        airgroup_id as u64,
-                        air_id as u64,
-                        _offset_aggregation,
-                        d_buffers,
-                        const_pols_path,
-                        setup.const_pols_size_packed as u64,
-                        tree_path,
-                        setup.const_tree_size as u64,
-                        proof_type,
-                        only_first_gpu,
-                    );
-                    _offset_aggregation += setup.const_pols_size_packed as u64;
-                    if load_tree {
-                        _offset_aggregation += setup.const_tree_size as u64;
-                    }
-                }
-            }
-        }
-
-        let n_airgroups = pctx.global_info.air_groups.len();
-        for airgroup_id in 0..n_airgroups {
-            let setup = setups.sctx_recursive2.as_ref().unwrap().get_setup(airgroup_id, 0)?;
-            let proof_type: &str = setup.setup_type.clone().into();
-            if cfg!(feature = "gpu") {
-                let const_pols_path = &setup.const_pols_path;
-                tracing::debug!(airgroup_id, air_id = 0, proof_type, "Loading const pols in GPU");
-                let load_tree = setup.preallocate && !verify_constraints;
-                let tree_path = match load_tree {
-                    true => &setup.const_pols_tree_path,
-                    false => "",
-                };
-                load_device_const_pols_c(
-                    airgroup_id as u64,
-                    0_u64,
-                    _offset_aggregation,
+        // LRU first (slot 0 lowest), then the final pins, then recursive2 on top.
+        let mut end = configure_const_slot_cache_c(
+            d_buffers,
+            setups.cache_big_words,
+            setups.cache_normal_words,
+            pctx.const_cache_lru_slots as u32,
+        );
+        let pinned_kinds =
+            [(CacheSetKind::Final, pctx.const_cache_pin_finals), (CacheSetKind::Recursive2, pctx.const_cache_pin_rec2)];
+        for kind in pinned_kinds.iter().filter(|(_, on)| *on).map(|(kind, _)| kind) {
+            for set in sets.iter().filter(|s| s.kind == *kind && s.setup.gpu) {
+                end = pin_const_slot_c(
                     d_buffers,
-                    const_pols_path,
-                    setup.const_pols_size_packed as u64,
-                    tree_path,
-                    setup.const_tree_size as u64,
-                    proof_type,
-                    only_first_gpu,
+                    const_set_key(&set.setup.const_pols_path),
+                    set.setup.const_pols_size_packed as u64,
                 );
-                _offset_aggregation += setup.const_pols_size_packed as u64;
-                if load_tree {
-                    _offset_aggregation += setup.const_tree_size as u64;
-                }
             }
         }
-
-        let setup_vadcop_final = setups.setup_vadcop_final.as_ref().unwrap();
-        let proof_type: &str = setup_vadcop_final.setup_type.clone().into();
-        if cfg!(feature = "gpu") {
-            let const_pols_path = &setup_vadcop_final.const_pols_path;
-            tracing::debug!(airgroup_id = 0, air_id = 0, proof_type, "Loading const pols in GPU");
-            let load_tree = setup_vadcop_final.preallocate && !verify_constraints;
-            let tree_path = match load_tree {
-                true => &setup_vadcop_final.const_pols_tree_path,
-                false => "",
-            };
-            load_device_const_pols_c(
-                0_u64,
-                0_u64,
-                _offset_aggregation,
-                d_buffers,
-                const_pols_path,
-                setup_vadcop_final.const_pols_size_packed as u64,
-                tree_path,
-                setup_vadcop_final.const_tree_size as u64,
-                proof_type,
-                only_first_gpu,
-            );
-            _offset_aggregation += setup_vadcop_final.const_pols_size_packed as u64;
-            if load_tree {
-                _offset_aggregation += setup_vadcop_final.const_tree_size as u64;
-            }
-        }
-
-        let setup_vadcop_final_compressed = setups.setup_vadcop_final_compressed.as_ref().unwrap();
-        let proof_type: &str = setup_vadcop_final_compressed.setup_type.clone().into();
-        if cfg!(feature = "gpu") {
-            let const_pols_path = &setup_vadcop_final_compressed.const_pols_path;
-            tracing::debug!(airgroup_id = 0, air_id = 0, proof_type, "Loading const pols in GPU");
-            let load_tree = setup_vadcop_final_compressed.preallocate && !verify_constraints;
-            let tree_path = match load_tree {
-                true => &setup_vadcop_final_compressed.const_pols_tree_path,
-                false => "",
-            };
-            load_device_const_pols_c(
-                0_u64,
-                0_u64,
-                _offset_aggregation,
-                d_buffers,
-                const_pols_path,
-                setup_vadcop_final_compressed.const_pols_size_packed as u64,
-                tree_path,
-                setup_vadcop_final_compressed.const_tree_size as u64,
-                proof_type,
-                only_first_gpu,
-            );
-            _offset_aggregation += setup_vadcop_final_compressed.const_pols_size_packed as u64;
-            if load_tree {
-                _offset_aggregation += setup_vadcop_final_compressed.const_tree_size as u64;
-            }
+        // The cache and its pins must fit the area the planner reserved.
+        if pctx.gpu && end > pctx.aggregation_const_words {
+            return Err(ProofmanError::InvalidConfiguration(format!(
+                "the const cache ends at {} but the aggregation area holds {}",
+                format_bytes(end as f64 * 8.0),
+                format_bytes(pctx.aggregation_const_words as f64 * 8.0),
+            )));
         }
     }
     Ok(())
 }
 
-pub fn initialize_witness_circom<F: PrimeField64>(pctx: &ProofCtx<F>, setups: &SetupsVadcop<F>) -> ProofmanResult<()> {
-    for (airgroup_id, air_group) in pctx.global_info.airs.iter().enumerate() {
-        for (air_id, _) in air_group.iter().enumerate() {
-            if pctx.global_info.get_air_has_compressor(airgroup_id, air_id) {
-                let setup = setups.sctx_compressor.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
-                setup.set_circom_circuit()?;
-                setup.set_exec_file_data()?;
-            }
-            let setup = setups.sctx_recursive1.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
-            setup.set_circom_circuit()?;
-            setup.set_exec_file_data()?;
-        }
-    }
-
-    let n_airgroups = pctx.global_info.air_groups.len();
-    for airgroup in 0..n_airgroups {
-        let setup = setups.sctx_recursive2.as_ref().unwrap().get_setup(airgroup, 0)?;
-        setup.set_circom_circuit()?;
-        setup.set_exec_file_data()?;
-    }
-
-    let setup_vadcop_final = setups.setup_vadcop_final.as_ref().unwrap();
-    setup_vadcop_final.set_circom_circuit()?;
-    setup_vadcop_final.set_exec_file_data()?;
-
-    let setup_vadcop_final_compressed = setups.setup_vadcop_final_compressed.as_ref().unwrap();
-    setup_vadcop_final_compressed.set_circom_circuit()?;
-    setup_vadcop_final_compressed.set_exec_file_data()?;
-
-    Ok(())
+/// A const set's identity in the GPU const cache: its packed file is unique per set, recursers included.
+pub fn const_set_key(const_pols_path: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    const_pols_path.hash(&mut h);
+    (h.finish() >> 1) as i64 // non-negative: -1 marks a free slot
 }
 
 pub fn add_publics_circom<F: PrimeField64>(
@@ -1135,18 +1204,14 @@ pub fn add_publics_circom<F: PrimeField64>(
     let mut p = 0;
     for (idx, proof_value_map) in proof_values_map.iter().enumerate() {
         if proof_value_map.stage == 1 {
-            proof[init_index + pctx.global_info.n_publics + 3 * idx] =
-                proof_values[p].as_canonical_u64();
+            proof[init_index + pctx.global_info.n_publics + 3 * idx] = proof_values[p].as_canonical_u64();
             proof[init_index + pctx.global_info.n_publics + 3 * idx + 1] = 0;
             proof[init_index + pctx.global_info.n_publics + 3 * idx + 2] = 0;
             p += 1;
         } else {
-            proof[init_index + pctx.global_info.n_publics + 3 * idx] =
-                proof_values[p].as_canonical_u64();
-            proof[init_index + pctx.global_info.n_publics + 3 * idx + 1] =
-                proof_values[p + 1].as_canonical_u64();
-            proof[init_index + pctx.global_info.n_publics + 3 * idx + 2] =
-                proof_values[p + 2].as_canonical_u64();
+            proof[init_index + pctx.global_info.n_publics + 3 * idx] = proof_values[p].as_canonical_u64();
+            proof[init_index + pctx.global_info.n_publics + 3 * idx + 1] = proof_values[p + 1].as_canonical_u64();
+            proof[init_index + pctx.global_info.n_publics + 3 * idx + 2] = proof_values[p + 2].as_canonical_u64();
             p += 3;
         }
     }
@@ -1182,19 +1247,16 @@ pub fn register_std<F: PrimeField64>(wcm: &WitnessManager<F>, std: &Std<F>) {
     wcm.register_component_std(std.prod_bus.clone());
     wcm.register_component_std(std.sum_bus.clone());
     wcm.register_component_std(std.range_check.clone());
-
-    if std.range_check.u8air.is_some() {
-        wcm.register_component_std(std.range_check.u8air.clone().unwrap());
+    // Only non-virtual ranges have these airs (virtual ones are `None`); the std counts them.
+    if let Some(air) = std.range_check.u8air.clone() {
+        wcm.register_component_std(air);
     }
-
-    if std.range_check.u16air.is_some() {
-        wcm.register_component_std(std.range_check.u16air.clone().unwrap());
+    if let Some(air) = std.range_check.u16air.clone() {
+        wcm.register_component_std(air);
     }
-
-    if std.range_check.specified_ranges_air.is_some() {
-        wcm.register_component_std(std.range_check.specified_ranges_air.clone().unwrap());
+    if let Some(air) = std.range_check.specified_ranges_air.clone() {
+        wcm.register_component_std(air);
     }
-
     wcm.register_component_std(std.virtual_table.clone());
     if std.virtual_table.virtual_table_airs.is_some() {
         for air in std.virtual_table.virtual_table_airs.clone().unwrap() {
@@ -1203,37 +1265,36 @@ pub fn register_std<F: PrimeField64>(wcm: &WitnessManager<F>, std: &Std<F>) {
     }
 }
 
-pub fn register_std_dev<F: PrimeField64>(
-    wcm: &WitnessManager<F>,
-    std: &Std<F>,
-    register_u8: bool,
-    register_u16: bool,
-    register_specified_ranges: bool,
-) {
-    wcm.register_component_std(std.prod_bus.clone());
-    wcm.register_component_std(std.sum_bus.clone());
-    wcm.register_component_std(std.range_check.clone());
+/// Each instance's stage-1 root. Its commit writes it through `ptr`, possibly from the device after
+/// the call returns, so the cells are interior-mutable; nothing reads one before its commit lands.
+pub struct InstanceRoots<F>(Vec<std::cell::UnsafeCell<[F; 4]>>);
 
-    if register_u8 && std.range_check.u8air.is_some() {
-        wcm.register_component_std(std.range_check.u8air.clone().unwrap());
+// SAFETY: each cell is written only by its own instance's commit and read once that commit is done.
+unsafe impl<F: Send> Sync for InstanceRoots<F> {}
+
+impl<F: Copy + Default> InstanceRoots<F> {
+    pub fn new(n: usize) -> Self {
+        Self((0..n).map(|_| std::cell::UnsafeCell::new([F::default(); 4])).collect())
     }
 
-    if register_u16 && std.range_check.u16air.is_some() {
-        wcm.register_component_std(std.range_check.u16air.clone().unwrap());
+    /// Where instance `i`'s commit writes its root.
+    pub fn ptr(&self, i: usize) -> *mut c_void {
+        self.0[i].get() as *mut c_void
     }
 
-    if register_specified_ranges && std.range_check.specified_ranges_air.is_some() {
-        wcm.register_component_std(std.range_check.specified_ranges_air.clone().unwrap());
+    /// # Safety
+    /// Instance `i`'s commit, if any, has completed.
+    pub unsafe fn get(&self, i: usize) -> [F; 4] {
+        unsafe { *self.0[i].get() }
     }
-
-    wcm.register_component_std(std.virtual_table.clone());
 }
 
-pub fn print_roots<F: PrimeField64>(pctx: &ProofCtx<F>, roots_contributions: &[[F; 4]]) {
+pub fn print_roots<F: PrimeField64>(pctx: &ProofCtx<F>, roots_contributions: &InstanceRoots<F>) {
     let instances = pctx.dctx_get_instances();
     for (instance_id, &instance_info) in instances.iter().enumerate() {
         let (airgroup_id, air_id) = (instance_info.airgroup_id, instance_info.air_id);
-        let contribution = roots_contributions[instance_id];
+        // SAFETY: called once the contributions are in.
+        let contribution = unsafe { roots_contributions.get(instance_id) };
         tracing::info!(
             "Contribution for instance id {} [{}:{}] is: {:?}",
             instance_id,
@@ -1244,7 +1305,7 @@ pub fn print_roots<F: PrimeField64>(pctx: &ProofCtx<F>, roots_contributions: &[[
     }
 }
 
-pub fn get_vadcop_final_proof_vkey(proving_key_path: &Path, compressed: bool) -> ProofmanResult<Vec<u8>> {
+pub fn get_vadcop_final_proof_vkey(proving_key_path: &Path, compressed: bool) -> ProofmanResult<Vec<u64>> {
     let global_info = GlobalInfo::new(proving_key_path)?;
     let setup_path = match compressed {
         true => global_info.get_setup_path("vadcop_final_compressed"),
@@ -1260,24 +1321,60 @@ pub fn get_vadcop_final_proof_vkey(proving_key_path: &Path, compressed: bool) ->
     file.read_to_end(&mut contents)
         .map_err(|e| ProofmanError::InvalidSetup(format!("Failed to read verkey file '{}': {}", verkey_file, e)))?;
 
-    Ok(contents)
-}
-
-pub fn deterministic_shuffle<T>(slice: &mut [T], seed: u64) {
-    let len = slice.len();
-    if len <= 1 {
-        return;
+    if !contents.len().is_multiple_of(8) {
+        return Err(ProofmanError::InvalidSetup(format!(
+            "Verkey file '{}' has length {} which is not a multiple of 8",
+            verkey_file,
+            contents.len()
+        )));
     }
 
-    const A: u64 = 1103515245;
-    const C: u64 = 12345;
-    const M: u64 = 1 << 31;
+    Ok(contents.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect())
+}
 
-    let mut state = seed;
+#[cfg(test)]
+mod const_gpu_staleness_tests {
+    use super::const_gpu_older_than_source;
+    use std::fs;
+    use std::path::PathBuf;
 
-    for i in (1..len).rev() {
-        state = state.wrapping_mul(A).wrapping_add(C) % M;
-        let j = (state as usize) % (i + 1);
-        slice.swap(i, j);
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("const_gpu_stale_{tag}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// What a size check cannot see: `.const` rewritten to the same length with
+    /// different values -- changed fixed pols over unchanged AIR geometry.
+    #[test]
+    fn same_size_newer_source_is_stale() {
+        let d = scratch("same_size");
+        let src = d.join("a.const");
+        let derived = d.join("a.const_gpu");
+        fs::write(&src, vec![1u8; 4096]).unwrap();
+        fs::write(&derived, vec![9u8; 4096]).unwrap();
+        assert!(!const_gpu_older_than_source(&src, &derived), "freshly packed must not look stale");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&src, vec![2u8; 4096]).unwrap();
+        assert_eq!(
+            fs::metadata(&src).unwrap().len(),
+            4096,
+            "length must be unchanged for this to be the interesting case"
+        );
+        assert!(const_gpu_older_than_source(&src, &derived), "same-size source rewrite must be detected");
+    }
+
+    /// A GPU proving key is complete without `.const`, and the repack a "stale" answer
+    /// triggers loads `.const` -- so an absent source must never report stale.
+    #[test]
+    fn missing_source_is_not_stale() {
+        let d = scratch("missing");
+        let src = d.join("a.const");
+        let derived = d.join("a.const_gpu");
+        fs::write(&derived, vec![9u8; 4096]).unwrap();
+        assert!(!const_gpu_older_than_source(&src, &derived), "source missing: size check alone decides");
+        assert!(!const_gpu_older_than_source(&src, &d.join("absent.const_gpu")), "neither present");
     }
 }

@@ -3,9 +3,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <ctype.h>
+#include <stdbool.h>
 #include "configuration.hpp"
 #include "globals.hpp"
 #include "asm_provided.hpp"
+#include "log.hpp"
+#include "../../lib-c/c/src/fcall/fcall.hpp"
 
 /*******************************/
 /* ARGUMENTS AND CONFIGURATION */
@@ -17,46 +21,50 @@ uint16_t arguments_port = 0;
 // Print usage information: valid arguments
 void print_usage (void)
 {
-    printf("Usage: ziskemuasm\n");
-    printf("\t-s(server)\n");
-    printf("\t-c(client)\n");
-    printf("\t-i <input_file>\n");
-    printf("\t-p <port_number>\n");
-    printf("\t--gen=0|--generate_fast\n");
-    printf("\t--gen=1|--generate_minimal_trace\n");
-    printf("\t--gen=2|--generate_rom_histogram\n");
-    printf("\t--gen=3|--generate_main_trace\n");
-    printf("\t--gen=4|--generate_chunks\n");
-    printf("\t--gen=6|--generate_zip\n");
-    printf("\t--gen=9|--generate_mem_reads\n");
-    printf("\t--gen=10|--generate_chunk_player_mem_reads\n");
-    printf("\t--chunk <chunk_number>\n");
-    printf("\t--shutdown\n");
-    printf("\t--mt <number_of_mt_requests>\n");
-    printf("\t-o output on\n");
-    printf("\t--output_riscof output riscof on\n");
-    printf("\t--silent silent on\n");
-    printf("\t--shm_prefix <prefix> (default: ZISK)\n");
-    printf("\t-m metrics on\n");
-    printf("\t-t trace on\n");
-    printf("\t-tt trace_trace on\n");
-    printf("\t-f(save to file)\n");
-    printf("\t-a chunk_address\n");
-    printf("\t-v verbose on\n");
-    printf("\t-u unlock physical memory in mmap\n");
-    printf("\t--share_input_shm share input shared memories\n");
-    printf("\t--open_input_shm open existing input shared memories\n");
+    asm_printf("Usage: ziskemuasm\n");
+    asm_printf("\t-s(server)\n");
+    asm_printf("\t-c(client)\n");
+    asm_printf("\t-i <input_file>\n");
+    asm_printf("\t-p <port_number>\n");
+    asm_printf("\t--gen=0|--generate_fast\n");
+    asm_printf("\t--gen=1|--generate_minimal_trace\n");
+    asm_printf("\t--gen=2|--generate_rom_histogram\n");
+    asm_printf("\t--gen=7|--generate_mem_op\n");
+    asm_printf("\t--shutdown\n");
+    asm_printf("\t--mt <number_of_mt_requests>\n");
+    asm_printf("\t-o output on\n");
+    asm_printf("\t--output_riscof output riscof on\n");
+    asm_printf("\t--silent silent on\n");
+    asm_printf("\t--random_seed <seed> (host randomness seed: 32 bytes as 64 hex digits; client: sent through the control input; server: used when the control input carries none)\n");
+    asm_printf("\t--shm_prefix <prefix> (default: \"ZISK\")\n");
+    asm_printf("\t--sem_prefix <prefix> (default: shm_prefix)\n");
+    asm_printf("\t-m metrics on\n");
+    asm_printf("\t-t trace on\n");
+    asm_printf("\t-tt trace_trace on\n");
+    asm_printf("\t-f(save to file)\n");
+    asm_printf("\t-v verbose on\n");
+    asm_printf("\t-u unlock physical memory in mmap\n");
+    asm_printf("\t--share_input_shm share input shared memories\n");
+    asm_printf("\t--open_input_shm open existing input shared memories\n");
+    asm_printf("\t--open_all_shm open existing shared memories: input, output and internal ones\n");
+    asm_printf("\t--just_create_all_shm just create all shared memories and exit, without doing any other setup or starting the server\n");
+    asm_printf("\t--just_create_non_input_shm just create all shared memories except the input ones and exit, without doing any other setup or starting the server\n");
 #ifdef ASM_PRECOMPILE_CACHE
-    printf("\t--precompile-cache-store store precompile results in cache file\n");
-    printf("\t--precompile-cache-load load precompile results from cache file\n");
+    asm_printf("\t--precompile-cache-store store precompile results in cache file\n");
+    asm_printf("\t--precompile-cache-load load precompile results from cache file\n");
 #endif
     if (precompile_results_enabled)
     {
-        printf("\t-r <precompile_results_file>\n");
+        asm_printf("\t-r <precompile_results_file>\n");
     }
-    printf("\t--redirect-output-to-file redirect output to file\n");
-    printf("\t-h/--help print this\n");
+    asm_printf("\t--redirect-output-to-file redirect output to file\n");
+    asm_printf("\t--stdio use standard input and output for communication instead of TCP\n");
+    asm_printf("\t-h/--help print this\n");
 }
+
+/*******************/
+/* PARSE ARGUMENTS */
+/*******************/
 
 // Parse main function arguments and configure global variables accordingly
 void parse_arguments(int argc, char *argv[])
@@ -95,45 +103,9 @@ void parse_arguments(int argc, char *argv[])
                 number_of_selected_generation_methods++;
                 continue;
             }
-            if ( (strcmp(argv[i], "--gen=3") == 0) || (strcmp(argv[i], "--generate_main_trace") == 0))
-            {
-                gen_method = MainTrace;
-                number_of_selected_generation_methods++;
-                continue;
-            }
-            if ( (strcmp(argv[i], "--gen=4") == 0) || (strcmp(argv[i], "--generate_chunks") == 0))
-            {
-                gen_method = ChunksOnly;
-                number_of_selected_generation_methods++;
-                continue;
-            }
-            if ( (strcmp(argv[i], "--gen=6") == 0) || (strcmp(argv[i], "--generate_zip") == 0))
-            {
-                gen_method = Zip;
-                number_of_selected_generation_methods++;
-                continue;
-            }
             if ( (strcmp(argv[i], "--gen=7") == 0) || (strcmp(argv[i], "--generate_mem_op") == 0))
             {
                 gen_method = MemOp;
-                number_of_selected_generation_methods++;
-                continue;
-            }
-            if ( (strcmp(argv[i], "--gen=8") == 0) || (strcmp(argv[i], "--generate_chunk_player_mt_collect_mem") == 0))
-            {
-                gen_method = ChunkPlayerMTCollectMem;
-                number_of_selected_generation_methods++;
-                continue;
-            }
-            if ( (strcmp(argv[i], "--gen=9") == 0) || (strcmp(argv[i], "--generate_mem_reads") == 0))
-            {
-                gen_method = MemReads;
-                number_of_selected_generation_methods++;
-                continue;
-            }
-            if ( (strcmp(argv[i], "--gen=10") == 0) || (strcmp(argv[i], "--generate_chunk_player_mem_reads") == 0))
-            {
-                gen_method = ChunkPlayerMemReadsCollectMain;
                 number_of_selected_generation_methods++;
                 continue;
             }
@@ -194,17 +166,48 @@ void parse_arguments(int argc, char *argv[])
                 i++;
                 if (i >= argc)
                 {
-                    printf("ERROR: Detected argument -i in the last position; please provide input file after it\n");
+                    asm_printf("ERROR: Detected argument -i in the last position; please provide input file after it\n");
                     print_usage();
                     exit(-1);
                 }
                 if (strlen(argv[i]) > 4095)
                 {
-                    printf("ERROR: Detected argument -i but next argument is too long\n");
+                    asm_printf("ERROR: Detected argument -i but next argument is too long\n");
                     print_usage();
                     exit(-1);
                 }
                 strcpy(input_file, argv[i]);
+                continue;
+            }
+            if (strcmp(argv[i], "--random_seed") == 0)
+            {
+                i++;
+                if (i >= argc)
+                {
+                    asm_printf("ERROR: Detected argument --random_seed in the last position; please provide the seed after it\n");
+                    print_usage();
+                    exit(-1);
+                }
+                // The 32 seed bytes in order, as hex digits, optionally 0x-prefixed; the guest
+                // reads them as little-endian words
+                const char * hex = argv[i];
+                if ((hex[0] == '0') && ((hex[1] == 'x') || (hex[1] == 'X'))) hex += 2;
+                uint64_t seed[RANDOM_SEED_WORDS] = {0};
+                bool valid = (strlen(hex) == RANDOM_SEED_WORDS * 16);
+                for (uint64_t k = 0; valid && (k < RANDOM_SEED_WORDS * 8); k++)
+                {
+                    char byte_hex[3] = { hex[2*k], hex[2*k + 1], 0 };
+                    valid = isxdigit((unsigned char)byte_hex[0]) && isxdigit((unsigned char)byte_hex[1]);
+                    seed[k / 8] |= strtoull(byte_hex, NULL, 16) << (8 * (k % 8));
+                }
+                if (!valid)
+                {
+                    asm_printf("ERROR: Detected argument --random_seed but next argument is not 32 bytes as 64 hex digits\n");
+                    print_usage();
+                    exit(-1);
+                }
+                memcpy(random_seed_argument, seed, sizeof(random_seed_argument));
+                random_seed_argument_set = true;
                 continue;
             }
             if (strcmp(argv[i], "--shm_prefix") == 0)
@@ -212,52 +215,35 @@ void parse_arguments(int argc, char *argv[])
                 i++;
                 if (i >= argc)
                 {
-                    printf("ERROR: Detected argument --shm_prefix in the last position; please provide shared mem prefix after it\n");
+                    asm_printf("ERROR: Detected argument --shm_prefix in the last position; please provide shared mem prefix after it\n");
                     print_usage();
                     exit(-1);
                 }
                 if (strlen(argv[i]) >= MAX_SHM_PREFIX_LENGTH)
                 {
-                    printf("ERROR: Detected argument --shm_prefix but next argument is too long\n");
+                    asm_printf("ERROR: Detected argument --shm_prefix but next argument is too long\n");
                     print_usage();
                     exit(-1);
                 }
                 strcpy(shm_prefix, argv[i]);
                 continue;
             }
-            if (strcmp(argv[i], "--chunk") == 0)
+            if (strcmp(argv[i], "--sem_prefix") == 0)
             {
                 i++;
                 if (i >= argc)
                 {
-                    printf("ERROR: Detected argument --chunk in the last position; please provide chunk number after it\n");
+                    asm_printf("ERROR: Detected argument --sem_prefix in the last position; please provide semaphore prefix after it\n");
                     print_usage();
                     exit(-1);
                 }
-                errno = 0;
-                char *endptr;
-                chunk_mask = strtoul(argv[i], &endptr, 10);
-
-                // Check for errors
-                if (errno == ERANGE) {
-                    printf("ERROR: Chunk number is too large\n");
+                if (strlen(argv[i]) >= MAX_SHM_PREFIX_LENGTH)
+                {
+                    asm_printf("ERROR: Detected argument --sem_prefix but next argument is too long\n");
                     print_usage();
                     exit(-1);
-                } else if (endptr == argv[i]) {
-                    printf("ERROR: No digits found while parsing chunk number\n");
-                    print_usage();
-                    exit(-1);
-                } else if (*endptr != '\0') {
-                    printf("ERROR: Extra characters after chunk number: %s\n", endptr);
-                    print_usage();
-                    exit(-1);
-                } else if (chunk_mask > MAX_CHUNK_MASK) {
-                    printf("ERROR: Invalid chunk number: %lu\n", chunk_mask);
-                    print_usage();
-                    exit(-1);
-                } else {
-                    printf("Got chunk_mask= %lu\n", chunk_mask);
                 }
+                strcpy(sem_prefix, argv[i]);
                 continue;
             }
             if (strcmp(argv[i], "--shutdown") == 0)
@@ -270,7 +256,7 @@ void parse_arguments(int argc, char *argv[])
                 i++;
                 if (i >= argc)
                 {
-                    printf("ERROR: Detected argument --mt in the last position; please provide number of MT requests after it\n");
+                    asm_printf("ERROR: Detected argument --mt in the last position; please provide number of MT requests after it\n");
                     print_usage();
                     exit(-1);
                 }
@@ -280,23 +266,23 @@ void parse_arguments(int argc, char *argv[])
 
                 // Check for errors
                 if (errno == ERANGE) {
-                    printf("ERROR: Number of MT requests is too large\n");
+                    asm_printf("ERROR: Number of MT requests is too large\n");
                     print_usage();
                     exit(-1);
                 } else if (endptr == argv[i]) {
-                    printf("ERROR: No digits found while parsing number of MT requests\n");
+                    asm_printf("ERROR: No digits found while parsing number of MT requests\n");
                     print_usage();
                     exit(-1);
                 } else if (*endptr != '\0') {
-                    printf("ERROR: Extra characters after number of MT requests: %s\n", endptr);
+                    asm_printf("ERROR: Extra characters after number of MT requests: %s\n", endptr);
                     print_usage();
                     exit(-1);
                 } else if (number_of_mt_requests > 1000000) {
-                    printf("ERROR: Invalid number of MT requests: %lu\n", number_of_mt_requests);
+                    asm_printf("ERROR: Invalid number of MT requests: %lu\n", number_of_mt_requests);
                     print_usage();
                     exit(-1);
                 } else {
-                    printf("Got number of MT requests= %lu\n", number_of_mt_requests);
+                    asm_printf("Got number of MT requests= %lu\n", number_of_mt_requests);
                 }
                 continue;
             }
@@ -305,7 +291,7 @@ void parse_arguments(int argc, char *argv[])
                 i++;
                 if (i >= argc)
                 {
-                    printf("ERROR: Detected argument -p in the last position; please provide port number after it\n");
+                    asm_printf("ERROR: Detected argument -p in the last position; please provide port number after it\n");
                     print_usage();
                     exit(-1);
                 }
@@ -314,7 +300,7 @@ void parse_arguments(int argc, char *argv[])
                 uint64_t arguments_port_u64 = strtoul(argv[i], &endptr, 10);
                 if (arguments_port_u64 > 0xFFFF)
                 {
-                    printf("ERROR: Port number is too large, must be at most 65535\n");
+                    asm_printf("ERROR: Port number is too large, must be at most 65535\n");
                     print_usage();
                     exit(-1);
                 }
@@ -322,58 +308,57 @@ void parse_arguments(int argc, char *argv[])
 
                 // Check for errors
                 if (errno == ERANGE) {
-                    printf("ERROR: Port number is too large\n");
+                    asm_printf("ERROR: Port number is too large\n");
                     print_usage();
                     exit(-1);
                 } else if (endptr == argv[i]) {
-                    printf("ERROR: No digits found while parsing port number\n");
+                    asm_printf("ERROR: No digits found while parsing port number\n");
                     print_usage();
                     exit(-1);
                 } else if (*endptr != '\0') {
-                    printf("ERROR: Extra characters after port number: %s\n", endptr);
+                    asm_printf("ERROR: Extra characters after port number: %s\n", endptr);
                     print_usage();
                     exit(-1);
                 } else {
-                    printf("Got port number= %u\n", arguments_port);
+                    asm_printf("Got port number= %u\n", arguments_port);
+                }
+                continue;
+            }
+            if (strcmp(argv[i], "--server_pid") == 0)
+            {
+                i++;
+                if (i >= argc)
+                {
+                    asm_printf("ERROR: Detected argument --server_pid in the last position; please provide server pid after it\n");
+                    print_usage();
+                    exit(-1);
+                }
+                errno = 0;
+                char *endptr;
+                uint64_t arguments_server_pid_u64 = strtoul(argv[i], &endptr, 10);
+                server_pid = arguments_server_pid_u64 & 0xFFFFFFFF; // Keep only lower 32 bits, since PIDs are typically 32 bits
+
+                // Check for errors
+                if (errno == ERANGE) {
+                    asm_printf("ERROR: Server PID is too large\n");
+                    print_usage();
+                    exit(-1);
+                } else if (endptr == argv[i]) {
+                    asm_printf("ERROR: No digits found while parsing server PID\n");
+                    print_usage();
+                    exit(-1);
+                } else if (*endptr != '\0') {
+                    asm_printf("ERROR: Extra characters after server PID: %s\n", endptr);
+                    print_usage();
+                    exit(-1);
+                } else {
+                    asm_printf("Got server PID= %d\n", server_pid);
                 }
                 continue;
             }
             if (strcmp(argv[i], "-f") == 0)
             {
                 save_to_file = true;
-                continue;
-            }
-            if (strcmp(argv[i], "-a") == 0)
-            {
-                i++;
-                if (i >= argc)
-                {
-                    printf("ERROR: Detected argument -a in the last position; please provide chunk address after it\n");
-                    print_usage();
-                    exit(-1);
-                }
-                errno = 0;
-                char *endptr;
-                char * argument = argv[i];
-                if ((argument[0] == '0') && (argument[1] == 'x')) argument += 2;
-                chunk_player_address = strtoul(argument, &endptr, 16);
-
-                // Check for errors
-                if (errno == ERANGE) {
-                    printf("ERROR: Chunk address is too large\n");
-                    print_usage();
-                    exit(-1);
-                } else if (endptr == argument) {
-                    printf("ERROR: No digits found while parsing chunk address\n");
-                    print_usage();
-                    exit(-1);
-                } else if (*endptr != '\0') {
-                    printf("ERROR: Extra characters after chunk address: %s\n", endptr);
-                    print_usage();
-                    exit(-1);
-                } else {
-                    printf("Got chunk address= %p\n", (void *)chunk_player_address);
-                }
                 continue;
             }
             if (strcmp(argv[i], "--share_input_shm") == 0)
@@ -383,12 +368,87 @@ void parse_arguments(int argc, char *argv[])
             }
             if (strcmp(argv[i], "--open_input_shm") == 0)
             {
-                open_input_shm = true;
+                create_input_shm = false;
+                delete_input_shm = false;
+                continue;
+            }
+            if (strcmp(argv[i], "--open_all_shm") == 0)
+            {
+                // Reuse existing shared memories...
+                create_input_shm = false;
+                create_output_shm = false;
+                create_internal_shm = false;
+
+                // ...and don't delete any when done
+                delete_input_shm = false;
+                delete_output_shm = false;
+                delete_internal_shm = false;
+                continue;
+            }
+            if (strcmp(argv[i], "--just_create_all_shm") == 0)
+            {
+                if (just_create_non_input_shm) {
+                    asm_printf("ERROR: Detected both --just_create_all_shm and --just_create_non_input_shm, which is not possible since they are contradictory\n");
+                    print_usage();
+                    exit(-1);
+                }
+                // Create all shared memories...
+                create_input_shm = true;
+                create_output_shm = true;
+                create_internal_shm = true;
+                create_semaphores = false;
+
+                // ...but don't open them
+                open_input_shm = false;
+                open_internal_shm = false;
+                open_output_shm = false;
+
+                // ...then quit...
+                just_create_all_shm = true;
+
+                // ...but don't delete any when done
+                delete_input_shm = false;
+                delete_output_shm = false;
+                delete_internal_shm = false;
+                delete_semaphores = false;
+                continue;
+            }
+            if (strcmp(argv[i], "--just_create_non_input_shm") == 0)
+            {
+                if (just_create_all_shm) {
+                    asm_printf("ERROR: Detected both --just_create_all_shm and --just_create_non_input_shm, which is not possible since they are contradictory\n");
+                    print_usage();
+                    exit(-1);
+                }
+                // Create all shared memories except the input ones...
+                create_input_shm = false;
+                create_output_shm = true;
+                create_internal_shm = true;
+                create_semaphores = false;
+
+                // ...but don't open them
+                open_input_shm = false;
+                open_internal_shm = false;
+                open_output_shm = false;
+
+                // ...then quit...
+                just_create_non_input_shm = true;
+
+                // ...but don't delete any when done
+                delete_input_shm = false;
+                delete_output_shm = false;
+                delete_internal_shm = false;
+                delete_semaphores = false;
                 continue;
             }
             if (strcmp(argv[i], "--redirect-output-to-file") == 0)
             {
                 redirect_output_to_file = true;
+                continue;
+            }
+            if (strcmp(argv[i], "--stdio") == 0)
+            {
+                stdio = true;
                 continue;
             }
 #ifdef ASM_PRECOMPILE_CACHE
@@ -411,33 +471,29 @@ void parse_arguments(int argc, char *argv[])
                 i++;
                 if (i >= argc)
                 {
-                    printf("ERROR: Detected argument -r in the last position; please provide precompile results file after it\n");
+                    asm_printf("ERROR: Detected argument -r in the last position; please provide precompile results file after it\n");
                     print_usage();
                     exit(-1);
                 }
                 if (strlen(argv[i]) > 4095)
                 {
-                    printf("ERROR: Detected argument -r but next argument is too long\n");
+                    asm_printf("ERROR: Detected argument -r but next argument is too long\n");
                     print_usage();
                     exit(-1);
                 }
                 strcpy(precompile_file_name, argv[i]);
                 continue;
             }
-            printf("ERROR: parse_arguments() Unrecognized argument: %s\n", argv[i]);
+            asm_printf("ERROR: parse_arguments() Unrecognized argument: %s\n", argv[i]);
             print_usage();
-            fflush(stdout);
-            fflush(stderr);
             exit(-1);
         }
     }
 #ifdef ASM_PRECOMPILE_CACHE
     if (precompile_cache_enabled == false)
     {
-        printf("ERROR: parse_arguments() when in precompile cache mode, you need to use an argument: either --precompile-cache-store or --precompile-cache-load\n");
+        asm_printf("ERROR: parse_arguments() when in precompile cache mode, you need to use an argument: either --precompile-cache-store or --precompile-cache-load\n");
         print_usage();
-        fflush(stdout);
-        fflush(stderr);
         exit(-1);
     }
 #endif
@@ -445,10 +501,8 @@ void parse_arguments(int argc, char *argv[])
     // Check that only one generation method was selected as an argument
     if (number_of_selected_generation_methods != 1)
     {
-        printf("ERROR! parse_arguments() Invalid arguments: select 1 generation method, and only one\n");
+        asm_printf("ERROR! parse_arguments() Invalid arguments: select 1 generation method, and only one\n");
         print_usage();
-        fflush(stdout);
-        fflush(stderr);
         exit(-1);
     }
 
@@ -457,42 +511,45 @@ void parse_arguments(int argc, char *argv[])
     uint64_t asm_gen_method = get_gen_method();
     if (asm_gen_method != gen_method)
     {
-        printf("ERROR! parse_arguments() Inconsistency: C generation method is %u but ASM generation method is %lu\n",
+        asm_printf("ERROR! parse_arguments() Inconsistency: C generation method is %u but ASM generation method is %lu\n",
             gen_method,
             asm_gen_method);
         print_usage();
-        fflush(stdout);
-        fflush(stderr);
         exit(-1);
     }
 
     // Check server/client
     if (server && client)
     {
-        printf("ERROR! parse_arguments() Inconsistency: both server and client at the same time is not possible\n");
+        asm_printf("ERROR! parse_arguments() Inconsistency: both server and client at the same time is not possible\n");
         print_usage();
-        fflush(stdout);
-        fflush(stderr);
         exit(-1);
     }
     if (!server && !client)
     {
-        printf("ERROR! parse_arguments() Inconsistency: select server or client\n");
+        asm_printf("ERROR! parse_arguments() Inconsistency: select server or client\n");
         print_usage();
-        fflush(stdout);
-        fflush(stderr);
         exit(-1);
     }
 
+    // Check that if we are in precompile results mode and we are a client, then a precompile results file is provided
     if (precompile_results_enabled && client && (strlen(precompile_file_name) == 0))
     {
-        printf("ERROR! parse_arguments() when in precompile results mode, you need to provide a precompile results file using -r <precompile_results_file>\n");
+        asm_printf("ERROR! parse_arguments() when in precompile results mode, you need to provide a precompile results file using -r <precompile_results_file>\n");
         print_usage();
-        fflush(stdout);
-        fflush(stderr);
         exit(-1);
     }
+
+    // Check semaphore prefix value
+    if (strlen(sem_prefix) == 0)
+    {
+        strcpy(sem_prefix, shm_prefix);
+    }
 }
+
+/*************/
+/* CONFIGURE */
+/*************/
 
 // Configure global variables based on generation method and other arguments
 void configure (void)
@@ -521,9 +578,9 @@ void configure (void)
                     strcat(shmem_precompile_name, "_precompile");
                 else
                     strcat(shmem_precompile_name, "_FT_precompile");
-                strcpy(sem_prec_avail_name, shm_prefix);
+                strcpy(sem_prec_avail_name, sem_prefix);
                 strcat(sem_prec_avail_name, "_FT_prec_avail");
-                strcpy(sem_prec_read_name, shm_prefix);
+                strcpy(sem_prec_read_name, sem_prefix);
                 strcat(sem_prec_read_name, "_FT_prec_read");
             }
             else
@@ -533,12 +590,15 @@ void configure (void)
                 strcpy(sem_prec_read_name, "");
             }
             strcpy(shmem_output_name, "");
+            strcpy(shmem_rom_name, shm_prefix);
+            strcat(shmem_rom_name, "_FT_rom");
+            strcpy(shmem_ram_name, shm_prefix);
+            strcat(shmem_ram_name, "_FT_ram");
             strcpy(sem_chunk_done_name, "");
-            strcpy(sem_shutdown_done_name, shm_prefix);
+            strcpy(sem_shutdown_done_name, sem_prefix);
             strcat(sem_shutdown_done_name, "_FT_shutdown_done");
-            strcpy(sem_input_avail_name, shm_prefix);
+            strcpy(sem_input_avail_name, sem_prefix);
             strcat(sem_input_avail_name, "_FT_input_avail");
-            strcpy(shmem_mt_name, "");
             strcpy(file_lock_name, "/tmp/");
             strcat(file_lock_name, shm_prefix);
             strcat(file_lock_name, ".lock");
@@ -568,9 +628,9 @@ void configure (void)
                     strcat(shmem_precompile_name, "_precompile");
                 else
                     strcat(shmem_precompile_name, "_MT_precompile");
-                strcpy(sem_prec_avail_name, shm_prefix);
+                strcpy(sem_prec_avail_name, sem_prefix);
                 strcat(sem_prec_avail_name, "_MT_prec_avail");
-                strcpy(sem_prec_read_name, shm_prefix);
+                strcpy(sem_prec_read_name, sem_prefix);
                 strcat(sem_prec_read_name, "_MT_prec_read");
             }
             else
@@ -581,13 +641,16 @@ void configure (void)
             }
             strcpy(shmem_output_name, shm_prefix);
             strcat(shmem_output_name, "_MT_output");
-            strcpy(sem_chunk_done_name, shm_prefix);
+            strcpy(shmem_rom_name, shm_prefix);
+            strcat(shmem_rom_name, "_MT_rom");
+            strcpy(shmem_ram_name, shm_prefix);
+            strcat(shmem_ram_name, "_MT_ram");
+            strcpy(sem_chunk_done_name, sem_prefix);
             strcat(sem_chunk_done_name, "_MT_chunk_done");
-            strcpy(sem_shutdown_done_name, shm_prefix);
+            strcpy(sem_shutdown_done_name, sem_prefix);
             strcat(sem_shutdown_done_name, "_MT_shutdown_done");
-            strcpy(sem_input_avail_name, shm_prefix);
+            strcpy(sem_input_avail_name, sem_prefix);
             strcat(sem_input_avail_name, "_MT_input_avail");
-            strcpy(shmem_mt_name, "");
             strcpy(file_lock_name, "/tmp/");
             strcat(file_lock_name, shm_prefix);
             strcat(file_lock_name, ".lock");
@@ -618,9 +681,9 @@ void configure (void)
                     strcat(shmem_precompile_name, "_precompile");
                 else
                     strcat(shmem_precompile_name, "_RH_precompile");
-                strcpy(sem_prec_avail_name, shm_prefix);
+                strcpy(sem_prec_avail_name, sem_prefix);
                 strcat(sem_prec_avail_name, "_RH_prec_avail");
-                strcpy(sem_prec_read_name, shm_prefix);
+                strcpy(sem_prec_read_name, sem_prefix);
                 strcat(sem_prec_read_name, "_RH_prec_read");
             }
             else
@@ -631,13 +694,16 @@ void configure (void)
             }
             strcpy(shmem_output_name, shm_prefix);
             strcat(shmem_output_name, "_RH_output");
-            strcpy(sem_chunk_done_name, shm_prefix);
+            strcpy(shmem_rom_name, shm_prefix);
+            strcat(shmem_rom_name, "_RH_rom");
+            strcpy(shmem_ram_name, shm_prefix);
+            strcat(shmem_ram_name, "_RH_ram");
+            strcpy(sem_chunk_done_name, sem_prefix);
             strcat(sem_chunk_done_name, "_RH_chunk_done");
-            strcpy(sem_shutdown_done_name, shm_prefix);
+            strcpy(sem_shutdown_done_name, sem_prefix);
             strcat(sem_shutdown_done_name, "_RH_shutdown_done");
-            strcpy(sem_input_avail_name, shm_prefix);
+            strcpy(sem_input_avail_name, sem_prefix);
             strcat(sem_input_avail_name, "_RH_input_avail");
-            strcpy(shmem_mt_name, "");
             strcpy(file_lock_name, "/tmp/");
             strcat(file_lock_name, shm_prefix);
             strcat(file_lock_name, ".lock");
@@ -645,149 +711,6 @@ void configure (void)
             strcat(log_name, "_RH");
             call_chunk_done = true;
             port = 23116;
-            break;
-        }
-        case MainTrace:
-        {
-            strcpy(shmem_control_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_control_input_name, "_control_input");
-            else
-                strcat(shmem_control_input_name, "_MA_control_input");
-            strcpy(shmem_control_output_name, shm_prefix);
-            strcat(shmem_control_output_name, "_MA_control_output");
-            strcpy(shmem_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_input_name, "_input");
-            else
-                strcat(shmem_input_name, "_MA_input");
-            if (precompile_results_enabled)
-            {
-                strcpy(shmem_precompile_name, shm_prefix);
-                if (share_input_shm)
-                    strcat(shmem_precompile_name, "_precompile");
-                else
-                    strcat(shmem_precompile_name, "_MA_precompile");
-                strcpy(sem_prec_avail_name, shm_prefix);
-                strcat(sem_prec_avail_name, "_MA_prec_avail");
-                strcpy(sem_prec_read_name, shm_prefix);
-                strcat(sem_prec_read_name, "_MA_prec_read");
-            }
-            else
-            {
-                strcpy(shmem_precompile_name, "");
-                strcpy(sem_prec_avail_name, "");
-                strcpy(sem_prec_read_name, "");
-            }
-            strcpy(shmem_output_name, shm_prefix);
-            strcat(shmem_output_name, "_MA_output");
-            strcpy(sem_chunk_done_name, shm_prefix);
-            strcat(sem_chunk_done_name, "_MA_chunk_done");
-            strcpy(sem_shutdown_done_name, shm_prefix);
-            strcat(sem_shutdown_done_name, "_MA_shutdown_done");
-            strcpy(sem_input_avail_name, shm_prefix);
-            strcat(sem_input_avail_name, "_MA_input_avail");
-            strcpy(shmem_mt_name, "");
-            strcpy(file_lock_name, "/tmp/");
-            strcat(file_lock_name, shm_prefix);
-            strcat(file_lock_name, ".lock");
-            strcpy(log_name, shm_prefix);
-            strcat(log_name, "_MA");
-            call_chunk_done = true;
-            port = 23118;
-            break;
-        }
-        case ChunksOnly:
-        {
-            strcpy(shmem_control_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_control_input_name, "_control_input");
-            else
-                strcat(shmem_control_input_name, "_CH_control_input");
-            strcpy(shmem_control_output_name, shm_prefix);
-            strcat(shmem_control_output_name, "_CH_control_output");
-            strcpy(shmem_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_input_name, "_input");
-            else
-                strcat(shmem_input_name, "_CH_input");
-            strcpy(shmem_precompile_name, "");
-            strcpy(sem_prec_avail_name, "");
-            strcpy(sem_prec_read_name, "");
-            strcpy(sem_input_avail_name, "");
-            strcpy(shmem_output_name, shm_prefix);
-            strcat(shmem_output_name, "_CH_output");
-            strcpy(sem_chunk_done_name, shm_prefix);
-            strcat(sem_chunk_done_name, "_CH_chunk_done");
-            strcpy(sem_shutdown_done_name, shm_prefix);
-            strcat(sem_shutdown_done_name, "_CH_shutdown_done");
-            strcpy(shmem_mt_name, "");
-            strcpy(file_lock_name, "/tmp/");
-            strcat(file_lock_name, shm_prefix);
-            strcat(file_lock_name, ".lock");
-            strcpy(log_name, shm_prefix);
-            strcat(log_name, "_CH");
-            call_chunk_done = true;
-            port = 23115;
-            break;
-        }
-        // case BusOp:
-        // {
-        //     strcpy(shmem_input_name, "ZISKBO_input");
-        //     strcpy(shmem_output_name, "ZISKBO_output");
-        //     strcpy(sem_chunk_done_name, "ZISKBO_chunk_done");
-        //     chunk_done = true;
-        //     port = 23115;
-        //     break;
-        // }
-        case Zip:
-        {
-            strcpy(shmem_control_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_control_input_name, "_control_input");
-            else
-                strcat(shmem_control_input_name, "_ZP_control_input");
-            strcpy(shmem_control_output_name, shm_prefix);
-            strcat(shmem_control_output_name, "_ZP_control_output");
-            strcpy(shmem_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_input_name, "_input");
-            else
-                strcat(shmem_input_name, "_ZP_input");
-            if (precompile_results_enabled)
-            {
-                strcpy(shmem_precompile_name, shm_prefix);
-                if (share_input_shm)
-                    strcat(shmem_precompile_name, "_precompile");
-                else
-                    strcat(shmem_precompile_name, "_ZP_precompile");
-                strcpy(sem_prec_avail_name, shm_prefix);
-                strcat(sem_prec_avail_name, "_ZP_prec_avail");
-                strcpy(sem_prec_read_name, shm_prefix);
-                strcat(sem_prec_read_name, "_ZP_prec_read");
-            }
-            else
-            {
-                strcpy(shmem_precompile_name, "");
-                strcpy(sem_prec_avail_name, "");
-                strcpy(sem_prec_read_name, "");
-            }
-            strcpy(shmem_output_name, shm_prefix);
-            strcat(shmem_output_name, "_ZP_output");
-            strcpy(sem_chunk_done_name, shm_prefix);
-            strcat(sem_chunk_done_name, "_ZP_chunk_done");
-            strcpy(sem_shutdown_done_name, shm_prefix);
-            strcat(sem_shutdown_done_name, "_ZP_shutdown_done");
-            strcpy(sem_input_avail_name, shm_prefix);
-            strcat(sem_input_avail_name, "_ZP_input_avail");
-            strcpy(shmem_mt_name, "");
-            strcpy(file_lock_name, "/tmp/");
-            strcat(file_lock_name, shm_prefix);
-            strcat(file_lock_name, ".lock");
-            strcpy(log_name, shm_prefix);
-            strcat(log_name, "_ZP");
-            call_chunk_done = true;
-            port = 23115;
             break;
         }
         case MemOp:
@@ -811,9 +734,9 @@ void configure (void)
                     strcat(shmem_precompile_name, "_precompile");
                 else
                     strcat(shmem_precompile_name, "_MO_precompile");
-                strcpy(sem_prec_avail_name, shm_prefix);
+                strcpy(sem_prec_avail_name, sem_prefix);
                 strcat(sem_prec_avail_name, "_MO_prec_avail");
-                strcpy(sem_prec_read_name, shm_prefix);
+                strcpy(sem_prec_read_name, sem_prefix);
                 strcat(sem_prec_read_name, "_MO_prec_read");
             }
             else
@@ -824,13 +747,16 @@ void configure (void)
             }
             strcpy(shmem_output_name, shm_prefix);
             strcat(shmem_output_name, "_MO_output");
-            strcpy(sem_chunk_done_name, shm_prefix);
+            strcpy(shmem_rom_name, shm_prefix);
+            strcat(shmem_rom_name, "_MO_rom");
+            strcpy(shmem_ram_name, shm_prefix);
+            strcat(shmem_ram_name, "_MO_ram");
+            strcpy(sem_chunk_done_name, sem_prefix);
             strcat(sem_chunk_done_name, "_MO_chunk_done");
-            strcpy(sem_shutdown_done_name, shm_prefix);
+            strcpy(sem_shutdown_done_name, sem_prefix);
             strcat(sem_shutdown_done_name, "_MO_shutdown_done");
-            strcpy(sem_input_avail_name, shm_prefix);
+            strcpy(sem_input_avail_name, sem_prefix);
             strcat(sem_input_avail_name, "_MO_input_avail");
-            strcpy(shmem_mt_name, "");
             strcpy(file_lock_name, "/tmp/");
             strcat(file_lock_name, shm_prefix);
             strcat(file_lock_name, ".lock");
@@ -840,129 +766,11 @@ void configure (void)
             port = 23117;
             break;
         }
-        case ChunkPlayerMTCollectMem:
-        {
-            strcpy(shmem_control_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_control_input_name, "_control_input");
-            else
-                strcat(shmem_control_input_name, "_CM_control_input");
-            strcpy(shmem_control_output_name, shm_prefix);
-            strcat(shmem_control_output_name, "_CM_control_output");
-            strcpy(shmem_input_name, "");
-            strcpy(shmem_precompile_name, "");
-            strcpy(sem_prec_avail_name, "");
-            strcpy(sem_prec_read_name, "");
-            strcpy(sem_input_avail_name, "");
-            strcpy(shmem_output_name, shm_prefix);
-            strcat(shmem_output_name, "_CM_output");
-            strcpy(sem_chunk_done_name, "");
-            strcpy(sem_shutdown_done_name, "");
-            strcpy(shmem_mt_name, shm_prefix);
-            strcat(shmem_mt_name, "_MT_output");
-            strcpy(file_lock_name, "/tmp/");
-            strcat(file_lock_name, shm_prefix);
-            strcat(file_lock_name, ".lock");
-            strcpy(log_name, shm_prefix);
-            strcat(log_name, "_CM");
-            call_chunk_done = false;
-            port = 23119;
-            break;
-        }
-        case MemReads:
-        {
-            strcpy(shmem_control_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_control_input_name, "_control_input");
-            else
-                strcat(shmem_control_input_name, "_MT_control_input");
-            strcpy(shmem_control_output_name, shm_prefix);
-            strcat(shmem_control_output_name, "_MT_control_output");
-            strcpy(shmem_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_input_name, "_input");
-            else
-                strcat(shmem_input_name, "_MT_input");
-            if (precompile_results_enabled)
-            {
-                strcpy(shmem_precompile_name, shm_prefix);
-                if (share_input_shm)
-                    strcat(shmem_precompile_name, "_precompile");
-                else
-                    strcat(shmem_precompile_name, "_MT_precompile");
-                strcpy(sem_prec_avail_name, shm_prefix);
-                strcat(sem_prec_avail_name, "_MT_prec_avail");
-                strcpy(sem_prec_read_name, shm_prefix);
-                strcat(sem_prec_read_name, "_MT_prec_read");
-            }
-            else
-            {
-                strcpy(shmem_precompile_name, "");
-                strcpy(sem_prec_avail_name, "");
-                strcpy(sem_prec_read_name, "");
-            }
-            strcpy(shmem_output_name, shm_prefix);
-            strcat(shmem_output_name, "_MT_output");
-            strcpy(sem_chunk_done_name, shm_prefix);
-            strcat(sem_chunk_done_name, "_MT_chunk_done");
-            strcpy(sem_shutdown_done_name, shm_prefix);
-            strcat(sem_shutdown_done_name, "_MT_shutdown_done");
-            strcpy(sem_input_avail_name, shm_prefix);
-            strcat(sem_input_avail_name, "_MT_input_avail");
-            strcpy(shmem_mt_name, "");
-            strcpy(file_lock_name, "/tmp/");
-            strcat(file_lock_name, shm_prefix);
-            strcat(file_lock_name, ".lock");
-            strcpy(log_name, shm_prefix);
-            strcat(log_name, "_MT");
-            call_chunk_done = true;
-            port = 23115;
-            break;
-        }
-        case ChunkPlayerMemReadsCollectMain:
-        {
-            strcpy(shmem_control_input_name, shm_prefix);
-            if (share_input_shm)
-                strcat(shmem_control_input_name, "_control_input");
-            else
-                strcat(shmem_control_input_name, "_CA_control_input");
-            strcpy(shmem_control_output_name, shm_prefix);
-            strcat(shmem_control_output_name, "_CA_control_output");
-            strcpy(shmem_input_name, "");
-            strcpy(shmem_precompile_name, "");
-            strcpy(sem_prec_avail_name, "");
-            strcpy(sem_prec_read_name, "");
-            strcpy(sem_input_avail_name, "");
-            strcpy(shmem_output_name, shm_prefix);
-            strcat(shmem_output_name, "_CA_output");
-            strcpy(sem_chunk_done_name, "");
-            strcpy(sem_shutdown_done_name, "");
-            strcpy(shmem_mt_name, shm_prefix);
-            strcat(shmem_mt_name, "_MT_output");
-            strcpy(file_lock_name, "/tmp/");
-            strcat(file_lock_name, shm_prefix);
-            strcat(file_lock_name, ".lock");
-            strcpy(log_name, shm_prefix);
-            strcat(log_name, "_CA");
-            call_chunk_done = false;
-            port = 23120;
-            break;
-        }
         default:
         {
-            printf("ERROR: configure() Invalid gen_method = %u\n", gen_method);
-            fflush(stdout);
-            fflush(stderr);
+            asm_printf("ERROR: configure() Invalid gen_method = %u\n", gen_method);
             exit(-1);
         }
-    }
-
-    if (precompile_results_enabled && (gen_method == ChunkPlayerMTCollectMem || gen_method == ChunkPlayerMemReadsCollectMain))
-    {
-        printf("ERROR: configure() precompile results enabled is not compatible with generation method %u\n", gen_method);
-        fflush(stdout);
-        fflush(stderr);
-        exit(-1);
     }
 
     if (arguments_port != 0)
@@ -972,28 +780,41 @@ void configure (void)
 
     if (verbose)
     {
-        printf("ziskemuasm configuration:\n");
-        printf("\tgen_method=%u\n", gen_method);
-        printf("\tshm_prefix=%s\n", shm_prefix);
-        printf("\tfile_lock_name=%s\n", file_lock_name);
-        printf("\tlog_name=%s\n", log_name);
-        printf("\tport=%u\n", port);
-        printf("\tcall_chunk_done=%u\n", call_chunk_done);
-        printf("\tchunk_size=%lu\n", chunk_size);
-        printf("\tshmem_control_input=%s\n", shmem_control_input_name);
-        printf("\tshmem_control_output=%s\n", shmem_control_output_name);
-        printf("\tshmem_input=%s\n", shmem_input_name);
-        printf("\tshmem_precompile=%s\n", shmem_precompile_name);
-        printf("\tshmem_output=%s\n", shmem_output_name);
-        printf("\tshmem_mt=%s\n", shmem_mt_name);
-        printf("\tsem_chunk_done=%s\n", sem_chunk_done_name);
-        printf("\tsem_shutdown_done=%s\n", sem_shutdown_done_name);
-        printf("\tsem_prec_avail=%s\n", sem_prec_avail_name);
-        printf("\tsem_prec_read=%s\n", sem_prec_read_name);
-        printf("\tsem_input_avail=%s\n", sem_input_avail_name);
-        printf("\tmap_locked_flag=%d\n", map_locked_flag);
-        printf("\toutput=%u\n", output);
-        printf("\tprecompile_results_enabled=%u\n", precompile_results_enabled);
-        printf("\toutput_riscof=%u\n", output_riscof);
+        asm_printf("ziskemuasm configuration:\n");
+        asm_printf("\tgen_method=%u\n", gen_method);
+        asm_printf("\tshm_prefix=%s\n", shm_prefix);
+        asm_printf("\tsem_prefix=%s\n", sem_prefix);
+        asm_printf("\tfile_lock_name=%s\n", file_lock_name);
+        asm_printf("\tlog_name=%s\n", log_name);
+        asm_printf("\tport=%u\n", port);
+        asm_printf("\tcall_chunk_done=%u\n", call_chunk_done);
+        asm_printf("\tchunk_size=%lu\n", chunk_size);
+        asm_printf("\tshmem_control_input=%s\n", shmem_control_input_name);
+        asm_printf("\tshmem_control_output=%s\n", shmem_control_output_name);
+        asm_printf("\tshmem_input=%s\n", shmem_input_name);
+        asm_printf("\tshmem_precompile=%s\n", shmem_precompile_name);
+        asm_printf("\tshmem_output=%s\n", shmem_output_name);
+        asm_printf("\tshmem_rom=%s\n", shmem_rom_name);
+        asm_printf("\tshmem_ram=%s\n", shmem_ram_name);
+        asm_printf("\tsem_chunk_done=%s\n", sem_chunk_done_name);
+        asm_printf("\tsem_shutdown_done=%s\n", sem_shutdown_done_name);
+        asm_printf("\tsem_prec_avail=%s\n", sem_prec_avail_name);
+        asm_printf("\tsem_prec_read=%s\n", sem_prec_read_name);
+        asm_printf("\tsem_input_avail=%s\n", sem_input_avail_name);
+        asm_printf("\tmap_locked_flag=%d\n", map_locked_flag);
+        asm_printf("\toutput=%u\n", output);
+        asm_printf("\tprecompile_results_enabled=%u\n", precompile_results_enabled);
+        asm_printf("\toutput_riscof=%u\n", output_riscof);
+        asm_printf("\tsilent=%u\n", silent);
+        asm_printf("\tmetrics=%u\n", metrics);
+        asm_printf("\tcreate_input_shm=%u\n", create_input_shm);
+        asm_printf("\tcreate_internal_shm=%u\n", create_internal_shm);
+        asm_printf("\tcreate_output_shm=%u\n", create_output_shm);
+        asm_printf("\tcreate_semaphores=%u\n", create_semaphores);
+        asm_printf("\tdelete_input_shm=%u\n", delete_input_shm);
+        asm_printf("\tdelete_internal_shm=%u\n", delete_internal_shm);
+        asm_printf("\tdelete_output_shm=%u\n", delete_output_shm);
+        asm_printf("\tdelete_semaphores=%u\n", delete_semaphores);
+        asm_printf("\tstdio=%u\n", stdio);
     }
 }

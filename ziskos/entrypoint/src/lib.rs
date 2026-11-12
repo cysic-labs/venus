@@ -1,18 +1,35 @@
+#![cfg_attr(zisk_guest, no_std)]
+// `linkage` is needed for the weak C++ runtime symbols (`__cxa_atexit`,
+// `__cxa_finalize`, `__dso_handle`) declared in `_zisk_main`. The linker-provided
+// init/fini array bounds are declared as *strong* externs (a weak static would be
+// reached through a hidden pointer slot, so `addr_of!` would not yield the section
+// address); standard linkers (GNU ld, LLD) always define those symbols. Guest-only,
+// so native/stable builds of this crate are unaffected.
+#![cfg_attr(zisk_guest, feature(linkage))]
 #![allow(unexpected_cfgs)]
 #![allow(unused_imports)]
 
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[cfg(zisk_guest)]
 use core::arch::asm;
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[cfg(zisk_guest)]
 mod dma;
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[cfg(zisk_guest)]
+mod evm;
+#[cfg(zisk_guest)]
 mod fcall;
 
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[cfg(zisk_guest)]
 mod alloc;
 
+// Link the `alloc` crate under an alias to avoid conflict with `mod alloc` above.
+// Exposed as `crate::alloc_crate` so submodules can use `use crate::alloc_crate::vec::Vec;`
+#[cfg(zisk_guest)]
+extern crate alloc as alloc_crate;
+#[cfg(zisk_guest)]
+pub(crate) use alloc_crate as alloc_extern;
+
 mod profile;
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[cfg(zisk_guest)]
 pub use fcall::*;
 pub mod io;
 pub use profile::*;
@@ -20,19 +37,15 @@ pub mod syscalls;
 pub mod zisklib;
 pub mod ziskos_definitions;
 
-#[cfg(all(
-    not(all(target_os = "zkvm", target_vendor = "zisk")),
-    any(zisk_hints, zisk_hints_debug),
-    feature = "user-hints"
-))]
+#[cfg(all(not(zisk_guest), any(zisk_hints, zisk_hints_debug), feature = "user-hints"))]
 pub mod hints;
 
-#[cfg(all(not(all(target_os = "zkvm", target_vendor = "zisk")), zisk_hints))]
+#[cfg(all(not(zisk_guest), zisk_hints))]
 extern "C" {
     fn hint_input_data(input_data_ptr: *const u8, input_data_len: usize);
 }
 
-#[cfg(all(not(all(target_os = "zkvm", target_vendor = "zisk")), zisk_hints_debug))]
+#[cfg(all(not(zisk_guest), zisk_hints_debug))]
 extern "C" {
     fn hint_log_c(msg: *const std::os::raw::c_char);
 }
@@ -40,7 +53,7 @@ extern "C" {
 #[cfg(zisk_hints_debug)]
 pub fn hint_log<S: AsRef<str>>(msg: S) {
     // On native we call external C function to log hints, since it controls if hints are paused or not
-    #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+    #[cfg(not(zisk_guest))]
     {
         use std::ffi::CString;
 
@@ -49,21 +62,118 @@ pub fn hint_log<S: AsRef<str>>(msg: S) {
         }
     }
     // On zkvm/zisk, we can just print directly
-    #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+    #[cfg(zisk_guest)]
     {
         println!("{}", msg.as_ref());
+    }
+}
+
+#[cfg_attr(all(not(feature = "hints"), not(zisk_staticlib)), no_mangle)]
+#[cfg_attr(feature = "hints", export_name = "hints_zkvm_init")]
+pub extern "C" fn zkvm_init() {
+    #[cfg(not(zisk_guest))]
+    {
+        read_input_reset();
+        crate::zisklib::zkvm_io::reset();
+    }
+
+    #[cfg(all(not(zisk_guest), zisk_hints, feature = "user-hints"))]
+    {
+        let path =
+            std::env::var("ZISK_HINTS_OUTPUT").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+                let dir = std::path::PathBuf::from("./tmp");
+                std::fs::create_dir_all(&dir).expect("failed to create tmp dir");
+                dir.join("hints.bin")
+            });
+        crate::hints::init_hints_file(path, None).expect("hints init failed");
+    }
+}
+
+#[cfg_attr(all(not(feature = "hints"), not(zisk_staticlib)), no_mangle)]
+#[cfg_attr(feature = "hints", export_name = "hints_zkvm_deinit")]
+pub extern "C" fn zkvm_deinit() {
+    #[cfg(all(not(zisk_guest), zisk_hints, feature = "user-hints"))]
+    {
+        crate::hints::close_hints().expect("hints close failed");
+    }
+
+    // End of the staticlib lifecycle: report the isolated allocator's peak usage.
+    #[cfg(all(zisk_guest, zisk_staticlib, feature = "alloc-stats"))]
+    unsafe {
+        crate::alloc::print_max_used_sys_alloc();
+    }
+}
+
+#[cfg(all(not(zisk_guest), zisk_hints, feature = "user-hints"))]
+pub fn zkvm_init_socket(
+    socket_path: std::path::PathBuf,
+    debug_file: Option<std::path::PathBuf>,
+    write_flush_threshold: Option<usize>,
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
+) -> anyhow::Result<()> {
+    read_input_reset();
+    crate::zisklib::zkvm_io::reset();
+    crate::hints::init_hints_socket(socket_path, debug_file, write_flush_threshold, ready)
+}
+
+/// Normalizes a guest entry-point's return value into a process exit code, so that
+/// [`entrypoint!`] accepts both `fn()` and `fn() -> i32` from a single macro arm.
+/// `macro_rules!` cannot branch on the entry's signature (macros expand before type
+/// checking), so the return type is resolved through this trait instead — the same
+/// role `std::process::Termination` plays for `fn main`.
+pub trait ZiskTermination {
+    fn to_exit_code(self) -> i32;
+}
+
+impl ZiskTermination for () {
+    #[inline]
+    fn to_exit_code(self) -> i32 {
+        // A plain `()` return is a successful completion.
+        0
+    }
+}
+
+impl ZiskTermination for i32 {
+    #[inline]
+    fn to_exit_code(self) -> i32 {
+        self
+    }
+}
+
+impl<T: ZiskTermination, E> ZiskTermination for Result<T, E> {
+    /// `Ok` delegates to the inner value's exit code; `Err` reports failure as `1`.
+    /// The error is intentionally not printed here (that would couple the trait to a
+    /// target-specific writer); log it inside the entry point before returning if a
+    /// diagnostic is needed.
+    #[inline]
+    fn to_exit_code(self) -> i32 {
+        match self {
+            Ok(value) => value.to_exit_code(),
+            Err(_) => 1,
+        }
     }
 }
 
 #[macro_export]
 macro_rules! entrypoint {
     ($path:path) => {
-        const ZISK_ENTRY: fn() = $path;
+        // Defined in the caller's module so `$path` resolves in the same scope. It
+        // accepts an entry of type `fn()` or `fn() -> i32` — anything whose return
+        // value implements `ZiskTermination` — and normalizes it to an exit code.
+        fn __zisk_entry() -> i32 {
+            $crate::ZiskTermination::to_exit_code($path())
+        }
 
         mod zkvm_generated_main {
+            // C ABI to match the `extern "C" { fn main() -> i32; }` declaration in
+            // `_zisk_main` that calls this symbol — mixing ABIs on the same symbol
+            // is undefined behavior.
             #[no_mangle]
-            fn main() {
-                super::ZISK_ENTRY()
+            extern "C" fn main() -> i32 {
+                $crate::zkvm_init();
+                let code = super::__zisk_entry();
+                $crate::zkvm_deinit();
+                code
             }
         }
     };
@@ -82,17 +192,25 @@ use crate::ziskos_definitions::ziskos_config::*;
 /// Initial offset for input reading.
 /// zkvm: 8 bytes offset due to INPUT_ADDR memory layout
 /// native: 0 bytes offset (file starts at position 0)
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
-const INPUT_INITIAL_OFFSET: usize = 8;
-#[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
-const INPUT_INITIAL_OFFSET: usize = 0;
+#[cfg(zisk_guest)]
+pub(crate) const INPUT_INITIAL_OFFSET: usize = 8;
+#[cfg(not(zisk_guest))]
+pub(crate) const INPUT_INITIAL_OFFSET: usize = 0;
 
 /// Pointer to the current position in the input buffer/file.
-static mut INPUT_POS: usize = INPUT_INITIAL_OFFSET;
+pub(crate) static mut INPUT_POS: usize = INPUT_INITIAL_OFFSET;
 
 /// Reset the input position to the beginning.
-pub fn read_reset() {
+pub fn read_input_reset() {
     unsafe { INPUT_POS = INPUT_INITIAL_OFFSET };
+}
+
+#[cfg(not(zisk_guest))]
+static NATIVE_INPUT: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+
+#[cfg(not(zisk_guest))]
+pub fn set_native_input(data: Vec<u8>) {
+    *NATIVE_INPUT.lock().unwrap() = Some(data);
 }
 
 /// Read a slice directly from INPUT_ADDR without copying (zero-copy).
@@ -100,7 +218,7 @@ pub fn read_reset() {
 /// This returns a slice pointing directly to the input memory region.
 /// Use this when you want to deserialize directly without an intermediate copy.
 /// The INPUT_POS is advanced after this call.
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[cfg(zisk_guest)]
 pub(crate) fn read_slice_zerocopy<'a>() -> &'a [u8] {
     // SAFETY: Single threaded, so nothing else can touch INPUT_POS while we're working.
     let input_pos = unsafe { INPUT_POS };
@@ -138,40 +256,54 @@ pub(crate) fn read_slice_zerocopy<'a>() -> &'a [u8] {
     data_slice
 }
 
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[cfg(not(zisk_guest))]
 pub(crate) fn read_input() -> Vec<u8> {
-    read_slice_zerocopy().to_vec()
-}
-
-#[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
-pub(crate) fn read_input() -> Vec<u8> {
-    use std::{
-        fs::File,
-        io::{Read, Seek, SeekFrom},
-    };
-
     let input_pos = unsafe { INPUT_POS };
 
-    let mut file =
-        File::open("build/input.bin").expect("Error opening input file at: build/input.bin");
+    let data = if let Some(buf) = NATIVE_INPUT.lock().unwrap().as_ref() {
+        let len_bytes: [u8; 8] = buf
+            .get(input_pos..input_pos + 8)
+            .expect("Failed to read length prefix from native input")
+            .try_into()
+            .unwrap();
+        let len = u64::from_le_bytes(len_bytes) as usize;
+        let data = buf
+            .get(input_pos + 8..input_pos + 8 + len)
+            .expect("Failed to read data from native input")
+            .to_vec();
+        let aligned_len = (len + 7) & !0x7;
+        unsafe { INPUT_POS = input_pos + 8 + aligned_len };
+        data
+    } else {
+        use std::{
+            fs::File,
+            io::{Read, Seek, SeekFrom},
+        };
 
-    // Seek to the current position
-    file.seek(SeekFrom::Start(input_pos as u64)).expect("Failed to seek in input file");
+        let path =
+            std::env::var("ZISK_INPUT_FILE").unwrap_or_else(|_| "build/input.bin".to_string());
 
-    // Read the 8-byte length prefix
-    let mut len_bytes = [0u8; 8];
-    file.read_exact(&mut len_bytes).expect("Failed to read length prefix from input file");
-    let len = u64::from_le_bytes(len_bytes) as usize;
+        let mut file = File::open(&path)
+            .unwrap_or_else(|e| panic!("Error opening input file at {}: {}", path, e));
 
-    // Read the actual data
-    let mut data = vec![0u8; len];
-    file.read_exact(&mut data).expect("Failed to read data from input file");
+        // Seek to the current position
+        file.seek(SeekFrom::Start(input_pos as u64)).expect("Failed to seek in input file");
 
-    // Advance INPUT_POS: 8 bytes for length + 8-byte aligned data
-    let aligned_len = (len + 7) & !0x7;
-    unsafe {
-        INPUT_POS = input_pos + 8 + aligned_len;
-    }
+        // Read the 8-byte length prefix
+        let mut len_bytes = [0u8; 8];
+        file.read_exact(&mut len_bytes).expect("Failed to read length prefix from input file");
+        let len = u64::from_le_bytes(len_bytes) as usize;
+
+        // Read the actual data
+        let mut data = vec![0u8; len];
+        file.read_exact(&mut data).expect("Failed to read data from input file");
+
+        // Advance INPUT_POS: 8 bytes for length + 8-byte aligned data
+        let aligned_len = (len + 7) & !0x7;
+        unsafe { INPUT_POS = input_pos + 8 + aligned_len };
+
+        data
+    };
 
     #[cfg(zisk_hints)]
     unsafe {
@@ -193,9 +325,9 @@ pub(crate) fn read_input() -> Vec<u8> {
     data
 }
 
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[cfg(zisk_guest)]
 pub(crate) fn set_output(id: usize, value: u32) {
-    use std::arch::asm;
+    use core::arch::asm;
     let addr_v: *mut u32;
     let arch_id_zisk: usize;
 
@@ -217,12 +349,12 @@ pub(crate) fn set_output(id: usize, value: u32) {
     unsafe { core::ptr::write_volatile(addr_v, value) };
 }
 
-#[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
+#[cfg(not(zisk_guest))]
 pub(crate) fn set_output(id: usize, value: u32) {
     println!("public {id}: {value:#010x}");
 }
 
-#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+#[cfg(zisk_guest)]
 pub mod ziskos {
     use crate::ziskos_definitions::ziskos_config::*;
     use core::arch::asm;
@@ -241,23 +373,30 @@ pub mod ziskos {
           // set the stack pointer
           "la sp, _init_stack_top",
 
-          // Call into Rust. `_zisk_main` returns the exit code in a0.
+          // Call into Rust. `_zisk_main` returns `main`'s exit code in a0,
+          // which both exit paths below forward to the termination mechanism.
           "call {_zisk_main}",
           "csrr t0, marchid",
           //"li   t1, {_ARCH_ID_ZISK}",
           "li   t1, 0xFFFEEEE",
           "beq t0, t1, 1f",
 
-          // QEmuu exit
-          //"li t0, {_QEMU_EXIT_ADDR}",
-          //"li t1, {_QEMU_EXIT_CODE}",
+          // QEMU exit via the sifive_test device @ 0x100000. Encode the exit
+          // code (a0): 0 => 0x5555 (pass); otherwise (code << 16) | 0x3333.
           "li t0, 0x100000",
+          "beqz a0, 3f",
+          "slli t1, a0, 16",
+          "li   t2, 0x3333",
+          "or   t1, t1, t2",
+          "sw t1, 0(t0)",
+          "j 2f",
+          "3:",
           "li t1, 0x5555",
           "sw t1, 0(t0)",
           "j 2f",
 
-          // Zisk exit: syscall 93 (exit) takes the exit code in a0, already set by `_zisk_main`.
-          // The BIOS ends any exit code other than 0 as a failed execution.
+          // Zisk exit: syscall 93 (exit) takes the exit code in a0, already set
+          // by `_zisk_main`'s return value.
           "1: li   a7, 93",
           "ecall",
 
@@ -278,13 +417,13 @@ pub mod ziskos {
         getrandom::register_custom_getrandom!(zkvm_getrandom);
     }
 
-    /// Runs the guest entry point and returns its exit code: 0, since the entry point returns
-    /// `()` and a failure traps (e.g. a panic aborts) instead of returning.
     #[no_mangle]
     unsafe extern "C" fn _zisk_main() -> i32 {
         {
             extern "C" {
-                fn main();
+                // Standard `int main(void)`: its return value is the program
+                // exit code, propagated to the termination mechanism below.
+                fn main() -> i32;
             }
             #[cfg(any(
                 feature = "zisk-embedded-alloc",
@@ -301,9 +440,114 @@ pub mod ziskos {
             ))]
             crate::alloc::init_sys_alloc();
 
-            main();
-            0
+            // Run C++ (and Rust ctor-style) static constructors before main.
+            run_init_array();
+
+            let code = main();
+
+            // Run static destructors after main returns (atexit-registered first,
+            // then `.fini_array`), before `_start` invokes the exit mechanism.
+            run_exit_handlers();
+
+            code
         }
+    }
+
+    // ---- C++ static constructors / destructors (zkvm-standards) -------------
+    //
+    // Run `.init_array` before `main` and the destructors after it returns.
+    // Empty arrays => no-ops, so this is zero-cost for programs without C++ (or
+    // Rust ctor-style) statics. Allocations done by constructors resolve to the
+    // host program's allocator, NOT ziskos's private bump heap (whose symbols are
+    // localized and which is rewound per call) — exactly what persistent statics
+    // need.
+
+    type CtorFn = extern "C" fn();
+
+    // Linker-provided bounds of the constructor/destructor arrays, defined by the
+    // linker script (see linker_script.ld). Declared as zero-length arrays with
+    // *normal* (strong) linkage so that `addr_of!` yields the section address
+    // directly. (An `extern_weak` static is reached through a hidden pointer slot,
+    // so `addr_of!` would not give the array address — it must be a plain symbol.)
+    extern "C" {
+        static __init_array_start: [CtorFn; 0];
+        static __init_array_end: [CtorFn; 0];
+        static __fini_array_start: [CtorFn; 0];
+        static __fini_array_end: [CtorFn; 0];
+    }
+
+    unsafe fn run_init_array() {
+        let mut p = core::ptr::addr_of!(__init_array_start) as *const CtorFn;
+        let end = core::ptr::addr_of!(__init_array_end) as *const CtorFn;
+        // Empty array (no C++/ctor statics) => p == end => no iterations.
+        while p < end {
+            (core::ptr::read(p))();
+            p = p.add(1);
+        }
+    }
+
+    unsafe fn run_fini_array() {
+        let start = core::ptr::addr_of!(__fini_array_start) as *const CtorFn;
+        let mut p = core::ptr::addr_of!(__fini_array_end) as *const CtorFn;
+        // `.fini_array` runs in reverse order; empty => no iterations.
+        while p > start {
+            p = p.sub(1);
+            (core::ptr::read(p))();
+        }
+    }
+
+    // Minimal freestanding C++ exit machinery. The compiler registers static
+    // destructors at construction time via `__cxa_atexit(dtor, obj, &__dso_handle)`
+    // and expects them to run at exit via `__cxa_finalize`. Single-threaded guest,
+    // so a plain fixed-capacity `static mut` table suffices. Weak so a host C++
+    // runtime (e.g. libsupc++), if linked, takes precedence.
+
+    #[no_mangle]
+    #[linkage = "weak"]
+    pub static __dso_handle: u8 = 0;
+
+    const MAX_ATEXIT: usize = 64;
+    static mut ATEXIT_FNS: [(Option<extern "C" fn(*mut u8)>, *mut u8); MAX_ATEXIT] =
+        [(None, core::ptr::null_mut()); MAX_ATEXIT];
+    static mut ATEXIT_LEN: usize = 0;
+
+    #[no_mangle]
+    #[linkage = "weak"]
+    pub unsafe extern "C" fn __cxa_atexit(
+        func: extern "C" fn(*mut u8),
+        arg: *mut u8,
+        _dso: *mut u8,
+    ) -> i32 {
+        if ATEXIT_LEN >= MAX_ATEXIT {
+            return -1;
+        }
+        // Raw-pointer write to avoid taking a reference to the `static mut`.
+        let base =
+            core::ptr::addr_of_mut!(ATEXIT_FNS) as *mut (Option<extern "C" fn(*mut u8)>, *mut u8);
+        core::ptr::write(base.add(ATEXIT_LEN), (Some(func), arg));
+        ATEXIT_LEN += 1;
+        0
+    }
+
+    #[no_mangle]
+    #[linkage = "weak"]
+    pub unsafe extern "C" fn __cxa_finalize(_dso: *mut u8) {
+        // Reverse registration order; idempotent (drains the table), so a second
+        // call (e.g. from `.fini_array`) is a no-op.
+        let base =
+            core::ptr::addr_of!(ATEXIT_FNS) as *const (Option<extern "C" fn(*mut u8)>, *mut u8);
+        while ATEXIT_LEN > 0 {
+            ATEXIT_LEN -= 1;
+            let (func, arg) = core::ptr::read(base.add(ATEXIT_LEN));
+            if let Some(func) = func {
+                func(arg);
+            }
+        }
+    }
+
+    unsafe fn run_exit_handlers() {
+        __cxa_finalize(core::ptr::null_mut());
+        run_fini_array();
     }
 
     #[no_mangle]
@@ -327,25 +571,22 @@ pub mod ziskos {
             }
         }
     }
-    use lazy_static::lazy_static;
-    use std::sync::Mutex;
-    const PRNG_SEED: u64 = 0x123456789abcdef0;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::rngs::SmallRng;
+    use rand::{Rng, SeedableRng};
 
-    lazy_static! {
-        /// A lazy static to generate a global random number generator.
-        static ref RNG: Mutex<StdRng> = Mutex::new(StdRng::seed_from_u64(PRNG_SEED));
-    }
+    // riscv64 guest targets are single-core — sys_rand uses static mut, no atomics needed
+    static mut RNG: Option<SmallRng> = None;
+    static mut SYS_RAND_WARNING: bool = false;
 
-    /// A lazy static to print a warning once for using the `sys_rand` system call.
-    static SYS_RAND_WARNING: std::sync::Once = std::sync::Once::new();
-
+    #[allow(static_mut_refs)]
     #[no_mangle]
     unsafe extern "C" fn sys_rand(recv_buf: *mut u8, words: usize) {
-        SYS_RAND_WARNING.call_once(|| {
-            println!("WARNING: Using insecure random number generator.");
-        });
-        let mut rng = RNG.lock().unwrap();
+        if !SYS_RAND_WARNING {
+            SYS_RAND_WARNING = true;
+            let msg = b"WARNING: Using insecure random number generator.\n";
+            sys_write(1, msg.as_ptr(), msg.len());
+        }
+        let rng = RNG.get_or_insert_with(|| SmallRng::seed_from_u64(0x123456789abcdef0));
         for i in 0..words {
             let element = recv_buf.add(i);
             *element = rng.gen();
@@ -372,7 +613,7 @@ pub mod ziskos {
         unimplemented!("sys_argv");
     }
 
-    pub extern "C" fn sys_print_hex(val: usize, ln: bool) {
+    pub extern "C" fn sys_write_hex(val: usize, ln: bool) {
         let mut buf = [0u8; 19]; // "0x" + 16 hex + \n — stack, no heap
         buf[0] = b'0';
         buf[1] = b'x';
@@ -386,6 +627,30 @@ pub mod ziskos {
             sys_write(1, buf.as_ptr(), buf.len());
         } else {
             sys_write(1, buf.as_ptr(), buf.len() - 1);
+        }
+    }
+
+    pub extern "C" fn sys_write_u64(val: u64, ln: bool) {
+        let mut buf = [0u8; 21]; // 20 digits max u64 + \n — stack, no heap
+        let mut v = val;
+        let mut end = 20usize;
+
+        if v == 0 {
+            buf[19] = b'0';
+            end = 19;
+        } else {
+            while v > 0 {
+                end -= 1;
+                buf[end] = b'0' + (v % 10) as u8;
+                v /= 10;
+            }
+        }
+
+        if ln {
+            buf[20] = b'\n';
+            sys_write(1, buf[end..].as_ptr(), 21 - end);
+        } else {
+            sys_write(1, buf[end..20].as_ptr(), 20 - end);
         }
     }
 

@@ -25,9 +25,6 @@ module.exports = class ExpressionPacker {
         assert.ok(this.expression.stack.length);
         let top = this.expression.stack.length-1;
         const result = this.stackPosPack(top, options);
-        // Stores whether to apply row offset when saving, to be used during reference resolution.
-        // An expression with a reference that uses row offset will apply the row offset.
-        this.container.setAppliesRowOffset(result, this.appliesRowOffset);
         return result;
 
     }
@@ -119,13 +116,6 @@ module.exports = class ExpressionPacker {
             if (defvalue.isExpression) {
                 let rowOffset = (ope.rowOffset ? ope.rowOffset.value : 0) + this.rowOffset;
                 if (this.container.pushExpressionReference(id, rowOffset)) {
-                    return;
-                }
-                // return reference with rowOffset = 0
-                const refRowOffsetZero = this.container.getExpressionReference(id);
-                if (refRowOffsetZero !== false) {
-                    // if reference with rowOffset = 0 exists, use it
-                    this.container.pushExpression(refRowOffsetZero);
                     return;
                 }
                 const packer = new ExpressionPacker(this.container, def.getValue(), rowOffset);

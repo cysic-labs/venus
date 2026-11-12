@@ -1,24 +1,24 @@
-#[cfg(distributed)]
+#[cfg(feature = "mpi")]
 use mpi::traits::*;
-#[cfg(distributed)]
+#[cfg(feature = "mpi")]
 use mpi::collective::CommunicatorCollectives;
-#[cfg(distributed)]
+#[cfg(feature = "mpi")]
 use mpi::datatype::PartitionMut;
-#[cfg(distributed)]
+#[cfg(feature = "mpi")]
 use mpi::environment::Universe;
-#[cfg(distributed)]
+#[cfg(feature = "mpi")]
 use mpi::topology::Communicator;
 
 use std::sync::atomic::{Ordering, AtomicU64, AtomicI32, AtomicU32};
-use fields::PrimeField64;
-#[cfg(distributed)]
-use fields::CubicExtensionField;
+use proofman_fields::PrimeField64;
+#[cfg(feature = "mpi")]
+use proofman_fields::CubicExtensionField;
 use crate::{GlobalInfo, ProofmanError};
 use crate::Proof;
 
 use crate::ProofmanResult;
 
-#[cfg(distributed)]
+#[cfg(feature = "mpi")]
 use proofman_starks_lib_c::{
     initialize_agg_readiness_tracker_c, free_agg_readiness_tracker_c, agg_is_ready_c, reset_agg_readiness_tracker_c,
 };
@@ -60,9 +60,9 @@ fn get_process_numa_node() -> i32 {
 }
 
 pub struct MpiCtx {
-    #[cfg(distributed)]
+    #[cfg(feature = "mpi")]
     pub universe: Universe,
-    #[cfg(distributed)]
+    #[cfg(feature = "mpi")]
     pub world: mpi::topology::SimpleCommunicator,
     pub rank: i32,
     pub n_processes: i32,
@@ -74,6 +74,9 @@ pub struct MpiCtx {
 }
 
 const _MPI_TAG_CANCEL_JOB: i32 = 999999;
+const _MPI_TAG_BROADCAST: i32 = 999998;
+const _MPI_TAG_DISTRIBUTE_MULTIPLICITY: i32 = 999997;
+const _MPI_TAG_DISTRIBUTE_MULTIPLICITIES: i32 = 999996;
 
 impl Default for MpiCtx {
     fn default() -> Self {
@@ -83,7 +86,7 @@ impl Default for MpiCtx {
 
 impl MpiCtx {
     pub fn new() -> Self {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             let (universe, _threading) = mpi::initialize_with_threading(mpi::Threading::Multiple)
                 .expect("Failed to initialize MPI with threading");
@@ -116,7 +119,7 @@ impl MpiCtx {
                 cancelled: AtomicU32::new(0),
             }
         }
-        #[cfg(not(distributed))]
+        #[cfg(not(feature = "mpi"))]
         {
             let numa_node = get_process_numa_node();
             MpiCtx {
@@ -135,7 +138,7 @@ impl MpiCtx {
     /// the instance added is not a table
     #[inline]
     pub fn process_ready_for_outer_agg(&self) {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             self.outer_agg_rank.store(agg_is_ready_c(), Ordering::SeqCst);
         }
@@ -151,7 +154,7 @@ impl MpiCtx {
     }
 
     pub fn reset_outer_agg_tracker(&self) {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             self.outer_agg_rank.store(-1, Ordering::SeqCst);
             reset_agg_readiness_tracker_c();
@@ -161,9 +164,15 @@ impl MpiCtx {
     pub fn reset(&self) {
         self.reset_outer_agg_tracker();
         self.cancelled.store(0, Ordering::SeqCst);
+        #[cfg(feature = "mpi")]
+        {
+            while self.world.any_process().immediate_probe_with_tag(_MPI_TAG_CANCEL_JOB).is_some() {
+                let (_msg, _status) = self.world.any_process().receive_vec_with_tag::<i32>(_MPI_TAG_CANCEL_JOB);
+            }
+        }
     }
 
-    #[cfg(distributed)]
+    #[cfg(feature = "mpi")]
     pub fn new_with_universe(universe: Universe) -> Self {
         let world = universe.world();
         let rank = world.rank();
@@ -198,22 +207,52 @@ impl MpiCtx {
         self.numa_nodes[self.node_rank as usize]
     }
 
+    pub fn split_active_processes(&self, _is_active: bool) {
+        #[cfg(feature = "mpi")]
+        {
+            let color =
+                if _is_active { mpi::topology::Color::with_value(1) } else { mpi::topology::Color::undefined() };
+            let _sub_comm = self.world.split_by_color(color);
+            self.world.split_shared(self.rank);
+        }
+    }
+
     #[inline]
     pub fn barrier(&self) {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             self.world.barrier();
         }
     }
 
+    /// Barrier that also checks all ranks succeeded.
+    /// Every rank must call this — pass `false` on failure so others detect it.
+    /// Returns `true` only if all ranks passed `true`.
+    pub fn all_finished_ok(&self, success: bool) -> bool {
+        #[cfg(feature = "mpi")]
+        {
+            if self.n_processes <= 1 {
+                return success;
+            }
+            let send: [u8; 1] = [if success { 1 } else { 0 }];
+            let mut all: Vec<u8> = vec![0u8; self.n_processes as usize];
+            self.world.all_gather_into(&send[..], &mut all[..]);
+            all.iter().all(|&v| v != 0)
+        }
+        #[cfg(not(feature = "mpi"))]
+        {
+            success
+        }
+    }
+
     pub fn distribute_roots(&self, values: Vec<u64>) -> Vec<u64> {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             let mut all_values: Vec<u64> = vec![0u64; values.len() * self.n_processes as usize];
             self.world.all_gather_into(&values, &mut all_values);
             all_values
         }
-        #[cfg(not(distributed))]
+        #[cfg(not(feature = "mpi"))]
         {
             values.to_vec()
         }
@@ -224,7 +263,7 @@ impl MpiCtx {
         airgroupvalues: Vec<Vec<u64>>,
         _global_info: &GlobalInfo,
     ) -> Vec<Vec<F>> {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             let airgroupvalues_flatten: Vec<u64> = airgroupvalues.into_iter().flatten().collect();
             let mut gathered_data: Vec<u64> = vec![0; airgroupvalues_flatten.len() * self.n_processes as usize];
@@ -281,7 +320,7 @@ impl MpiCtx {
             }
             airgroupvalues_full
         }
-        #[cfg(not(distributed))]
+        #[cfg(not(feature = "mpi"))]
         {
             airgroupvalues
                 .into_iter()
@@ -291,7 +330,7 @@ impl MpiCtx {
     }
 
     pub fn distribute_publics(&self, publics: Vec<u64>) -> Vec<u64> {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             let local_size = publics.len() as i32;
             let mut sizes: Vec<i32> = vec![0; self.n_processes as usize];
@@ -320,7 +359,7 @@ impl MpiCtx {
             // Each process will now have the same complete dataset
             all_publics
         }
-        #[cfg(not(distributed))]
+        #[cfg(not(feature = "mpi"))]
         {
             publics
         }
@@ -330,18 +369,19 @@ impl MpiCtx {
     //Root provides data in buf; others can pass an empty Vec that is filled with the message
     //Uses point-to-point with matched_probe for thread safety (no message interleaving)
     pub fn broadcast(&self, _buf: &mut Vec<u8>) {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             if self.n_processes > 1 {
                 if self.rank == 0 {
                     // Root sends to all other processes
                     for dest in 1..self.n_processes {
-                        self.world.process_at_rank(dest).send(&_buf[..]);
+                        self.world.process_at_rank(dest).send_with_tag(&_buf[..], _MPI_TAG_BROADCAST);
                     }
                 } else {
-                    // Non-root: matched_probe + matched_receive_into for thread-safe receive
+                    // Non-root: matched_probe_with_tag + matched_receive_into for thread-safe receive
                     // This atomically binds to a specific message, preventing interleaving
-                    let (msg, status) = self.world.process_at_rank(0).matched_probe();
+                    // Using a dedicated tag prevents capturing unrelated internal messages
+                    let (msg, status) = self.world.process_at_rank(0).matched_probe_with_tag(_MPI_TAG_BROADCAST);
                     let count = status.count(u8::equivalent_datatype()) as usize;
                     _buf.resize(count, 0u8);
                     msg.matched_receive_into(&mut _buf[..]);
@@ -351,33 +391,33 @@ impl MpiCtx {
     }
 
     pub fn send_proof_to_rank(&self, _proof: &Vec<u64>, _airgroup_id: usize, _rank: i32) {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         // Send the proof directly - the vector already contains its length information
         self.world.process_at_rank(_rank).send_with_tag(_proof, _airgroup_id as i32);
     }
 
     pub fn recv_proof_from_rank(&self, _airgroup_id: usize, _rank: i32) -> Vec<u64> {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             // Receive the proof directly as a vector
             let (proof_buffer, _) = self.world.process_at_rank(_rank).receive_vec_with_tag::<u64>(_airgroup_id as i32);
             proof_buffer
         }
-        #[cfg(not(distributed))]
+        #[cfg(not(feature = "mpi"))]
         {
             Vec::new()
         }
     }
 
     pub fn send_proof_agg_rank<F: PrimeField64>(&self, _proof: &Proof<F>) {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         self.world
             .process_at_rank(self.outer_agg_rank.load(Ordering::SeqCst))
             .send_with_tag(&_proof.proof[..], _proof.airgroup_id as i32);
     }
 
     pub fn check_incoming_proofs(&self, airgroup_id: usize) -> Option<Vec<u64>> {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             if let Some(_status) = self.world.any_process().immediate_probe_with_tag(airgroup_id as i32) {
                 let (proof_data, _status) = self.world.any_process().receive_vec_with_tag::<u64>(airgroup_id as i32);
@@ -386,30 +426,56 @@ impl MpiCtx {
                 None
             }
         }
-        #[cfg(not(distributed))]
+        #[cfg(not(feature = "mpi"))]
         {
             _ = airgroup_id;
             None
         }
     }
 
+    /// Fail loudly if the ranks disagree on the aggregation arity.
+    ///
+    /// Tags are arity-derived, so disagreeing ranks would send to tags nobody receives on and
+    /// hang silently. The all-gather is symmetric: every rank sees the mismatch and panics.
+    #[cfg(feature = "mpi")]
+    fn check_aggregation_arity_agreement(&self, arity: usize) {
+        if self.n_processes <= 1 {
+            return;
+        }
+        let send: [u64; 1] = [arity as u64];
+        let mut all: Vec<u64> = vec![0u64; self.n_processes as usize];
+        self.world.all_gather_into(&send[..], &mut all[..]);
+        if let Some((other_rank, &other)) = all.iter().enumerate().find(|&(_, &v)| v != arity as u64) {
+            panic!(
+                "aggregation arity disagreement across MPI ranks: rank {} has {}, rank {} has {}. \
+                 Every rank must load a proving key built with the same aggregationArity.",
+                self.rank, arity, other_rank, other
+            );
+        }
+    }
+
     #[allow(unused_variables)]
-    pub fn distribute_recursive2_proofs(&self, alives: &[usize], proofs: &mut [Vec<Option<Vec<u64>>>]) {
-        #[cfg(distributed)]
+    pub fn distribute_recursive2_proofs(&self, alives: &[usize], proofs: &mut [Vec<Option<Vec<u64>>>], arity: usize) {
+        #[cfg(feature = "mpi")]
         {
+            // Must run before any tagged send/receive below: the tags are arity-derived.
+            self.check_aggregation_arity_agreement(arity);
+
             // Count number of aggregations that will be done
             let n_groups = alives.len();
-            let n_agregations: usize = alives.iter().map(|&alive| alive.div_ceil(3)).sum();
+            let n_agregations: usize = alives.iter().map(|&alive| alive.div_ceil(arity)).sum();
             let aggs_per_process = (n_agregations / self.n_processes as usize).max(1);
 
             let mut i_proof = 0;
             // tags codes:
-            // 0,...,ngroups-1: proofs that need to be sent to rank0 from another rank for a group with alive == 1
-            // ngroups, ..., ngroups + 2*n_aggregations - 1: proofs that need to be sent to the owner of the aggregation task
+            // 0,...,ngroups-1: proofs sent to rank0 from another rank for a group with alive == 1
+            // ngroups, ..., ngroups + arity*n_aggregations - 1: proofs sent to the owner of the
+            // aggregation task. Every rank must derive `arity` from the same proving key, or
+            // senders and receivers use different tags and the exchange deadlocks.
 
             for (group_idx, &alive) in alives.iter().enumerate() {
                 let group_proofs: &mut Vec<Option<Vec<u64>>> = &mut proofs[group_idx];
-                let n_aggs_group = alive.div_ceil(3);
+                let n_aggs_group = alive.div_ceil(arity);
 
                 if n_aggs_group == 0 {
                     assert!(alive == 1);
@@ -430,36 +496,23 @@ impl MpiCtx {
                     let chunk = i_proof / aggs_per_process;
                     let owner_rank =
                         if chunk < self.n_processes as usize { chunk } else { i_proof % self.n_processes as usize };
-                    let left_idx = i * 3;
-                    let mid_idx = i * 3 + 1;
-                    let right_idx = i * 3 + 2;
 
                     if owner_rank == self.rank as usize {
-                        for &idx in &[left_idx, mid_idx, right_idx] {
+                        for k in 0..arity {
+                            let idx = i * arity + k;
                             if idx < alive && group_proofs[idx].is_none() {
-                                let tag = if idx == left_idx {
-                                    i_proof * 3 + n_groups
-                                } else if idx == mid_idx {
-                                    i_proof * 3 + n_groups + 1
-                                } else {
-                                    i_proof * 3 + n_groups + 2
-                                };
-                                let (msg, _status) = self.world.any_process().receive_vec_with_tag::<u64>(tag as i32);
+                                let tag = (i_proof * arity + n_groups + k) as i32;
+                                let (msg, _status) = self.world.any_process().receive_vec_with_tag::<u64>(tag);
                                 group_proofs[idx] = Some(msg);
                             }
                         }
                     } else if self.n_processes > 1 {
-                        for &idx in &[left_idx, mid_idx, right_idx] {
+                        for k in 0..arity {
+                            let idx = i * arity + k;
                             if idx < alive {
                                 if let Some(proof) = group_proofs[idx].take() {
-                                    let tag = if idx == left_idx {
-                                        i_proof * 3 + n_groups
-                                    } else if idx == mid_idx {
-                                        i_proof * 3 + n_groups + 1
-                                    } else {
-                                        i_proof * 3 + n_groups + 2
-                                    };
-                                    self.world.process_at_rank(owner_rank as i32).send_with_tag(&proof[..], tag as i32);
+                                    let tag = (i_proof * arity + n_groups + k) as i32;
+                                    self.world.process_at_rank(owner_rank as i32).send_with_tag(&proof[..], tag);
                                 }
                             }
                         }
@@ -471,7 +524,7 @@ impl MpiCtx {
     }
 
     pub fn distribute_multiplicity(&self, _multiplicity: &[AtomicU64], _owner: i32) {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             //assert that I can operate with u32
             assert!(_multiplicity.len() < u32::MAX as usize);
@@ -489,12 +542,16 @@ impl MpiCtx {
                         packed_multiplicity[0] += 2;
                     }
                 }
-                self.world.process_at_rank(_owner).send(&packed_multiplicity[..]);
+                self.world
+                    .process_at_rank(_owner)
+                    .send_with_tag(&packed_multiplicity[..], _MPI_TAG_DISTRIBUTE_MULTIPLICITY);
             } else {
                 let mut packed_multiplicity: Vec<u32> = vec![0; _multiplicity.len() * 2 + 1];
                 for i in 0..self.n_processes {
                     if i != _owner {
-                        self.world.process_at_rank(i).receive_into(&mut packed_multiplicity);
+                        let (msg, _) =
+                            self.world.process_at_rank(i).matched_probe_with_tag(_MPI_TAG_DISTRIBUTE_MULTIPLICITY);
+                        msg.matched_receive_into(&mut packed_multiplicity);
                         for j in (1..packed_multiplicity[0]).step_by(2) {
                             let idx = packed_multiplicity[j as usize] as usize;
                             let m = packed_multiplicity[j as usize + 1] as u64;
@@ -506,55 +563,86 @@ impl MpiCtx {
         }
     }
 
-    pub fn distribute_multiplicities(&self, _multiplicities: &[Vec<AtomicU64>], _owner: i32) {
-        #[cfg(distributed)]
+    pub fn distribute_multiplicities(
+        &self,
+        _multiplicities: &[AtomicU64],
+        _n_cols: usize,
+        _col_len: usize,
+        _owner: i32,
+    ) {
+        #[cfg(feature = "mpi")]
         {
-            // Ensure that each multiplicity vector can be operated with u32
-            let mut buff_size = 0;
-            for multiplicity in _multiplicities.iter() {
-                assert!(multiplicity.len() < u32::MAX as usize);
-                buff_size += multiplicity.len() + 1;
+            if self.n_processes <= 1 {
+                return;
             }
 
-            let n_columns = _multiplicities.len();
+            assert!(_col_len < u32::MAX as usize);
+            assert_eq!(_multiplicities.len(), _n_cols * _col_len);
+            let buff_size = _n_cols * (_col_len + 1);
+
             if _owner != self.rank {
-                // Pack multiplicities in a sparse vector
-                let mut packed_multiplicities = vec![0u32; n_columns];
-                for (col_idx, multiplicity) in _multiplicities.iter().enumerate() {
-                    for (idx, mul) in multiplicity.iter().enumerate() {
-                        let m = mul.load(Ordering::Relaxed);
-                        if m != 0 {
-                            assert!(m < u32::MAX as u64);
-                            packed_multiplicities[col_idx] += 1;
-                            packed_multiplicities.push(idx as u32);
-                            packed_multiplicities.push(m as u32);
-                        }
-                    }
-                }
-
-                self.world.process_at_rank(_owner).send(&packed_multiplicities[..]);
-            } else {
-                let mut packed_multiplicities: Vec<u32> = vec![0; buff_size * 2];
-                for i in 0..self.n_processes {
-                    if i != _owner {
-                        self.world.process_at_rank(i).receive_into(&mut packed_multiplicities);
-
-                        // Read counters
-                        let mut counters = vec![0usize; n_columns];
-                        for col_idx in 0..n_columns {
-                            counters[col_idx] = packed_multiplicities[col_idx] as usize;
-                        }
-
-                        // Unpack multiplicities
-                        let mut idx = n_columns;
-                        for col_idx in 0..n_columns {
-                            for _ in 0..counters[col_idx] {
-                                let row_idx = packed_multiplicities[idx] as usize;
-                                let m = packed_multiplicities[idx + 1] as u64;
-                                _multiplicities[col_idx][row_idx].fetch_add(m, Ordering::Relaxed);
-                                idx += 2;
+                // Pack multiplicities in a sparse vector the per-column scan is parallel
+                use rayon::prelude::*;
+                let per_col: Vec<Vec<u32>> = _multiplicities
+                    .par_chunks(_col_len)
+                    .map(|column| {
+                        let mut pairs: Vec<u32> = Vec::new();
+                        for (idx, mul) in column.iter().enumerate() {
+                            let m = mul.load(Ordering::Relaxed);
+                            if m != 0 {
+                                assert!(m < u32::MAX as u64);
+                                pairs.push(idx as u32);
+                                pairs.push(m as u32);
                             }
                         }
+                        pairs
+                    })
+                    .collect();
+                let total: usize = per_col.iter().map(|v| v.len()).sum();
+                let mut packed_multiplicities: Vec<u32> = Vec::with_capacity(_n_cols + total);
+                packed_multiplicities.extend(per_col.iter().map(|v| (v.len() / 2) as u32));
+                for v in &per_col {
+                    packed_multiplicities.extend_from_slice(v);
+                }
+                self.world
+                    .process_at_rank(_owner)
+                    .send_with_tag(&packed_multiplicities[..], _MPI_TAG_DISTRIBUTE_MULTIPLICITIES);
+            } else {
+                use rayon::prelude::*;
+                for i in 0..self.n_processes {
+                    if i != _owner {
+                        // Receive exactly the message size
+                        let (msg, status) =
+                            self.world.process_at_rank(i).matched_probe_with_tag(_MPI_TAG_DISTRIBUTE_MULTIPLICITIES);
+                        let count = status.count(u32::equivalent_datatype()) as usize;
+                        assert!(
+                            count >= _n_cols && count <= buff_size * 2,
+                            "distribute_multiplicities: bad message size {count}"
+                        );
+                        let mut packed_multiplicities: Vec<u32> = vec![0; count];
+                        msg.matched_receive_into(&mut packed_multiplicities[..]);
+                        // Per-column offsets into the pair area, then unpack columns in parallel
+                        // (each column touches only its own atomics; fetch_add keeps it exact).
+                        let mut offsets = Vec::with_capacity(_n_cols + 1);
+                        let mut acc = _n_cols;
+                        for &counter in &packed_multiplicities[.._n_cols] {
+                            offsets.push(acc);
+                            acc += 2 * counter as usize;
+                        }
+                        offsets.push(acc);
+                        assert_eq!(acc, count, "distribute_multiplicities: counters do not match message size");
+                        let packed = &packed_multiplicities;
+                        (0.._n_cols).into_par_iter().for_each(|col_idx| {
+                            let col_base = col_idx * _col_len;
+                            let mut idx = offsets[col_idx];
+                            let end = offsets[col_idx + 1];
+                            while idx < end {
+                                let row_idx = packed[idx] as usize;
+                                let m = packed[idx + 1] as u64;
+                                _multiplicities[col_base + row_idx].fetch_add(m, Ordering::Relaxed);
+                                idx += 2;
+                            }
+                        });
                     }
                 }
             }
@@ -564,7 +652,7 @@ impl MpiCtx {
     /// Notify all other MPI processes to cancel their current job
     /// This sends a cancellation message to all ranks except the current one
     pub fn notify_cancellation(&self) {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             if self.cancelled.load(Ordering::SeqCst) == 1 {
                 // Already cancelled, no need to send again
@@ -585,13 +673,14 @@ impl MpiCtx {
 
     /// Check for incoming cancellation messages
     pub fn check_cancellation(&self) -> Option<ProofmanError> {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             if self.cancelled.load(Ordering::SeqCst) == 0 {
                 if let Some(_status) = self.world.any_process().immediate_probe_with_tag(_MPI_TAG_CANCEL_JOB) {
                     let (msg, _) = self.world.any_process().receive_vec_with_tag::<i32>(_MPI_TAG_CANCEL_JOB);
 
                     if let Some(&failed_rank) = msg.first() {
+                        self.cancelled.store(1, Ordering::SeqCst);
                         return Some(ProofmanError::MpiCancellation(format!(
                             "Process {} received cancellation message from failed rank {}.",
                             self.rank, failed_rank
@@ -606,7 +695,7 @@ impl MpiCtx {
 
 impl Drop for MpiCtx {
     fn drop(&mut self) {
-        #[cfg(distributed)]
+        #[cfg(feature = "mpi")]
         {
             free_agg_readiness_tracker_c();
         }

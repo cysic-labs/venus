@@ -73,12 +73,3 @@ obj/
 
 zig-out
 .zig-cache
-!go.mod
-!bindings/python/
-!bindings/python/**
-!bindings/java/
-!bindings/java/**
-!bindings/node.js/
-!bindings/node.js/**
-!bindings/emscripten/
-!bindings/emscripten/**

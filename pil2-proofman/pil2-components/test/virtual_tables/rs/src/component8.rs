@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use witness::{define_wc_with_std, execute, WitnessComponent};
+use proofman_witness::{define_wc_with_std, execute, WitnessComponent};
 use proofman_common::{BufferPool, FromTrace, AirInstance, ProofCtx, SetupCtx, ProofmanResult};
 
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use rand::{rngs::StdRng, SeedableRng, RngExt};
 
 use crate::{Component8Trace, Table8};
@@ -48,7 +48,7 @@ impl<F: PrimeField64> WitnessComponent<F> for Component8<F> {
                 let row = Table8::calculate_table_row(val1, val2, val3);
 
                 // Update the virtual table rows
-                self.std_lib.inc_virtual_row(id, row, 1);
+                self.std_lib.inc_virtual_row_one(id, row);
             }
 
             let air_instance = AirInstance::new_from_trace(FromTrace::new(&mut trace));

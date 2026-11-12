@@ -42,7 +42,7 @@ class PlonkSetup {
     map<string, Polynomial<AltBn128::Engine> *> polynomials;
     FrElement k1, k2;
     FrElement w3, w4, w8, wr;
-    G1PointAffine *PTau;
+    G1PointAffine *PTau = nullptr;
 
     vector<ConstraintCoefficients> plonkConstraints;
     vector<AdditionCoefficients> plonkAdditions;
@@ -78,6 +78,8 @@ public:
     ~PlonkSetup();
 
     void generateZkey(string r1csFilename, string pTauFilename, string zkeyFilename);
+
+    void computeConstraintCounts(string r1csFilename, uint64_t &nConstraints, uint64_t &nAdditions);
 };
 }  // namespace Plonk
 

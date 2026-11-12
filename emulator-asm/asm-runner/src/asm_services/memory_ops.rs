@@ -2,7 +2,7 @@ use crate::asm_services::CMD_MO_RESPONSE_ID;
 
 use super::{FromResponsePayload, RequestData, ResponseData, ToRequestPayload, CMD_MO_REQUEST_ID};
 
-pub struct MemoryOperationsRequest {
+pub(crate) struct MemoryOperationsRequest {
     pub max_steps: u64,
     pub chunk_len: u64,
 }
@@ -13,19 +13,16 @@ impl ToRequestPayload for MemoryOperationsRequest {
     }
 }
 
-pub struct MemoryOperationsResponse {
+pub(crate) struct MemoryOperationsResponse {
     pub result: u8,
     pub allocated_len: u64,
     pub trace_len: u64,
 }
 
 impl FromResponsePayload for MemoryOperationsResponse {
+    const RESPONSE_ID: u64 = CMD_MO_RESPONSE_ID;
+
     fn from_response_payload(payload: ResponseData) -> Self {
-        assert!(
-            payload[0] == CMD_MO_RESPONSE_ID,
-            "Expected CMD_MO_RESPONSE_ID but got {}",
-            payload[0]
-        );
         MemoryOperationsResponse {
             result: payload[1] as u8,
             allocated_len: payload[2],

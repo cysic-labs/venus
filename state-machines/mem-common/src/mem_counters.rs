@@ -8,6 +8,7 @@ use zisk_common::ChunkId;
 use crate::{MemAlignCounters, MemHelpers};
 use std::fmt;
 use zisk_common::{BusDevice, BusId, MemBusData, Metrics, MEM_BUS_DATA_SIZE, MEM_BUS_ID};
+use zisk_core::{RAM_ADDR, ROM_ADDR};
 
 const ST_BITS_OFFSET: u32 = 30;
 const ST_INI: u8 = 0;
@@ -69,10 +70,10 @@ impl MemCounters {
         addr_vector.par_sort_by_key(|(key, _)| *key);
 
         // Divide the original vector into three parts
-        let point = addr_vector.partition_point(|x| x.0 < (0xA000_0000 / 8));
+        let point = addr_vector.partition_point(|x| x.0 < (RAM_ADDR / 8) as u32);
         self.addr_sorted[2] = addr_vector.split_off(point);
 
-        let point = addr_vector.partition_point(|x| x.0 < (0x8000_0000 / 8));
+        let point = addr_vector.partition_point(|x| x.0 < (ROM_ADDR / 8) as u32);
         self.addr_sorted[0] = addr_vector.split_off(point);
 
         self.addr_sorted[1] = addr_vector;
@@ -317,6 +318,32 @@ impl MemCounters {
         self.measure(data);
 
         true
+    }
+    pub fn init_with_mem_sections(&mut self, mem_sections: &dyn zisk_core::MemDataSection) {
+        let sections = mem_sections.ro_sections().iter().chain(mem_sections.rw_sections().iter());
+        for section in sections {
+            if section.data.is_empty() {
+                continue;
+            }
+            let addr = section.addr as u32;
+            let mut addr_w = MemHelpers::get_addr_w(addr);
+            if MemHelpers::is_dual(addr) {
+                for _value in section.data.iter() {
+                    self.addr
+                        .entry(addr_w)
+                        .and_modify(|count| {
+                            *count = Self::incr_st_counter_aligned(*count, true);
+                        })
+                        .or_insert(ST_INI_TO_WRITE);
+                    addr_w += 1;
+                }
+            } else {
+                for _value in section.data.iter() {
+                    self.addr.entry(addr_w).and_modify(|count| *count += 1).or_insert(1);
+                    addr_w += 1;
+                }
+            }
+        }
     }
 }
 

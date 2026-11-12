@@ -14,9 +14,7 @@
 using namespace std;
 using json = nlohmann::json;
 
-Goldilocks fr;
-
-void buildConstTree(const string constFile, const string starkInfoFile, const string constTreeFile, const string verKeyFile)
+void buildConstTree(const string constFile, const string starkInfoFile, const string constTreeFile, const string verKeyFile, uint64_t *outRoot)
 {
     TimerStart(BUILD_CONST_TREE);
 
@@ -41,8 +39,14 @@ void buildConstTree(const string constFile, const string starkInfoFile, const st
 
     TimerStart(EXTEND_CONST_POLS);
     NTT_Goldilocks ntt(N);
-    ntt.extendPol(pConstPolsExt, pConstPols, NExtended, N, nPols);
+    ntt.LDE(pConstPolsExt, pConstPols, NExtended, N, nPols);
     TimerStopAndLog(EXTEND_CONST_POLS);
+
+    // loadFileParallel's allocating overload returns malloc'd memory (utils.cpp),
+    // so this must be free(). munmap() here unmapped whole pages out from under
+    // glibc's arena -- destroying neighbouring live allocations and malloc's own
+    // metadata -- which crashed a later, unrelated allocation.
+    free(pConstPols);
 
     if (verificationHashType == "GL") {
         TimerStart(MERKELIZE_CONST_TREE);
@@ -54,6 +58,13 @@ void buildConstTree(const string constFile, const string starkInfoFile, const st
         mt.merkelize();
         mt.getRoot(root);
         TimerStopAndLog(MERKELIZE_CONST_TREE);
+
+        if (outRoot) {
+            outRoot[0] = Goldilocks::toU64(root[0]);
+            outRoot[1] = Goldilocks::toU64(root[1]);
+            outRoot[2] = Goldilocks::toU64(root[2]);
+            outRoot[3] = Goldilocks::toU64(root[3]);
+        }
 
         TimerStart(GENERATING_FILES);
 
@@ -73,6 +84,10 @@ void buildConstTree(const string constFile, const string starkInfoFile, const st
 
         TimerStopAndLog(GENERATING_FILES);
 
+        // setNodes leaves isNodesAllocated false, so ~MerkleTreeGL does not
+        // free this; without the delete the whole node buffer leaks per call.
+        delete[] buffNodes;
+
     } else if(verificationHashType == "BN128"){
         TimerStart(MERKELIZE_CONST_TREE);
         RawFr::Element rootC;
@@ -86,6 +101,10 @@ void buildConstTree(const string constFile, const string starkInfoFile, const st
         mt.merkelize();
         mt.getRoot(&rootC);
         TimerStopAndLog(MERKELIZE_CONST_TREE);
+
+        if (outRoot) {
+            outRoot[0] = 0; outRoot[1] = 0; outRoot[2] = 0; outRoot[3] = 0;
+        }
 
         if (verKeyFile != "") {
             json value;
@@ -101,9 +120,11 @@ void buildConstTree(const string constFile, const string starkInfoFile, const st
             mt.writeFile(constTreeFile);
         }
         TimerStopAndLog(GENERATING_FILES);
+
+        // As above: setNodes means the tree does not own this buffer.
+        delete[] buffNodes;
     } else {
-        cerr << "Invalid Hash Type: " << verificationHashType << endl;
-        exit(-1);
+        throw runtime_error("Invalid Hash Type: " + verificationHashType);
     }
 
     delete[] pConstPolsExt;

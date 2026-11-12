@@ -2,9 +2,27 @@ require "std_lookup.pil"
 require "operations.pil"
 require "opids.pil"
 
-airtemplate ArithTable(const int N = 2**7, const int generate_table = 0) {
+// ArithTable: Lookup table that enumerates all valid combinations of sign flags
+// for each arithmetic operation (multiply/divide). This table acts as a constraint:
+// the arithmetic state machine must prove that its flag combination exists in this table,
+// ensuring only mathematically consistent sign relationships are used.
+//
+// Columns:
+//   OP       - operation opcode (0xB0..0xBF)
+//   FLAGS    - packed bitfield encoding all sign/mode flags
+//   RANGE_AB - encodes sign-extension constraints for operands A and B upper chunks
+//   RANGE_CD - encodes sign-extension constraints for result C (product/quotient) and D (remainder)
+//
+// The table is consumed via lookup_assumes from the arithmetic execution trace,
+// proving that every executed operation uses a valid flag combination.
 
-    // N = 74
+airtemplate ArithTable(int N = 0, const int generate_table = 0) {
+
+    const int COMPACT_ROWS = 124;
+    N = VIRTUAL ? COMPACT_ROWS : 2**(log2(COMPACT_ROWS - 1) + 1);
+
+    // COMPACT_ROWS is the exact number of valid flag combinations across the 14 operations.
+    // Recompute it with generate_table = 1 after changing any of the filters below.
 
     // div m32 sa  sb  primary  secondary  opcodes             na   nb   np   nr   sext(c)
     // -----------------------------------------------------------------------------------
@@ -24,14 +42,34 @@ airtemplate ArithTable(const int N = 2**7, const int generate_table = 0) {
     col fixed FLAGS;
     col fixed RANGE_AB;
     col fixed RANGE_CD;
+
+    // Range encoding for sign-extension of upper chunks:
+    //   POS (1) = upper chunk must be all zeros (positive or unsigned value)
+    //   NEG (2) = upper chunk must be all ones (negative value, sign-extended)
+    //   0       = no constraint on upper chunk (full 64-bit value used)
+    const int NEG = 2;
+    const int POS = 1;
+
+    // rid tables for the compressed range-id layout of ArithRangeTable (see the rid table there).
+    // A rid encodes the range types of four chunks at once. Exactly one of the two halves is
+    // constrained: either the "3" chunks (64-bit ops) or the "1" chunks (32-bit / _W ops).
+    // Index is 3 * range(x) + range(y) with 0 = no constraint, 1 = POS, 2 = NEG.
+    const int RID_HIGH[9] = [3, 11, 5, 9, 13, 15, 2, 7, 0];   // (x3, y3) constrained
+    const int RID_LOW[9]  = [3, 10, 4, 8, 12, 14, 1, 6, 16];  // (x1, y1) constrained
+
+    // op2row maps (opcode, icase) -> table row. icase is 9 bits now, and the opcodes are not
+    // contiguous (0xb2 and 0xb7 do not exist), so the stride covers all 16 opcode slots.
+    const int ICASES = 512;
+    const int OP2ROW_SIZE = 16 * ICASES;
+
     string code = "";
 
     int index = 0;
     int aborted = 0;
 
     if (generate_table) {
-        int air.op2row[2048];
-        for (int i = 0; i < 2048; ++i) {
+        int air.op2row[OP2ROW_SIZE];
+        for (int i = 0; i < OP2ROW_SIZE; ++i) {
             op2row[i] = 255;
         }
     }
@@ -43,8 +81,8 @@ airtemplate ArithTable(const int N = 2**7, const int generate_table = 0) {
         const int opcode = OPS[iop];
         int m32 = 0;    // 32 bits operation
         int div = 0;    // division operation (div,rem)
-        int sa = 0;
-        int sb = 0;
+        int sa = 0;     // operation with a signed otherwise unsigned
+        int sb = 0;     // operation with b signed otherwise unsigned
         int main_mul = 0;
         int main_div = 0;
         string opname = "";
@@ -112,15 +150,48 @@ airtemplate ArithTable(const int N = 2**7, const int generate_table = 0) {
                 m32 = 1;
         }
 
-        for (int icase = 0; icase < 128; ++icase) {
+        // Iterate all 512 possible flag combinations (9 bits) and filter valid ones.
+        // Each bit encodes a boolean flag; invalid combinations are skipped.
+        for (int icase = 0; icase < ICASES; ++icase) {
+            // bit 0: na - operand A is negative (quotient in division)
             const int na = (0x01 & icase) ? 1 : 0;
+            // bit 1: nb - operand B is negative (divisor in division)
             const int nb = (0x02 & icase) ? 1 : 0;
+            // bit 2: np - product (mul) or dividend (div) is negative
             const int np = (0x04 & icase) ? 1 : 0;
+            // bit 3: nr - remainder is negative (division only)
             const int nr = (0x08 & icase) ? 1 : 0;
+            // bit 4: sext - result requires 32-to-64 sign extension (_W operations)
             const int sext = (0x10 & icase) ? 1 : 0;
+            // bit 5: div_by_zero - divisor is zero (special case result)
             const int div_by_zero = (0x20 & icase) ? 1 : 0;
+            // bit 6: div_overflow
             const int div_overflow = (0x40 & icase) ? 1 : 0;
+            // bit 7: result_is_zero - result is zero (product/quotient)
+            const int result_is_zero = (0x80 & icase) ? 1 : 0;
+            // bit 8: remainder_is_zero - remainder is zero (division only)
+            const int remainder_is_zero = (0x100 & icase) ? 1 : 0;
 
+            // division alias to clarify
+            // div(x,y)  x = c (dividend), y = b (divisor), a (quotient), d (remainder)
+            //           a * b === c - d
+            const int neg_dividend = np;
+            const int neg_divisor = nb;
+            const int neg_quotient = na;
+            const int neg_remainder = nr;
+            const int quotient_is_zero = result_is_zero;
+
+            if (div) {
+                if (quotient_is_zero && neg_quotient) continue;
+                if (remainder_is_zero && neg_remainder) continue;
+                if ((div_by_zero || div_overflow) && quotient_is_zero) continue;
+            } else {
+                if (remainder_is_zero) continue;  // remainder sign only meaningful for division
+                if (result_is_zero && np) continue;  // if p is negative cannot be zero (product is non-zero)
+                if (div_by_zero) continue;  // div_by_zero only meaningful for division
+                if (div_overflow) continue;  // div_overflow only meaningful for division
+            }   
+            // operation signed because a or/and b are signed
             const int signed = (sa || sb) ? 1 : 0;
 
             // division by zero (dividend: x, divisor: 0)
@@ -147,23 +218,156 @@ airtemplate ArithTable(const int N = 2**7, const int generate_table = 0) {
             // div_overflow
             //      signed:1 => na:1 nb:1 np:1 nr:0 sext:0
 
+            // ===== Validity filters: skip invalid flag combinations =====
+
+            //   - for multiplication with result_is_zero=1: product=0 means bit 31 is 0 → no sign extension
+            if (result_is_zero && sext && !div) continue;
+
+            // Division-by-zero constraints:
+            //   - only valid for division operations
+            //   - divisor (b) cannot be negative (it's zero)
+            //   - quotient sign (np) must equal remainder sign (nr)
+            //   - for signed ops, dividend must be negative (na) matches signed flag
             if (div_by_zero && (!div || nb || np != nr || signed != na)) continue;
+
+            //   - 32-bit main_div with div_by_zero must sign-extend (result is 0xFFFF...)
             if (div_by_zero && main_div && m32 && !sext) continue;
+
+            // Division-overflow constraints (e.g. INT64_MIN / -1 or INT32_MIN / -1):
+            //   - only for signed division
+            //   - both operands must be negative (a=MIN, b=-1)
+            //   - quotient is negative (overflow wraps to negative)
+            //   - remainder must be zero (no remainder in overflow case)
             if (div_overflow && (!div || !signed || !na || !nb || !np || nr)) continue;
+
+            // ===== Combinations no real operation can produce =====
+            //
+            // Without these the table has rows that are unreachable. Each one is self-contradictory,
+            // so the equations plus the range checks make it unsatisfiable and no prover can use it,
+            // but keeping them out costs nothing and removes rows a future change could turn into a
+            // real hole. Verified against the executor: none of them rejects a reachable row.
+            //
+            //   - multiplication: both operands negative means both are non-zero, so the product
+            //     cannot be zero (na = 1 forces a[3] >= 0x8000 through the NEG range check, so a != 0)
+            if (!div && result_is_zero && na && nb) continue;
+            //   - division overflow (MIN / -1) divides exactly, so the remainder is always zero
+            if (div_overflow && !remainder_is_zero) continue;
+            //   - quotient == 0 and remainder == 0 imply dividend == 0, which cannot be negative
+            if (div && result_is_zero && remainder_is_zero && neg_dividend) continue;
+            //   - a zero quotient has bit 31 clear, so it cannot drive sign extension
+            if (div && main_div && result_is_zero && sext) continue;
+            //   - likewise a zero remainder cannot drive sign extension
+            if (div && !main_div && remainder_is_zero && sext) continue;
+            //
+            // The last two are arithmetic rather than flag consistency, so they need the reasoning
+            // spelled out. They only apply to the UNSIGNED _W ops, where sext is driven by the value
+            // itself; for div_w/rem_w sext is tied to na/nr by the two filters further down.
+            //
+            //   - divu_w: sext = 1 means the 32-bit quotient has bit 31 set, so quotient >= 2^31.
+            //     Since quotient <= dividend / divisor and the dividend is below 2^32, a divisor of
+            //     2 or more would give a quotient below 2^31. So the divisor is 1 and the remainder
+            //     is zero. Without this, the row with remainder_is_zero cleared stays in the table:
+            //     it is not exploitable (the equation plus |d| < |b| still pin d to 0) but that
+            //     argument depends on constraints outside this table, so pin it here instead.
+            //     div_by_zero is excluded: there the quotient is forced to 0xFFFF_FFFF (so sext = 1)
+            //     and the remainder is the dividend, which need not be zero.
+            if (div && main_div && !signed && !div_by_zero && sext && !remainder_is_zero) continue;
+            //   - remu_w: sext = 1 means the remainder has bit 31 set, so remainder >= 2^31. As
+            //     remainder < divisor, the divisor is above 2^31; a quotient of 1 or more would make
+            //     the dividend exceed 2^32. So the quotient is zero. div_by_zero is excluded for
+            //     the same reason: there the quotient is 0xFFFF_FFFF, not zero.
+            if (div && !main_div && !signed && !div_by_zero && sext && !result_is_zero) continue;
+            //
+            // Sign-extension only applies to 32-bit (_W) operations
             if (sext && !m32) continue;
+            // Remainder sign only meaningful for division operations
             if (nr && !div) continue;
+            // na (A negative) requires operand A to be signed
             if (na && !sa) continue;
-            if (nb && !sb) continue;
+            // nb (B negative) requires operand B to be signed
+            if (nb && !sb) continue;        
+            // np (product/quotient negative) requires at least one signed operand
             if (np && !sa && !sb) continue;
-            if (nr && !sa && !sb) continue;
-            if (np && na == nb && !div) continue;
-            if (np && !na && !nb && !nr && div) continue;
-            if (na && !nb && !nr && !np && div && !div_by_zero) continue;
-            if (np && na && nb && !div_overflow) continue;
-            if (!np & nr) continue;
+
+            // 32-bit signed: sign-extension must match the sign of the result
+            //   - for main_div (quotient result): sext must match na (dividend sign drives extension)
             if (m32 && signed && main_div && na != sext) continue;
+            //   - for remainder result: sext must match nr (remainder sign drives extension)
             if (m32 && signed && div && !main_div && nr != sext) continue;
 
+
+            // multiplication [a*b = c|d] (np)
+            //
+            //    na  nb  result_is_zero  np
+            //    --  --  --------------  --
+            //     0   0         0         0
+            //     0   0         1         0
+            //     0   1         0         1 
+            //     0   1         1         0 <-- exception when np = 0
+            //     1   0         0         1 
+            //     1   0         1         0 <-- exception when np = 0
+            //     1   1         0         0
+            //     1   1         1         0
+            // 
+            if (!div) {
+                if (na == 0 && nb == 0 && result_is_zero == 0 && np != 0) continue;
+                if (na == 0 && nb == 0 && result_is_zero == 1 && np != 0) continue;
+                if (na == 0 && nb == 1 && result_is_zero == 0 && np != 1) continue;
+                if (na == 0 && nb == 1 && result_is_zero == 1 && np != 0) continue;
+                if (na == 1 && nb == 0 && result_is_zero == 0 && np != 1) continue;
+                if (na == 1 && nb == 0 && result_is_zero == 1 && np != 0) continue;
+                if (na == 1 && nb == 1 && result_is_zero == 0 && np != 0) continue;
+                if (na == 1 && nb == 1 && result_is_zero == 1 && np != 0) continue;
+            }
+
+            // division [c/b, a*b=c-d] (quotient = a, np)
+            //
+            //        (nc)         (nb)                           (na)
+            //    neg_dividend  neg_divisor  quotient_is_zero  neg_quotient
+            //    ------------  -----------  ----------------  ------------
+            //          0            0               0              0
+            //          0            0               1              0
+            //          0            1               0              1 
+            //          0            1               1              0 <-- exception when quotient = 0
+            //          1            0               0              1 
+            //          1            0               1              0 <-- exception when quotient = 0
+            //          1            1               0              0
+            //          1            1               1              0
+            //
+
+            if (div && !div_by_zero && !div_overflow) {
+                if (neg_dividend == 0 && neg_divisor == 0 && quotient_is_zero == 0 && neg_quotient != 0) continue;
+                if (neg_dividend == 0 && neg_divisor == 0 && quotient_is_zero == 1 && neg_quotient != 0) continue;
+                if (neg_dividend == 0 && neg_divisor == 1 && quotient_is_zero == 0 && neg_quotient != 1) continue;
+                if (neg_dividend == 0 && neg_divisor == 1 && quotient_is_zero == 1 && neg_quotient != 0) continue;
+                if (neg_dividend == 1 && neg_divisor == 0 && quotient_is_zero == 0 && neg_quotient != 1) continue;
+                if (neg_dividend == 1 && neg_divisor == 0 && quotient_is_zero == 1 && neg_quotient != 0) continue;
+                if (neg_dividend == 1 && neg_divisor == 1 && quotient_is_zero == 0 && neg_quotient != 0) continue;
+                if (neg_dividend == 1 && neg_divisor == 1 && quotient_is_zero == 1 && neg_quotient != 0) continue;
+            }
+
+            // division [c/b, a*b=c-d] (remain = d, nr) 
+            //
+            //        (nc)                            (nr)
+            //    neg_dividend remainder_is_zero  neg_remainder
+            //    ------------ -----------------  -------------
+            //          0              0                0 
+            //          0              1                0 
+            //          1              0                1
+            //          1              1                0 <-- exception when remainder = 0
+            //
+
+            if (div && !div_by_zero && !div_overflow) {
+                if (neg_dividend == 0 && remainder_is_zero == 0 && neg_remainder != 0) continue;
+                if (neg_dividend == 0 && remainder_is_zero == 1 && neg_remainder != 0) continue;
+                if (neg_dividend == 1 && remainder_is_zero == 0 && neg_remainder != 1) continue;
+                if (neg_dividend == 1 && remainder_is_zero == 1 && neg_remainder != 0) continue;
+            }
+            
+            // Range constraints for upper chunks of operands/results.
+            // For 64-bit ops: range_x3 constrains chunk[3] (bits 48..63)
+            // For 32-bit ops: range_x1 constrains chunk[1] (bits 16..31) since only lower 32 bits are used
+            // These determine whether the upper portion must be all-zeros (POS) or all-ones (NEG)
             int range_a1 = 0;
             int range_b1 = 0;
             int range_c1 = 0;
@@ -175,51 +379,54 @@ airtemplate ArithTable(const int N = 2**7, const int generate_table = 0) {
 
             if (m32) {
                 if (sa) {
-                    range_a1 = na ? 2 : 1;
+                    range_a1 = na ? NEG : POS;
                 } else if (main_div) {
-                    range_a1 = sext ? 2 : 1;
+                    range_a1 = sext ? NEG : POS;
                 }
                 if (sb) {
-                    range_b1 = nb ? 2 : 1;
+                    range_b1 = nb ? NEG : POS;
                 }
                 if (!div) {
-                    range_c1 = sext ? 2 : 1;
+                    range_c1 = sext ? NEG : POS;
                 } else if (sa) {
-                    range_c1 = np ? 2 : 1;
+                    range_c1 = np ? NEG : POS;
                 }
                 if (div && !main_div) {
-                    range_d1 = sext ? 2 : 1;
+                    range_d1 = sext ? NEG : POS;
                 } else if (sa) {
-                    range_d1 = nr ? 2 : 1;
+                    range_d1 = nr ? NEG : POS;
                 }
             } else {
                 if (sa) {
-                    range_a3 = na ? 2 : 1;
+                    range_a3 = na ? NEG : POS;
                     if (div) {
-                        range_c3 = np ? 2 : 1;
-                        range_d3 = nr ? 2 : 1;
+                        range_c3 = np ? NEG : POS;
+                        range_d3 = nr ? NEG : POS;
                     } else {
-                        range_d3 = np ? 2 : 1;
+                        range_d3 = np ? NEG : POS;
                     }
                 }
                 if (sb) {
-                    range_b3 = nb ? 2 : 1;
+                    range_b3 = nb ? NEG : POS;
                 }
             }
+            // Pack all flags into a single integer for the lookup table.
+            // Bit layout: [0]:m32 [1]:div [2]:na [3]:nb [4]:np [5]:nr [6]:sext [7]:div_by_zero
+            //             [8]:div_overflow [9]:main_mul [10]:main_div [11]:signed
+            //             [12]:result_is_zero [13]:remainder_is_zero
             const int flags = m32 + 2 * div + 4 * na + 8 * nb + 16 * np + 32 * nr + 64 * sext +
                            128 * div_by_zero + 256 * div_overflow + 512 * main_mul +
-                           1024 * main_div + 2048 * signed;
+                           1024 * main_div + 2048 * signed + 4096 * result_is_zero +
+                           8192 * remainder_is_zero;
 
-            int range_ab = (range_a3 + range_a1) * 3 + range_b3 + range_b1;
-            if ((range_a1 + range_b1) > 0) {
-                range_ab = range_ab + 8;
-            }
-            int range_cd = (range_c3 + range_c1) * 3 + range_d3 + range_d1;
-            if ((range_c1 + range_d1) > 0) {
-                range_cd = range_cd + 8;
-            }
-            // const int range_cd = range_c3 * 3 + range_d3 + m32 * 8 + range_c1 * 3 + range_d1;
-
+            // Encode the range constraints of A,B into a single rid. A _W (chunk1) constraint means
+            // the "1" chunks are the constrained half, otherwise it is the "3" chunks. With no
+            // constraint at all both tables agree on the all-FULL rid, so either branch is correct.
+            int range_ab = (range_a1 + range_b1) > 0 ? RID_LOW[range_a1 * 3 + range_b1]
+                                                     : RID_HIGH[range_a3 * 3 + range_b3];
+            // Same encoding for C (product/quotient) and D (remainder)
+            int range_cd = (range_c1 + range_d1) > 0 ? RID_LOW[range_c1 * 3 + range_d1]
+                                                     : RID_HIGH[range_c3 * 3 + range_d3];
             OP[index] = opcode;
             FLAGS[index] = flags;
             RANGE_AB[index] = range_ab;
@@ -227,10 +434,10 @@ airtemplate ArithTable(const int N = 2**7, const int generate_table = 0) {
 
             if (generate_table) {
                 // println(`OP:${opcode} na:${na} nb:${nb} np:${np} nr:${nr} sext:${sext} m32:${m32} div:${div}`,
-                //         `div_by_zero:${div_by_zero} div_overflow:${div_overflow} sa:${sa} sb:${sb} main_mul:${main_mul}`,
+                //         `div_by_zero:${div_by_zero} div_overflow:${div_overflow} result_is_zero:${result_is_zero} remainder_is_zero:${remainder_is_zero} sa:${sa} sb:${sb} main_mul:${main_mul}`,
                 //         `main_div:${main_div} signed:${signed} range_ab:${range_ab} range_cd:${range_cd} index:${(opcode - OP_MULU) * 128 + icase} icase:${icase}`);
 
-                op2row[(opcode - OP_MULU) * 128 + icase] = index;
+                op2row[(opcode - OP_MULU) * ICASES + icase] = index;
                 code = code + `[${opcode}, ${flags}, ${range_ab}, ${range_cd}],`;
             }
             ++index;
@@ -243,16 +450,21 @@ airtemplate ArithTable(const int N = 2**7, const int generate_table = 0) {
 
     if (generate_table) {
         println(`pub const ROWS: usize = ${size};`);
+        println(`pub const ICASES: usize = ${ICASES};`);
         println("const __: u8 = 255;");
         string _op2row = "";
-        for (int i = 0; i < 2048; ++i) {
+        for (int i = 0; i < OP2ROW_SIZE; ++i) {
             _op2row = _op2row + ((op2row[i] == 255) ? "__":string(op2row[i])) + ",";
         }
-        println("pub static ARITH_TABLE_ROWS: [u8; 2048] = [", _op2row, "];");
+        println(`pub static ARITH_TABLE_ROWS: [u8; ${OP2ROW_SIZE}] = [`, _op2row, "];");
+        println("/// Only read by the debug/test validation path in `ArithTableHelpers::get_row`.");
+        println("#[allow(dead_code)]");
         println(`pub static ARITH_TABLE: [[u16; 4]; ROWS] = [${code}];`);
     }
 
-    // padding repeat first row
+    // Pad remaining rows up to N by repeating the first row.
+    // This is required because the air template must fill all N rows,
+    // and padding with a valid row ensures the lookup table remains consistent.
 
     const int padding_op = OP[0];
     const int padding_flags = FLAGS[0];
@@ -270,15 +482,20 @@ airtemplate ArithTable(const int N = 2**7, const int generate_table = 0) {
     lookup_proves(ARITH_TABLE_ID, mul: multiplicity, expressions: [OP, FLAGS, RANGE_AB, RANGE_CD]);
 }
 
+// Helper function used by the arithmetic execution trace to assert that a given
+// combination of (opcode, flags, ranges) exists in the ArithTable.
+// This is the "consumer" side of the lookup: the execution must prove its flags are valid.
 function arith_table_assumes( const expr op, const expr flag_m32, const expr flag_div, const expr flag_na,
                               const expr flag_nb, const expr flag_np, const expr flag_nr, const expr flag_sext,
                               const expr flag_div_by_zero, const expr flag_div_overflow,
                               const expr flag_main_mul, const expr flag_main_div, const expr flag_signed,
+                              const expr flag_result_is_zero, const expr flag_remainder_is_zero,
                               const expr range_ab, const expr range_cd) {
 
     lookup_assumes(ARITH_TABLE_ID, expressions: [ op, flag_m32 + 2 * flag_div + 4 * flag_na + 8 * flag_nb +
                                            16 * flag_np + 32 * flag_nr + 64 * flag_sext +
                                            128 * flag_div_by_zero + 256 * flag_div_overflow +
-                                           512 * flag_main_mul + 1024 * flag_main_div + 2048 * flag_signed,
+                                           512 * flag_main_mul + 1024 * flag_main_div + 2048 * flag_signed +
+                                           4096 * flag_result_is_zero + 8192 * flag_remainder_is_zero,
                                            range_ab, range_cd]);
 }

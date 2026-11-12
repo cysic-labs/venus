@@ -1,0 +1,727 @@
+function get_type_code(const expr c): int {
+        if (c is int) {
+            return 1;
+        }
+        if (c is string) {
+            return 2;
+        }
+        if (c is expr) {
+            return 3;
+        }
+        if (c is col fixed) {
+            return 4;
+        }
+        if (c is col witness) {
+            return 5;
+        }
+        if (c is airval) {
+            return 6;
+        }
+        if (c is proofval) {
+            return 7;
+        }
+        if (c is public) {
+            return 8;
+        }
+        if (c is challenge) {
+            return 9;
+        }
+        if (c is airgroupval) {
+            return 10;
+        }
+        if (c is col custom) {
+            return 11;
+        }
+        return 0;
+}
+
+public rom_root[4];
+airtemplate Types(int N = 2**8) {
+    
+    commit stage(0) public(rom_root) rom;
+
+    {
+        int c = 13;
+        assert(c is int);
+        assert(!(c is string));
+        assert(!(c is expr));
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col rom));
+        assert(get_type_code(c) == 1);
+    }
+    {
+        string c = "test";
+        assert(!(c is int));
+        assert(c is string);
+        assert(!(c is expr));
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col rom));
+        assert(get_type_code(c) == 2);
+    }
+    {
+        col witness k;
+        expr c = k + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col rom));
+        assert(get_type_code(c) == 3);  
+    }
+    {
+        col witness k;
+        expr c = k;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(c is col witness);
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 5);
+    }
+    {
+        col witness c;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr));
+        assert(!(c is col fixed));
+        assert(c is col witness);
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 5);
+    }
+    {
+        col witness k;
+        const expr c = k + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col rom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        col witness k;
+        const expr c = k;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(c is col witness);
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col rom));
+        assert(get_type_code(c) == 5);
+    }
+    {
+        col rom k;
+        expr c = k + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is col rom));
+        assert(!(c is col custom));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        col rom k;
+        expr c = k;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(c is col rom);
+        assert(c is col custom);
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(get_type_code(c) == 11);
+    }
+    {
+        col rom c;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr));
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(c is col rom);
+        assert(c is col custom);
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+    }
+    {
+        col rom k;
+        const expr c = k + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is col rom));
+        assert(!(c is col custom));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        col rom k;
+        const expr c = k;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(c is col rom);
+        assert(c is col custom);
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(get_type_code(c) == 11);
+    }
+    {
+        col fixed k = [0..N-1];
+        expr c = k + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        col fixed k = [0..N-1];
+        expr c = k;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(c is col fixed);
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 4);
+    }
+    {
+        col fixed k = [0..N-1];
+        const expr c = k + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        col fixed k = [0..N-1];
+        const expr c = k;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(c is col fixed);
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 4);
+    }
+    {
+        col fixed c = [0..N-1];
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr));
+        assert(c is col fixed);
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 4);
+    }
+    {
+        expr c = 10;
+        c = c + 20;
+        assert(c is int);
+        assert(!(c is string));
+        assert(!(c is expr));
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 1);
+    }
+    {
+        airval k;
+        expr c = k + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        airval k;
+        expr c = k;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(c is airval);
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 6);
+    }
+    {
+        airval k;
+        const expr c = k + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        airval k;
+        const expr c = k;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(c is airval);
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 6);
+    }
+    {
+        airval c;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(c is airval);
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 6);
+    }
+    {
+        proofval pk1;
+        expr c = pk1 + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        proofval pk2;
+        expr c = pk2;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(c is proofval);
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 7);
+    }
+    {
+        proofval pk3;
+        const expr c = pk3 + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        proofval pk4;
+        const expr c = pk4;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(c is proofval);
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 7);
+    }
+    {
+        proofval c;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(c is proofval);
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 7);
+    }    
+    {
+        public uk1;
+        expr c = uk1 + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        public uk2;
+        expr c = uk2;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(c is public);
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 8);
+    }
+    {
+        public uk3;
+        const expr c = uk3 + 10;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        public uk4;
+        const expr c = uk4;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(c is public);
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 8);
+    }
+    {
+        public c2;
+        assert(!(c2 is int));
+        assert(!(c2 is string));
+        assert(!(c2 is expr)); // means a non runtime no single expression
+        assert(!(c2 is col fixed));
+        assert(!(c2 is col witness));
+        assert(!(c2 is airval));
+        assert(!(c2 is proofval));
+        assert(c2 is public);
+        assert(!(c2 is challenge));
+        assert(!(c2 is airgroupval));
+        assert(!(c2 is col custom));
+        assert(get_type_code(c2) == 8);
+    }    
+    {
+        challenge ck1;
+        expr c = uk1 + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        challenge ck2;
+        expr c = ck2;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(c is challenge);
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 9);
+    }
+    {
+        challenge ck3;
+        const expr c = ck3 + 10;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        challenge ck4;
+        const expr c = ck4;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(c is challenge);
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 9);
+    }
+    {
+        challenge ck;
+        assert(!(ck is int));
+        assert(!(ck is string));
+        assert(!(ck is expr)); // means a non runtime no single expression
+        assert(!(ck is col fixed));
+        assert(!(ck is col witness));
+        assert(!(ck is airval));
+        assert(!(ck is proofval));
+        assert(!(ck is public));
+        assert(ck is challenge);
+        assert(!(ck is airgroupval));
+        assert(!(ck is col custom));
+        assert(get_type_code(ck) == 9);
+    }    
+    {
+        airgroupval aggregate(sum) agv1;
+        expr c = agv1 + 10;        
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        airgroupval aggregate(sum) agv2;
+        expr c = agv2;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(c is airgroupval);
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 10);
+    }
+    {
+        airgroupval aggregate(sum) agv3;
+        const expr c = agv3 + 10;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(c is expr); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(!(c is airgroupval));
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 3);
+    }
+    {
+        airgroupval aggregate(sum) agv4;
+        const expr c = agv4;
+        assert(!(c is int));
+        assert(!(c is string));
+        assert(!(c is expr)); // means a non runtime no single expression
+        assert(!(c is col fixed));
+        assert(!(c is col witness));
+        assert(!(c is airval));
+        assert(!(c is proofval));
+        assert(!(c is public));
+        assert(!(c is challenge));
+        assert(c is airgroupval);
+        assert(!(c is col custom));
+        assert(get_type_code(c) == 10);
+    }
+    {
+        airgroupval aggregate(sum) agv;
+        assert(!(agv is int));
+        assert(!(agv is string));
+        assert(!(agv is expr)); // means a non runtime no single expression
+        assert(!(agv is col fixed));
+        assert(!(agv is col witness));
+        assert(!(agv is airval));
+        assert(!(agv is proofval));
+        assert(!(agv is public));
+        assert(!(agv is challenge));
+        assert(agv is airgroupval);
+        assert(!(agv is col custom));
+        assert(get_type_code(agv) == 10);
+    }    
+}
+
+airgroup Types {
+    Types();
+}

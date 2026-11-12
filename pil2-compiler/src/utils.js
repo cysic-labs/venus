@@ -30,3 +30,8 @@ exports.extractNameAndNumIndexes = function (s) {
     const indexes = [...s.matchAll(/\[(\d+)\]/g)].map(match => parseInt(match[1]));
     return [name, indexes];
 }
+
+exports.cleanSourceTag = function (s) {
+    if (typeof s !== 'string') return s;
+    return s.replace(/^(.*?:\d+)(?::.*)?$/, '$1');
+}

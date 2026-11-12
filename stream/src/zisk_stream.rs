@@ -1,0 +1,320 @@
+//! ZiskStream is responsible for reading precompile hints from a stream source and sent to a hints processor.
+
+use crate::error::{Result, StreamError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+
+use crate::{StreamRead, StreamSource};
+
+/// A trait for processing precompile hints from a stream source.
+pub trait StreamProcessor: Send + Sync + 'static {
+    /// Process a batch of hint data.
+    ///
+    /// # Returns
+    /// `true` if CTRL_END was encountered (signals end of stream), `false` otherwise.
+    fn process_hints(&self, data: &[u64], first_batch: bool) -> Result<bool>;
+
+    /// Reset the processor state, if applicable.
+    fn reset(&self) {}
+}
+
+/// Trait for submitting processed hints to a sink.
+///
+/// # Arguments
+/// * `processed` - A slice of processed hints as u64 values.
+///
+/// # Returns
+/// * `Ok(())` - If hints were successfully submitted
+/// * `Err` - If submission fails
+pub trait StreamSink: Send + Sync + 'static {
+    /// Submit processed hints to the sink.
+    fn submit(&self, processed: &[u64]) -> Result<()>;
+
+    /// Reset the sink state, if applicable.
+    fn reset(&self) {}
+}
+
+enum ThreadCommand {
+    Process,
+    Shutdown,
+}
+
+/// ZiskStream struct manages the processing of precompile hints and writing them to shared memory.
+pub struct ZiskStream<P: StreamProcessor> {
+    /// The hints processor used to process hints before writing.
+    hints_processor: Arc<P>,
+
+    /// Channel sender to communicate with the background thread.
+    tx: Option<Sender<ThreadCommand>>,
+
+    /// Join handle for the background thread.
+    thread_handle: Option<JoinHandle<()>>,
+
+    initialized: AtomicBool,
+}
+
+impl<P: StreamProcessor> ZiskStream<P> {
+    /// Create a new ZiskStream with the given processor.
+    ///
+    /// # Arguments
+    /// * `hints_processor` - The processor used to process hints.
+    ///
+    /// # Returns
+    /// A new `ZiskStream` instance without a running thread.
+    pub fn new(hints_processor: P) -> Self {
+        Self {
+            hints_processor: Arc::new(hints_processor),
+            tx: None,
+            thread_handle: None,
+            initialized: AtomicBool::new(false),
+        }
+    }
+
+    /// Create a new ZiskStream from an already-Arc-wrapped processor.
+    ///
+    /// Useful when the processor is shared with other owners (e.g. `InputsShmemWriter`).
+    pub fn from_arc(hints_processor: Arc<P>) -> Self {
+        Self { hints_processor, tx: None, thread_handle: None, initialized: AtomicBool::new(false) }
+    }
+
+    /// Stop the current background thread if running.
+    fn stop_thread(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(ThreadCommand::Shutdown);
+        }
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+    }
+
+    /// Set a new StreamSource for the pipeline and spawn a background thread to process data.
+    ///
+    /// This will stop any existing background thread and start a new one with the new stream.
+    ///
+    /// # Arguments
+    /// * `stream` - The new StreamSource for reading data.
+    pub fn set_stream_src(&mut self, mut stream: StreamSource) -> Result<()> {
+        // Stop the existing thread if running
+        self.stop_thread();
+
+        // Create a new channel for communication with the thread
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tx = Some(tx);
+
+        // Clone Arc references for the thread
+        let hints_processor = Arc::clone(&self.hints_processor);
+
+        // Spawn the background thread — open() is deferred here so that
+        // QUIC readers can create their dedicated runtime on a plain thread
+        // (not inside spawn_blocking, which interferes with block_on).
+        let thread_handle = thread::spawn(move || {
+            if !stream.is_active() {
+                if let Err(e) = stream.open() {
+                    tracing::error!("Failed to open stream in background thread: {e}");
+                    return;
+                }
+            }
+            Self::background_thread(stream, hints_processor, rx);
+        });
+
+        self.thread_handle = Some(thread_handle);
+
+        self.initialized.store(true, Ordering::SeqCst);
+
+        Ok(())
+    }
+
+    /// Background thread function that processes hints when requested.
+    fn background_thread(
+        mut stream: StreamSource,
+        hints_processor: Arc<P>,
+        rx: Receiver<ThreadCommand>,
+    ) {
+        while let Ok(ThreadCommand::Process) = rx.recv() {
+            if let Err(e) = Self::process_stream(&mut stream, &*hints_processor) {
+                panic!("Error processing hints in background thread: {:?}", e);
+            }
+        }
+        // Loop exits when Shutdown is received or channel is closed
+    }
+
+    /// Process all hints from the stream.
+    ///
+    /// Processes hints in batches until CTRL_END is encountered or the stream ends.
+    fn process_stream(stream: &mut StreamSource, hints_processor: &P) -> Result<()> {
+        let mut first_batch = true;
+
+        while let Some(hints) = stream.next()? {
+            let hints = reinterpret_vec(hints)?;
+            let has_ctrl_end = hints_processor.process_hints(&hints, first_batch)?;
+
+            first_batch = false;
+
+            // Break if CTRL_END was encountered
+            if has_ctrl_end {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reset the ZiskStream state, stopping any background thread and resetting the processor.
+    pub fn reset(&mut self) {
+        self.hints_processor.reset();
+        self.initialized.store(false, Ordering::SeqCst);
+    }
+
+    /// Trigger the background thread to process hints asynchronously.
+    ///
+    /// This method:
+    /// 1. Sends a command to the background thread to process hints
+    /// 2. Returns immediately without waiting for processing to complete
+    ///
+    /// # Returns
+    /// * `Ok(())` - If the command was successfully sent
+    /// * `Err` - If there's no active thread or the channel is closed
+    pub fn start_stream(&mut self) -> Result<()> {
+        if !self.initialized.load(Ordering::SeqCst) {
+            return Err(StreamError::Transport(
+                "Stream is not initialized. Call set_stream_src first.".to_string(),
+            ));
+        }
+
+        if let Some(tx) = &self.tx {
+            tx.send(ThreadCommand::Process).map_err(|e| {
+                StreamError::Transport(format!(
+                    "Failed to send process command to background thread: {}",
+                    e
+                ))
+            })?;
+            Ok(())
+        } else {
+            Err(StreamError::Transport(
+                "No background thread running. Call set_stream_src first.".to_string(),
+            ))
+        }
+    }
+
+    /// Check if the ZiskStream has been initialized with a stream source.
+    pub fn is_initialized(&self) -> bool {
+        self.initialized.load(Ordering::SeqCst)
+    }
+
+    /// Get a reference to the hints processor.
+    pub fn get_processor(&self) -> Arc<P> {
+        Arc::clone(&self.hints_processor)
+    }
+}
+
+impl<P: StreamProcessor> Drop for ZiskStream<P> {
+    fn drop(&mut self) {
+        // Drop tx — the background thread will see the channel closed and
+        // exit after its current process_stream() call returns naturally.
+        // We must NOT join here: for gRPC hints the thread blocks on
+        // ChannelStreamReader::recv(), which only unblocks when the client
+        // calls PushJobHintsInput.  That RPC can't start until submit_job
+        // returns, but submit_job can't return if we're blocking in join().
+        self.tx.take();
+        self.thread_handle.take(); // detach
+    }
+}
+
+/// Marker for types that are sound to reinterpret raw bytes as, in either direction: an
+/// arbitrary byte buffer can be read as them, and their own bytes can be read raw. Mirror
+/// of `zisk_common::AnyBitPattern` (this crate cannot depend on `zisk-common`).
+///
+/// # Safety
+///
+/// Implementors must both accept every bit pattern as a valid value (the destination
+/// requirement) and contain no padding or otherwise uninitialized bytes (the source
+/// requirement). Integer types qualify; `bool`, `char`, `NonZero*`, niche enums,
+/// references, and structs with padding do not.
+unsafe trait AnyBitPattern {}
+
+// SAFETY: `u8` has no invalid bit patterns.
+unsafe impl AnyBitPattern for u8 {}
+// SAFETY: `u64` has no invalid bit patterns.
+unsafe impl AnyBitPattern for u64 {}
+
+/// Reinterprets a `Vec<T>` as a `Vec<U>` over the same bytes.
+///
+/// Mirror of `zisk_common::reinterpret_vec`, duplicated here because `zisk-common`
+/// depends on `zisk-stream` and so this crate cannot import it back — keep the two in
+/// sync.
+///
+/// When the source allocation matches `Vec<U>`'s layout (identical alignment and a byte
+/// length/capacity that are whole numbers of `U`) the buffer is reused in place;
+/// otherwise (e.g. `u8` → `u64`, where the alignment differs) the bytes are copied into
+/// a fresh `Vec<U>` allocated — and therefore freed — under `U`'s own layout, so the
+/// result is sound to drop on any global allocator. A trailing partial `U` is
+/// zero-padded.
+///
+/// The `T: AnyBitPattern` bound guarantees the source bytes are fully initialized (no
+/// padding to read as uninitialized memory) and the `U: AnyBitPattern` bound guarantees
+/// the reinterpreted bytes form valid `U` values, so this function is safe.
+///
+/// # Errors
+///
+/// Returns [`StreamError::Invalid`] if `U` is a zero-sized type.
+fn reinterpret_vec<T: Copy + AnyBitPattern, U: AnyBitPattern>(v: Vec<T>) -> Result<Vec<U>> {
+    let size_t = std::mem::size_of::<T>();
+    let size_u = std::mem::size_of::<U>();
+
+    // A zero-sized `U` would make the `% size_u` / `/ size_u` arithmetic below divide by
+    // zero; reject it explicitly rather than panic.
+    if size_u == 0 {
+        return Err(StreamError::Invalid(format!(
+            "cannot reinterpret Vec<{}> as Vec<{}>: destination type is zero-sized",
+            std::any::type_name::<T>(),
+            std::any::type_name::<U>()
+        )));
+    }
+
+    let byte_len = v.len() * size_t;
+    let byte_cap = v.capacity() * size_t;
+    let len = byte_len.div_ceil(size_u); // whole `U` count, rounding a partial tail up
+
+    // Zero-copy is sound only when the source allocation matches `Vec<U>`'s layout
+    // exactly: identical alignment (so `ptr` is aligned for `U` and the free-time
+    // `Layout` matches the allocation), a byte capacity that is a whole number of `U` (so
+    // `cap` is not truncated), and a byte length already a whole number of `U` (a reused
+    // buffer cannot grow to pad a partial tail).
+    if std::mem::align_of::<T>() == std::mem::align_of::<U>()
+        && byte_cap % size_u == 0
+        && byte_len % size_u == 0
+    {
+        let cap = byte_cap / size_u;
+        let ptr = v.as_ptr() as *mut U;
+        std::mem::forget(v);
+        // SAFETY: `ptr` comes from `v`'s allocation, forgotten just above so it is freed
+        // exactly once — by the returned `Vec`. Equal alignment makes `ptr` aligned for
+        // `U` and the layout identical under either type; `byte_cap % size_u == 0` makes
+        // `cap * size_u == byte_cap`, so the returned `Vec` frees precisely the original
+        // allocation, and `byte_len % size_u == 0` makes `len` cover it with no partial
+        // element. `U: AnyBitPattern` makes every byte a valid `U`.
+        return Ok(unsafe { Vec::from_raw_parts(ptr, len, cap) });
+    }
+
+    // Layouts differ (e.g. `u8` → `u64`): reusing the buffer would free it under a
+    // different `Layout` than it was allocated with — undefined behaviour, and not merely
+    // theoretical under jemalloc/mimalloc/Miri or a non-glibc libc. Copy into a fresh
+    // `Vec<U>` owned end-to-end under `U`'s own layout, zero-filling any partial trailing
+    // `U`. The source `v` is left untouched and dropped normally at end of scope.
+    let mut out: Vec<U> = Vec::with_capacity(len);
+    let out_bytes = len * size_u;
+    // SAFETY: `out` reserves `out_bytes >= byte_len` bytes in a distinct allocation, so
+    // copying the `byte_len` source bytes is in-bounds and non-overlapping; the remaining
+    // `[byte_len, out_bytes)` tail is then zeroed, so all `out_bytes` bytes are
+    // initialized and `set_len(len)` is sound. `U: AnyBitPattern` makes every byte
+    // pattern (source data and zero padding alike) a valid `U`.
+    unsafe {
+        let dst = out.as_mut_ptr() as *mut u8;
+        std::ptr::copy_nonoverlapping(v.as_ptr() as *const u8, dst, byte_len);
+        std::ptr::write_bytes(dst.add(byte_len), 0, out_bytes - byte_len);
+        out.set_len(len);
+    }
+    Ok(out)
+}

@@ -1,0 +1,720 @@
+use crate::{
+    coordinator::exec_stats_from_job,
+    coordinator_errors::{CoordinatorError, CoordinatorResult},
+    job_events::{CoordinatorJobEvent, CoordinatorJobResult},
+};
+use chrono::Utc;
+use colored::Colorize;
+use std::collections::{BTreeMap, BTreeSet};
+use std::{sync::atomic::Ordering, time::Duration};
+use tracing::{error, info, warn};
+use zisk_cluster_common::{
+    AggDispatch, AggNode, AggParamsDto, AggProofData, AggSet, AggTaskKind, CoordinatorMessageDto,
+    ExecuteTaskRequestDto, ExecuteTaskRequestTypeDto, ExecuteTaskResponseDto,
+    ExecuteTaskResponseResultDataDto, Job, JobId, JobPhase, JobResultData, JobState, ProofStarkDto,
+    WorkerId,
+};
+use zisk_common::Proof;
+
+use crate::Coordinator;
+
+impl Coordinator {
+    /// Handles aggregation completion, finalizes the job if all steps are done.
+    ///    
+    /// # Parameters
+    ///
+    /// * `execute_task_response` - Response containing final proof or failure details
+    pub(super) async fn handle_recurser_completion(
+        &self,
+        execute_task_response: ExecuteTaskResponseDto,
+    ) -> CoordinatorResult<()> {
+        let job_id = &execute_task_response.job_id;
+
+        let job_entry = {
+            let jobs_map = self.jobs.read().await;
+            jobs_map.get(job_id).cloned().ok_or(CoordinatorError::NotFoundOrInaccessible)?
+        };
+
+        // Hold the write lock through all state mutations so a racing
+        // fail_job cannot park the worker SettingUp between is_resolved
+        // and our worker-state writes. Drop it before sibling calls that
+        // take their own.
+        let mut job = job_entry.write().await;
+
+        if job.state().is_resolved() {
+            return Ok(());
+        }
+
+        if !execute_task_response.success {
+            drop(job);
+            let reason = format!("Aggregation failed in job {}", job_id);
+            self.fail_job(job_id, &reason).await?;
+
+            return Err(CoordinatorError::Internal(reason));
+        }
+
+        // Bind the payload to the phase mutated below (see
+        // `validate_response_phase`). After the failure branch: a failed
+        // response carries no `result_data` to bind.
+        Self::validate_response_phase(&job, &execute_task_response)?;
+
+        // Checked against the task sent: an absorb's ack can arrive after its node has closed.
+        let worker_id = execute_task_response.worker_id.clone();
+
+        let Some(scheduler) = job.agg.as_ref() else {
+            return Err(CoordinatorError::InvalidRequest(format!(
+                "Worker {worker_id} sent an aggregation result for {job_id} before aggregation \
+                 started"
+            )));
+        };
+        // Nothing outstanding: a duplicate, or a result for a task never given.
+        let Some(expected) = scheduler.outstanding(&worker_id) else {
+            return Err(CoordinatorError::InvalidRequest(format!(
+                "Worker {worker_id} sent an aggregation result for {job_id} with no task \
+                 outstanding"
+            )));
+        };
+
+        let proof_data = match (expected, execute_task_response.result_data) {
+            // Absorb-only: acks with no proof, and that ack releases the next task.
+            (AggTaskKind::Absorb, Some(ExecuteTaskResponseResultDataDto::FinalProof(ack)))
+                if ack.proof_data.is_empty() =>
+            {
+                let scheduler = job.agg.as_mut().expect("checked above");
+                let next = scheduler.on_ack(&worker_id);
+                let freed = scheduler.take_released();
+                drop(job);
+
+                self.release_donors(job_id, &freed).await;
+                if let Some(next) = next {
+                    self.dispatch_agg(job_id, next).await?;
+                }
+                return Ok(());
+            }
+
+            // An intermediate node's folded subtree.
+            (
+                AggTaskKind::Drain,
+                Some(ExecuteTaskResponseResultDataDto::PartialAggProofs(proofs)),
+            ) => {
+                let node =
+                    job.agg.as_ref().and_then(|s| s.live_node(&worker_id)).ok_or_else(|| {
+                        CoordinatorError::Internal(format!(
+                            "Node {worker_id} owes {job_id} a subtree but is not live"
+                        ))
+                    })?;
+                // Per airgroup: a leaf only contributes to the airgroups it had instances in.
+                let per_airgroup = Self::airgroup_coverage(node);
+                drop(job);
+                return self.absorb_node_export(job_id, &worker_id, proofs, per_airgroup).await;
+            }
+
+            // The job's final proof. An empty one would complete the job from nothing.
+            (AggTaskKind::DrainFinal, Some(ExecuteTaskResponseResultDataDto::FinalProof(p)))
+                if !p.proof_data.is_empty() =>
+            {
+                p
+            }
+            (expected, _) => {
+                return Err(CoordinatorError::InvalidRequest(format!(
+                    "Worker {worker_id} sent a response for {job_id} that does not answer the \
+                     {expected:?} task it was given"
+                )))
+            }
+        };
+
+        let agg_worker_id = worker_id;
+
+        // Decode before changing any state. A proof that does not decode, or cannot be saved
+        // (which would complete the job with no proof for its webhook), fails the job.
+        let zisk_proof = Proof::from_bincode(&proof_data.proof_data)
+            .and_then(|p| p.ensure_saveable().map(|()| p));
+        let zisk_proof = match zisk_proof {
+            Ok(p) => p,
+            Err(e) => {
+                drop(job);
+                let reason = format!("Final proof from worker {agg_worker_id} is malformed: {e}");
+                let _ = self.fail_job(job_id, &reason).await;
+                return Err(CoordinatorError::Internal(reason));
+            }
+        };
+
+        let scheduler = job.agg.as_mut().expect("checked above");
+        scheduler.take_live(&agg_worker_id);
+        if let Some(stray) = scheduler.on_ack(&agg_worker_id) {
+            warn!(
+                "Discarding aggregation task queued for {} after {} completed",
+                stray.worker, job_id
+            );
+        }
+
+        self.workers_pool.release_computing_to_ready(&agg_worker_id, job_id).await;
+        // Workers assemble the final proof from proof words alone, which carry no seed: stamp the
+        // job's, since the final proof attests to its execution.
+        job.proof = Some(zisk_proof.with_random_seed(job.random_seed));
+        job.executed_steps = Some(proof_data.executed_steps);
+        job.instances = Some(proof_data.instances);
+
+        job.change_state(JobState::Completed);
+
+        let end_time = Utc::now();
+
+        let phase1_time = job.phase_start_time(&JobPhase::Contributions).unwrap_or_else(|| {
+            error!("Missing start time for Phase1 in job {}", job.job_id);
+            end_time
+        });
+        let phase2_time = job.phase_start_time(&JobPhase::Prove).unwrap_or_else(|| {
+            error!("Missing start time for Phase2 in job {}", job.job_id);
+            end_time
+        });
+        let phase3_time = job.phase_start_time(&JobPhase::Recurse).unwrap_or_else(|| {
+            error!("Missing start time for Phase3 in job {}", job.job_id);
+            end_time
+        });
+
+        let phase1_duration = phase2_time.signed_duration_since(phase1_time);
+        let phase2_duration = phase3_time.signed_duration_since(phase2_time);
+        let phase3_duration = end_time.signed_duration_since(phase3_time);
+
+        info!(
+            "[Phase3] WorkerId {} done, phase 3 completed for {} ({:.3}s)",
+            agg_worker_id,
+            job_id,
+            phase3_duration.as_seconds_f32()
+        );
+
+        let duration = Duration::from_millis(job.duration_ms.unwrap_or(0));
+
+        crate::metrics::record_job_terminal(crate::metrics::JobOutcome {
+            job_id,
+            outcome: crate::metrics::OUTCOME_SUCCESS,
+            reason: None,
+            workers: &job.workers,
+            contributions_started: job.phase_start_time(&JobPhase::Contributions),
+            duration: job.duration_ms.map(|ms| ms as f64 / 1000.0),
+            phases: Some([
+                phase1_duration.as_seconds_f64(),
+                phase2_duration.as_seconds_f64(),
+                phase3_duration.as_seconds_f64(),
+            ]),
+            steps: job.executed_steps,
+            instances: job.instances,
+            costs: Some(super::cost_per_type_from_job(&job)),
+        });
+        for (label, phase) in [("1", JobPhase::Contributions), ("2", JobPhase::Prove)] {
+            if let (Some(results), Some(start)) =
+                (job.results.get(&phase), job.phase_start_time(&phase))
+            {
+                let durations: Vec<(WorkerId, f64)> = results
+                    .iter()
+                    .map(|(worker_id, result)| {
+                        (worker_id.clone(), (result.end_time - start).as_seconds_f64())
+                    })
+                    .collect();
+                crate::metrics::record_proof_worker_phases(label, &durations);
+            }
+        }
+
+        let header = format!("[Job] Finished {} successfully ✔", job_id).green();
+        let duration_str = format!("Duration: {:.3}s", duration.as_secs_f32()).bold();
+        let steps_str = if let Some(executed_steps) = job.executed_steps {
+            format!("Steps: {}", Self::format_number_with_dots(executed_steps)).bold()
+        } else {
+            "Steps: N/A".to_string().red().bold()
+        };
+        let instances_str = if let Some(instances) = job.instances {
+            format!("Instances: {}", Self::format_number_with_dots(instances)).bold()
+        } else {
+            "Instances: N/A".to_string().red().bold()
+        };
+
+        let metadata_str = Self::format_job_metadata(job.metadata.as_ref());
+
+        info!(
+            "{} {} ({:.3}s+{:.3}s+{:.3}s) {} {} Capacity: {}{}",
+            header,
+            duration_str,
+            phase1_duration.as_seconds_f32(),
+            phase2_duration.as_seconds_f32(),
+            phase3_duration.as_seconds_f32(),
+            steps_str,
+            instances_str,
+            job.compute_capacity,
+            metadata_str,
+        );
+
+        let workers = job.workers.clone();
+
+        if workers.len() > 1 {
+            for phase in [JobPhase::Contributions, JobPhase::Prove] {
+                if let Some(results) = job.results.get(&phase) {
+                    if let Some(start_time) = job.phase_start_time(&phase) {
+                        let mut durations_ms: Vec<(WorkerId, i64)> = results
+                            .iter()
+                            .map(|(worker_id, result)| {
+                                let duration = result.end_time.signed_duration_since(start_time);
+                                (worker_id.clone(), duration.num_milliseconds())
+                            })
+                            .collect();
+
+                        if durations_ms.len() > 1 {
+                            durations_ms.sort_by_key(|(_, duration)| *duration);
+
+                            let (best_worker, best_duration) = &durations_ms[0];
+                            let (worst_worker, worst_duration) = durations_ms.last().unwrap();
+
+                            let avg_duration = durations_ms.iter().map(|(_, d)| d).sum::<i64>()
+                                as f64
+                                / durations_ms.len() as f64;
+
+                            let diff_percentage = if *best_duration > 0 {
+                                ((*worst_duration - *best_duration) as f64 / *best_duration as f64)
+                                    * 100.0
+                            } else {
+                                0.0
+                            };
+
+                            info!(
+                        "[Job] {:?} Performance for {} - Avg: {:.3}s, Best: {} ({:.3}s), Worst: {} ({:.3}s), Diff: {:.1}%",
+                        phase,
+                        job_id,
+                        avg_duration / 1000.0,
+                        best_worker,
+                        *best_duration as f64 / 1000.0,
+                        worst_worker,
+                        *worst_duration as f64 / 1000.0,
+                        diff_percentage
+                    );
+                        }
+
+                        // For Phase 1, also show delay, witness, and ASM execution statistics
+                        if phase == JobPhase::Contributions && durations_ms.len() > 1 {
+                            // Extract delay times (coordinator send to worker start)
+                            let mut delays_ms: Vec<(WorkerId, i64)> = results
+                                .iter()
+                                .filter_map(|(worker_id, result)| {
+                                    if let JobResultData::Challenges(contrib) = &result.data {
+                                        contrib.task_received_time.map(|task_received| {
+                                            let delay =
+                                                task_received.signed_duration_since(start_time);
+                                            (worker_id.clone(), delay.num_milliseconds().max(0))
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+
+                            if !delays_ms.is_empty() {
+                                delays_ms.sort_by_key(|(_, delay)| *delay);
+                                let (best_delay_worker, best_delay) = &delays_ms[0];
+                                let (worst_delay_worker, worst_delay) = delays_ms.last().unwrap();
+                                let avg_delay = delays_ms.iter().map(|(_, d)| d).sum::<i64>()
+                                    as f64
+                                    / delays_ms.len() as f64;
+
+                                let delay_diff_percentage = if *best_delay > 0 {
+                                    ((*worst_delay - *best_delay) as f64 / *best_delay as f64)
+                                        * 100.0
+                                } else {
+                                    0.0
+                                };
+
+                                info!(
+                            "[Job] Contributions Delay for {} - Avg: {:.3}s, Best: {} ({:.3}s), Worst: {} ({:.3}s), Diff: {:.1}%",
+                            job_id,
+                            avg_delay / 1000.0,
+                            best_delay_worker,
+                            *best_delay as f64 / 1000.0,
+                            worst_delay_worker,
+                            *worst_delay as f64 / 1000.0,
+                            delay_diff_percentage
+                        );
+                            }
+
+                            // Extract witness times
+                            let mut witness_times: Vec<(WorkerId, f32)> = results
+                                .iter()
+                                .filter_map(|(worker_id, result)| {
+                                    if let JobResultData::Challenges(contrib) = &result.data {
+                                        Some((worker_id.clone(), contrib.witness_info.witness_time))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+
+                            if !witness_times.is_empty() {
+                                witness_times.sort_by(|(_, a), (_, b)| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                let (best_witness_worker, best_witness) = &witness_times[0];
+                                let (worst_witness_worker, worst_witness) =
+                                    witness_times.last().unwrap();
+                                let avg_witness =
+                                    witness_times.iter().map(|(_, t)| *t as f64).sum::<f64>()
+                                        / witness_times.len() as f64;
+
+                                let witness_diff_percentage = if *best_witness > 0.0 {
+                                    ((*worst_witness - *best_witness) as f64 / *best_witness as f64)
+                                        * 100.0
+                                } else {
+                                    0.0
+                                };
+
+                                info!(
+                            "[Job] Contributions Witness for {} - Avg: {:.3}s, Best: {} ({:.3}s), Worst: {} ({:.3}s), Diff: {:.1}%",
+                            job_id,
+                            avg_witness / 1000.0,
+                            best_witness_worker,
+                            *best_witness as f64 / 1000.0,
+                            worst_witness_worker,
+                            *worst_witness as f64 / 1000.0,
+                            witness_diff_percentage
+                        );
+                            }
+
+                            // Extract ASM execution times
+                            let mut asm_times: Vec<(WorkerId, f32, f32)> = results
+                                .iter()
+                                .filter_map(|(worker_id, result)| {
+                                    if let JobResultData::Challenges(contrib) = &result.data {
+                                        contrib
+                                            .zisk_executor_time
+                                            .asm_execution_duration
+                                            .as_ref()
+                                            .map(|asm| (worker_id.clone(), asm.time, asm.mhz))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+
+                            if !asm_times.is_empty() {
+                                asm_times.sort_by(|(_, a, _), (_, b, _)| {
+                                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                let (best_asm_worker, best_asm, best_mhz) = &asm_times[0];
+                                let (worst_asm_worker, worst_asm, worst_mhz) =
+                                    asm_times.last().unwrap();
+                                let avg_asm =
+                                    asm_times.iter().map(|(_, t, _)| *t as f64).sum::<f64>()
+                                        / asm_times.len() as f64;
+
+                                let asm_diff_percentage = if *best_asm > 0.0 {
+                                    ((*worst_asm - *best_asm) as f64 / *best_asm as f64) * 100.0
+                                } else {
+                                    0.0
+                                };
+
+                                info!(
+                            "[Job] Contributions ASM for {} - Avg: {:.3}s, Best: {} ({:.3}s @ {:.1}MHz), Worst: {} ({:.3}s @ {:.1}MHz), Diff: {:.1}%",
+                            job_id,
+                            avg_asm,
+                            best_asm_worker,
+                            *best_asm,
+                            *best_mhz,
+                            worst_asm_worker,
+                            *worst_asm,
+                            *worst_mhz,
+                            asm_diff_percentage
+                        );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let duration = Utc::now().signed_duration_since(self.start_time_utc);
+        let total_secs = duration.num_seconds().max(0) as u64; // avoid negative durations
+        let uptime = humantime::format_duration(Duration::from_secs(total_secs)).to_string();
+
+        info!(
+            "[Coordinator] Started at {} UTC — Uptime: {}",
+            self.start_time_utc.format("%Y-%m-%d %H:%M:%S"),
+            uptime
+        );
+
+        info!(
+            "[Coordinator] Registrations: {} Reconnections: {}",
+            self.registrations.load(Ordering::Relaxed),
+            self.reconnections.load(Ordering::Relaxed)
+        );
+
+        // Build proof bytes and stats for the event before releasing the lock
+        let prove_event = {
+            let proof_bytes = match job.proof.as_ref() {
+                Some(p) => p.to_bincode().unwrap_or_else(|e| {
+                    warn!("Failed to serialize proof for event on job {}: {}", job_id, e);
+                    vec![]
+                }),
+                None => vec![],
+            };
+            let stats = exec_stats_from_job(&job);
+            CoordinatorJobEvent::Completed(CoordinatorJobResult::Prove {
+                proof_bytes,
+                stats,
+                random_seed: job.random_seed,
+            })
+        };
+
+        // Release job lock before calling post_launch_proof
+        drop(job);
+
+        self.fire_job_event(job_id, prove_event).await;
+
+        self.post_launch_proof(job_id).await?;
+
+        Ok(())
+    }
+
+    /// The set a worker's phase-2 result represents, resident on it. The proofs are moved out
+    /// of the stored result, not cloned: the node keeps them for the rest of phase 3.
+    pub(super) fn worker_agg_set(job: &mut Job, worker_id: &WorkerId) -> CoordinatorResult<AggSet> {
+        let worker_index = job.workers.iter().position(|w| w == worker_id).ok_or_else(|| {
+            CoordinatorError::InvalidRequest(format!(
+                "Worker {worker_id} is not assigned to {}",
+                job.job_id
+            ))
+        })? as u32;
+
+        let job_id = job.job_id.clone();
+        let results = job.results.get_mut(&JobPhase::Prove).ok_or_else(|| {
+            CoordinatorError::InvalidRequest(format!("No Phase2 results for {job_id}"))
+        })?;
+        let result = results.get_mut(worker_id).ok_or_else(|| {
+            CoordinatorError::InvalidRequest(format!(
+                "Worker {worker_id} has not completed Phase2 for {job_id}"
+            ))
+        })?;
+        let JobResultData::AggProofs(proofs) = &mut result.data else {
+            return Err(CoordinatorError::InvalidRequest(
+                "Expected AggProofs data for Phase2".to_string(),
+            ));
+        };
+
+        // A partition with no instances returns no proofs. proofman cannot finish such a
+        // job (its final drain requires every worker's contribution to be aggregated), so
+        // fail here rather than at the root.
+        if proofs.is_empty() {
+            return Err(CoordinatorError::InvalidRequest(format!(
+                "Worker {worker_id} returned no Phase2 proofs for {job_id}: partitions without \
+                 instances are not supported"
+            )));
+        }
+
+        // Coverage tells the scheduler the job is done, so it comes from the assignment,
+        // not the untrusted payload. A leaf covers its own index and nothing else.
+        if let Some(p) = proofs.iter().find(|p| p.worker_indexes != [worker_index]) {
+            return Err(CoordinatorError::InvalidRequest(format!(
+                "Worker {worker_id} claims its Phase2 proof for airgroup {} covers {:?}, \
+                 expected only {worker_index}",
+                p.airgroup_id, p.worker_indexes
+            )));
+        }
+        let covers = BTreeSet::from([worker_index]);
+
+        // Only now: taking first would destroy the leaf on a rejected payload, and
+        // the duplicate guard blocks any resubmission.
+        Ok(AggSet { covers, proofs: std::mem::take(proofs), location: worker_id.clone() })
+    }
+
+    /// Which leaf workers each airgroup's proofs actually cover, from the sets this
+    /// node absorbed.
+    fn airgroup_coverage(node: &AggNode) -> BTreeMap<u64, BTreeSet<u32>> {
+        let mut per_airgroup: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
+        for input in &node.inputs {
+            for proof in &input.proofs {
+                per_airgroup
+                    .entry(proof.airgroup_id)
+                    .or_default()
+                    .extend(proof.worker_indexes.iter().copied());
+            }
+        }
+        per_airgroup
+    }
+
+    /// Feed a node's folded subtree back into the scheduler; it stays resident on that node.
+    async fn absorb_node_export(
+        &self,
+        job_id: &JobId,
+        worker_id: &WorkerId,
+        proofs: Vec<ProofStarkDto>,
+        per_airgroup: BTreeMap<u64, BTreeSet<u32>>,
+    ) -> CoordinatorResult<()> {
+        // Untrusted airgroup ids index a Vec on the next worker: keep only this node's, once each.
+        let mut seen = BTreeSet::new();
+        let mut folded = Vec::with_capacity(proofs.len());
+        for proof in proofs {
+            let Some(covers) = per_airgroup.get(&proof.airgroup_id) else {
+                // proofman drains one proof per airgroup, including ones this node
+                // never absorbed; those carry nothing to account for.
+                continue;
+            };
+            if !seen.insert(proof.airgroup_id) {
+                return Err(CoordinatorError::InvalidRequest(format!(
+                    "Node {worker_id} returned airgroup {} twice for {job_id}",
+                    proof.airgroup_id
+                )));
+            }
+            folded.push(AggProofData {
+                airgroup_id: proof.airgroup_id,
+                values: proof.values,
+                worker_indexes: covers.iter().copied().collect(),
+            });
+        }
+
+        if folded.len() != per_airgroup.len() {
+            return Err(CoordinatorError::InvalidRequest(format!(
+                "Node {worker_id} returned {} of {} airgroups for {job_id}",
+                folded.len(),
+                per_airgroup.len()
+            )));
+        }
+        let (dispatches, freed) = {
+            let jobs_map = self.jobs.read().await;
+            let job_entry = jobs_map.get(job_id).ok_or(CoordinatorError::NotFoundOrInaccessible)?;
+            let mut job = job_entry.write().await;
+
+            // The lock was released in between, so the job may have been failed.
+            if job.state().is_resolved() {
+                return Ok(());
+            }
+
+            let scheduler = job
+                .agg
+                .as_mut()
+                .ok_or_else(|| CoordinatorError::Internal("No scheduler".into()))?;
+
+            // A replay finds nothing to consume; folding it again would trip
+            // proofman's duplicate-index check.
+            let Some(node) = scheduler.take_live(worker_id) else {
+                return Ok(());
+            };
+            let released = scheduler.on_ack(worker_id);
+
+            info!("[Phase3] {job_id} {worker_id} returned a subtree covering {:?}", node.covers);
+
+            // The scheduler's own record, not the proofs': those only list the leaves that
+            // had instances in each airgroup.
+            let set = AggSet { covers: node.covers, proofs: folded, location: worker_id.clone() };
+            // One export can yield both: what the ack released, and the new fold.
+            let dispatches: Vec<_> =
+                released.into_iter().chain(scheduler.on_set_ready(set)).collect();
+            (dispatches, scheduler.take_released())
+        };
+
+        self.release_donors(job_id, &freed).await;
+
+        self.dispatch_all(job_id, dispatches).await
+    }
+
+    /// Send every dispatch before reporting the first failure: the scheduler already
+    /// marked them all in flight, so one skipped after an error would never be retried.
+    /// A failed send needs no requeue: its worker's stream is gone, so either the
+    /// disconnect fails the job or a reconnect replays the node.
+    pub(super) async fn dispatch_all(
+        &self,
+        job_id: &JobId,
+        dispatches: Vec<AggDispatch>,
+    ) -> CoordinatorResult<()> {
+        let mut first_error = None;
+        for dispatch in dispatches {
+            if let Err(e) = self.dispatch_agg(job_id, dispatch).await {
+                first_error.get_or_insert(e);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Return donors to the pool. Guarded: one may have disconnected or been parked
+    /// awaiting recovery, and an unconditional write would resurrect it.
+    pub(super) async fn release_donors(&self, job_id: &JobId, donors: &[WorkerId]) {
+        for donor in donors {
+            self.workers_pool.release_computing_to_ready(donor, job_id).await;
+        }
+    }
+
+    /// Send a scheduled fold.
+    pub(super) async fn dispatch_agg(
+        &self,
+        job_id: &JobId,
+        dispatch: AggDispatch,
+    ) -> CoordinatorResult<()> {
+        let step = match (dispatch.last_proof, dispatch.final_proof) {
+            (false, _) => "absorb",
+            (true, false) => "fold",
+            (true, true) => "fold+final",
+        };
+        info!(
+            "[Phase3] {job_id} {} {step}: {} proof(s) in, now covers {:?}",
+            dispatch.worker,
+            dispatch.proofs.len(),
+            dispatch.covers
+        );
+
+        self.send_agg_task(job_id, &dispatch).await
+    }
+
+    /// Re-sends a node's retained inputs to a reconnecting worker. The inputs are
+    /// kept until the node exports, so replay is idempotent.
+    pub(super) async fn replay_inflight_agg_task_if_recurser(
+        &self,
+        worker_id: &WorkerId,
+        job_id: &JobId,
+    ) -> CoordinatorResult<()> {
+        let dispatch = {
+            let jobs_map = self.jobs.read().await;
+            let job_entry = jobs_map.get(job_id).ok_or(CoordinatorError::NotFoundOrInaccessible)?;
+            let mut job = job_entry.write().await;
+            // Open nodes too: an undistributed aggregator never becomes live.
+            let Some(dispatch) = job.agg.as_mut().and_then(|s| s.replay_for(worker_id)) else {
+                return Ok(());
+            };
+            dispatch
+        };
+
+        info!("Replaying aggregation inputs to reconnected node {worker_id}");
+        self.send_agg_task(job_id, &dispatch).await
+    }
+
+    /// Sends an aggregation task to a node.
+    async fn send_agg_task(&self, job_id: &JobId, dispatch: &AggDispatch) -> CoordinatorResult<()> {
+        let proof_type = {
+            let jobs_map = self.jobs.read().await;
+            let job_entry = jobs_map.get(job_id).ok_or(CoordinatorError::NotFoundOrInaccessible)?;
+            let proof_type = job_entry.read().await.proof_type;
+            proof_type
+        };
+
+        let agg_proofs: Vec<ProofStarkDto> = dispatch
+            .proofs
+            .iter()
+            .map(|p| ProofStarkDto {
+                airgroup_id: p.airgroup_id,
+                values: p.values.clone(),
+                worker_indexes: p.worker_indexes.clone(),
+            })
+            .collect();
+
+        #[allow(deprecated)] // `metadata` is deprecated and left empty.
+        let req = ExecuteTaskRequestDto {
+            worker_id: dispatch.worker.clone(),
+            job_id: job_id.clone(),
+            params: ExecuteTaskRequestTypeDto::AggParams(AggParamsDto {
+                agg_proofs,
+                last_proof: dispatch.last_proof,
+                final_proof: dispatch.final_proof,
+                proof_type,
+                keep_resident: dispatch.keep_resident,
+                reset_state: dispatch.reset_state,
+            }),
+            metadata: None,
+        };
+
+        self.workers_pool
+            .send_message(&dispatch.worker, CoordinatorMessageDto::ExecuteTaskRequest(req))
+            .await
+    }
+}

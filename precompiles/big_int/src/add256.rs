@@ -1,39 +1,53 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use rayon::prelude::*;
 
-use pil_std_lib::Std;
-use proofman_common::{AirInstance, FromTrace, ProofmanResult};
+use proofman_common::{AirInstance, FromTrace, GenericTrace, ProofmanResult, SetupCtx};
 use proofman_util::{timer_start_trace, timer_stop_and_log_trace};
 
-#[cfg(not(feature = "packed"))]
-use zisk_pil::{Add256Trace, Add256TraceRow};
-#[cfg(feature = "packed")]
-use zisk_pil::{Add256TracePacked, Add256TraceRowPacked};
+use zisk_common::{OperationAdd256Data, B, OPERATION_PRECOMPILED_BUS_DATA_SIZE, STEP};
+use zisk_pil::{Add256Trace, Add256TraceRowOps, ZISK_AIRGROUP_ID};
 
-#[cfg(not(feature = "packed"))]
-type Add256TraceRowType<F> = Add256TraceRow<F>;
-#[cfg(feature = "packed")]
-type Add256TraceRowType<F> = Add256TraceRowPacked<F>;
+use super::add256_constants::{PARAM_CHUNKS, START_READ_PARAMS};
 
-#[cfg(not(feature = "packed"))]
-type Add256TraceType<F> = Add256Trace<F>;
-#[cfg(feature = "packed")]
-type Add256TraceType<F> = Add256TracePacked<F>;
+/// Per-operation input record assembled from the bus payload.
+#[derive(Debug)]
+pub struct Add256Input {
+    pub step_main: u64,
+    pub addr_main: u32,
+    pub addr_a: u32,
+    pub addr_b: u32,
+    pub addr_c: u32,
+    pub cin: u64,
+    pub a: [u64; 4],
+    pub b: [u64; 4],
+}
 
-use super::Add256Input;
+impl Add256Input {
+    pub fn from(values: &OperationAdd256Data<u64>) -> Self {
+        Self {
+            step_main: values[STEP],
+            addr_main: values[B] as u32,
+            addr_a: values[OPERATION_PRECOMPILED_BUS_DATA_SIZE] as u32,
+            addr_b: values[OPERATION_PRECOMPILED_BUS_DATA_SIZE + 1] as u32,
+            cin: values[OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2],
+            addr_c: values[OPERATION_PRECOMPILED_BUS_DATA_SIZE + 3] as u32,
+            a: values[START_READ_PARAMS..START_READ_PARAMS + PARAM_CHUNKS].try_into().unwrap(),
+            b: values[START_READ_PARAMS + PARAM_CHUNKS..START_READ_PARAMS + 2 * PARAM_CHUNKS]
+                .try_into()
+                .unwrap(),
+        }
+    }
+}
 
 /// The `Add256SM` struct encapsulates the logic of the Add256 State Machine.
 pub struct Add256SM<F: PrimeField64> {
-    /// Reference to the PIL2 standard library.
-    pub std: Arc<Std<F>>,
-
     /// Number of available add256s in the trace.
     pub num_availables: usize,
 
-    /// Range checks ID's
-    range_id: usize,
+    _phantom: PhantomData<F>,
 }
 
 impl<F: PrimeField64> Add256SM<F> {
@@ -41,13 +55,10 @@ impl<F: PrimeField64> Add256SM<F> {
     ///
     /// # Returns
     /// A new `Add256SM` instance.
-    pub fn new(std: Arc<Std<F>>) -> Arc<Self> {
-        // Compute some useful values
-        let num_availables = Add256TraceType::<F>::NUM_ROWS;
+    pub fn new() -> Arc<Self> {
+        let num_availables = Add256Trace::<()>::NUM_ROWS;
 
-        let range_id = std.get_range_id(0, (1 << 16) - 1, None).unwrap();
-
-        Arc::new(Self { std, num_availables, range_id })
+        Arc::new(Self { num_availables, _phantom: PhantomData })
     }
 
     /// Processes a slice of operation data, updating the trace.
@@ -56,14 +67,15 @@ impl<F: PrimeField64> Add256SM<F> {
     /// * `trace` - A mutable reference to the Add256 trace.
     /// * `input` - The operation data to process.
     #[inline(always)]
-    pub fn process_slice(
-        &self,
-        input: &Add256Input,
-        trace: &mut Add256TraceRowType<F>,
-        multiplicities: &mut [u32],
-    ) {
+    pub fn process_slice<R: Add256TraceRowOps<F>>(&self, input: &Add256Input, trace: &mut R) {
         debug_assert!(input.cin < 2);
         trace.set_cin(input.cin != 0);
+
+        let mut a_values = [[0u32; 2]; 4];
+        let mut b_values = [[0u32; 2]; 4];
+        let mut c_chunks_values = [[0u16; 4]; 4];
+        let mut cout_values = [[false; 2]; 4];
+
         let mut cout_2 = input.cin as u32;
         for i in 0..4 {
             let al = input.a[i] as u32;
@@ -72,10 +84,11 @@ impl<F: PrimeField64> Add256SM<F> {
             let bl = input.b[i] as u32;
             let bh = (input.b[i] >> 32) as u32;
 
-            trace.set_a(i, 0, al);
-            trace.set_a(i, 1, ah);
-            trace.set_b(i, 0, bl);
-            trace.set_b(i, 1, bh);
+            a_values[i][0] = al;
+            a_values[i][1] = ah;
+            b_values[i][0] = bl;
+            b_values[i][1] = bh;
+
             let cl = al as u64 + bl as u64 + cout_2 as u64;
             let cout_1 = cl >> 32;
             let ch = ah as u64 + bh as u64 + cout_1;
@@ -86,19 +99,20 @@ impl<F: PrimeField64> Add256SM<F> {
             let chl = ch as u16;
             let chh = (ch >> 16) as u16;
 
-            trace.set_c_chunks(i, 0, cll);
-            trace.set_c_chunks(i, 1, clh);
-            trace.set_c_chunks(i, 2, chl);
-            trace.set_c_chunks(i, 3, chh);
+            c_chunks_values[i][0] = cll;
+            c_chunks_values[i][1] = clh;
+            c_chunks_values[i][2] = chl;
+            c_chunks_values[i][3] = chh;
 
-            trace.set_cout(i, 0, cout_1 != 0);
-            trace.set_cout(i, 1, cout_2 != 0);
-
-            multiplicities[cll as usize] += 1;
-            multiplicities[clh as usize] += 1;
-            multiplicities[chl as usize] += 1;
-            multiplicities[chh as usize] += 1;
+            cout_values[i][0] = cout_1 != 0;
+            cout_values[i][1] = cout_2 != 0;
         }
+
+        trace.set_all_a(&a_values);
+        trace.set_all_b(&b_values);
+        trace.set_all_c_chunks(&c_chunks_values);
+        trace.set_all_cout(&cout_values);
+
         trace.set_addr_params(input.addr_main);
         trace.set_addr_a(input.addr_a);
         trace.set_addr_b(input.addr_b);
@@ -115,12 +129,16 @@ impl<F: PrimeField64> Add256SM<F> {
     ///
     /// # Returns
     /// An `AirInstance` containing the computed witness data.
-    pub fn compute_witness(
+    /// The air is selected by the `NUM_ROWS` / `AIR_ID` consts of the trace this builds, so one
+    /// body serves every height the air is instantiated at.
+    pub fn compute_witness<R: Add256TraceRowOps<F>, const NUM_ROWS: usize, const AIR_ID: usize>(
         &self,
+        _sctx: &SetupCtx<F>,
         inputs: &[Vec<Add256Input>],
         trace_buffer: Vec<F>,
     ) -> ProofmanResult<AirInstance<F>> {
-        let mut trace = Add256TraceType::<F>::new_from_vec(trace_buffer)?;
+        let mut trace =
+            GenericTrace::<R, NUM_ROWS, ZISK_AIRGROUP_ID, AIR_ID>::new_from_vec(trace_buffer)?;
 
         let num_rows = trace.num_rows();
 
@@ -144,37 +162,17 @@ impl<F: PrimeField64> Add256SM<F> {
         let num_threads = rayon::current_num_threads();
         let chunk_size = std::cmp::max(1, flat_inputs.len() / num_threads);
 
-        // Process in chunks to allow per-chunk local multiplicities arrays
-        let local_multiplicities_vec: Vec<Vec<u32>> = flat_inputs
-            .par_chunks(chunk_size)
-            .zip(trace_rows.par_chunks_mut(chunk_size))
-            .map(|(input_chunk, trace_chunk)| {
-                // Local array shared by this chunk
-                let mut local_multiplicities = vec![0u32; 1 << 16];
-
-                // Sum all local arrays into a global one
+        flat_inputs.par_chunks(chunk_size).zip(trace_rows.par_chunks_mut(chunk_size)).for_each(
+            |(input_chunk, trace_chunk)| {
                 for (input, trace_row) in input_chunk.iter().zip(trace_chunk.iter_mut()) {
-                    self.process_slice(input, trace_row, &mut local_multiplicities);
+                    self.process_slice(input, trace_row);
                 }
-
-                local_multiplicities
-            })
-            .collect();
-
-        // Sum all local arrays into a global one
-        let mut global_multiplicities = vec![0u32; 1 << 16];
-        for local_multiplicities in local_multiplicities_vec {
-            for (i, count) in local_multiplicities.iter().enumerate() {
-                global_multiplicities[i] += count;
-            }
-        }
-
-        // Send final result to std
-        self.std.range_checks(self.range_id, global_multiplicities);
+            },
+        );
 
         timer_stop_and_log_trace!(ADD256_TRACE);
 
-        let padding_row = Add256TraceRowType::<F>::default();
+        let padding_row: R = Default::default();
         trace.buffer[total_inputs..num_rows].par_iter_mut().for_each(|slot| *slot = padding_row);
 
         Ok(AirInstance::<F>::new_from_trace(FromTrace::new(&mut trace)))

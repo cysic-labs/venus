@@ -10,13 +10,13 @@ use crate::save_dma_collectors;
 #[cfg(feature = "save_dma_inputs")]
 use crate::DmaInput;
 use crate::{DmaCheckPoint, DmaModule};
-use fields::PrimeField64;
-use proofman_common::{AirInstance, ProofCtx, ProofmanResult, SetupCtx};
+use proofman_common::{ProofCtx, SetupCtx};
+use proofman_fields::PrimeField64;
 use std::sync::Arc;
 use zisk_common::{
     BusDevice, CheckPoint, ChunkId, Instance, InstanceCtx, InstanceType, PayloadType, StatsType,
 };
-use zisk_pil::{DmaMemCpyTrace, DmaTrace};
+use zisk_pil::DmaTrace;
 
 /// The `DmaInstance` struct represents an instance for the Dma State Machine.
 ///
@@ -46,8 +46,9 @@ impl<F: PrimeField64> DmaInstance<F> {
     }
 
     pub fn build_dma_collector(&self, chunk_id: ChunkId) -> DmaCollector {
-        debug_assert!(
-            [DmaTrace::<F>::AIR_ID, DmaMemCpyTrace::<F>::AIR_ID].contains(&self.ictx.plan.air_id),
+        debug_assert_eq!(
+            self.ictx.plan.air_id,
+            DmaTrace::<()>::AIR_ID,
             "DmaInstance: Unsupported air_id: {:?}",
             self.ictx.plan.air_id
         );
@@ -76,7 +77,8 @@ impl<F: PrimeField64> Instance<F> for DmaInstance<F> {
         _sctx: &SetupCtx<F>,
         collectors: Vec<(usize, Box<dyn BusDevice<PayloadType>>)>,
         trace_buffer: Vec<F>,
-    ) -> ProofmanResult<Option<AirInstance<F>>> {
+        packed: bool,
+    ) -> zisk_common::WitnessResult<F> {
         #[cfg(feature = "save_dma_collectors")]
         let (debug, inputs): (Vec<_>, Vec<_>) = collectors
             .into_iter()
@@ -107,7 +109,7 @@ impl<F: PrimeField64> Instance<F> for DmaInstance<F> {
             &format!("{}_inputs_{air_instance_id:04}.txt", self.module.get_name()),
         )?;
 
-        Ok(Some(self.module.compute_witness(&inputs, trace_buffer)?))
+        Ok(Some(self.module.compute_witness(&inputs, trace_buffer, packed)?))
     }
 
     /// Retrieves the checkpoint associated with this instance.
@@ -133,7 +135,7 @@ impl<F: PrimeField64> Instance<F> for DmaInstance<F> {
     fn build_inputs_collector(&self, chunk_id: ChunkId) -> Option<Box<dyn BusDevice<PayloadType>>> {
         assert_eq!(
             self.ictx.plan.air_id,
-            DmaTrace::<F>::AIR_ID,
+            DmaTrace::<()>::AIR_ID,
             "DmaInstance: Unsupported air_id: {:?}",
             self.ictx.plan.air_id
         );

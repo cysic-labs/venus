@@ -2,22 +2,22 @@
 //! data for communication over the operation bus. This includes data extraction from instructions
 //! and managing the format of operation data.
 
-use crate::{uninit_array, BusId, PayloadType};
+use crate::{BusId, PayloadType};
 use std::collections::VecDeque;
 use zisk_core::zisk_ops::ZiskOp;
 use zisk_core::{InstContext, ZiskInst, ZiskOperationType};
 
 /// The unique bus ID for operation-related data communication.
 pub const OPERATION_BUS_ID: BusId = BusId(0);
-
 /// The size of the operation data payload.
 pub const OPERATION_BUS_DATA_SIZE: usize = 4; // op,op_type,a,b
+/// The size of the precompiled operation data payload, which includes an additional `step` parameter.
 pub const OPERATION_PRECOMPILED_BUS_DATA_SIZE: usize = 5; // op,op_type,a,b, step
 
 // worst case:
 // arith_256:     3 x 256 + 2 addr = 3 * 4 + 2 = 14
 // arith_256_mod: 4 x 256 + 2 addr = 4 * 4 + 2 = 18
-// secp256k1_add: 4 x 256 + 2 addr = 4 * 4 + 2 = 18
+// secp256k1_add: 4 x 256 (p1, p2 addresses travel in a, b) = 4 * 4 = 16
 // secp256k1_dbl: 2 x 256 + 1 addr = 2 * 4 + 1 = 9
 // TODO: optimize and send only one value 64 upto 32-bits addr
 
@@ -36,67 +36,108 @@ const COMPLEX_OVER_384_BITS_SIZE: usize = 2 * DATA_384_BITS_SIZE;
 
 // use OPERATION_BUS_DATA_SIZE because a = step, b = addr
 
+/// Keccakf operation data size.
 pub const OPERATION_BUS_KECCAKF_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 25;
-pub const OPERATION_BUS_POSEIDON2_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 16;
+/// Poseidon2 operation data size.
+pub const OPERATION_BUS_POSEIDON_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 16;
+/// SHA256F operation data size.
 pub const OPERATION_BUS_SHA256F_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 3 * DATA_256_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 3 * DATA_256_BITS_SIZE;
+/// Arithmetic operation data size for 256-bit operations.
 pub const OPERATION_BUS_ARITH_256_DATA_SIZE: usize =
     OPERATION_PRECOMPILED_BUS_DATA_SIZE + 5 * INDIRECTION_SIZE + 3 * DATA_256_BITS_SIZE;
+/// Arithmetic operation data size for 256-bit modular operations.
 pub const OPERATION_BUS_ARITH_256_MOD_DATA_SIZE: usize =
     OPERATION_PRECOMPILED_BUS_DATA_SIZE + 5 * INDIRECTION_SIZE + 4 * DATA_256_BITS_SIZE;
+/// Secp256k1 addition operation data size.
 pub const OPERATION_BUS_SECP256K1_ADD_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * POINT_256_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * POINT_256_BITS_SIZE;
+/// Secp256k1 doubling operation data size.
 pub const OPERATION_BUS_SECP256K1_DBL_DATA_SIZE: usize =
     OPERATION_PRECOMPILED_BUS_DATA_SIZE + POINT_256_BITS_SIZE;
+/// BN254 curve addition, doubling, and complex operation data size.
 pub const OPERATION_BUS_BN254_CURVE_ADD_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * POINT_256_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * POINT_256_BITS_SIZE;
+/// BN254 curve doubling operation data size.
 pub const OPERATION_BUS_BN254_CURVE_DBL_DATA_SIZE: usize =
     OPERATION_PRECOMPILED_BUS_DATA_SIZE + POINT_256_BITS_SIZE;
+/// BN254 complex addition operation data size.
 pub const OPERATION_BUS_BN254_COMPLEX_ADD_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * COMPLEX_OVER_256_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * COMPLEX_OVER_256_BITS_SIZE;
+/// BN254 complex subtraction operation data size.
 pub const OPERATION_BUS_BN254_COMPLEX_SUB_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * COMPLEX_OVER_256_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * COMPLEX_OVER_256_BITS_SIZE;
+/// BN254 complex multiplication operation data size.
 pub const OPERATION_BUS_BN254_COMPLEX_MUL_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * COMPLEX_OVER_256_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * COMPLEX_OVER_256_BITS_SIZE;
+/// Arithmetic 384-bit modular operation data size.
 pub const OPERATION_BUS_ARITH_384_MOD_DATA_SIZE: usize =
     OPERATION_PRECOMPILED_BUS_DATA_SIZE + 5 * INDIRECTION_SIZE + 4 * DATA_384_BITS_SIZE;
+/// BLS12-381 curve addition, doubling, and complex operation data size.
 pub const OPERATION_BUS_BLS12_381_CURVE_ADD_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * POINT_384_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * POINT_384_BITS_SIZE;
+/// BLS12-381 curve doubling operation data size.
 pub const OPERATION_BUS_BLS12_381_CURVE_DBL_DATA_SIZE: usize =
     OPERATION_PRECOMPILED_BUS_DATA_SIZE + POINT_384_BITS_SIZE;
+/// BLS12-381 complex addition operation data size.
 pub const OPERATION_BUS_BLS12_381_COMPLEX_ADD_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * COMPLEX_OVER_384_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * COMPLEX_OVER_384_BITS_SIZE;
+/// BLS12-381 complex subtraction operation data size.
 pub const OPERATION_BUS_BLS12_381_COMPLEX_SUB_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * COMPLEX_OVER_384_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * COMPLEX_OVER_384_BITS_SIZE;
+/// BLS12-381 complex multiplication operation data size.    
 pub const OPERATION_BUS_BLS12_381_COMPLEX_MUL_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * COMPLEX_OVER_384_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * COMPLEX_OVER_384_BITS_SIZE;
+/// Secp256r1 addition operation data size.
 pub const OPERATION_BUS_SECP256R1_ADD_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 2 * POINT_256_BITS_SIZE;
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * POINT_256_BITS_SIZE;
+/// Secp256r1 doubling operation data size.
 pub const OPERATION_BUS_SECP256R1_DBL_DATA_SIZE: usize =
     OPERATION_PRECOMPILED_BUS_DATA_SIZE + POINT_256_BITS_SIZE;
-pub const OPERATION_BUS_BLAKE2_DATA_SIZE: usize =
-    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * INDIRECTION_SIZE + 33 * DATA_64_BITS_SIZE;
-
-// bus_data_size + 4 params (&a, &b, cin, &c, a, b)
+/// Blake2b operation data size (round index + state[16] + input[16]; state and input addresses
+/// travel in a and b).
+pub const OPERATION_BUS_BLAKE2B_DATA_SIZE: usize =
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 33 * DATA_64_BITS_SIZE;
+/// Blake3 operation data size (state[8] + input[8]; their addresses travel in a and b).
+pub const OPERATION_BUS_BLAKE3_DATA_SIZE: usize =
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 16 * DATA_64_BITS_SIZE;
+/// Blake2s operation data size (state[8] + input[8]; their addresses travel in a and b).
+pub const OPERATION_BUS_BLAKE2S_DATA_SIZE: usize =
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 16 * DATA_64_BITS_SIZE;
+/// Poseidon2 KoalaBear operation data size (state[8], 16 lanes packed two per word; its address travels in b).
+pub const OPERATION_BUS_POSEIDON2_KOALABEAR_DATA_SIZE: usize =
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 8 * DATA_64_BITS_SIZE;
+/// BabyJubJub point-add operation data size (2 points; their addresses travel in a and b).
+pub const OPERATION_BUS_BABYJUBJUB_ADD_DATA_SIZE: usize =
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * POINT_256_BITS_SIZE;
+/// Ed25519 point-add operation data size (2 points; their addresses travel in a and b).
+pub const OPERATION_BUS_ED25519_ADD_DATA_SIZE: usize =
+    OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2 * POINT_256_BITS_SIZE;
+/// Addition operation data size for 256-bit operations.
 pub const OPERATION_BUS_ADD_256_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE
     + 4 * PARAMS_SIZE
     + 2 * DATA_256_BITS_SIZE
     + SINGLE_RESULT_SIZE;
 
+/// DMA operation data size for memory copy operations.
 pub const DMA_ENCODED: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE;
+/// DMA operation data size for memory comparison operations.
 pub const DMA_MEMCMP_COUNT_BUS: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 1;
-// 5 bus_precompiled_data + encoded
+/// 5 bus_precompiled_data + encoded
 pub const OPERATION_BUS_DMA_MEMCPY_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 1;
+/// 5 bus_precompiled_data + encoded
 pub const OPERATION_BUS_DMA_XMEMCPY_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 1;
-// 5 bus_precompiled_data + encoded + count_eq
+/// 5 bus_precompiled_data + encoded + count_eq
 pub const OPERATION_BUS_DMA_MEMCMP_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2;
+/// 5 bus_precompiled_data + encoded + count_eq
 pub const OPERATION_BUS_DMA_XMEMCMP_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 2;
-// 5 bus_precompiled_data + encoded
+/// 5 bus_precompiled_data + encoded
 pub const OPERATION_BUS_DMA_INPUTCPY_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 1;
-// 5 bus_precompiled_data + encoded (fill_byte encoded)
+/// 5 bus_precompiled_data + encoded (fill_byte encoded)
 pub const OPERATION_BUS_DMA_XMEMSET_DATA_SIZE: usize = OPERATION_PRECOMPILED_BUS_DATA_SIZE + 1;
 
-pub const MAX_OPERATION_DATA_SIZE: usize = OPERATION_BUS_BLAKE2_DATA_SIZE;
+/// The maximum size of the operation data payload, which is determined by the largest precompiled operation data size.
+pub const MAX_OPERATION_DATA_SIZE: usize = OPERATION_BUS_BLAKE2B_DATA_SIZE;
 
 /// Index of the operation value in the operation data payload.
 pub const OP: usize = 0;
@@ -116,66 +157,144 @@ pub const STEP: usize = 4;
 /// Type alias for operation data payload.
 pub type OperationData<D> = [D; OPERATION_BUS_DATA_SIZE];
 
-/// Type alias for precompiles operation data payload.
+// Type alias for precompiles operation data payload.
+/// Keccakf operation data type alias.
 pub type OperationKeccakData<D> = [D; OPERATION_BUS_KECCAKF_DATA_SIZE];
+/// SHA256F operation data type alias.
 pub type OperationSha256Data<D> = [D; OPERATION_BUS_SHA256F_DATA_SIZE];
-pub type OperationPoseidon2Data<D> = [D; OPERATION_BUS_POSEIDON2_DATA_SIZE];
+/// Poseidon2 operation data type alias.
+pub type OperationPoseidonData<D> = [D; OPERATION_BUS_POSEIDON_DATA_SIZE];
+/// 256-bit arithmetic operation data type alias.
 pub type OperationArith256Data<D> = [D; OPERATION_BUS_ARITH_256_DATA_SIZE];
+/// 256-bit modular arithmetic operation data type alias.
 pub type OperationArith256ModData<D> = [D; OPERATION_BUS_ARITH_256_MOD_DATA_SIZE];
+/// Secp256k1 addition operation data type alias.
 pub type OperationSecp256k1AddData<D> = [D; OPERATION_BUS_SECP256K1_ADD_DATA_SIZE];
+/// Secp256k1 doubling operation data type alias.
 pub type OperationSecp256k1DblData<D> = [D; OPERATION_BUS_SECP256K1_DBL_DATA_SIZE];
+/// BN254 curve addition operation data type alias.
 pub type OperationBn254CurveAddData<D> = [D; OPERATION_BUS_BN254_CURVE_ADD_DATA_SIZE];
+/// BN254 curve doubling operation data type alias.
 pub type OperationBn254CurveDblData<D> = [D; OPERATION_BUS_BN254_CURVE_DBL_DATA_SIZE];
+/// BN254 complex addition operation data type alias.
 pub type OperationBn254ComplexAddData<D> = [D; OPERATION_BUS_BN254_COMPLEX_ADD_DATA_SIZE];
+/// BN254 complex subtraction operation data type alias.
 pub type OperationBn254ComplexSubData<D> = [D; OPERATION_BUS_BN254_COMPLEX_SUB_DATA_SIZE];
+/// BN254 complex multiplication operation data type alias.
 pub type OperationBn254ComplexMulData<D> = [D; OPERATION_BUS_BN254_COMPLEX_MUL_DATA_SIZE];
+/// 384-bit modular arithmetic operation data type alias.
 pub type OperationArith384ModData<D> = [D; OPERATION_BUS_ARITH_384_MOD_DATA_SIZE];
+/// BLS12-381 curve addition operation data type alias.
 pub type OperationBls12_381CurveAddData<D> = [D; OPERATION_BUS_BLS12_381_CURVE_ADD_DATA_SIZE];
+/// BLS12-381 curve doubling operation data type alias.
 pub type OperationBls12_381CurveDblData<D> = [D; OPERATION_BUS_BLS12_381_CURVE_DBL_DATA_SIZE];
+/// BLS12-381 complex addition operation data type alias.   
 pub type OperationBls12_381ComplexAddData<D> = [D; OPERATION_BUS_BLS12_381_COMPLEX_ADD_DATA_SIZE];
+/// BLS12-381 complex subtraction operation data type alias.
 pub type OperationBls12_381ComplexSubData<D> = [D; OPERATION_BUS_BLS12_381_COMPLEX_SUB_DATA_SIZE];
+/// BLS12-381 complex multiplication operation data type alias.
 pub type OperationBls12_381ComplexMulData<D> = [D; OPERATION_BUS_BLS12_381_COMPLEX_MUL_DATA_SIZE];
+/// 256-bit addition operation data type alias.
 pub type OperationAdd256Data<D> = [D; OPERATION_BUS_ADD_256_DATA_SIZE];
+/// DMA memory copy operation data type alias.
 pub type OperationDmaMemCpyData<D> = [D; OPERATION_BUS_DMA_MEMCPY_DATA_SIZE];
+/// DMA memory compare operation data type alias.   
 pub type OperationDmaMemCmpData<D> = [D; OPERATION_BUS_DMA_MEMCMP_DATA_SIZE];
+/// DMA input copy operation data type alias.
 pub type OperationDmaInputCpyData<D> = [D; OPERATION_BUS_DMA_INPUTCPY_DATA_SIZE];
+/// DMA extended memory copy operation data type alias.
 pub type OperationDmaXMemCpyData<D> = [D; OPERATION_BUS_DMA_XMEMCPY_DATA_SIZE];
+/// DMA extended memory compare operation data type alias.
 pub type OperationDmaXMemCmpData<D> = [D; OPERATION_BUS_DMA_XMEMCMP_DATA_SIZE];
+/// DMA extended memory set operation data type alias.
 pub type OperationDmaXMemSetData<D> = [D; OPERATION_BUS_DMA_XMEMSET_DATA_SIZE];
+/// Secp256r1 addition operation data type alias.
 pub type OperationSecp256r1AddData<D> = [D; OPERATION_BUS_SECP256R1_ADD_DATA_SIZE];
+/// Secp256r1 doubling operation data type alias.
 pub type OperationSecp256r1DblData<D> = [D; OPERATION_BUS_SECP256R1_DBL_DATA_SIZE];
-pub type OperationBlake2Data<D> = [D; OPERATION_BUS_BLAKE2_DATA_SIZE];
+/// Blake2b operation data type alias.
+pub type OperationBlake2bData<D> = [D; OPERATION_BUS_BLAKE2B_DATA_SIZE];
+/// Blake3 operation data type alias.
+pub type OperationBlake3Data<D> = [D; OPERATION_BUS_BLAKE3_DATA_SIZE];
+/// Blake2s operation data type alias.
+pub type OperationBlake2sData<D> = [D; OPERATION_BUS_BLAKE2S_DATA_SIZE];
+/// Poseidon2 KoalaBear operation data type alias.
+pub type OperationPoseidon2KoalaBearData<D> = [D; OPERATION_BUS_POSEIDON2_KOALABEAR_DATA_SIZE];
+/// BabyJubJub point-add operation data type alias.
+pub type OperationBabyJubJubAddData<D> = [D; OPERATION_BUS_BABYJUBJUB_ADD_DATA_SIZE];
+/// Ed25519 point-add operation data type alias.
+pub type OperationEd25519AddData<D> = [D; OPERATION_BUS_ED25519_ADD_DATA_SIZE];
 
+/// The `ExtOperationData` enum encapsulates the various types of operation data that can be transmitted over the operation bus.
 pub enum ExtOperationData<D> {
+    /// Generic operation data type for operations that do not fit into specific precompiled categories.
     OperationData(OperationData<D>),
+    /// Keccakf operation data.
     OperationKeccakData(OperationKeccakData<D>),
+    /// SHA-256 operation data.
     OperationSha256Data(OperationSha256Data<D>),
-    OperationPoseidon2Data(OperationPoseidon2Data<D>),
+    /// Poseidon2 operation data.
+    OperationPoseidonData(OperationPoseidonData<D>),
+    /// 256-bit arithmetic operation data.
     OperationArith256Data(OperationArith256Data<D>),
+    /// 256-bit modular arithmetic operation data.
     OperationArith256ModData(OperationArith256ModData<D>),
+    /// Secp256k1 addition operation data.
     OperationSecp256k1AddData(OperationSecp256k1AddData<D>),
+    /// Secp256k1 doubling operation data.
     OperationSecp256k1DblData(OperationSecp256k1DblData<D>),
+    /// Bn254 curve addition operation data.
     OperationBn254CurveAddData(OperationBn254CurveAddData<D>),
+    /// Bn254 curve doubling operation data.
     OperationBn254CurveDblData(OperationBn254CurveDblData<D>),
+    /// Bn254 complex addition operation data.
     OperationBn254ComplexAddData(OperationBn254ComplexAddData<D>),
+    /// Bn254 complex subtraction operation data.
     OperationBn254ComplexSubData(OperationBn254ComplexSubData<D>),
+    /// Bn254 complex multiplication operation data.
     OperationBn254ComplexMulData(OperationBn254ComplexMulData<D>),
+    /// 384-bit modular arithmetic operation data.
     OperationArith384ModData(OperationArith384ModData<D>),
+    /// BLS12-381 curve addition operation data.
     OperationBls12_381CurveAddData(OperationBls12_381CurveAddData<D>),
+    /// BLS12-381 curve doubling operation data.
     OperationBls12_381CurveDblData(OperationBls12_381CurveDblData<D>),
+    /// BLS12-381 complex addition operation data.
     OperationBls12_381ComplexAddData(OperationBls12_381ComplexAddData<D>),
+    /// BLS12-381 complex subtraction operation data.
     OperationBls12_381ComplexSubData(OperationBls12_381ComplexSubData<D>),
+    /// BLS12-381 complex multiplication operation data.
     OperationBls12_381ComplexMulData(OperationBls12_381ComplexMulData<D>),
+    /// 256-bit addition operation data.
     OperationAdd256Data(OperationAdd256Data<D>),
+    /// DMA memory copy operation data.
     OperationDmaMemCpyData(OperationDmaMemCpyData<D>),
+    /// DMA memory compare operation data.
     OperationDmaMemCmpData(OperationDmaMemCmpData<D>),
+    /// DMA input copy operation data.
     OperationDmaInputCpyData(OperationDmaInputCpyData<D>),
+    /// DMA extended memory set operation data.
     OperationDmaXMemSetData(OperationDmaXMemSetData<D>),
+    /// DMA extended memory copy operation data.
     OperationDmaXMemCpyData(OperationDmaXMemCpyData<D>),
+    /// DMA extended memory compare operation data.
     OperationDmaXMemCmpData(OperationDmaXMemCmpData<D>),
+    /// Secp256r1 addition operation data.
     OperationSecp256r1AddData(OperationSecp256r1AddData<D>),
+    /// Secp256r1 doubling operation data.
     OperationSecp256r1DblData(OperationSecp256r1DblData<D>),
-    OperationBlake2Data(OperationBlake2Data<D>),
+    /// Blake2b operation data.
+    OperationBlake2bData(OperationBlake2bData<D>),
+    /// Blake3 operation data.
+    OperationBlake3Data(OperationBlake3Data<D>),
+    /// Blake2s operation data.
+    OperationBlake2sData(OperationBlake2sData<D>),
+    /// BabyJubJub point-add operation data.
+    OperationBabyJubJubAddData(OperationBabyJubJubAddData<D>),
+    /// Ed25519 point-add operation data.
+    OperationEd25519AddData(OperationEd25519AddData<D>),
+    /// Poseidon2 KoalaBear operation data.
+    OperationPoseidon2KoalaBearData(OperationPoseidon2KoalaBearData<D>),
 }
 
 // impl<D: Copy + Into<u8>> TryFrom<&[D]> for ExtOperationData<D> {
@@ -198,15 +317,30 @@ impl<D: Copy + Into<u64>> TryFrom<&[D]> for ExtOperationData<D> {
                     data.try_into().map_err(|_| "Invalid OperationSha256Data size")?;
                 Ok(ExtOperationData::OperationSha256Data(array))
             }
-            ZiskOp::POSEIDON2 => {
-                let array: OperationPoseidon2Data<D> =
-                    data.try_into().map_err(|_| "Invalid OperationPoseidon2Data size")?;
-                Ok(ExtOperationData::OperationPoseidon2Data(array))
+            ZiskOp::POSEIDON2 | ZiskOp::POSEIDON1 => {
+                let array: OperationPoseidonData<D> =
+                    data.try_into().map_err(|_| "Invalid OperationPoseidonData size")?;
+                Ok(ExtOperationData::OperationPoseidonData(array))
             }
-            ZiskOp::BLAKE2 => {
-                let array: OperationBlake2Data<D> =
-                    data.try_into().map_err(|_| "Invalid OperationBlake2Data size")?;
-                Ok(ExtOperationData::OperationBlake2Data(array))
+            ZiskOp::BLAKE2B => {
+                let array: OperationBlake2bData<D> =
+                    data.try_into().map_err(|_| "Invalid OperationBlake2bData size")?;
+                Ok(ExtOperationData::OperationBlake2bData(array))
+            }
+            ZiskOp::BLAKE3 => {
+                let array: OperationBlake3Data<D> =
+                    data.try_into().map_err(|_| "Invalid OperationBlake3Data size")?;
+                Ok(ExtOperationData::OperationBlake3Data(array))
+            }
+            ZiskOp::BLAKE2S => {
+                let array: OperationBlake2sData<D> =
+                    data.try_into().map_err(|_| "Invalid OperationBlake2sData size")?;
+                Ok(ExtOperationData::OperationBlake2sData(array))
+            }
+            ZiskOp::POSEIDON2_KOALABEAR => {
+                let array: OperationPoseidon2KoalaBearData<D> =
+                    data.try_into().map_err(|_| "Invalid OperationPoseidon2KoalaBearData size")?;
+                Ok(ExtOperationData::OperationPoseidon2KoalaBearData(array))
             }
             ZiskOp::ARITH256 => {
                 let array: OperationArith256Data<D> =
@@ -328,6 +462,16 @@ impl<D: Copy + Into<u64>> TryFrom<&[D]> for ExtOperationData<D> {
                     data.try_into().map_err(|_| "Invalid OperationSecp256r1DblData size")?;
                 Ok(ExtOperationData::OperationSecp256r1DblData(array))
             }
+            ZiskOp::BABYJUBJUB_ADD => {
+                let array: OperationBabyJubJubAddData<D> =
+                    data.try_into().map_err(|_| "Invalid OperationBabyJubJubAddData size")?;
+                Ok(ExtOperationData::OperationBabyJubJubAddData(array))
+            }
+            ZiskOp::ED25519_ADD => {
+                let array: OperationEd25519AddData<D> =
+                    data.try_into().map_err(|_| "Invalid OperationEd25519AddData size")?;
+                Ok(ExtOperationData::OperationEd25519AddData(array))
+            }
             _ => {
                 let array: OperationData<D> =
                     data.try_into().map_err(|_| "Invalid OperationData size")?;
@@ -384,8 +528,7 @@ impl OperationBusData<u64> {
 
         match inst.op_type {
             ZiskOperationType::Keccak => {
-                let mut data =
-                    unsafe { uninit_array::<OPERATION_BUS_KECCAKF_DATA_SIZE>().assume_init() };
+                let mut data = [0u64; OPERATION_BUS_KECCAKF_DATA_SIZE];
                 data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                     .copy_from_slice(&[op, op_type, a, b, step]);
                 data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -394,8 +537,7 @@ impl OperationBusData<u64> {
             }
 
             ZiskOperationType::Sha256 => {
-                let mut data =
-                    unsafe { uninit_array::<OPERATION_BUS_SHA256F_DATA_SIZE>().assume_init() };
+                let mut data = [0u64; OPERATION_BUS_SHA256F_DATA_SIZE];
                 data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                     .copy_from_slice(&[op, op_type, a, b, step]);
                 data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -403,31 +545,54 @@ impl OperationBusData<u64> {
                 ExtOperationData::OperationSha256Data(data)
             }
 
-            ZiskOperationType::Poseidon2 => {
-                let mut data =
-                    unsafe { uninit_array::<OPERATION_BUS_POSEIDON2_DATA_SIZE>().assume_init() };
+            ZiskOperationType::Poseidon => {
+                let mut data = [0u64; OPERATION_BUS_POSEIDON_DATA_SIZE];
                 data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                     .copy_from_slice(&[op, op_type, a, b, step]);
                 data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
                     .copy_from_slice(&ctx.precompiled.input_data);
-                ExtOperationData::OperationPoseidon2Data(data)
+                ExtOperationData::OperationPoseidonData(data)
             }
 
-            ZiskOperationType::Blake2 => {
-                let mut data =
-                    unsafe { uninit_array::<OPERATION_BUS_BLAKE2_DATA_SIZE>().assume_init() };
+            ZiskOperationType::Blake2b => {
+                let mut data = [0u64; OPERATION_BUS_BLAKE2B_DATA_SIZE];
                 data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                     .copy_from_slice(&[op, op_type, a, b, step]);
                 data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
                     .copy_from_slice(&ctx.precompiled.input_data);
-                ExtOperationData::OperationBlake2Data(data)
+                ExtOperationData::OperationBlake2bData(data)
+            }
+
+            ZiskOperationType::Blake3 => {
+                let mut data = [0u64; OPERATION_BUS_BLAKE3_DATA_SIZE];
+                data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                    .copy_from_slice(&[op, op_type, a, b, step]);
+                data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
+                    .copy_from_slice(&ctx.precompiled.input_data);
+                ExtOperationData::OperationBlake3Data(data)
+            }
+
+            ZiskOperationType::Blake2s => {
+                let mut data = [0u64; OPERATION_BUS_BLAKE2S_DATA_SIZE];
+                data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                    .copy_from_slice(&[op, op_type, a, b, step]);
+                data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
+                    .copy_from_slice(&ctx.precompiled.input_data);
+                ExtOperationData::OperationBlake2sData(data)
+            }
+
+            ZiskOperationType::Poseidon2KoalaBear => {
+                let mut data = [0u64; OPERATION_BUS_POSEIDON2_KOALABEAR_DATA_SIZE];
+                data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                    .copy_from_slice(&[op, op_type, a, b, step]);
+                data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
+                    .copy_from_slice(&ctx.precompiled.input_data);
+                ExtOperationData::OperationPoseidon2KoalaBearData(data)
             }
 
             ZiskOperationType::ArithEq => match inst.op {
                 ZiskOp::ARITH256 => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_ARITH_256_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_ARITH_256_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -435,9 +600,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationArith256Data(data)
                 }
                 ZiskOp::ARITH256_MOD => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_ARITH_256_MOD_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_ARITH_256_MOD_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -445,9 +608,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationArith256ModData(data)
                 }
                 ZiskOp::SECP256K1_ADD => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_SECP256K1_ADD_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_SECP256K1_ADD_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -455,9 +616,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationSecp256k1AddData(data)
                 }
                 ZiskOp::SECP256K1_DBL => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_SECP256K1_DBL_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_SECP256K1_DBL_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -465,9 +624,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationSecp256k1DblData(data)
                 }
                 ZiskOp::BN254_CURVE_ADD => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BN254_CURVE_ADD_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BN254_CURVE_ADD_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -475,9 +632,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationBn254CurveAddData(data)
                 }
                 ZiskOp::BN254_CURVE_DBL => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BN254_CURVE_DBL_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BN254_CURVE_DBL_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -485,9 +640,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationBn254CurveDblData(data)
                 }
                 ZiskOp::BN254_COMPLEX_ADD => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BN254_COMPLEX_ADD_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BN254_COMPLEX_ADD_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -495,9 +648,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationBn254ComplexAddData(data)
                 }
                 ZiskOp::BN254_COMPLEX_SUB => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BN254_COMPLEX_SUB_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BN254_COMPLEX_SUB_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -505,9 +656,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationBn254ComplexSubData(data)
                 }
                 ZiskOp::BN254_COMPLEX_MUL => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BN254_COMPLEX_MUL_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BN254_COMPLEX_MUL_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -515,9 +664,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationBn254ComplexMulData(data)
                 }
                 ZiskOp::SECP256R1_ADD => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_SECP256R1_ADD_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_SECP256R1_ADD_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -525,9 +672,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationSecp256r1AddData(data)
                 }
                 ZiskOp::SECP256R1_DBL => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_SECP256R1_DBL_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_SECP256R1_DBL_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -539,9 +684,7 @@ impl OperationBusData<u64> {
 
             ZiskOperationType::ArithEq384 => match inst.op {
                 ZiskOp::ARITH384_MOD => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_ARITH_384_MOD_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_ARITH_384_MOD_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -549,9 +692,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationArith384ModData(data)
                 }
                 ZiskOp::BLS12_381_CURVE_ADD => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BLS12_381_CURVE_ADD_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BLS12_381_CURVE_ADD_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -559,9 +700,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationBls12_381CurveAddData(data)
                 }
                 ZiskOp::BLS12_381_CURVE_DBL => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BLS12_381_CURVE_DBL_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BLS12_381_CURVE_DBL_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -569,10 +708,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationBls12_381CurveDblData(data)
                 }
                 ZiskOp::BLS12_381_COMPLEX_ADD => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BLS12_381_COMPLEX_ADD_DATA_SIZE>()
-                            .assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BLS12_381_COMPLEX_ADD_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -580,10 +716,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationBls12_381ComplexAddData(data)
                 }
                 ZiskOp::BLS12_381_COMPLEX_SUB => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BLS12_381_COMPLEX_SUB_DATA_SIZE>()
-                            .assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BLS12_381_COMPLEX_SUB_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -591,10 +724,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationBls12_381ComplexSubData(data)
                 }
                 ZiskOp::BLS12_381_COMPLEX_MUL => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_BLS12_381_COMPLEX_MUL_DATA_SIZE>()
-                            .assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_BLS12_381_COMPLEX_MUL_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -606,8 +736,7 @@ impl OperationBusData<u64> {
 
             ZiskOperationType::BigInt => match inst.op {
                 ZiskOp::ADD256 => {
-                    let mut data =
-                        unsafe { uninit_array::<OPERATION_BUS_ADD_256_DATA_SIZE>().assume_init() };
+                    let mut data = [0u64; OPERATION_BUS_ADD_256_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -617,11 +746,29 @@ impl OperationBusData<u64> {
                 _ => ExtOperationData::OperationData([op, op_type, a, b]),
             },
 
+            ZiskOperationType::TwistedEdwards => match inst.op {
+                ZiskOp::BABYJUBJUB_ADD => {
+                    let mut data = [0u64; OPERATION_BUS_BABYJUBJUB_ADD_DATA_SIZE];
+                    data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                        .copy_from_slice(&[op, op_type, a, b, step]);
+                    data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
+                        .copy_from_slice(&ctx.precompiled.input_data);
+                    ExtOperationData::OperationBabyJubJubAddData(data)
+                }
+                ZiskOp::ED25519_ADD => {
+                    let mut data = [0u64; OPERATION_BUS_ED25519_ADD_DATA_SIZE];
+                    data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                        .copy_from_slice(&[op, op_type, a, b, step]);
+                    data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
+                        .copy_from_slice(&ctx.precompiled.input_data);
+                    ExtOperationData::OperationEd25519AddData(data)
+                }
+                _ => ExtOperationData::OperationData([op, op_type, a, b]),
+            },
+
             ZiskOperationType::Dma => match inst.op {
                 ZiskOp::DMA_MEMCPY => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_DMA_MEMCPY_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_DMA_MEMCPY_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -629,9 +776,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationDmaMemCpyData(data)
                 }
                 ZiskOp::DMA_MEMCMP => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_DMA_MEMCMP_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_DMA_MEMCMP_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -639,9 +784,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationDmaMemCmpData(data)
                 }
                 ZiskOp::DMA_INPUTCPY => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_DMA_INPUTCPY_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_DMA_INPUTCPY_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -649,9 +792,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationDmaInputCpyData(data)
                 }
                 ZiskOp::DMA_XMEMSET => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_DMA_XMEMSET_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_DMA_XMEMSET_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -659,9 +800,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationDmaXMemSetData(data)
                 }
                 ZiskOp::DMA_XMEMCPY => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_DMA_XMEMCPY_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_DMA_XMEMCPY_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -669,9 +808,7 @@ impl OperationBusData<u64> {
                     ExtOperationData::OperationDmaXMemCpyData(data)
                 }
                 ZiskOp::DMA_XMEMCMP => {
-                    let mut data = unsafe {
-                        uninit_array::<OPERATION_BUS_DMA_XMEMCMP_DATA_SIZE>().assume_init()
-                    };
+                    let mut data = [0u64; OPERATION_BUS_DMA_XMEMCMP_DATA_SIZE];
                     data[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                         .copy_from_slice(&[op, op_type, a, b, step]);
                     data[OPERATION_PRECOMPILED_BUS_DATA_SIZE..]
@@ -685,6 +822,7 @@ impl OperationBusData<u64> {
         }
     }
 
+    /// Writes the operation instruction payload into a provided buffer.
     #[inline(always)]
     pub fn write_instruction_payload<'a>(
         inst: &ZiskInst,
@@ -708,7 +846,7 @@ impl OperationBusData<u64> {
             }
 
             ZiskOperationType::Sha256 => {
-                debug_assert_eq!(ctx.precompiled.input_data.len(), 14);
+                debug_assert_eq!(ctx.precompiled.input_data.len(), 12);
                 buffer[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                     .copy_from_slice(&[op, op_type, a, b, step]);
                 buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE..OPERATION_BUS_SHA256F_DATA_SIZE]
@@ -716,22 +854,50 @@ impl OperationBusData<u64> {
                 &buffer[..OPERATION_BUS_SHA256F_DATA_SIZE]
             }
 
-            ZiskOperationType::Poseidon2 => {
+            ZiskOperationType::Poseidon => {
                 debug_assert_eq!(ctx.precompiled.input_data.len(), 16);
                 buffer[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                     .copy_from_slice(&[op, op_type, a, b, step]);
-                buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE..OPERATION_BUS_POSEIDON2_DATA_SIZE]
+                buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE..OPERATION_BUS_POSEIDON_DATA_SIZE]
                     .copy_from_slice(&ctx.precompiled.input_data);
-                &buffer[..OPERATION_BUS_POSEIDON2_DATA_SIZE]
+                &buffer[..OPERATION_BUS_POSEIDON_DATA_SIZE]
             }
 
-            ZiskOperationType::Blake2 => {
-                debug_assert_eq!(ctx.precompiled.input_data.len(), 35);
+            ZiskOperationType::Blake2b => {
+                debug_assert_eq!(ctx.precompiled.input_data.len(), 33);
                 buffer[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
                     .copy_from_slice(&[op, op_type, a, b, step]);
-                buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE..OPERATION_BUS_BLAKE2_DATA_SIZE]
+                buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE..OPERATION_BUS_BLAKE2B_DATA_SIZE]
                     .copy_from_slice(&ctx.precompiled.input_data);
-                &buffer[..OPERATION_BUS_BLAKE2_DATA_SIZE]
+                &buffer[..OPERATION_BUS_BLAKE2B_DATA_SIZE]
+            }
+
+            ZiskOperationType::Blake3 => {
+                debug_assert_eq!(ctx.precompiled.input_data.len(), 16);
+                buffer[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                    .copy_from_slice(&[op, op_type, a, b, step]);
+                buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE..OPERATION_BUS_BLAKE3_DATA_SIZE]
+                    .copy_from_slice(&ctx.precompiled.input_data);
+                &buffer[..OPERATION_BUS_BLAKE3_DATA_SIZE]
+            }
+
+            ZiskOperationType::Blake2s => {
+                debug_assert_eq!(ctx.precompiled.input_data.len(), 16);
+                buffer[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                    .copy_from_slice(&[op, op_type, a, b, step]);
+                buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE..OPERATION_BUS_BLAKE2S_DATA_SIZE]
+                    .copy_from_slice(&ctx.precompiled.input_data);
+                &buffer[..OPERATION_BUS_BLAKE2S_DATA_SIZE]
+            }
+
+            ZiskOperationType::Poseidon2KoalaBear => {
+                debug_assert_eq!(ctx.precompiled.input_data.len(), 8);
+                buffer[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                    .copy_from_slice(&[op, op_type, a, b, step]);
+                buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE
+                    ..OPERATION_BUS_POSEIDON2_KOALABEAR_DATA_SIZE]
+                    .copy_from_slice(&ctx.precompiled.input_data);
+                &buffer[..OPERATION_BUS_POSEIDON2_KOALABEAR_DATA_SIZE]
             }
 
             ZiskOperationType::ArithEq => match inst.op {
@@ -903,6 +1069,40 @@ impl OperationBusData<u64> {
 
             ZiskOperationType::BigInt => match inst.op {
                 ZiskOp::ADD256 => {
+                    let len =
+                        OPERATION_PRECOMPILED_BUS_DATA_SIZE + ctx.precompiled.input_data.len();
+                    buffer[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                        .copy_from_slice(&[op, op_type, a, b, step]);
+                    buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE..len]
+                        .copy_from_slice(&ctx.precompiled.input_data);
+                    &buffer[..len]
+                }
+                _ => {
+                    buffer[0..OPERATION_BUS_DATA_SIZE].copy_from_slice(&[op, op_type, a, b]);
+                    &buffer[..OPERATION_BUS_DATA_SIZE]
+                }
+            },
+
+            ZiskOperationType::TwistedEdwards => match inst.op {
+                ZiskOp::BABYJUBJUB_ADD | ZiskOp::ED25519_ADD => {
+                    let len =
+                        OPERATION_PRECOMPILED_BUS_DATA_SIZE + ctx.precompiled.input_data.len();
+                    buffer[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
+                        .copy_from_slice(&[op, op_type, a, b, step]);
+                    buffer[OPERATION_PRECOMPILED_BUS_DATA_SIZE..len]
+                        .copy_from_slice(&ctx.precompiled.input_data);
+                    &buffer[..len]
+                }
+                _ => {
+                    buffer[0..OPERATION_BUS_DATA_SIZE].copy_from_slice(&[op, op_type, a, b]);
+                    &buffer[..OPERATION_BUS_DATA_SIZE]
+                }
+            },
+
+            ZiskOperationType::Evm => match inst.op {
+                ZiskOp::JUMP_DEST => {
+                    // The header is a single word, the byte count; the source words
+                    // travel separately through data_ext.
                     let len =
                         OPERATION_PRECOMPILED_BUS_DATA_SIZE + ctx.precompiled.input_data.len();
                     buffer[0..OPERATION_PRECOMPILED_BUS_DATA_SIZE]
@@ -958,7 +1158,7 @@ impl OperationBusData<u64> {
             ExtOperationData::OperationData(d) => d[OP] as u8,
             ExtOperationData::OperationKeccakData(d) => d[OP] as u8,
             ExtOperationData::OperationSha256Data(d) => d[OP] as u8,
-            ExtOperationData::OperationPoseidon2Data(d) => d[OP] as u8,
+            ExtOperationData::OperationPoseidonData(d) => d[OP] as u8,
             ExtOperationData::OperationArith256Data(d) => d[OP] as u8,
             ExtOperationData::OperationArith256ModData(d) => d[OP] as u8,
             ExtOperationData::OperationSecp256k1AddData(d) => d[OP] as u8,
@@ -983,7 +1183,12 @@ impl OperationBusData<u64> {
             ExtOperationData::OperationDmaXMemCmpData(d) => d[OP] as u8,
             ExtOperationData::OperationSecp256r1AddData(d) => d[OP] as u8,
             ExtOperationData::OperationSecp256r1DblData(d) => d[OP] as u8,
-            ExtOperationData::OperationBlake2Data(d) => d[OP] as u8,
+            ExtOperationData::OperationBlake2bData(d) => d[OP] as u8,
+            ExtOperationData::OperationBlake3Data(d) => d[OP] as u8,
+            ExtOperationData::OperationBlake2sData(d) => d[OP] as u8,
+            ExtOperationData::OperationPoseidon2KoalaBearData(d) => d[OP] as u8,
+            ExtOperationData::OperationBabyJubJubAddData(d) => d[OP] as u8,
+            ExtOperationData::OperationEd25519AddData(d) => d[OP] as u8,
         }
     }
 
@@ -1000,7 +1205,7 @@ impl OperationBusData<u64> {
             ExtOperationData::OperationData(d) => d[OP_TYPE],
             ExtOperationData::OperationKeccakData(d) => d[OP_TYPE],
             ExtOperationData::OperationSha256Data(d) => d[OP_TYPE],
-            ExtOperationData::OperationPoseidon2Data(d) => d[OP_TYPE],
+            ExtOperationData::OperationPoseidonData(d) => d[OP_TYPE],
             ExtOperationData::OperationArith256Data(d) => d[OP_TYPE],
             ExtOperationData::OperationArith256ModData(d) => d[OP_TYPE],
             ExtOperationData::OperationSecp256k1AddData(d) => d[OP_TYPE],
@@ -1025,7 +1230,12 @@ impl OperationBusData<u64> {
             ExtOperationData::OperationDmaXMemCmpData(d) => d[OP_TYPE],
             ExtOperationData::OperationSecp256r1AddData(d) => d[OP_TYPE],
             ExtOperationData::OperationSecp256r1DblData(d) => d[OP_TYPE],
-            ExtOperationData::OperationBlake2Data(d) => d[OP_TYPE],
+            ExtOperationData::OperationBlake2bData(d) => d[OP_TYPE],
+            ExtOperationData::OperationBlake3Data(d) => d[OP_TYPE],
+            ExtOperationData::OperationBlake2sData(d) => d[OP_TYPE],
+            ExtOperationData::OperationPoseidon2KoalaBearData(d) => d[OP_TYPE],
+            ExtOperationData::OperationBabyJubJubAddData(d) => d[OP_TYPE],
+            ExtOperationData::OperationEd25519AddData(d) => d[OP_TYPE],
         }
     }
 
@@ -1042,7 +1252,7 @@ impl OperationBusData<u64> {
             ExtOperationData::OperationData(d) => d[A],
             ExtOperationData::OperationKeccakData(d) => d[A],
             ExtOperationData::OperationSha256Data(d) => d[A],
-            ExtOperationData::OperationPoseidon2Data(d) => d[A],
+            ExtOperationData::OperationPoseidonData(d) => d[A],
             ExtOperationData::OperationArith256Data(d) => d[A],
             ExtOperationData::OperationArith256ModData(d) => d[A],
             ExtOperationData::OperationSecp256k1AddData(d) => d[A],
@@ -1067,7 +1277,12 @@ impl OperationBusData<u64> {
             ExtOperationData::OperationDmaXMemCmpData(d) => d[A],
             ExtOperationData::OperationSecp256r1AddData(d) => d[A],
             ExtOperationData::OperationSecp256r1DblData(d) => d[A],
-            ExtOperationData::OperationBlake2Data(d) => d[A],
+            ExtOperationData::OperationBlake2bData(d) => d[A],
+            ExtOperationData::OperationBlake3Data(d) => d[A],
+            ExtOperationData::OperationBlake2sData(d) => d[A],
+            ExtOperationData::OperationPoseidon2KoalaBearData(d) => d[A],
+            ExtOperationData::OperationBabyJubJubAddData(d) => d[A],
+            ExtOperationData::OperationEd25519AddData(d) => d[A],
         }
     }
 
@@ -1084,7 +1299,7 @@ impl OperationBusData<u64> {
             ExtOperationData::OperationData(d) => d[B],
             ExtOperationData::OperationKeccakData(d) => d[B],
             ExtOperationData::OperationSha256Data(d) => d[B],
-            ExtOperationData::OperationPoseidon2Data(d) => d[B],
+            ExtOperationData::OperationPoseidonData(d) => d[B],
             ExtOperationData::OperationArith256Data(d) => d[B],
             ExtOperationData::OperationArith256ModData(d) => d[B],
             ExtOperationData::OperationSecp256k1AddData(d) => d[B],
@@ -1109,7 +1324,12 @@ impl OperationBusData<u64> {
             ExtOperationData::OperationDmaXMemCmpData(d) => d[B],
             ExtOperationData::OperationSecp256r1AddData(d) => d[B],
             ExtOperationData::OperationSecp256r1DblData(d) => d[B],
-            ExtOperationData::OperationBlake2Data(d) => d[B],
+            ExtOperationData::OperationBlake2bData(d) => d[B],
+            ExtOperationData::OperationBlake3Data(d) => d[B],
+            ExtOperationData::OperationBlake2sData(d) => d[B],
+            ExtOperationData::OperationPoseidon2KoalaBearData(d) => d[B],
+            ExtOperationData::OperationBabyJubJubAddData(d) => d[B],
+            ExtOperationData::OperationEd25519AddData(d) => d[B],
         }
     }
 }

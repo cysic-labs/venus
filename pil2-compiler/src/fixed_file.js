@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const Context = require("./context.js");
+const COLORS = require("./colors.js");
 const { type } = require("os");
 const MAX_BUFF_SIZE = 1024 * 1024 * 16; // 8 * 32Mb
 const HEADER_SIGNATURE = "cnst\x01\0\0\0\x01\0\0\0\x01\0\0\0";
@@ -22,7 +23,7 @@ module.exports = class FixedFile {
     saveToFile(filename) {
         const _filename = (!Context.fixedOutputDir || filename.startsWith('/')) ? filename : path.join(Context.fixedOutputDir, filename);
         const dirname = path.dirname(_filename);
-        console.log(`  > Saving fixed file ${_filename} ...`);
+        console.log(`  > Saving fixed file ${COLORS.filename(_filename)} ...`);
         if (!fs.existsSync(dirname)) {
             fs.mkdirSync(dirname, { recursive: true });
         }

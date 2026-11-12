@@ -1,24 +1,36 @@
-use std::{collections::HashMap, sync::RwLock};
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::RwLock,
+};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::Arc;
 use std::sync::Mutex;
-use crate::{MpiCtx, ProofmanError};
+use crate::{plan_stream_layout, StreamClass, StreamLayout};
+use crate::{plan_buffer, BufferPlan, BufferPlanInput, CacheInput, CONST_CACHE_SLOTS_PLAN_MAX};
+use crate::{GpuWitnessAir, GpuWitnessAirs, MpiCtx, ProofmanError};
 use borsh::{BorshDeserialize, BorshSerialize};
 use std::fs::File;
 use std::io::Read;
-use std::fs;
-use fields::{PrimeField64, Transcript, Poseidon16};
+use proofman_fields::{new_transcript, PrimeField64};
 use crate::{
     initialize_logger, format_bytes, AirInstance, DistributionCtx, GlobalInfo, InstanceInfo, PolMap, SetupCtx, StdMode,
-    RowInfo, StepsParams, SetupsVadcop, VerboseMode, ProofmanResult,
+    CustomCommits, PackedInfo, RowInfo, Setup, StepsParams, SetupsVadcop, VerboseMode, ProofmanResult,
+    custom_commit_words_per_row, CustomCommitEntry, CustomCommitValidation, WitnessState, WitnessStats,
+    WitnessPriority,
 };
 
 use std::ffi::c_void;
 use proofman_starks_lib_c::{
-    check_device_memory_c, custom_commit_size_c, get_num_gpus_c, gen_device_buffers_c, gen_device_streams_c,
-    alloc_device_large_buffers_c,
+    upload_custom_commit_packed_c, check_device_memory_c, configure_phase_b_c, get_num_gpus_c, gen_device_buffers_c,
+    gen_device_streams_c, alloc_device_large_buffers_c, acquire_first_gpu_buffer_c, release_first_gpu_buffer_c,
+    get_first_gpu_id_c, get_first_gpu_buffer_c, get_mops_floor_bytes_c, get_post_alloc_headroom_bytes_c,
+    get_layout_offset_c, set_basic_fixed_on_host_c, LayoutBoundary,
 };
 use proofman_util::DeviceBuffer;
+
+/// The smallest GPU headroom a short card falls back to, in steps of 256 MiB from PROOFMAN_GPU_HEADROOM_MB.
+const POST_ALLOC_HEADROOM_MIN_BYTES: f64 = (512u64 << 20) as f64;
 
 #[derive(Debug)]
 pub struct Values<F> {
@@ -28,6 +40,10 @@ pub struct Values<F> {
 impl<F: PrimeField64> Values<F> {
     pub fn new(n_values: usize) -> Self {
         Self { values: RwLock::new(vec![F::ZERO; n_values]) }
+    }
+
+    pub fn reset(&self) {
+        self.values.write().unwrap().fill(F::ZERO);
     }
 }
 
@@ -51,6 +67,15 @@ pub type InstanceMap = HashMap<usize, InstancesInfo>;
 
 pub const DEFAULT_N_PRINT_CONSTRAINTS: usize = 10;
 
+/// Extra free memory (MB) kept when the layout adds the phase-A recursion alias stream: its CUDA
+/// graphs and per-stream device buffers (measured ~0.3 GB at 712 tx, rounded up).
+const PHASE_A_ALIAS_HEADROOM_MB: u64 = 512;
+
+/// Unified-buffer floor (bytes) for final-snark runs: the snark prover borrows the buffer
+/// whole and carves ~27.97 GiB (2^24 plonk key), regardless of what the streams need.
+/// Padded from the layout's unused slack only, so it never eats into the reserve.
+const GPU_UNIFIED_BUFFER_MIN_SNARK_BYTES: u64 = 30_386_893_620;
+
 #[derive(Clone)]
 pub struct ProofOptions {
     pub verify_constraints: bool,
@@ -58,9 +83,6 @@ pub struct ProofOptions {
     pub rma: bool,
     pub compressed: bool,
     pub verify_proofs: bool,
-    pub save_proofs: bool,
-    pub test_mode: bool,
-    pub output_dir_path: Option<PathBuf>,
     pub minimal_memory: bool,
 }
 
@@ -71,9 +93,6 @@ impl BorshSerialize for ProofOptions {
         BorshSerialize::serialize(&self.rma, writer)?;
         BorshSerialize::serialize(&self.compressed, writer)?;
         BorshSerialize::serialize(&self.verify_proofs, writer)?;
-        BorshSerialize::serialize(&self.save_proofs, writer)?;
-        BorshSerialize::serialize(&self.test_mode, writer)?;
-        BorshSerialize::serialize(&self.output_dir_path.as_ref().map(|p| p.to_string_lossy().to_string()), writer)?;
         BorshSerialize::serialize(&self.minimal_memory, writer)?;
         Ok(())
     }
@@ -86,22 +105,9 @@ impl BorshDeserialize for ProofOptions {
         let rma = bool::deserialize_reader(reader)?;
         let compressed = bool::deserialize_reader(reader)?;
         let verify_proofs = bool::deserialize_reader(reader)?;
-        let save_proofs = bool::deserialize_reader(reader)?;
-        let test_mode = bool::deserialize_reader(reader)?;
-        let output_dir_path: Option<String> = Option::<String>::deserialize_reader(reader)?;
         let minimal_memory = bool::deserialize_reader(reader)?;
 
-        Ok(Self {
-            verify_constraints,
-            aggregation,
-            rma,
-            compressed,
-            verify_proofs,
-            save_proofs,
-            test_mode,
-            output_dir_path: output_dir_path.map(PathBuf::from),
-            minimal_memory,
-        })
+        Ok(Self { verify_constraints, aggregation, rma, compressed, verify_proofs, minimal_memory })
     }
 }
 
@@ -145,13 +151,10 @@ impl Default for ProofOptions {
         Self {
             verify_constraints: false,
             aggregation: true,
-            rma: false,
+            rma: true,
             compressed: false,
             verify_proofs: false,
             minimal_memory: false,
-            save_proofs: false,
-            output_dir_path: None,
-            test_mode: false,
         }
     }
 }
@@ -165,97 +168,85 @@ impl ProofOptions {
         compressed: bool,
         verify_proofs: bool,
         minimal_memory: bool,
-        save_proofs: bool,
-        output_dir_path: Option<PathBuf>,
     ) -> Self {
-        Self {
-            verify_constraints,
-            aggregation,
-            rma,
-            compressed,
-            verify_proofs,
-            minimal_memory,
-            save_proofs,
-            output_dir_path,
-            test_mode: false,
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_test(
-        verify_constraints: bool,
-        aggregation: bool,
-        rma: bool,
-        compressed: bool,
-        verify_proofs: bool,
-        minimal_memory: bool,
-        save_proofs: bool,
-        output_dir_path: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            verify_constraints,
-            aggregation,
-            rma,
-            compressed,
-            verify_proofs,
-            save_proofs,
-            minimal_memory,
-            output_dir_path,
-            test_mode: true,
-        }
+        Self { verify_constraints, aggregation, rma, compressed, verify_proofs, minimal_memory }
     }
 
     pub fn minimal_memory(&mut self) {
         self.minimal_memory = true;
     }
 
-    pub fn use_rma(&mut self) {
-        self.rma = true;
-    }
-
     pub fn compressed(&mut self) {
         self.compressed = true;
-    }
-
-    pub fn save_proofs(&mut self, output_dir_path: Option<PathBuf>) {
-        self.save_proofs = true;
-        self.output_dir_path = output_dir_path;
     }
 }
 
 #[derive(Clone)]
-pub struct ParamsGPU {
-    pub preallocate: bool,
+pub struct ProofmanOptions {
     pub max_number_streams: usize,
+    /// Upper bound on per-GPU recursive (aggregation) streams. The actual count is
+    /// also memory-bounded; this caps it. Defaults to 10 (the prior hardcoded cap).
+    pub max_number_recursive_streams: usize,
     pub number_threads_pools_witness: usize,
     pub are_threads_per_witness_set: bool,
     pub max_witness_stored: usize,
-    pub pack_trace: bool,
+    pub verify_constraints: bool,
+    pub aggregation: bool,
+    pub verbose_mode: VerboseMode,
+    pub gpu: bool,
+    pub packed: bool,
+    pub packed_info: HashMap<(usize, usize), PackedInfo>,
+    /// The provingKeySnark/ of the final SNARKs this run produces
+    pub final_snark: Option<PathBuf>,
+    /// Custom-commit name -> packed file, known up front: the const buffer then reserves each commit's
+    /// real packed width instead of one word per column. Same map `register_custom_commits` takes.
+    pub custom_commits_fixed: HashMap<String, PathBuf>,
+
+    /// Basic airs are proved with no global challenge (prove-air), so none takes the in-place commit.
+    pub self_contained: bool,
+    /// Virtual tables the caller counts itself in the witness; the prover must not claim them. Every
+    /// other table is the prover's, and one it cannot derive a row map for is a setup error.
+    pub std_owned_tables: Vec<u64>,
+
+    /// Airs whose stage-1 witness a GPU kernel writes into the commit slot. They get no host trace
+    /// buffer or upload, so the trace pool and prefetch zone are sized without them.
+    pub gpu_witness_airs: GpuWitnessAirs,
 }
 
-impl Default for ParamsGPU {
+impl Default for ProofmanOptions {
     fn default() -> Self {
         Self {
-            preallocate: false,
             max_number_streams: 20,
+            max_number_recursive_streams: 10,
             number_threads_pools_witness: 4,
-            #[cfg(feature = "packed")]
-            max_witness_stored: 10,
-            #[cfg(not(feature = "packed"))]
-            max_witness_stored: 4,
-            pack_trace: true,
+            max_witness_stored: 8,
             are_threads_per_witness_set: false,
+            packed: false,
+            gpu: false,
+            verify_constraints: false,
+            aggregation: true,
+            verbose_mode: VerboseMode::Info,
+            packed_info: HashMap::new(),
+            final_snark: None,
+            custom_commits_fixed: HashMap::new(),
+            self_contained: false,
+            std_owned_tables: Vec::new(),
+            gpu_witness_airs: GpuWitnessAirs::default(),
         }
     }
 }
 
-impl ParamsGPU {
-    pub fn new(preallocate: bool) -> Self {
-        Self { preallocate, ..Self::default() }
+impl ProofmanOptions {
+    pub fn new() -> Self {
+        Self { ..Self::default() }
     }
 
     pub fn with_max_number_streams(&mut self, max_number_streams: usize) {
         self.max_number_streams = max_number_streams;
+    }
+
+    pub fn with_max_number_recursive_streams(&mut self, max_number_recursive_streams: usize) {
+        self.max_number_recursive_streams = max_number_recursive_streams;
     }
 
     pub fn with_number_threads_pools_witness(&mut self, number_threads_pools_witness: usize) {
@@ -266,8 +257,85 @@ impl ParamsGPU {
         self.max_witness_stored = max_witness_stored;
     }
 
-    pub fn with_pack_trace(&mut self, pack_trace: bool) {
-        self.pack_trace = pack_trace;
+    pub fn packed(&mut self) {
+        self.packed = true;
+    }
+
+    /// Declare that this run will produce final SNARKs with the key at `proving_key_snark`, whose
+    /// recursivef a blake3 key's run proves. Gates the unified-buffer snark floor
+    /// (GPU_UNIFIED_BUFFER_MIN_SNARK_BYTES): runs without a wrapper never borrow the buffer at that
+    /// size, so they skip the padding and keep the layout slack free.
+    pub fn final_snark(&mut self, proving_key_snark: impl Into<PathBuf>) {
+        self.final_snark = Some(proving_key_snark.into());
+    }
+
+    /// Undoes `gpu()`'s implied packing. Without this `--no-packed` relies on `packed_info` being
+    /// empty, which stops being true as soon as a caller populates it unconditionally.
+    pub fn no_packed(&mut self) {
+        self.packed = false;
+    }
+
+    pub fn gpu(&mut self) {
+        self.gpu = true;
+        self.packed = true;
+    }
+
+    pub fn verify_constraints(&mut self) {
+        self.verify_constraints = true;
+        self.aggregation = false;
+    }
+
+    pub fn self_contained(&mut self) {
+        self.self_contained = true;
+    }
+
+    pub fn no_aggregation(&mut self) {
+        self.aggregation = false;
+    }
+
+    pub fn verbose_mode(&mut self, verbose_mode: VerboseMode) {
+        self.verbose_mode = verbose_mode;
+    }
+
+    /// Name the packed custom-commit files before the const buffer is sized. Optional: without it
+    /// every custom commit reserves one word per column.
+    pub fn custom_commits_fixed(&mut self, custom_commits_fixed: HashMap<String, PathBuf>) {
+        self.custom_commits_fixed = custom_commits_fixed;
+    }
+
+    pub fn packed_info(&mut self, packed_info: HashMap<(usize, usize), PackedInfo>) {
+        self.packed_info = packed_info;
+    }
+
+    /// Declare the virtual tables this caller counts itself. A prover table it cannot derive fails setup.
+    pub fn std_owned_tables(&mut self, table_ids: Vec<u64>) {
+        self.std_owned_tables = table_ids;
+    }
+
+    /// Declare the airs whose witness a GPU kernel produces on the device. Must be set before
+    /// `ProofMan::new`, which sizes the trace pool and prefetch zone from it. See [`GpuWitnessAirs`].
+    pub fn gpu_witness_airs(&mut self, airs: Vec<GpuWitnessAir>) {
+        self.gpu_witness_airs = GpuWitnessAirs::new(airs);
+    }
+}
+
+/// `ProofCtx::witness_staged` states. A staged state carries its zone's GPU (local index) in the
+/// bits above `WITNESS_STAGED_KIND`; see [`witness_staged_on`] and [`witness_staged_gpu`].
+pub const WITNESS_NOT_STAGED: u8 = 0;
+pub const WITNESS_STAGED: u8 = 1;
+pub const WITNESS_STAGED_RELEASED: u8 = 2;
+pub const WITNESS_STAGED_KIND: u8 = 3;
+
+pub const fn witness_staged_on(kind: u8, gpu: u8) -> u8 {
+    kind | (gpu << 2)
+}
+
+/// The GPU whose zone holds the witness, or None when it is not staged.
+pub const fn witness_staged_gpu(state: u8) -> Option<usize> {
+    if state & WITNESS_STAGED_KIND == WITNESS_NOT_STAGED {
+        None
+    } else {
+        Some((state >> 2) as usize)
     }
 }
 
@@ -281,25 +349,99 @@ pub struct ProofCtx<F: PrimeField64> {
     pub global_info: GlobalInfo,
     pub air_instances: Vec<RwLock<AirInstance<F>>>,
     pub weights: HashMap<(usize, usize), u64>,
-    pub q_ops_order_weights: HashMap<(usize, usize), u64>,
-    pub custom_commits_values: Mutex<HashMap<String, (PathBuf, Vec<u8>)>>,
+    pub compressor_weights: HashMap<(usize, usize), u64>,
+    pub recursion_weights: HashMap<(usize, usize), u64>,
+    pub custom_commits_values: Mutex<HashMap<String, CustomCommitEntry>>,
     pub dctx: RwLock<DistributionCtx>,
     pub debug_info: RwLock<DebugInfo>,
     pub aggregation: bool,
     pub proof_tx: RwLock<Option<crossbeam_channel::Sender<usize>>>,
     pub witness_tx: RwLock<Option<crossbeam_channel::Sender<usize>>>,
-    pub witness_tx_priority: RwLock<Option<crossbeam_channel::Sender<usize>>>,
+    pub witness_stats: WitnessStats,
     pub d_buffers: Arc<DeviceBuffer>,
+    pub gpu: bool,
+    /// Airs whose rows components must write packed. Holds the same `packedTrace && is_packed`
+    /// pair the device gates on, so a global flag cannot disagree with the per-air setup.
+    pub packed_airs: HashSet<(usize, usize)>,
+    pub reload_fixed_pols_gpu: Arc<AtomicBool>,
+    /// Basic fixed pols (custom commits included) stay in pinned host memory (set by `set_device_buffers`).
+    pub basic_fixed_on_host: bool,
+    /// Set while a contributions witness thread stages the instance before dispatching it itself;
+    /// `add_air_instance` then skips the send.
+    pub dispatch_deferred: Vec<AtomicBool>,
+    /// `add_air_instance` ran while the dispatch was deferred: the witness thread owes the send.
+    /// Separate from the trace, which a staged instance may have lost to eviction.
+    pub dispatch_pending: Vec<AtomicBool>,
+    /// What the witness thread did with the witness before dispatch: `WITNESS_NOT_STAGED`,
+    /// `WITNESS_STAGED` (host buffer kept) or `WITNESS_STAGED_RELEASED` (host buffer given back; the
+    /// commit must read the zone and not release again). Consumed by the commit.
+    pub witness_staged: Vec<AtomicU8>,
+    /// Range tables the prover counts itself, and their counts, keyed by the virtual table's host air.
+    /// Held here because the witness library and the host binary each link their own libstarks.
+    pub prover_owned_tables: RwLock<Vec<u64>>,
+
+    /// Virtual-table airs the device produces end to end: the host must neither build their trace nor
+    /// skip the instance for looking empty.
+    pub device_owned_table_airs: RwLock<Vec<(usize, usize)>>,
+    pub prover_counts: RwLock<HashMap<(usize, usize), Vec<u64>>>,
+    /// Aux-trace size of each basic GPU stream, largest class first (empty until `set_device_buffers`,
+    /// and on CPU). An air can only run on a stream at least as large as its `prover_buffer_size`, so
+    /// this is what makes stream eligibility visible to the Rust-side schedulers.
+    pub basic_stream_sizes: Vec<usize>,
+    /// Phase B registered: the two recursive streams alias the single basic stream's buffer and
+    /// open only after every basic and compressor completed (set_phase_b_c from the proofs phase).
+    pub phase_b: bool,
+    /// Phase B: capacity (elements) of each half of the basic stream. An instance whose buffer
+    /// exceeds it can only run in phase A; the phase-A countdown counts exactly those.
+    pub phase_b_half: usize,
+    /// Witness prefetch units the planner gave each GPU (0 = no zone).
+    pub prefetch_units: u32,
+    /// LRU slots of the aggregation const cache, slot 0 included (the loader carves this many).
+    pub const_cache_lru_slots: usize,
+    /// recursive2 has its pinned slots (false when memory was short: it goes through the LRU).
+    pub const_cache_pin_rec2: bool,
+    /// The planner had room to pin vadcop_final and vadcop_final_compressed.
+    pub const_cache_pin_finals: bool,
+    /// Aggregation const area the carve reserved (words): the loader checks its layout fits.
+    pub aggregation_const_words: u64,
+    /// This prover's GPU witness declarations, copied from the options at startup: the one source the
+    /// witness side asks before staging kernel inputs.
+    pub gpu_witness_airs: GpuWitnessAirs,
 }
 
 pub const MAX_INSTANCES: u64 = 1 << 17;
 
+/// `ubl::AUX_ALIGN`: auxBase and the slot size are rounded up to it.
+const UBL_AUX_ALIGN_BYTES: u64 = 1 << 20;
+/// Streams stay 1 MiB-sized when the mops floor grows them (words).
+const MIB_WORDS: usize = (1 << 20) / 8;
+
+/// Pad (elements) that brings the buffer to `floor_bytes`, aligning auxBase exactly as `ubl::plan` does.
+fn snark_pad_elems(below_aux_bytes: u64, above_aux_elems: u64, floor_bytes: u64) -> u64 {
+    let end = below_aux_bytes.next_multiple_of(UBL_AUX_ALIGN_BYTES) + above_aux_elems * 8;
+    floor_bytes.saturating_sub(end).div_ceil(8)
+}
+
+/// The phase-B basic stream's size: at least the mops floor, at most all the slack.
+fn phase_b_target(current: usize, unused: usize, mops_floor: usize, headroom_extra: usize, align: usize) -> usize {
+    let floor = mops_floor.next_multiple_of(align);
+    let target = current.max(floor).max((current + unused).saturating_sub(headroom_extra)).min(current + unused);
+    (target & !(align - 1)).max(current)
+}
+
 impl<F: PrimeField64> ProofCtx<F> {
+    /// The declaration this prover's kernel for the air was registered from, or `None` when the host
+    /// fills the trace. Pass it to `stage_gpu_witness`.
+    pub fn gpu_witness_air(&self, airgroup_id: usize, air_id: usize) -> Option<&GpuWitnessAir> {
+        self.gpu_witness_airs.get(airgroup_id, air_id)
+    }
+
     pub fn create_ctx(
         proving_key_path: PathBuf,
         aggregation: bool,
         verbose_mode: VerboseMode,
         mpi_ctx: Arc<MpiCtx>,
+        gpu: bool,
     ) -> ProofmanResult<Self> {
         tracing::info!("Creating proof context");
 
@@ -309,35 +451,69 @@ impl<F: PrimeField64> ProofCtx<F> {
 
         initialize_logger(verbose_mode, None);
         let global_info: GlobalInfo = GlobalInfo::new(&proving_key_path)?;
+        tracing::info!("Using hash function: {}", global_info.hash);
         let n_publics = global_info.n_publics;
-        let n_proof_values = global_info.proof_values_words()?;
-        let n_challenge_words = global_info.challenge_words()?;
+        let n_proof_values = global_info
+            .proof_values_map
+            .as_ref()
+            .map(|map| map.iter().filter(|entry| entry.stage == 1).count())
+            .unwrap_or(0);
+        let n_challenges = global_info.n_challenges.iter().sum::<usize>();
 
         let weights = HashMap::new();
-        let q_ops_order_weights = HashMap::new();
+        let compressor_weights = HashMap::new();
+        let recursion_weights = HashMap::new();
 
         let air_instances: Vec<RwLock<AirInstance<F>>> =
             (0..MAX_INSTANCES).map(|_| RwLock::new(AirInstance::<F>::default())).collect();
 
         Ok(Self {
+            prover_owned_tables: RwLock::new(Vec::new()),
+            gpu_witness_airs: GpuWitnessAirs::default(),
+            device_owned_table_airs: RwLock::new(Vec::new()),
+            prover_counts: RwLock::new(HashMap::new()),
             mpi_ctx,
             global_info,
             public_inputs: Values::new(n_publics),
             proof_values: Values::new(n_proof_values),
-            challenges: Values::new(n_challenge_words),
+            challenges: Values::new(n_challenges * 3),
             global_challenge: Values::new(3),
             air_instances,
             dctx: RwLock::new(dctx),
             debug_info: RwLock::new(DebugInfo::default()),
             custom_commits_values: Mutex::new(HashMap::new()),
             weights,
-            q_ops_order_weights,
+            compressor_weights,
+            recursion_weights,
             aggregation,
             witness_tx: RwLock::new(None),
-            witness_tx_priority: RwLock::new(None),
+            witness_stats: WitnessStats::default(),
             proof_tx: RwLock::new(None),
             d_buffers: Arc::new(DeviceBuffer::default()),
+            gpu,
+            packed_airs: HashSet::new(),
+            reload_fixed_pols_gpu: Arc::new(AtomicBool::new(false)),
+            basic_fixed_on_host: false,
+            dispatch_deferred: (0..MAX_INSTANCES).map(|_| AtomicBool::new(false)).collect(),
+            dispatch_pending: (0..MAX_INSTANCES).map(|_| AtomicBool::new(false)).collect(),
+            witness_staged: (0..MAX_INSTANCES).map(|_| AtomicU8::new(WITNESS_NOT_STAGED)).collect(),
+            basic_stream_sizes: Vec::new(),
+            phase_b: false,
+            phase_b_half: 0,
+            prefetch_units: 0,
+            const_cache_lru_slots: 0,
+            const_cache_pin_rec2: false,
+            const_cache_pin_finals: false,
+            aggregation_const_words: 0,
         })
+    }
+
+    pub fn get_rank_info(&self) -> crate::RankInfo {
+        crate::RankInfo {
+            world_rank: self.mpi_ctx.rank,
+            local_rank: self.mpi_ctx.node_rank,
+            n_processes: self.mpi_ctx.n_processes,
+        }
     }
 
     pub fn set_debug_info(&self, debug_info: &DebugInfo) {
@@ -360,37 +536,80 @@ impl<F: PrimeField64> ProofCtx<F> {
         *self.proof_tx.write().unwrap() = proof_tx;
     }
 
-    pub fn set_witness_tx_priority(&self, witness_tx_priority: Option<crossbeam_channel::Sender<usize>>) {
-        *self.witness_tx_priority.write().unwrap() = witness_tx_priority;
-    }
-
     pub fn set_witness_tx(&self, witness_tx: Option<crossbeam_channel::Sender<usize>>) {
         *self.witness_tx.write().unwrap() = witness_tx;
     }
 
-    pub fn set_witness_ready(&self, global_id: usize, priority: bool) {
-        if priority {
-            if let Some(witness_tx_priority) = &*self.witness_tx_priority.read().unwrap() {
-                witness_tx_priority.send(global_id).unwrap();
-                return;
-            }
+    /// Queue this instance for dispatch, at most once per proof; urgency is its declared
+    /// [`WitnessPriority`], not an argument here.
+    pub fn announce_witness_ready(&self, global_id: usize) {
+        if !self.dctx_try_queue_witness(global_id) {
+            self.witness_stats.duplicate_sends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
         }
         if let Some(witness_tx) = &*self.witness_tx.read().unwrap() {
             witness_tx.send(global_id).unwrap();
         }
     }
 
+    /// A witness about to be computed over a trace that already holds one: always redundant, and
+    /// only reachable if a component produced the trace outside `calculate_witness`.
+    pub fn note_witness_recomputed_over_trace(&self, global_idx: usize) {
+        let seen = self.witness_stats.recomputed_over_trace.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if seen < 8 {
+            tracing::warn!("Instance {global_idx}: recomputing a witness over a trace that already has one");
+        }
+    }
+
+    /// `words_per_row` and root of a registered custom-commit file, or why it cannot be used.
+    fn read_custom_commit_header(
+        setup: &Setup<F>,
+        custom_commit: &CustomCommits,
+        path: &Path,
+    ) -> ProofmanResult<(u64, [u8; 32])> {
+        if !path.exists() {
+            return Err(ProofmanError::ProofmanError(format!("{} does not exist", path.display())));
+        }
+        let n = 1u64 << setup.stark_info.stark_struct.n_bits;
+        let n_extended = 1u64 << setup.stark_info.stark_struct.n_bits_ext;
+        let n_cols = custom_commit.stage_widths[0] as u64;
+        let arity = setup.stark_info.stark_struct.merkle_tree_arity;
+        let words_per_row = custom_commit_words_per_row(path, n, n_extended, n_cols, arity)?;
+
+        let mut root_bytes = [0u8; 32];
+        File::open(path)?.read_exact(&mut root_bytes)?;
+        Ok((words_per_row, root_bytes))
+    }
+
+    /// Packed `words_per_row` of a registered custom commit; 0 if its file is not generated yet.
+    pub fn get_custom_commit_words_per_row(&self, name: &str) -> u64 {
+        let lock = self.custom_commits_values.lock().unwrap();
+        lock.get(name).map(|(_, _, wpr)| *wpr).unwrap_or(0)
+    }
+
+    /// Names of the custom commits whose files still have to be generated.
+    pub fn custom_commits_pending(&self) -> Vec<String> {
+        let lock = self.custom_commits_values.lock().unwrap();
+        lock.iter().filter(|(_, (_, _, wpr))| *wpr == 0).map(|(name, _)| name.clone()).collect()
+    }
+
+    /// The registered name -> file map, to re-run validation after a regeneration.
+    pub fn custom_commits_paths(&self) -> HashMap<String, PathBuf> {
+        let lock = self.custom_commits_values.lock().unwrap();
+        lock.iter().map(|(name, (path, _, _))| (name.clone(), path.clone())).collect()
+    }
+
     pub fn initialize_custom_commits(
         &self,
         custom_commits_fixed: HashMap<String, PathBuf>,
         sctx: &SetupCtx<F>,
-        only_init: bool,
+        validation: CustomCommitValidation,
     ) -> ProofmanResult<()> {
         tracing::info!("Initializing publics custom_commits");
         for (airgroup_id, airs) in self.global_info.airs.iter().enumerate() {
             for (air_id, _) in airs.iter().enumerate() {
                 let setup = sctx.get_setup(airgroup_id, air_id)?;
-                for (commit_id, custom_commit) in setup.stark_info.custom_commits.iter().enumerate() {
+                for (commit_idx, custom_commit) in setup.stark_info.custom_commits.iter().enumerate() {
                     if custom_commit.stage_widths[0] > 0 {
                         let custom_file_path = custom_commits_fixed.get(&custom_commit.name).ok_or_else(|| {
                             ProofmanError::ProofmanError(format!(
@@ -399,55 +618,107 @@ impl<F: PrimeField64> ProofCtx<F> {
                             ))
                         })?;
 
+                        // words_per_row == 0 marks the entry as still needing generation.
                         let mut root_bytes = [0u8; 32];
-                        if !only_init {
-                            if !PathBuf::from(&custom_file_path).exists() {
-                                let error_message = format!(
-                                    "Error: Unable to find {} custom commit at '{}'.\n\
-                                    Please run the following command:\n\
-                                    \x1b[1mcargo run --bin proofman-cli gen-custom-commits-fixed --witness-lib <WITNESS_LIB> --proving-key <PROVING_KEY> --custom-commits <CUSTOM_COMMITS_DIR> \x1b[0m",
-                                    custom_commit.name,
-                                    custom_file_path.display(),
-                                );
-                                tracing::warn!("{}", error_message);
-                                return Err(ProofmanError::ProofmanError(error_message));
-                            }
-
-                            let error_message = format!(
-                                "Error: The custom commit file for {} at '{}' exists but is invalid or corrupted.\n\
-                                Please regenerate it by running:\n\
-                                \x1b[1mcargo run --bin proofman-cli gen-custom-commits-fixed --witness-lib <WITNESS_LIB> --proving-key <PROVING_KEY> --custom-commits <CUSTOM_COMMITS_DIR> \x1b[0m",
-                                custom_commit.name,
-                                custom_file_path.display(),
-                            );
-
-                            let size = custom_commit_size_c((&setup.p_setup).into(), commit_id as u64) as usize;
-
-                            match fs::metadata(custom_file_path) {
-                                Ok(metadata) => {
-                                    let actual_size = metadata.len() as usize;
-                                    if actual_size != (size + 4) * 8 {
+                        let mut words_per_row = 0u64;
+                        if validation != CustomCommitValidation::Skip {
+                            match Self::read_custom_commit_header(setup, custom_commit, custom_file_path) {
+                                Ok((wpr, root)) => {
+                                    words_per_row = wpr;
+                                    root_bytes = root;
+                                }
+                                Err(err) => {
+                                    if validation == CustomCommitValidation::Strict {
+                                        let error_message = format!(
+                                            "Error: The custom commit file for {} at '{}' cannot be used ({}) and \
+                                            regenerating it did not help.\n\
+                                            Please regenerate it by running:\n\
+                                            \x1b[1mcargo run --bin proofman-cli gen-custom-commits-fixed --witness-lib <WITNESS_LIB> --proving-key <PROVING_KEY> --custom-commits <CUSTOM_COMMITS_DIR> \x1b[0m",
+                                            custom_commit.name,
+                                            custom_file_path.display(),
+                                            err,
+                                        );
                                         tracing::warn!("{}", error_message);
                                         return Err(ProofmanError::ProofmanError(error_message));
                                     }
-                                }
-                                Err(err) => {
-                                    let error_message = format!(
-                                        "Failed to open {} for custom_commit {}: {}",
-                                        setup.air_name, custom_commit.name, err
+                                    tracing::info!(
+                                        "Custom commit {} at '{}' will be regenerated ({})",
+                                        custom_commit.name,
+                                        custom_file_path.display(),
+                                        err
                                     );
-                                    tracing::warn!("{}", error_message);
-                                    return Err(ProofmanError::ProofmanError(error_message));
                                 }
                             }
-                            let mut file = File::open(custom_file_path)?;
-                            file.read_exact(&mut root_bytes)?;
                         }
 
-                        self.custom_commits_values
-                            .lock()
-                            .unwrap()
-                            .insert(custom_commit.name.clone(), (custom_file_path.clone(), root_bytes.to_vec()));
+                        // The const buffer was sized from an assumed width; a wider file would overrun the slot.
+                        let reserved =
+                            setup.custom_commits_words_per_row.get(commit_idx).copied().unwrap_or(words_per_row);
+                        if words_per_row > reserved {
+                            return Err(ProofmanError::ProofmanError(format!(
+                                "custom commit '{}' at '{}' packs {words_per_row} words per row, but the const \
+                                 buffer reserved {reserved} for [{airgroup_id}:{air_id}]. The file registered \
+                                 here must be the one named before the buffer was sized.",
+                                custom_commit.name,
+                                custom_file_path.display(),
+                            )));
+                        }
+
+                        self.upload_custom_commit(setup, airgroup_id, air_id, custom_file_path, words_per_row, false);
+
+                        self.custom_commits_values.lock().unwrap().insert(
+                            custom_commit.name.clone(),
+                            (custom_file_path.clone(), root_bytes.to_vec(), words_per_row),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Resident (no proof DMAs a custom commit) until a snark carve clobbers it.
+    fn upload_custom_commit(
+        &self,
+        setup: &Setup<F>,
+        airgroup_id: usize,
+        air_id: usize,
+        custom_file_path: &std::path::Path,
+        words_per_row: u64,
+        only_first_gpu: bool,
+    ) {
+        if setup.gpu && words_per_row > 0 {
+            upload_custom_commit_packed_c(
+                airgroup_id as u64,
+                air_id as u64,
+                setup.setup_type.into(),
+                &custom_file_path.to_string_lossy(),
+                words_per_row,
+                (&setup.p_setup).into(),
+                self.get_device_buffers_ptr(),
+                only_first_gpu,
+            );
+        }
+    }
+
+    /// Re-upload every registered custom commit from its file to the first GPU, the one a snark carves.
+    pub fn reupload_custom_commits(&self, sctx: &SetupCtx<F>) -> ProofmanResult<()> {
+        // In host mode they live in pinned host blobs, which a carve of the device buffer never touches.
+        if self.basic_fixed_on_host {
+            return Ok(());
+        }
+        let registered = self.custom_commits_values.lock().unwrap().clone();
+        // Airs of one fixed group share the slot: one upload per group and commit.
+        let mut uploaded = HashSet::new();
+        for (airgroup_id, airs) in self.global_info.airs.iter().enumerate() {
+            for (air_id, _) in airs.iter().enumerate() {
+                let setup = sctx.get_setup(airgroup_id, air_id)?;
+                let owner = sctx.get_fixed_group(airgroup_id, air_id).map_or((airgroup_id, air_id), |g| g.owner);
+                for custom_commit in setup.stark_info.custom_commits.iter().filter(|c| c.stage_widths[0] > 0) {
+                    if let Some((path, _, words_per_row)) = registered.get(&custom_commit.name) {
+                        if uploaded.insert((owner, custom_commit.name.clone())) {
+                            self.upload_custom_commit(setup, airgroup_id, air_id, path, *words_per_row, true);
+                        }
                     }
                 }
             }
@@ -459,51 +730,91 @@ impl<F: PrimeField64> ProofCtx<F> {
         let custom_commit_lock = self.custom_commits_values.lock().unwrap();
         let root_bytes = custom_commit_lock.get(name);
         match root_bytes {
-            Some((_, bytes)) => Ok(bytes.clone()),
+            Some((_, bytes, _)) => Ok(bytes.clone()),
             None => Err(ProofmanError::ProofmanError(format!("Custom Commit {name} not found"))),
         }
     }
 
-    pub fn set_weights(&mut self, sctx: &SetupCtx<F>) -> ProofmanResult<()> {
+    /// Estimated prover cost of a single proof of this setup
+    fn setup_weight(setup: &Setup<F>) -> u64 {
+        let mut total_cols = setup
+            .stark_info
+            .map_sections_n
+            .iter()
+            .filter(|(key, _)| *key != "const")
+            .map(|(_, value)| *value)
+            .sum::<u64>();
+        total_cols += 3; // FRI polinomial
+        let n_openings = setup.stark_info.opening_points.len() as u64;
+        // let n_ops_quotient = setup.n_operations_quotient;
+        // weight += (n_ops_quotient / 10) * (1 << (setup.stark_info.stark_struct.n_bits_ext));
+        (total_cols + n_openings * 3) * (1 << (setup.stark_info.stark_struct.n_bits_ext))
+    }
+
+    /// One `recursive1` per `batch` instances, plus its share of the `recursive2` tree: collapsing
+    /// `n` leaves at arity `a` takes `(n - 1) / (a - 1)` proofs. Arity >= 2 is enforced by GlobalInfo.
+    fn recursion_weight(w_recursive1: u64, w_recursive2: u64, aggregation_arity: usize, batch: usize) -> u64 {
+        (w_recursive1 + w_recursive2 / (aggregation_arity as u64 - 1)) / batch.max(1) as u64
+    }
+
+    /// Basic proof of every air, its compressor if it has one, and its recursion chain. The
+    /// recursion is ~half the GPU work on blake3 and used to weigh nothing, which let one heavy
+    /// air eat a whole worker's budget and skew instance counts ~7x.
+    pub fn set_weights(&mut self, sctx: &SetupCtx<F>, setups_vadcop: &SetupsVadcop<F>) -> ProofmanResult<()> {
         for (airgroup_id, air_group) in self.global_info.airs.iter().enumerate() {
             for (air_id, _) in air_group.iter().enumerate() {
                 let setup = sctx.get_setup(airgroup_id, air_id)?;
-                let mut total_cols = setup
-                    .stark_info
-                    .map_sections_n
-                    .iter()
-                    .filter(|(key, _)| *key != "const")
-                    .map(|(_, value)| *value)
-                    .sum::<u64>();
-                total_cols += 3; // FRI polinomial
-                let n_openings = setup.stark_info.opening_points.len() as u64;
-                let weight = (total_cols + n_openings * 3) * (1 << (setup.stark_info.stark_struct.n_bits_ext));
-                let q_ops_divisor = std::env::var_os("VENUS_WEIGHT_Q_OPS")
-                    .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
-                    .filter(|&divisor| divisor > 0)
-                    .unwrap_or(10);
-                let q_ops_order_weight = weight
-                    + (setup.n_operations_quotient / q_ops_divisor) * (1 << (setup.stark_info.stark_struct.n_bits_ext));
-                self.weights.insert((airgroup_id, air_id), weight);
-                self.q_ops_order_weights.insert((airgroup_id, air_id), q_ops_order_weight);
+                self.weights.insert((airgroup_id, air_id), Self::setup_weight(setup));
+
+                if self.global_info.get_air_has_compressor(airgroup_id, air_id) {
+                    if let Some(sctx_compressor) = setups_vadcop.sctx_compressor.as_ref() {
+                        let compressor_setup = sctx_compressor.get_setup(airgroup_id, air_id)?;
+                        self.compressor_weights.insert((airgroup_id, air_id), Self::setup_weight(compressor_setup));
+                    }
+                }
+
+                // Both None without aggregation, and then no recursion proof runs
+                if let (Some(sctx_recursive1), Some(sctx_recursive2)) =
+                    (setups_vadcop.sctx_recursive1.as_ref(), setups_vadcop.sctx_recursive2.as_ref())
+                {
+                    let w_recursive1 = Self::setup_weight(sctx_recursive1.get_setup(airgroup_id, air_id)?);
+                    // recursive2 is per airgroup, hence air_id 0
+                    let w_recursive2 = Self::setup_weight(sctx_recursive2.get_setup(airgroup_id, 0)?);
+                    self.recursion_weights.insert(
+                        (airgroup_id, air_id),
+                        Self::recursion_weight(
+                            w_recursive1,
+                            w_recursive2,
+                            self.global_info.aggregation_arity,
+                            self.global_info.get_air_r1_batch_size(airgroup_id, air_id),
+                        ),
+                    );
+                }
             }
         }
         Ok(())
     }
 
+    /// Basic proof alone; the recursion chain and the compressor are booked apart
     pub fn get_weight(&self, airgroup_id: usize, air_id: usize) -> u64 {
         *self.weights.get(&(airgroup_id, air_id)).unwrap()
     }
 
-    pub fn get_q_ops_order_weight(&self, airgroup_id: usize, air_id: usize) -> u64 {
-        *self.q_ops_order_weights.get(&(airgroup_id, air_id)).unwrap()
+    /// 0 if the air has no compressor, or if the compressor setups are not loaded (no aggregation)
+    pub fn get_compressor_weight(&self, airgroup_id: usize, air_id: usize) -> u64 {
+        self.compressor_weights.get(&(airgroup_id, air_id)).copied().unwrap_or(0)
+    }
+
+    /// 0 without aggregation, and then no recursion proof runs
+    pub fn get_recursion_weight(&self, airgroup_id: usize, air_id: usize) -> u64 {
+        self.recursion_weights.get(&(airgroup_id, air_id)).copied().unwrap_or(0)
     }
 
     pub fn get_custom_commits_fixed_buffer(&self, name: &str, return_error: bool) -> ProofmanResult<PathBuf> {
         let custom_commits_lock = self.custom_commits_values.lock().unwrap();
         let file_name = custom_commits_lock.get(name);
         match file_name {
-            Some((path, _)) => Ok(path.to_path_buf()),
+            Some((path, _, _)) => Ok(path.to_path_buf()),
             None => {
                 if return_error {
                     Err(ProofmanError::ProofmanError(format!("Custom Commit Fixed {file_name:?} not found")))
@@ -516,10 +827,43 @@ impl<F: PrimeField64> ProofCtx<F> {
     }
 
     pub fn add_air_instance(&self, air_instance: AirInstance<F>, global_idx: usize) {
-        *self.air_instances[global_idx].write().unwrap() = air_instance;
+        {
+            // Carried across the replacement, never restarted.
+            let mut slot = self.air_instances[global_idx].write().unwrap();
+            let generation = slot.trace_generation.wrapping_add(1);
+            *slot = air_instance;
+            slot.trace_generation = generation;
+        }
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.dispatch_deferred[global_idx].load(SeqCst) {
+            // Publish, then re-check: if the witness thread ended the deferral meanwhile, one of us
+            // must still send, and the swap picks exactly one.
+            self.dispatch_pending[global_idx].store(true, SeqCst);
+            if self.dispatch_deferred[global_idx].load(SeqCst) || !self.dispatch_pending[global_idx].swap(false, SeqCst)
+            {
+                return;
+            }
+        }
+        self.dispatch_air_instance(global_idx);
+    }
+
+    /// End a deferral started with `dispatch_deferred`, sending the instance if it arrived meanwhile.
+    pub fn end_deferred_dispatch(&self, global_idx: usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.dispatch_deferred[global_idx].store(false, SeqCst);
+        if self.dispatch_pending[global_idx].swap(false, SeqCst) {
+            self.dispatch_air_instance(global_idx);
+        }
+    }
+
+    fn dispatch_air_instance(&self, global_idx: usize) {
         if let Some(proof_tx) = &*self.proof_tx.read().unwrap() {
             proof_tx.send(global_idx).unwrap();
         }
+    }
+
+    pub fn instance_trace_generation(&self, global_idx: usize) -> u64 {
+        self.air_instances[global_idx].read().unwrap().trace_generation
     }
 
     pub fn is_air_instance_stored(&self, global_idx: usize) -> bool {
@@ -541,26 +885,66 @@ impl<F: PrimeField64> ProofCtx<F> {
         dctx.is_first_process()
     }
 
-    pub fn dctx_reset_instances_calculated(&self) {
-        let dctx = self.dctx.read().unwrap();
-        for instance in dctx.instances_calculated.iter() {
-            instance.store(false, std::sync::atomic::Ordering::SeqCst);
+    // The state accessors below are bounds-tolerant on purpose: `air_instances` is a fixed
+    // MAX_INSTANCES vector while `witness_states` only grows with the registered instances, so an
+    // id valid for the former can be past the end of the latter. Out of range answers "not tracked":
+    // do the work, record nothing.
+
+    /// Take ownership of an instance's witness. False means another hook owns it or already
+    /// produced it: do not run the component.
+    pub fn dctx_try_acquire_witness(&self, global_idx: usize) -> bool {
+        self.dctx.read().unwrap().witness_states.get(global_idx).is_none_or(|s| s.try_acquire())
+    }
+
+    /// Hand an instance back. `produced` is the observed residency, not the hook's intent.
+    pub fn dctx_release_witness(&self, global_idx: usize, produced: bool) {
+        if let Some(slot) = self.dctx.read().unwrap().witness_states.get(global_idx) {
+            slot.release(produced);
         }
     }
 
-    pub fn dctx_set_instance_calculated(&self, global_idx: usize) {
-        let dctx = self.dctx.read().unwrap();
-        dctx.instances_calculated[global_idx].store(true, std::sync::atomic::Ordering::SeqCst);
+    /// The one place duplicate dispatches are stopped.
+    pub fn dctx_try_queue_witness(&self, global_idx: usize) -> bool {
+        self.dctx.read().unwrap().witness_states.get(global_idx).is_none_or(|s| s.try_queue())
     }
 
-    pub fn dctx_reset_instance_calculated(&self, global_idx: usize) {
-        let dctx = self.dctx.read().unwrap();
-        dctx.instances_calculated[global_idx].store(false, std::sync::atomic::Ordering::SeqCst);
+    /// The trace is gone. Does not by itself make the instance computable again -- a blanket
+    /// re-announce must not pick it up -- `rearm` does.
+    pub fn dctx_mark_witness_evicted(&self, global_idx: usize) {
+        if let Some(slot) = self.dctx.read().unwrap().witness_states.get(global_idx) {
+            slot.mark_evicted();
+        }
     }
 
+    /// Ask for this instance to be prepared, queued and computed from scratch again.
+    pub fn dctx_rearm_witness(&self, global_idx: usize) {
+        if let Some(slot) = self.dctx.read().unwrap().witness_states.get(global_idx) {
+            slot.rearm();
+        }
+    }
+
+    /// Re-arm everything that never produced or lost its trace, and report how many. Unlike the
+    /// blanket reset it replaces, a `Done` instance whose trace is resident stays put and is reused.
+    pub fn dctx_rearm_witnesses(&self) -> usize {
+        self.dctx.read().unwrap().witness_states.iter().filter(|s| s.rearm()).count()
+    }
+
+    /// Cost proxy for picking which stored trace to reclaim first: the cheapest to redo.
+    pub fn dctx_instance_weight(&self, global_idx: usize) -> u64 {
+        self.dctx.read().unwrap().instances.get(global_idx).map_or(0, |i| i.weight)
+    }
+
+    pub fn dctx_witness_state(&self, global_idx: usize) -> WitnessState {
+        self.dctx.read().unwrap().witness_states.get(global_idx).map_or(WitnessState::Absent, |s| s.get())
+    }
+
+    pub fn dctx_count_witness_state(&self, state: WitnessState) -> usize {
+        self.dctx.read().unwrap().witness_states.iter().filter(|s| s.get() == state).count()
+    }
+
+    /// A witness exists for this instance, whether or not its trace is still resident.
     pub fn dctx_is_instance_calculated(&self, global_idx: usize) -> bool {
-        let dctx = self.dctx.read().unwrap();
-        dctx.instances_calculated[global_idx].load(std::sync::atomic::Ordering::SeqCst)
+        matches!(self.dctx_witness_state(global_idx), WitnessState::Running | WitnessState::Done)
     }
 
     pub fn dctx_get_my_tables(&self) -> Vec<usize> {
@@ -568,14 +952,62 @@ impl<F: PrimeField64> ProofCtx<F> {
         dctx.instances
             .iter()
             .enumerate()
-            .filter(|(id, inst)| inst.table && (dctx.process_instances.contains(id) || inst.shared))
+            .filter(|(id, inst)| {
+                inst.table && (dctx.process_instances.contains(id) || inst.shared) && !dctx.is_skipped_instance(*id)
+            })
             .map(|(id, _)| id)
             .collect()
     }
 
     pub fn dctx_get_process_instances(&self) -> Vec<usize> {
         let dctx = self.dctx.read().unwrap();
-        dctx.process_instances.clone()
+        dctx.process_instances.iter().copied().filter(|id| !dctx.is_skipped_instance(*id)).collect()
+    }
+
+    /// This process's instances in dispatch order. See [`witness_schedule`].
+    ///
+    /// The collect is load-bearing, not a copy to be optimised away: callers pass lazy iterators
+    /// whose filters call back into `dctx` (`dctx_is_table`, `skip_prover_instance`). Draining one
+    /// under the guard would take a second read on the same `RwLock`, which std documents as
+    /// allowed to panic and which deadlocks outright behind a queued writer.
+    pub fn dctx_witness_schedule(&self, instances: impl IntoIterator<Item = usize>) -> Vec<usize> {
+        let ids: Vec<usize> = instances.into_iter().collect();
+        let dctx = self.dctx.read().unwrap();
+        crate::witness_schedule(ids, |id| dctx.instance_priority(id))
+    }
+
+    /// The band `instance_id` was registered with.
+    pub fn dctx_instance_priority(&self, instance_id: usize) -> WitnessPriority {
+        self.dctx.read().unwrap().instance_priority(instance_id)
+    }
+
+    /// Stall diagnostic: of `instances`, those never `Done`, grouped by state -- `Absent` never
+    /// announced, `Queued` never dispatched, `Running` wedged in a hook, `Evicted` not recomputed.
+    /// Poison-tolerant: it runs only after a failure and must not replace the real error.
+    pub fn dctx_instances_not_done(&self, instances: &[usize]) -> Vec<(WitnessState, Vec<usize>)> {
+        let dctx = self.dctx.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let states = [WitnessState::Absent, WitnessState::Queued, WitnessState::Running, WitnessState::Evicted];
+        states
+            .into_iter()
+            .filter_map(|want| {
+                let ids: Vec<usize> = instances
+                    .iter()
+                    .copied()
+                    .filter(|&id| dctx.witness_states.get(id).is_some_and(|s| s.get() == want))
+                    .collect();
+                (!ids.is_empty()).then_some((want, ids))
+            })
+            .collect()
+    }
+
+    pub fn dctx_skip_process_instance(&self, instance_id: usize) {
+        let mut dctx = self.dctx.write().unwrap();
+        dctx.skip_instance(instance_id);
+    }
+
+    pub fn dctx_is_skipped_process_instance(&self, instance_id: usize) -> bool {
+        let dctx = self.dctx.read().unwrap();
+        dctx.is_skipped_instance(instance_id)
     }
 
     pub fn dctx_get_process_owner_instance(&self, instance_id: usize) -> ProofmanResult<i32> {
@@ -608,6 +1040,21 @@ impl<F: PrimeField64> ProofCtx<F> {
         dctx.instances[global_idx].table
     }
 
+    /// Process instances excluding table airs, under a single read lock.
+    pub fn dctx_get_process_instances_no_tables(&self) -> Vec<usize> {
+        let dctx = self.dctx.read().unwrap();
+        dctx.process_instances
+            .iter()
+            .copied()
+            .filter(|id| !dctx.is_skipped_instance(*id) && !dctx.instances[*id].table)
+            .collect()
+    }
+
+    /// Whether this air's witness rows must be written packed.
+    pub fn is_packed(&self, airgroup_id: usize, air_id: usize) -> bool {
+        self.packed_airs.contains(&(airgroup_id, air_id))
+    }
+
     pub fn is_shared_buffer(&self, global_idx: usize) -> bool {
         self.air_instances[global_idx].read().unwrap().is_shared_buffer()
     }
@@ -615,6 +1062,11 @@ impl<F: PrimeField64> ProofCtx<F> {
     pub fn dctx_find_air_instance_id(&self, global_idx: usize) -> ProofmanResult<usize> {
         let dctx = self.dctx.read().unwrap();
         dctx.find_air_instance_id(global_idx)
+    }
+
+    pub fn dctx_find_instance_id(&self, airgroup_id: usize, air_id: usize) -> ProofmanResult<(bool, usize)> {
+        let dctx = self.dctx.read().unwrap();
+        dctx.find_instance_id(airgroup_id, air_id)
     }
 
     pub fn dctx_find_process_instance(&self, airgroup_id: usize, air_id: usize) -> ProofmanResult<(bool, usize)> {
@@ -637,39 +1089,89 @@ impl<F: PrimeField64> ProofCtx<F> {
         dctx.set_chunks(global_idx, chunks, slow);
     }
 
-    pub fn add_instance_assign(&self, airgroup_id: usize, air_id: usize) -> ProofmanResult<usize> {
+    /// Registers an instance, assigned to the least-loaded partition immediately, in `priority`'s band.
+    pub fn add_instance_assign(
+        &self,
+        airgroup_id: usize,
+        air_id: usize,
+        priority: WitnessPriority,
+    ) -> ProofmanResult<usize> {
         let mut dctx = self.dctx.write().unwrap();
-        let weight = self.get_weight(airgroup_id, air_id);
-        dctx.add_instance(airgroup_id, air_id, weight)
+        let weight = self.get_weight(airgroup_id, air_id) + self.get_recursion_weight(airgroup_id, air_id);
+        let compressor_weight = self.get_compressor_weight(airgroup_id, air_id);
+        dctx.add_instance(airgroup_id, air_id, weight, compressor_weight, priority)
     }
 
-    pub fn add_instance_assign_first_process(&self, airgroup_id: usize, air_id: usize) -> ProofmanResult<usize> {
+    /// [`Self::add_instance_assign`] on a chosen partition.
+    pub fn add_instance_assign_to(
+        &self,
+        airgroup_id: usize,
+        air_id: usize,
+        priority: WitnessPriority,
+        partition_id: usize,
+    ) -> ProofmanResult<usize> {
         let mut dctx = self.dctx.write().unwrap();
-        let weight = self.get_weight(airgroup_id, air_id);
-        dctx.add_instance_first_process(airgroup_id, air_id, weight)
+        let weight = self.get_weight(airgroup_id, air_id) + self.get_recursion_weight(airgroup_id, air_id);
+        let compressor_weight = self.get_compressor_weight(airgroup_id, air_id);
+        dctx.add_instance_in(airgroup_id, air_id, weight, compressor_weight, priority, partition_id)
     }
 
+    /// Registers an instance with no band preference.
     pub fn add_instance(&self, airgroup_id: usize, air_id: usize) -> ProofmanResult<usize> {
-        let mut dctx = self.dctx.write().unwrap();
-        let weight = self.get_weight(airgroup_id, air_id);
-        dctx.add_instance_no_assign(airgroup_id, air_id, weight)
+        self.add_instance_with_priority(airgroup_id, air_id, WitnessPriority::default())
     }
 
+    /// Registers an instance in `priority`'s band, to be assigned later by `assign_instances`.
+    pub fn add_instance_with_priority(
+        &self,
+        airgroup_id: usize,
+        air_id: usize,
+        priority: WitnessPriority,
+    ) -> ProofmanResult<usize> {
+        let mut dctx = self.dctx.write().unwrap();
+        let weight = self.get_weight(airgroup_id, air_id) + self.get_recursion_weight(airgroup_id, air_id);
+        let compressor_weight = self.get_compressor_weight(airgroup_id, air_id);
+        dctx.add_instance_no_assign(airgroup_id, air_id, weight, compressor_weight, priority)
+    }
+
+    /// Booked like an instance: a table's proof runs the same recursion chain.
     pub fn add_table(&self, airgroup_id: usize, air_id: usize) -> ProofmanResult<usize> {
         let mut dctx = self.dctx.write().unwrap();
-        let weight = self.get_weight(airgroup_id, air_id);
-        dctx.add_table(airgroup_id, air_id, weight)
+        let weight = self.get_weight(airgroup_id, air_id) + self.get_recursion_weight(airgroup_id, air_id);
+        let compressor_weight = self.get_compressor_weight(airgroup_id, air_id);
+        dctx.add_table(airgroup_id, air_id, weight, compressor_weight)
     }
 
     pub fn add_table_all(&self, airgroup_id: usize, air_id: usize) -> ProofmanResult<usize> {
         let mut dctx = self.dctx.write().unwrap();
-        let weight = self.get_weight(airgroup_id, air_id);
-        dctx.add_table_all(airgroup_id, air_id, weight)
+        let weight = self.get_weight(airgroup_id, air_id) + self.get_recursion_weight(airgroup_id, air_id);
+        let compressor_weight = self.get_compressor_weight(airgroup_id, air_id);
+        dctx.add_table_all(airgroup_id, air_id, weight, compressor_weight)
     }
 
-    pub fn dctx_add_instance_no_assign(&self, airgroup_id: usize, air_id: usize, weight: u64) -> ProofmanResult<usize> {
+    pub fn assign_table_to(&self, airgroup_id: usize, air_id: usize, gid: usize) -> ProofmanResult<()> {
         let mut dctx = self.dctx.write().unwrap();
-        dctx.add_instance_no_assign(airgroup_id, air_id, weight)
+        dctx.assign_table_to(airgroup_id, air_id, gid)
+    }
+
+    pub fn dctx_is_assigned_table(&self, instance_id: usize) -> ProofmanResult<bool> {
+        let dctx = self.dctx.read().unwrap();
+        dctx.is_assigned_table(instance_id)
+    }
+
+    /// `weight` is the caller's basic-proof estimate; the recursion chain is added here.
+    /// `priority` is required, not defaulted: a silent `Normal` here demotes an air with no error.
+    pub fn dctx_add_instance_no_assign(
+        &self,
+        airgroup_id: usize,
+        air_id: usize,
+        weight: u64,
+        priority: WitnessPriority,
+    ) -> ProofmanResult<usize> {
+        let mut dctx = self.dctx.write().unwrap();
+        let compressor_weight = self.get_compressor_weight(airgroup_id, air_id);
+        let weight = weight + self.get_recursion_weight(airgroup_id, air_id);
+        dctx.add_instance_no_assign(airgroup_id, air_id, weight, compressor_weight, priority)
     }
 
     pub fn dctx_assign_instances(&self) -> ProofmanResult<()> {
@@ -721,7 +1223,7 @@ impl<F: PrimeField64> ProofCtx<F> {
         global_challenge_guard[1] = global_challenge[1];
         global_challenge_guard[2] = global_challenge[2];
 
-        let mut transcript: Transcript<F, Poseidon16, 16> = Transcript::new();
+        let mut transcript = new_transcript::<F>(&self.global_info.hash);
 
         transcript.put(global_challenge);
         let mut challenges_guard = self.challenges.values.write().unwrap();
@@ -753,7 +1255,7 @@ impl<F: PrimeField64> ProofCtx<F> {
 
         let mut values = Vec::new();
         let mut p = 0;
-        for proof_value in self.global_info.proof_values_map.iter().flatten() {
+        for proof_value in self.global_info.proof_values_map.as_ref().unwrap() {
             if proof_value.stage > stage as u64 {
                 break;
             }
@@ -818,6 +1320,7 @@ impl<F: PrimeField64> ProofCtx<F> {
             p_const_pols: const_pols,
             p_const_tree: std::ptr::null_mut(),
             custom_commits_fixed: air_instance.get_custom_commits_fixed_ptr(),
+            witness_ops: air_instance.gpu_witness_ops,
         }
     }
 
@@ -859,7 +1362,7 @@ impl<F: PrimeField64> ProofCtx<F> {
         air_instance_id: usize,
     ) -> ProofmanResult<Vec<F>> {
         let dctx = self.dctx.read().unwrap();
-        let index = dctx.find_instance_id(airgroup_id, air_id, air_instance_id);
+        let index = dctx.find_by_air_instance_id(airgroup_id, air_id, air_instance_id);
         if let Some(index) = index {
             Ok(self.air_instances[index].read().unwrap().get_air_values())
         } else {
@@ -876,7 +1379,7 @@ impl<F: PrimeField64> ProofCtx<F> {
         air_instance_id: usize,
     ) -> ProofmanResult<Vec<F>> {
         let dctx = self.dctx.read().unwrap();
-        let index = dctx.find_instance_id(airgroup_id, air_id, air_instance_id);
+        let index = dctx.find_by_air_instance_id(airgroup_id, air_id, air_instance_id);
         if let Some(index) = index {
             Ok(self.air_instances[index].read().unwrap().get_airgroup_values())
         } else {
@@ -887,11 +1390,32 @@ impl<F: PrimeField64> ProofCtx<F> {
     }
 
     pub fn free_instance(&self, instance_id: usize) -> (bool, Vec<F>) {
-        self.air_instances[instance_id].write().unwrap().reset()
+        // One lock across both: marking first and clearing later lets a hook acquire the `Evicted`
+        // slot and release `Done` over the trace this then drops.
+        let mut air_instance = self.air_instances[instance_id].write().unwrap();
+        self.dctx_mark_witness_evicted(instance_id);
+        air_instance.reset()
     }
 
+    /// Reclaim an instance's trace, marking it `Evicted`. That is not the same as computable again:
+    /// only an explicit `rearm` puts it back in play, so a blanket re-announce cannot redo work the
+    /// pipeline has already consumed.
     pub fn free_instance_traces(&self, instance_id: usize) -> (bool, Vec<F>) {
-        self.air_instances[instance_id].write().unwrap().clear_traces()
+        // One transition, for the same reason as `free_instance`.
+        let mut air_instance = self.air_instances[instance_id].write().unwrap();
+        self.dctx_mark_witness_evicted(instance_id);
+        air_instance.clear_traces()
+    }
+
+    /// Only if the resident trace is still the one offered: a queued candidate outlives the trace it
+    /// names, and freeing on a stale entry throws away a recomputation.
+    pub fn free_instance_traces_at(&self, instance_id: usize, generation: u64) -> (bool, Vec<F>) {
+        let mut air_instance = self.air_instances[instance_id].write().unwrap();
+        if air_instance.trace_generation != generation {
+            return (false, Vec::new());
+        }
+        self.dctx_mark_witness_evicted(instance_id);
+        air_instance.clear_traces()
     }
 
     pub fn set_instance_stream_id(&self, instance_id: usize, stream_id: u64) {
@@ -905,7 +1429,17 @@ impl<F: PrimeField64> ProofCtx<F> {
         sctx: &SetupCtx<F>,
         setups_vadcop: &SetupsVadcop<F>,
         aggregation: bool,
-        gpu_params: &ParamsGPU,
+        gpu: bool,
+        max_number_streams_gpu: usize,
+        max_number_recursive_streams_gpu: usize,
+        final_snark: bool,
+        // One witness prefetch unit (words), half the largest basic trace (0 = no zone).
+        prefetch_unit_words: u64,
+        // Late region (bytes), and the streaming-commit slots (count, bytes each).
+        late_region_bytes: u64,
+        n_slots: u64,
+        slot_bytes: u64,
+        // -> (basic streams/GPU, aggregation workers/GPU, GPUs)
     ) -> ProofmanResult<(u64, u64, u64)> {
         let d_buffers = Arc::new(DeviceBuffer(gen_device_buffers_c(
             self.mpi_ctx.node_rank as u32,
@@ -915,7 +1449,7 @@ impl<F: PrimeField64> ProofCtx<F> {
             sctx.max_n_bits_ext as u32,
         )));
 
-        let mut free_memory_gpu = match cfg!(feature = "gpu") {
+        let free_memory_device = match gpu {
             true => check_device_memory_c(self.mpi_ctx.node_rank as u32, self.mpi_ctx.node_n_processes as u32) as f64,
             false => 0.0,
         };
@@ -925,7 +1459,7 @@ impl<F: PrimeField64> ProofCtx<F> {
         let n_gpus = get_num_gpus_c();
         let n_processes_node = self.mpi_ctx.node_n_processes as usize as u64;
 
-        let n_partitions = match cfg!(feature = "gpu") {
+        let n_partitions = match gpu {
             true => {
                 if n_gpus > n_processes_node {
                     1
@@ -936,78 +1470,301 @@ impl<F: PrimeField64> ProofCtx<F> {
             false => 1,
         };
 
-        free_memory_gpu /= n_partitions as f64;
+        // Basic fixed: the planner decides whether they are resident (else read from host memory).
+        let basic_fixed_words = if gpu { sctx.total_const_pols_size as u64 } else { 0 };
+        // The planner sizes the const cache; without one (prove-air) the aggregation area is resident.
+        let cache_on = gpu && aggregation && setups_vadcop.cache_normal_words > 0;
+        let resident_aggregation_area =
+            if gpu && aggregation && !cache_on { setups_vadcop.total_const_pols_size as u64 } else { 0 };
 
-        let mut total_const_area = 0;
-        let mut total_const_area_aggregation = 0;
+        // Wrapping here would carve streams out of a budget the card does not have, and only fail
+        // later inside cudaMalloc.
+        // + ubl::AUX_ALIGN slack.
+        let late_area = if gpu { (late_region_bytes + UBL_AUX_ALIGN_BYTES).div_ceil(8) } else { 0 };
+        // The first stream must hold one slot, or the carve drops the slots.
+        let slot_floor =
+            if gpu && n_slots > 0 { slot_bytes.next_multiple_of(UBL_AUX_ALIGN_BYTES).div_ceil(8) } else { 0 };
 
-        if cfg!(feature = "gpu") {
-            total_const_area += sctx.total_const_pols_size as u64;
-            total_const_area += sctx.total_const_tree_size as u64;
-            if aggregation {
-                total_const_area_aggregation += setups_vadcop.total_const_pols_size as u64;
-                total_const_area_aggregation += setups_vadcop.total_const_tree_size as u64;
-            }
-        }
+        // Non-recursive streams also take compressor/vadcop_final launches, which floors their classes.
+        let recursive_capable_size = setups_vadcop.max_prover_recursive_buffer_size.max(slot_floor as usize);
+        let max_prover_recursive2_buffer_size =
+            if aggregation { setups_vadcop.max_prover_recursive2_buffer_size } else { 0 };
 
-        let max_size_buffer = ((free_memory_gpu / 8.0).floor() as u64)
-            .checked_sub(total_const_area + total_const_area_aggregation)
-            .ok_or_else(|| {
-                ProofmanError::InvalidConfiguration("Not enough GPU memory to load fixed polynomials and trees".into())
-            })?;
-        let max_prover_buffer_size = sctx.max_prover_buffer_size.max(setups_vadcop.max_prover_buffer_size);
-
-        let n_streams_per_gpu = match cfg!(feature = "gpu") {
-            true => {
-                if max_prover_buffer_size == 0 {
-                    return Err(ProofmanError::InvalidSetup("Prover buffer size is zero".into()));
-                }
-                let max_number_proofs_per_gpu =
-                    gpu_params.max_number_streams.min(max_size_buffer as usize / max_prover_buffer_size);
-                if max_number_proofs_per_gpu < 1 {
-                    return Err(ProofmanError::InvalidConfiguration("Not enough GPU memory to run the proof".into()));
-                }
-                max_number_proofs_per_gpu
-            }
-            false => 1,
-        };
-
-        let max_prover_buffer_size =
-            sctx.max_prover_buffer_size.max(setups_vadcop.max_prover_recursive_buffer_size) as u64;
-
-        let max_prover_recursive2_buffer_size = setups_vadcop.max_prover_recursive2_buffer_size as u64;
-
-        tracing::info!("Max prover buffer size: {}", format_bytes(max_prover_buffer_size as f64 * 8.0));
         tracing::info!(
-            "Max prover recursive buffer size: {}",
-            format_bytes(setups_vadcop.max_prover_recursive_buffer_size as f64 * 8.0)
+            "Max prover buffer size: {}",
+            format_bytes(sctx.max_prover_buffer_size.max(recursive_capable_size) as f64 * 8.0)
         );
+        tracing::info!("Max prover recursive buffer size: {}", format_bytes(recursive_capable_size as f64 * 8.0));
         tracing::info!(
-            "Max prover recursive1/recursive2 buffer size: {}",
-            format_bytes(setups_vadcop.max_prover_recursive2_buffer_size as f64 * 8.0)
+            "Max prover recursive1/recursive2 buffer size: {} (recursive2 map {} + compact witness tail {})",
+            format_bytes(setups_vadcop.max_prover_recursive2_buffer_size as f64 * 8.0),
+            format_bytes(setups_vadcop.sctx_recursive2.as_ref().map_or(0, |s| s.max_prover_buffer_size) as f64 * 8.0),
+            format_bytes(setups_vadcop.sctx_recursive2.as_ref().map_or(0, |s| s.max_compact_trace_size) as f64 * 8.0),
         );
 
-        let mut gpu_available_memory = match cfg!(feature = "gpu") {
-            true => max_size_buffer as i64 - (n_streams_per_gpu * max_prover_buffer_size as usize) as i64,
-            false => 0,
+        let basic_sizes: Vec<usize> = sctx.prover_buffer_sizes.iter().map(|(_, size)| *size).collect();
+
+        // The plan for `free_memory_gpu` (per partition); no side effects, so a shortfall can retry.
+        let plan_with = |free_memory_gpu: f64| -> ProofmanResult<(BufferPlanInput, BufferPlan, u64, StreamLayout)> {
+            let max_size_buffer = ((free_memory_gpu / 8.0).floor() as u64)
+                .checked_sub(resident_aggregation_area + late_area)
+                .ok_or_else(|| {
+                    ProofmanError::InvalidConfiguration(format!(
+                        "Fixed polynomials + late region need {} but only {} is free on the GPU",
+                        format_bytes((resident_aggregation_area + late_area) as f64 * 8.0),
+                        format_bytes(free_memory_gpu),
+                    ))
+                })?;
+
+            // Prefetch first, then the const cache, then the streams (see buffer_plan.rs).
+            let plan_input = BufferPlanInput {
+                free_words: (free_memory_gpu / 8.0).floor() as u64,
+                fixed_words: resident_aggregation_area + late_area,
+                budget_words: max_size_buffer,
+                min_stream_words: (sctx
+                    .max_prover_buffer_size
+                    .max(recursive_capable_size)
+                    .max(max_prover_recursive2_buffer_size)) as u64,
+                prefetch_unit_words: if gpu { prefetch_unit_words } else { 0 },
+                basic_fixed_words,
+                cache: cache_on.then(|| CacheInput {
+                    slot0_words: setups_vadcop.cache_big_words,
+                    normal_words: setups_vadcop.cache_normal_words,
+                    rec2_words: setups_vadcop.rec2_words,
+                    rec2_fits_lru: setups_vadcop.rec2_fits_lru,
+                    finals_words: setups_vadcop.finals_pin_words,
+                    rec2_sets: setups_vadcop.rec2_sets,
+                    finals_sets: setups_vadcop.finals_sets,
+                    slots_cap: CONST_CACHE_SLOTS_PLAN_MAX.min(setups_vadcop.cache_n_lru_keys.max(2)),
+                }),
+            };
+            let plan = if gpu {
+                plan_buffer(&plan_input)?
+            } else {
+                BufferPlan {
+                    prefetch_units: 0,
+                    cache_slots: 0,
+                    pin_rec2: false,
+                    pin_finals: false,
+                    basic_resident: true,
+                    relaxed: false,
+                }
+            };
+            let max_size_buffer = max_size_buffer
+                - plan.basic_words(&plan_input)
+                - plan.prefetch_words(prefetch_unit_words)
+                - plan.cache_words(&plan_input);
+
+            let layout = match gpu {
+                true => plan_stream_layout(
+                    max_size_buffer as usize,
+                    &basic_sizes,
+                    recursive_capable_size,
+                    max_prover_recursive2_buffer_size,
+                    max_number_streams_gpu,
+                    if aggregation { max_number_recursive_streams_gpu } else { 0 },
+                )
+                .ok_or_else(|| ProofmanError::InvalidConfiguration("Not enough GPU memory to run the proof".into()))?,
+                // No device streams to carve: one nominal stream, sized for the largest proof.
+                false => StreamLayout {
+                    basic: vec![StreamClass {
+                        size: sctx.max_prover_buffer_size.max(recursive_capable_size),
+                        count: 1,
+                    }],
+                    recursive: StreamClass { size: max_prover_recursive2_buffer_size, count: 0 },
+                    aggregation_workers: 0,
+                    unused: 0,
+                },
+            };
+            Ok((plan_input, plan, max_size_buffer, layout))
         };
-        let mut n_recursive_streams_per_gpu = 0;
-        if aggregation {
-            while gpu_available_memory > 0 && n_recursive_streams_per_gpu < 10 {
-                gpu_available_memory -= max_prover_recursive2_buffer_size as i64;
-                if gpu_available_memory < 0 {
+
+        // The headroom for everything allocated after the unified buffer ( ):
+        // the final SNARK's sppark pool, the per-air tables and lazily loaded kernels, and the CUDA
+        // graphs above PROOFMAN_GPU_MIN_HEADROOM_MB. A card it does not fit retries at the next
+        // multiple of 256 MiB below, down to the minimum.
+        let free_after = |reserve: f64| (free_memory_device - reserve).max(0.0) / n_partitions as f64;
+        let mut reserve = if gpu { get_post_alloc_headroom_bytes_c() as f64 } else { 0.0 };
+        let mut planned = plan_with(free_after(reserve));
+        if gpu {
+            const STEP: f64 = (256u64 << 20) as f64;
+            while let Err(e) = &planned {
+                if reserve <= POST_ALLOC_HEADROOM_MIN_BYTES {
                     break;
                 }
-                n_recursive_streams_per_gpu += 1;
+                let next = (((reserve - 1.0) / STEP).floor() * STEP).max(POST_ALLOC_HEADROOM_MIN_BYTES);
+                tracing::warn!(
+                    "{e}; retrying with {} free after the unified buffer instead of {}",
+                    format_bytes(next),
+                    format_bytes(reserve),
+                );
+                reserve = next;
+                planned = plan_with(free_after(reserve));
+            }
+        }
+        let (plan_input, plan, max_size_buffer, layout) = planned?;
+        if gpu {
+            tracing::info!("Reserving {} of GPU memory for other device consumers", format_bytes(reserve));
+        }
+
+        let total_const_area = plan.basic_words(&plan_input);
+        self.basic_fixed_on_host = gpu && !plan.basic_resident;
+        set_basic_fixed_on_host_c(d_buffers.get_ptr(), self.basic_fixed_on_host);
+        let prefetch_region_area = plan.prefetch_words(prefetch_unit_words);
+        let total_const_area_aggregation = resident_aggregation_area + plan.cache_words(&plan_input);
+        self.prefetch_units = plan.prefetch_units;
+        self.const_cache_lru_slots = plan.cache_slots;
+        self.const_cache_pin_rec2 = plan.pin_rec2;
+        self.const_cache_pin_finals = plan.pin_finals;
+        if plan.relaxed {
+            tracing::warn!(
+                "GPU memory is short: the plan keeps {} prefetch units, a {}-slot const cache and recursive2 {}",
+                plan.prefetch_units,
+                plan.cache_slots,
+                if plan.pin_rec2 { "pinned" } else { "through the LRU" },
+            );
+        }
+        if gpu {
+            tracing::info!(
+                "Buffer plan: basic fixed {}, {} prefetch units ({}), {} const cache LRU slots{}, {} left for the streams",
+                if plan.basic_resident { "resident" } else { "on host" },
+                plan.prefetch_units,
+                format_bytes(prefetch_region_area as f64 * 8.0),
+                self.const_cache_lru_slots,
+                if plan.pin_finals { ", finals pinned" } else { "" },
+                format_bytes(max_size_buffer as f64 * 8.0),
+            );
+        }
+
+        // Phase B splits the single basic stream in two halves that host recursion and every basic
+        // that fits them (the big ones ran in phase A). The stream is grown into all the slack the
+        // post-allocation headroom leaves (at least to the mops floor), which makes the halves as large
+        // as the card allows: the more airs fit a half, the shorter phase A. The halves must hold the
+        // recursive1/recursive2 class.
+        // The mops window [mopsBase, recursiveBase) starts past the slots.
+        let mops_floor = if gpu {
+            (get_mops_floor_bytes_c() + n_slots * slot_bytes.next_multiple_of(UBL_AUX_ALIGN_BYTES)).div_ceil(8) as usize
+        } else {
+            0
+        };
+        let mut layout = layout;
+        let mut phase_b_half: usize = 0;
+        let mut alias_headroom_kept = false;
+        if gpu && aggregation && layout.n_basic_streams() == 1 && layout.recursive.count == 0 {
+            // 2 MiB granularity, so both halves stay 1 MiB aligned.
+            const HALVES_ALIGN: usize = 2 * MIB_WORDS;
+            let mut headroom_extra: usize = 0;
+            let current = layout.basic[0].size;
+            let grow_to = |extra: usize| phase_b_target(current, layout.unused, mops_floor, extra, HALVES_ALIGN);
+            let mut target = grow_to(headroom_extra);
+            // The phase-A recursion alias (below) is a fourth device stream, and every stream brings
+            // its own CUDA graphs and small device buffers (~0.3 GB measured at 712 tx); when the
+            // stream will hold it, keep that much more free.
+            if target >= sctx.max_prover_buffer_size + max_prover_recursive2_buffer_size {
+                headroom_extra += (PHASE_A_ALIAS_HEADROOM_MB * 1024 * 1024 / 8) as usize;
+                target = grow_to(headroom_extra);
+                // The mops floor may have taken it.
+                alias_headroom_kept = current + layout.unused - target >= headroom_extra;
+            }
+            let half = target / 2;
+            if half >= max_prover_recursive2_buffer_size {
+                layout.unused -= target - current;
+                layout.basic[0].size = target;
+                phase_b_half = half;
+            } else {
+                tracing::warn!(
+                    "single basic stream can grow to {} at most, whose half does not hold the recursive class ({}) -- phase B will not be available on this layout",
+                    format_bytes(target as f64 * 8.0),
+                    format_bytes(max_prover_recursive2_buffer_size as f64 * 8.0)
+                );
             }
         }
 
-        if cfg!(feature = "gpu") {
+        // Phase B already took all the slack; otherwise the large class grows (evenly, so its streams
+        // stay interchangeable) until the basic streams reach the mops floor. Short of it, mops runs on the CPU.
+        if gpu && phase_b_half == 0 {
+            let short = mops_floor.saturating_sub(layout.basic_stream_sizes().iter().sum());
+            let n = layout.basic[0].count;
+            let per = short.div_ceil(n).next_multiple_of(MIB_WORDS).min(layout.unused / n / MIB_WORDS * MIB_WORDS);
+            layout.basic[0].size += per;
+            layout.unused -= per * n;
+            if per * n < short {
+                tracing::warn!(
+                    "the basic streams hold {} of the {} the GPU mops planner needs: it will run on the CPU",
+                    format_bytes(layout.basic_stream_sizes().iter().sum::<usize>() as f64 * 8.0),
+                    format_bytes(mops_floor as f64 * 8.0),
+                );
+            }
+        }
+        let aux_trace_sizes: Vec<u64> = layout.basic_stream_sizes().iter().map(|&s| s as u64).collect();
+        // Retained so the witness admission can tell which airs are confined to a subset of streams.
+        self.basic_stream_sizes = layout.basic_stream_sizes();
+        let n_streams_per_gpu = layout.n_basic_streams();
+        let mut n_recursive_streams_per_gpu = layout.recursive.count;
+
+        // Phase B: with aggregation and one basic stream, two recursive-class streams alias that
+        // stream's halves (sized above). They cost no memory and open once every instance that does
+        // not fit a half has completed (see the phase-A countdown in the proofs phase).
+        // PROOFMAN_NO_PHASE_B=1 disables.
+        self.phase_b = gpu
+            && aggregation
+            && n_streams_per_gpu == 1
+            && n_recursive_streams_per_gpu == 0
+            && phase_b_half > 0
+            && !std::env::var("PROOFMAN_NO_PHASE_B").map(|v| v == "1").unwrap_or(false);
+        // Phase-A recursion alias: when the stream also holds the recursive class beside the largest
+        // basic, a third recursive-class stream runs recursion there during phase A (see
+        // DeviceCommitBuffers::phaseAAliasOffset). Otherwise recursion interleaves on the basic
+        // stream in phase A as before.
+        let mut phase_a_alias_offset: usize = 0;
+        if self.phase_b {
+            configure_phase_b_c(d_buffers.get_ptr());
+            n_recursive_streams_per_gpu = 2;
+            self.phase_b_half = phase_b_half;
+            let largest_basic = sctx.max_prover_buffer_size;
+            if alias_headroom_kept && layout.basic[0].size >= largest_basic + max_prover_recursive2_buffer_size {
+                phase_a_alias_offset = largest_basic;
+                n_recursive_streams_per_gpu = 3;
+            } else {
+                tracing::info!(
+                    "Phase A alias not available: the stream ({}) does not hold the recursive class ({}) beside the largest basic ({})",
+                    format_bytes(layout.basic[0].size as f64 * 8.0),
+                    format_bytes(max_prover_recursive2_buffer_size as f64 * 8.0),
+                    format_bytes(largest_basic as f64 * 8.0)
+                );
+            }
+        }
+        // The recursive-class streams' capacity: the halves under phase B, else the recursive class.
+        let recursive_stream_size = if self.phase_b { phase_b_half } else { max_prover_recursive2_buffer_size };
+
+        if gpu {
+            let classes = layout
+                .basic
+                .iter()
+                .map(|c| format!("{} x {}", c.count, format_bytes(c.size as f64 * 8.0)))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            let aggregation_desc = match n_recursive_streams_per_gpu {
+                0 => format!("{} aggregation workers sharing the basic streams", layout.aggregation_workers),
+                2 if self.phase_b => format!(
+                    "2 phase-B streams over the basic stream's halves ({} each, recursion + basics that fit)",
+                    format_bytes(phase_b_half as f64 * 8.0)
+                ),
+                3 if self.phase_b => format!(
+                    "2 phase-B streams over the basic stream's halves ({} each, recursion + basics that fit) + a phase-A recursion alias past the largest basic ({} free)",
+                    format_bytes(phase_b_half as f64 * 8.0),
+                    format_bytes((layout.basic[0].size - phase_a_alias_offset) as f64 * 8.0)
+                ),
+                n => format!("{n} dedicated streams per GPU for recursive proofs"),
+            };
             tracing::info!(
-                "Using {} streams per GPU for basic proofs and {} streams per GPU for recursive proofs. Using {} for fixed pols",
+                "Using {} streams per GPU for basic proofs ({}) and {}. \
+                 Using {} for fixed pols, {} unused",
                 n_streams_per_gpu,
-                n_recursive_streams_per_gpu,
-                format_bytes((total_const_area + total_const_area_aggregation) as f64 * 8.0)
+                classes,
+                aggregation_desc,
+                format_bytes((total_const_area + total_const_area_aggregation) as f64 * 8.0),
+                format_bytes(layout.unused as f64 * 8.0),
             );
         }
 
@@ -1018,28 +1775,207 @@ impl<F: PrimeField64> ProofCtx<F> {
 
         let n_gpus: u64 = gen_device_streams_c(
             d_buffers.get_ptr(),
-            n_streams_per_gpu as u64,
+            &aux_trace_sizes,
             n_recursive_streams_per_gpu as u64,
-            max_prover_buffer_size,
-            max_prover_recursive2_buffer_size,
+            recursive_stream_size as u64,
             max_pinned_proof_size,
             self.global_info.transcript_arity as u64,
         );
 
+        // Pad the unified buffer up to the snark floor (see GPU_UNIFIED_BUFFER_MIN_SNARK_BYTES),
+        // taking only the layout's unused slack. Runs without a wrapper skip it, and so do blake3
+        // keys': their final SNARK carves no BN128 recursivef nor rapidsnark prover.
+        let unified_buffer_pad_area: u64 = if gpu && final_snark && self.global_info.hash != "blake3" {
+            let below_aux_bytes = (total_const_area + prefetch_region_area) * 8 + late_region_bytes;
+            let above_aux_elems = aux_trace_sizes.iter().sum::<u64>()
+                + if self.phase_b {
+                    0
+                } else {
+                    n_recursive_streams_per_gpu as u64 * max_prover_recursive2_buffer_size as u64
+                }
+                + total_const_area_aggregation;
+            let need = snark_pad_elems(below_aux_bytes, above_aux_elems, GPU_UNIFIED_BUFFER_MIN_SNARK_BYTES);
+            let pad = need.min(layout.unused as u64);
+            if pad > 0 {
+                tracing::info!(
+                    "Padding the unified buffer by {} to reach the {} snark floor",
+                    format_bytes(pad as f64 * 8.0),
+                    format_bytes(GPU_UNIFIED_BUFFER_MIN_SNARK_BYTES as f64),
+                );
+                if need > layout.unused as u64 {
+                    tracing::warn!(
+                        "Snark floor not reachable: layout slack is {} short; the final snark \
+                         prover will not fit the unified buffer",
+                        format_bytes((need - layout.unused as u64) as f64 * 8.0),
+                    );
+                }
+            }
+            pad
+        } else {
+            0
+        };
+
+        self.aggregation_const_words = total_const_area_aggregation;
         alloc_device_large_buffers_c(
             d_buffers.get_ptr(),
-            max_prover_buffer_size,
-            max_prover_recursive2_buffer_size,
+            recursive_stream_size as u64,
             total_const_area,
             total_const_area_aggregation,
+            unified_buffer_pad_area,
+            prefetch_region_area,
+            phase_a_alias_offset as u64,
+            late_region_bytes,
+            n_slots,
+            slot_bytes,
+            reserve as u64,
         );
 
         self.d_buffers = d_buffers;
 
-        Ok((n_streams_per_gpu as u64, n_recursive_streams_per_gpu as u64, n_gpus))
+        Ok((n_streams_per_gpu as u64, layout.aggregation_workers as u64, n_gpus))
     }
 
     pub fn get_device_buffers_ptr(&self) -> *mut c_void {
         self.d_buffers.get_ptr()
+    }
+
+    pub fn acquire_first_gpu_buffer(&self) {
+        if self.gpu {
+            acquire_first_gpu_buffer_c(self.d_buffers.get_ptr());
+        }
+    }
+
+    pub fn release_first_gpu_buffer(&self) {
+        if self.gpu {
+            release_first_gpu_buffer_c(self.d_buffers.get_ptr());
+        }
+    }
+
+    /// The mops borrow window `[mopsBase, recursiveBase)` of the FIRST GPU's (my_gpu_ids[0]) unified
+    /// buffer: the basic streams past the slots. The recursive streams and the
+    /// aggregation fixed pols above it stay untouched.
+    pub fn get_first_gpu_buffer(&self) -> (usize, u64) {
+        let (mops_base, size) = self.mops_window();
+        (get_first_gpu_buffer_c(self.d_buffers.get_ptr()) as usize + mops_base as usize, size)
+    }
+
+    /// `(mopsBase, size)` of the mops window, in bytes from the buffer base.
+    fn mops_window(&self) -> (u64, u64) {
+        let p = self.d_buffers.get_ptr();
+        let mops_base = get_layout_offset_c(p, LayoutBoundary::MopsBase);
+        (mops_base, get_layout_offset_c(p, LayoutBoundary::RecursiveBase) - mops_base)
+    }
+
+    /// Report how many bytes (from the window base) a borrower of the first GPU's buffer used. Call
+    /// after the borrower finished writing, before or at buffer release. No-op on CPU.
+    pub fn report_first_gpu_buffer_usage(&self, used_bytes: u64) {
+        if !self.gpu {
+            return;
+        }
+        let (mops_base, size) = self.mops_window();
+        if used_bytes > size {
+            panic!(
+                "first-GPU unified buffer borrower used {used_bytes} bytes, past the {size}-byte window it \
+                 was handed at offset {mops_base}"
+            );
+        }
+        tracing::info!(
+            "GPU mops used {} of {} (window from {})",
+            format_bytes(used_bytes as f64),
+            format_bytes(size as f64),
+            format_bytes(mops_base as f64),
+        );
+    }
+
+    /// Device of the first GPU (my_gpu_ids[0]) — the GPU `get_first_gpu_buffer`
+    /// points to. Not always 0 (NUMA can reorder). 0 when GPU mode is off.
+    pub fn first_gpu_id(&self) -> u32 {
+        if self.gpu {
+            get_first_gpu_id_c(self.d_buffers.get_ptr())
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proofman_fields::Goldilocks;
+
+    type Pctx = super::ProofCtx<Goldilocks>;
+
+    /// The padded buffer reaches the floor whatever alignment auxBase gets.
+    #[test]
+    fn snark_pad_matches_the_aux_alignment() {
+        const MIB: u64 = 1 << 20;
+        let end = |below: u64, above: u64, pad: u64| below.next_multiple_of(MIB) + (above + pad) * 8;
+        for below in [MIB, MIB + 8, 2 * MIB - 8] {
+            let floor = 64 * MIB + 4;
+            let pad = super::snark_pad_elems(below, 1000, floor);
+            assert!(end(below, 1000, pad) >= floor);
+            assert!(end(below, 1000, pad) < floor + 8);
+        }
+        // Already past the floor: no pad.
+        assert_eq!(super::snark_pad_elems(64 * MIB, 0, 32 * MIB), 0);
+    }
+
+    /// At arity 2 a leaf pays for a whole recursive2 proof, at arity 3 for half of one
+    #[test]
+    fn recursion_weight_scales_with_the_aggregation_arity() {
+        assert_eq!(Pctx::recursion_weight(1000, 400, 2, 1), 1400);
+        assert_eq!(Pctx::recursion_weight(1000, 400, 3, 1), 1200);
+    }
+
+    /// A batched recursive1 verifies k proofs and is one leaf of the tree, so both terms split k ways
+    #[test]
+    fn recursion_weight_splits_over_the_recursive1_batch() {
+        assert_eq!(Pctx::recursion_weight(1000, 400, 2, 2), 700);
+        assert_eq!(Pctx::recursion_weight(1000, 400, 2, 0), 1400, "0 reads as unbatched");
+    }
+
+    /// Real setup weights: blake3 charges ~15.8x Poseidon, 11.8x circuit x 1.33x arity. This
+    /// ratio is what keeps the balance hash-agnostic with no per-family branch.
+    #[test]
+    fn recursion_weight_separates_the_hash_families() {
+        let blake3 = Pctx::recursion_weight(1_228_931_072, 1_228_931_072, 2, 1);
+        let poseidon = Pctx::recursion_weight(103_809_024, 103_809_024, 3, 1);
+        assert_eq!(blake3, 2_457_862_144);
+        assert_eq!(poseidon, 155_713_536);
+        assert!((15.7..15.9).contains(&(blake3 as f64 / poseidon as f64)));
+    }
+
+    const MIB: usize = (1 << 20) / 8;
+
+    #[test]
+    fn phase_b_grows_into_all_slack_with_one_headroom() {
+        // 1 GB slack, no extra headroom: the stream takes all of it (2 MiB aligned).
+        assert_eq!(super::phase_b_target(20_000 * MIB, 1024 * MIB, 0, 0, 2 * MIB), 21_024 * MIB);
+    }
+
+    #[test]
+    fn phase_b_reaches_the_mops_floor_when_slack_allows() {
+        assert_eq!(
+            super::phase_b_target(10_000 * MIB, 20_000 * MIB, 19_000 * MIB, 25_000 * MIB, 2 * MIB),
+            19_000 * MIB
+        );
+    }
+
+    #[test]
+    fn phase_b_never_exceeds_the_slack() {
+        assert_eq!(super::phase_b_target(10_000 * MIB, 100 * MIB, 50_000 * MIB, 0, 2 * MIB), 10_100 * MIB);
+    }
+
+    #[test]
+    fn phase_b_rounds_an_unaligned_floor_up() {
+        assert_eq!(
+            super::phase_b_target(10_000 * MIB, 20_000 * MIB, 19_001 * MIB, 25_000 * MIB, 2 * MIB),
+            19_002 * MIB
+        );
+    }
+
+    #[test]
+    fn phase_b_keeps_current_when_alignment_would_shrink_it() {
+        // Half a MiB of slack: aligning down falls below `current`, so the stream stays as is.
+        assert_eq!(super::phase_b_target(10_001 * MIB, MIB / 2, 0, 0, 2 * MIB), 10_001 * MIB);
     }
 }

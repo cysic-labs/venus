@@ -10,15 +10,14 @@ use proofman_common::GenericTrace;
 use proofman_common::PackedInfoConst;
 pub use proofman_macros::trace_row;
 pub use proofman_macros::values;
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use std::fmt;
 
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "904eb62e7f7dc4361e75780eabe8e1d96374d63555f3f6749eef45d1231beaa5";
+pub const PILOUT_HASH: &str = "929916ed7e400bfc7939cfeb81680fcb5ffc0f6b64fe0284a2678bec2cff184f";
 
-pub const MERKLE_TREE_ARITY: u64 = 4;
 
 //AIRGROUP CONSTANTS
 

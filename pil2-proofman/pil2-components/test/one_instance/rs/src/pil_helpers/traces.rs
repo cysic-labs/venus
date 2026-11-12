@@ -10,15 +10,13 @@ use proofman_common::GenericTrace;
 use proofman_common::PackedInfoConst;
 pub use proofman_macros::trace_row;
 pub use proofman_macros::values;
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use std::fmt;
 
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "c26855220153e3911866b19eb46995bdab3a243a259875673c17589f1c2960dd";
-
-pub const MERKLE_TREE_ARITY: u64 = 4;
+pub const PILOUT_HASH: &str = "a989665d2c247af2be74de814572ddc2a5760d34baf784d032d73132b8f2ae5a";
 
 //AIRGROUP CONSTANTS
 
@@ -41,8 +39,8 @@ pub type AirProdFixed<F> = GenericTrace<AirProdFixedRow<F>, 256, 0, 0>;
 trace_row!(AirProdTraceRow<F> {
  a:F, b:F, c:F,
 });
-pub type AirProdTrace<F> = GenericTrace<AirProdTraceRow<F>, 256, 0, 0>;
 
+pub type AirProdTrace<F> = GenericTrace<AirProdTraceRow<F>, 256, 0, 0>;
 
 trace_row!(AirSumFixedRow<F> {
  __L1__: F,
@@ -52,8 +50,15 @@ pub type AirSumFixed<F> = GenericTrace<AirSumFixedRow<F>, 256, 1, 0>;
 trace_row!(AirSumTraceRow<F> {
  a:F, b:F, c:F,
 });
+
 pub type AirSumTrace<F> = GenericTrace<AirSumTraceRow<F>, 256, 1, 0>;
 
-
 pub const PACKED_INFO: &[(usize, usize, PackedInfoConst)] = &[
+];
+
+/// Display name for every `(airgroup_id, air_id)` pair, derived directly from the
+/// PILOUT. Lets code resolve an AIR name without a loaded setup/`GlobalInfo`.
+pub const AIR_NAMES: &[(usize, usize, &str)] = &[
+    (0, 0, "AirProd"),
+    (1, 0, "AirSum"),
 ];

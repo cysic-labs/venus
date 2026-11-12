@@ -5,15 +5,10 @@ edition = "2021"
 
 [dependencies]
 zisk-sdk = { workspace = true }
-proofman = { path = "../../../pil2-proofman/proofman" }
-anyhow = "1.0"
+zisk-verifier = { workspace = true }
+zisk-test-artifacts = { workspace = true, features = ["fib_mod", "agg_verify"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
-sha2 = "0.10.8"
-
-[build-dependencies]
-zisk-sdk = { workspace = true }
 
 [features]
 default = []
-packed = ["zisk-sdk/packed"]
-gpu = ["zisk-sdk/gpu", "packed"]
+gpu = []

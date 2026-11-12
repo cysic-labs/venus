@@ -1,6 +1,6 @@
 const MultiArray = require("./multi_array.js");
 const Expression = require("./expression.js");
-const {ExpressionItem, ArrayOf} = require("./expression_items.js");
+const {ExpressionItem, ArrayOf, ProofItem, ReferenceItem} = require("./expression_items.js");
 const Reference = require('./reference.js');
 const Containers = require('./containers.js');
 const Context = require('./context.js');

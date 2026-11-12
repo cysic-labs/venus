@@ -1,4 +1,6 @@
 #include "hints.cuh"
+#include "multiplicity.cuh"
+#include "multiplicity_kernel.cuh"
 #include "expressions_gpu.cuh"
 #include "goldilocks_cubic_extension.cuh"
 #include "expressions_pack.hpp"
@@ -19,8 +21,9 @@ void opHintFieldsGPU(StepsParams *d_params, Dest &dest, uint64_t nRows, bool dom
 __global__ void setPolynomial_(Goldilocks::Element *pol, Goldilocks::Element *values, uint64_t dim, uint64_t col, uint64_t nCols, uint64_t nRows) {
     uint64_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < nRows) {
+        Layout layout = resolveLayout(63 - __clzll(nRows), nCols);
         for (uint64_t j = 0; j < dim; ++j) {
-            uint64_t idx = getBufferOffset(row, col + j, nRows, nCols);
+            uint64_t idx = getBufferOffset(row, col + j, nRows, nCols, layout);
             pol[idx] = values[row * dim + j];
         }
     }
@@ -39,12 +42,12 @@ void setPolynomialGPU(SetupCtx& setupCtx, Goldilocks::Element *aux_trace, Goldil
     setPolynomial_<<<blocks, threads, 0, stream>>>(aux_trace + offset, values, dim, polInfo.stagePos, nCols, nRows);    
 }
 
-__global__ void getPolynomial_(Goldilocks::Element *pol, Goldilocks::Element *dest, uint64_t dim, uint64_t col, uint64_t nCols, uint64_t nRows, uint64_t rowOffset) {
+__global__ void getPolynomial_(Goldilocks::Element *pol, Goldilocks::Element *dest, uint64_t dim, uint64_t col, uint64_t nCols, uint64_t nRows, uint64_t rowOffset, Layout layout) {
     uint64_t row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < nRows) {
         uint64_t srcRow = (row + rowOffset) % nRows;
         for (uint64_t j = 0; j < dim; ++j) {
-            uint64_t idx = getBufferOffset(srcRow, col + j, nRows, nCols);
+            uint64_t idx = getBufferOffset(srcRow, col + j, nRows, nCols, layout);
             dest[row * dim + j] = pol[idx];
         }
     }
@@ -56,10 +59,15 @@ void getPolynomialGPU(SetupCtx& setupCtx, Goldilocks::Element *buffer, Goldilock
     uint64_t rowOffset = setupCtx.starkInfo.openingPoints[rowOffsetIndex];
     uint64_t nCols = setupCtx.starkInfo.mapSectionsN[stage];
     uint64_t dim = polInfo.dim;
-    
+    // cm follows resolveLayout; const and custom commits follow fixedLayout(),
+    // matching write_custom_commit_gpu and the expressions/FRI/eval readers.
+    Layout layout = (type == "cm") ? resolveLayout(setupCtx.starkInfo.starkStruct.nBits, nCols)
+                  : (type == "const" || type == "custom") ? fixedLayout()
+                  : Layout::ColMajor;
+
     dim3 threads(512);
     dim3 blocks((nRows + threads.x - 1) / threads.x);
-    getPolynomial_<<<blocks, threads, 0, stream>>>(buffer, dest, dim, polInfo.stagePos, nCols, nRows, rowOffset);
+    getPolynomial_<<<blocks, threads, 0, stream>>>(buffer, dest, dim, polInfo.stagePos, nCols, nRows, rowOffset, layout);
 }
 
 void copyValueGPU( Goldilocks::Element * target, Goldilocks::Element* src, uint64_t size, cudaStream_t stream) {
@@ -160,6 +168,7 @@ void calculateExprGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParams *d_
         uint64_t stageCols = 0;
         bool expr = false;
         uint64_t nRows;
+        uint64_t auxOffset = 0, auxSpan = 0;
         if(hintFieldDestVal.operand == opType::cm) {
             stageCols = setupCtx.starkInfo.mapSectionsN["cm" + to_string(setupCtx.starkInfo.cmPolsMap[hintFieldDestVal.id].stage)];
             stagePos = setupCtx.starkInfo.cmPolsMap[hintFieldDestVal.id].stagePos;  
@@ -167,6 +176,7 @@ void calculateExprGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParams *d_
             buff = NULL;
             buff_gpu = h_params.aux_trace + offsetAuxTrace;
             nRows = 1 << setupCtx.starkInfo.starkStruct.nBits;
+            auxOffset = offsetAuxTrace; auxSpan = nRows * stageCols;  // the whole committed section
         } else if (hintFieldDestVal.operand == opType::airvalue) {
             nRows = 1;
             expr = true;
@@ -176,6 +186,7 @@ void calculateExprGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParams *d_
             }
             buff = NULL;
             buff_gpu = h_params.airValues + pos;
+            auxOffset = setupCtx.starkInfo.mapOffsets[std::make_pair("airvalues", false)] + pos; auxSpan = FIELD_EXTENSION;
         } else {
             zklog.error("Only committed pols and airvalues can be set");
             exitProcess();
@@ -184,11 +195,41 @@ void calculateExprGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParams *d_
 
         Dest destStruct(buff, nRows, stagePos, stageCols, expr);
         destStruct.dest_gpu = buff_gpu;
+        destStruct.setAuxRange(auxOffset, auxSpan);
 
         addHintField(setupCtx, h_params, hintId[i], destStruct, hintFieldName[i], hintOptions[i]);
         
         opHintFieldsGPU(d_params, destStruct, nRows, false, GPUExpressionsCtx, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream);
     }
+}
+
+// Multiplicity scatter: evaluate each lookup's tuple, selector and bus id over this air's trace
+// into the device mirror, using the per-air plan built from `gsum_debug_data` hints.
+void calculateMulCalcGPU(SetupCtx& setupCtx, StepsParams &h_params, uint64_t airgroupId, uint64_t airId,
+                         uint64_t *acc, TimerGPU &timer, cudaStream_t stream) {
+    if (acc == nullptr || mulDecoders().empty()) return;
+
+    const MulPlan &plan = mulPlanFor(setupCtx, airgroupId, airId);
+    if (plan.jobs.empty()) return;
+
+    int gpuId = 0;
+    CHECKCUDAERR(cudaGetDevice(&gpuId));
+    uint64_t *oob = mulOob(gpuId);
+
+    const uint64_t domainSize = 1ULL << setupCtx.starkInfo.starkStruct.nBits;
+    const MulPlanDev dev = mulPlanDevice(plan, airgroupId, airId, gpuId);
+    timer.startCategory("MUL_SCATTER_KERNEL");
+    const uint64_t *bases[MUL_SRC_N] = {
+        (const uint64_t *)h_params.pConstPolsAddress, (const uint64_t *)h_params.trace,
+        (const uint64_t *)h_params.aux_trace,         (const uint64_t *)h_params.publicInputs,
+        (const uint64_t *)h_params.airValues,         (const uint64_t *)h_params.proofValues,
+        (const uint64_t *)h_params.airgroupValues,    (const uint64_t *)h_params.pCustomCommitsFixed,
+        nullptr, nullptr };   // slot-only sources; the legacy scatter reads the unpacked trace
+    mul_scatter_launch(dev.jobs, (uint32_t)plan.jobs.size(), plan.maxRows, domainSize, bases,
+                       acc, oob, (airgroupId << 32) | airId, dev.prog, stream);
+    timer.stopCategory("MUL_SCATTER_KERNEL");
+    // The fold waits on these events (no device sync during graph capture).
+    mul_note_scatter(gpuId, stream);
 }
 
 void multiplyHintFieldsGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParams *d_params, uint64_t nHints, uint64_t* hintId, std::string *hintFieldNameDest, std::string* hintFieldName1, std::string* hintFieldName2,  HintFieldOptions *hintOptions1, HintFieldOptions *hintOptions2, void* GPUExpressionsCtx, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams, Goldilocks::Element *pinned_exps_params, Goldilocks::Element *pinned_exps_args, uint64_t& countId, TimerGPU &timer, cudaStream_t stream) {
@@ -215,6 +256,7 @@ void multiplyHintFieldsGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParam
         uint64_t stageCols = 0;
         bool expr = false;
         uint64_t nRows;
+        uint64_t auxOffset = 0, auxSpan = 0;
         if(hintFieldDestVal.operand == opType::cm) {
             stageCols = setupCtx.starkInfo.mapSectionsN["cm" + to_string(setupCtx.starkInfo.cmPolsMap[hintFieldDestVal.id].stage)];
             stagePos = setupCtx.starkInfo.cmPolsMap[hintFieldDestVal.id].stagePos;  
@@ -222,6 +264,7 @@ void multiplyHintFieldsGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParam
             buff = NULL;
             buff_gpu = h_params.aux_trace + offsetAuxTrace;
             nRows = 1 << setupCtx.starkInfo.starkStruct.nBits;
+            auxOffset = offsetAuxTrace; auxSpan = nRows * stageCols;  // the whole committed section
         } else if (hintFieldDestVal.operand == opType::airvalue) {
             nRows = 1;
             expr = true;
@@ -231,6 +274,7 @@ void multiplyHintFieldsGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParam
             }
             buff = NULL;
             buff_gpu = h_params.airValues + pos;
+            auxOffset = setupCtx.starkInfo.mapOffsets[std::make_pair("airvalues", false)] + pos; auxSpan = FIELD_EXTENSION;
         } else {
             zklog.error("Only committed pols and airvalues can be set");
             exitProcess();
@@ -239,6 +283,7 @@ void multiplyHintFieldsGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParam
 
         Dest destStruct(buff, nRows, stagePos, stageCols, expr);
         destStruct.dest_gpu = buff_gpu;
+        destStruct.setAuxRange(auxOffset, auxSpan);
 
         addHintField(setupCtx, h_params, hintId[i], destStruct, hintFieldName1[i], hintOptions1[i]);
         addHintField(setupCtx, h_params, hintId[i], destStruct, hintFieldName2[i], hintOptions2[i]);
@@ -263,6 +308,7 @@ void accMulHintFieldsGPU(SetupCtx& setupCtx, StepsParams &h_params, StepsParams 
     
     Dest destStruct(nullptr, 1 << setupCtx.starkInfo.starkStruct.nBits, 0, 0, true);
     destStruct.dest_gpu = vals_gpu;
+    destStruct.setAuxRange(offsetAuxTrace, N * FIELD_EXTENSION);  // row-major, dim <= 3, at q
     addHintField(setupCtx, h_params, hintId, destStruct, hintFieldName1, hintOptions1);
     addHintField(setupCtx, h_params, hintId, destStruct, hintFieldName2, hintOptions2);
 
@@ -288,17 +334,20 @@ uint64_t updateAirgroupValueGPU(SetupCtx& setupCtx, StepsParams &h_params, Steps
     });
     HintFieldValue hintFieldAirgroupVal = hintFieldAirgroup->values[0];
 
-    Goldilocks::Element vals[3];
-    
-    Dest destStruct(vals, 1, 0, 0, true);
+    Dest destStruct(nullptr, 1, 0, 0, true);
     uint64_t offsetAuxTrace = setupCtx.starkInfo.mapOffsets[std::make_pair("q", true)];
     destStruct.dest_gpu = h_params.aux_trace + offsetAuxTrace;
-    destStruct.dest = nullptr;
+    destStruct.setAuxRange(offsetAuxTrace, FIELD_EXTENSION);
     addHintField(setupCtx, h_params, hintId, destStruct, hintFieldName1, hintOptions1);
     addHintField(setupCtx, h_params, hintId, destStruct, hintFieldName2, hintOptions2);
 
     opHintFieldsGPU(d_params, destStruct, 1, false, GPUExpressionsCtx, d_expsArgs, d_destParams, pinned_exps_params, pinned_exps_args, countId, timer, stream); 
-    opAirgroupValueGPU(h_params.airgroupValues + FIELD_EXTENSION*hintFieldAirgroupVal.id, destStruct.dest_gpu, destStruct.dim, add, stream);
+    // Packed offset (stage-1 values take 1 limb).
+    uint64_t agPos = 0;
+    for(uint64_t i = 0; i < hintFieldAirgroupVal.id; ++i) {
+        agPos += setupCtx.starkInfo.airgroupValuesMap[i].stage == 1 ? 1 : FIELD_EXTENSION;
+    }
+    opAirgroupValueGPU(h_params.airgroupValues + agPos, destStruct.dest_gpu, destStruct.dim, add, stream);
     return hintFieldAirgroupVal.id;
 }
 

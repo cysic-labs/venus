@@ -10,6 +10,10 @@ main() {
 
     current_dir=$(pwd)
 
+    info "Loading environment variables..."
+    # Load environment variables from .env file (only the ones used by this script)
+    load_env ZISK_REPO_DIR ZISK_TEMPLATE_BRANCH DISABLE_PROVE ONLY_CPU PROVE_FLAGS || return 1
+
     current_step=1
     if [[ "${DISABLE_PROVE}" == "1" ]]; then
         total_steps=8
@@ -24,10 +28,6 @@ main() {
         is_proving_key_installed || return 1
     fi
 
-    step "Loading environment variables..."
-    # Load environment variables from .env file
-    load_env || return 1
-
     cd "${WORKSPACE_DIR}"
 
     step "Deleting shared memory..."
@@ -36,8 +36,15 @@ main() {
 
     step "Creating new ZisK program: $PROJECT_NAME"
     rm -rf "$PROJECT_NAME"
-    ensure cargo-zisk sdk new "$PROJECT_NAME" || return 1
+    ensure cargo-zisk new "$PROJECT_NAME" || return 1
     cd "$PROJECT_NAME"
+
+    # Resolve the absolute path to the ZisK repo (handles ZISK_REPO_DIR overrides used by GHA),
+    # then repoint each git dependency to its local crate so the build uses this repo.
+    ZISK_REPO_DIR="$(get_zisk_repo_dir)"
+
+    patch_cargo_dep "./Cargo.toml" "zisk-sdk"       "${ZISK_REPO_DIR}/sdk"               || return 1
+    patch_cargo_dep "./Cargo.toml" "ziskos"         "${ZISK_REPO_DIR}/ziskos/entrypoint" || return 1
 
     step "Building program..."
     ensure cargo build --bin host --release || return 1
@@ -56,41 +63,43 @@ main() {
         warn "Skipping prove and verify steps on macOS as it's not supported in GHA"
     else
         step "Generating program setup..."
-        ensure cargo-zisk rom-setup -e "$ELF_PATH" 2>&1 | tee romsetup_output.log || return 1
+        local gpu_flag=""
+        # Only enable GPU when not forced to CPU, not on macOS, and the installed
+        # cargo-zisk is actually a GPU build (its `--version` description contains
+        # "[gpu]", e.g. "cargo-zisk 0.18.0 [gpu] (790f9e2 ...)").
+        if [[ "${ONLY_CPU:-}" != "1" ]] && [[ "${PLATFORM}" != "darwin" ]] && cargo-zisk --version 2>/dev/null | grep -q "\[gpu\]"; then
+            gpu_flag="--gpu"
+        fi
+        # The Rust emulator is the default backend; force the ASM backend (the
+        # production path) everywhere except macOS, which has no ASM support.
+        local asm_flag=""
+        if [[ "${PLATFORM}" != "darwin" ]]; then
+            asm_flag="--asm"
+        fi
+        ensure cargo-zisk-dev program-setup -e "$ELF_PATH" ${gpu_flag} 2>&1 | tee romsetup_output.log || return 1
         if ! grep -F "ROM setup successfully completed" romsetup_output.log; then
-            err "program setup failed"
-            return 1
+           err "program setup failed"
+           return 1
         fi
 
         step "Verifying constraints..."
-        if [[ "${BUILD_GPU}" == "1" ]]; then
-            warn "Skipping verify constraints step for GPU mode (not supported yet)"
-        else
-            ensure cargo-zisk verify-constraints -e "$ELF_PATH" -i "$INPUT_BIN" 2>&1 | tee constraints_output.log || return 1
-            if ! grep -F "All global constraints were successfully verified" constraints_output.log; then
-                err "verify constraints failed"
-                return 1
-            fi
+        ensure cargo-zisk-dev verify-constraints -e "$ELF_PATH" -i "$INPUT_BIN" ${asm_flag} ${gpu_flag} 2>&1 | tee constraints_output.log || return 1
+        if ! grep -F "All global constraints were successfully verified" constraints_output.log; then
+            err "verify constraints failed"
+            return 1
         fi
 
         if [[ "${DISABLE_PROVE}" != "1" ]]; then
             step "Generating proof..."
-            MPI_CMD=""
-            # If ZISK_GHA is set, use mpirun command for distributed proving to prove it faster and reduce GHA time
-            if is_gha; then
-                # Build mpi command
-                info "Using mpirun for distributed proving"
-                MPI_CMD="mpirun --allow-run-as-root --bind-to none -np $DISTRIBUTED_PROCESSES -x OMP_NUM_THREADS=$DISTRIBUTED_THREADS -x RAYON_NUM_THREADS=$DISTRIBUTED_THREADS"
-            fi
-            ensure $MPI_CMD cargo-zisk prove -e "$ELF_PATH" -i "$INPUT_BIN" -o proof $PROVE_FLAGS 2>&1 | tee prove_output.log || return 1
+            ensure cargo-zisk-dev prove -e "$ELF_PATH" -i "$INPUT_BIN" -o proof.bin $PROVE_FLAGS ${asm_flag} ${gpu_flag} 2>&1 | tee prove_output.log || return 1
             if ! grep -F "Vadcop Final proof was verified" prove_output.log; then
                 err "prove program failed"
                 return 1
             fi
 
             step "Verifying proof..."
-            ensure cargo-zisk verify -p ./proof/vadcop_final_proof.bin 2>&1 | tee verify_output.log || return 1
-            if ! grep -F "Stark proof was verified" verify_output.log; then
+            ensure cargo-zisk verify -p ./proof.bin 2>&1 | tee verify_output.log || return 1
+            if ! grep -F "STARK proof was verified" verify_output.log; then
                 err "verify proof failed"
                 return 1
             fi

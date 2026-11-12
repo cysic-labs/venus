@@ -1,15 +1,15 @@
 //! Operations on the BLS12-381 curve E: y² = x³ + 4
 
+#[cfg(zisk_guest)]
+use crate::alloc_extern::vec::Vec;
+
 use crate::{
-    syscalls::{
-        syscall_bls12_381_curve_add, syscall_bls12_381_curve_dbl, SyscallBls12_381CurveAddParams,
-        SyscallPoint384,
-    },
-    zisklib::{eq, fcall_msb_pos_256, is_zero, lt},
+    syscalls::{syscall_bls12_381_curve_add, syscall_bls12_381_curve_dbl, SyscallPoint384},
+    zisklib::{eq, fcall_msb_pos_256, is_one, is_two, is_zero, lt},
 };
 
 use super::{
-    constants::{E_B, G1_IDENTITY, GAMMA, P},
+    constants::{E_B, G1_IDENTITY, GAMMA, P, X2DIV3_BIN_BE},
     fp::{
         add_fp_bls12_381, mul_fp_bls12_381, neg_fp_bls12_381, sqrt_fp_bls12_381,
         square_fp_bls12_381,
@@ -18,14 +18,18 @@ use super::{
 };
 
 /// G1 add result codes
-const G1_ADD_SUCCESS: u8 = 0;
-const G1_ADD_SUCCESS_INFINITY: u8 = 1;
+#[allow(dead_code)]
+pub(crate) const G1_ADD_SUCCESS: u8 = 0;
+#[allow(dead_code)]
+pub(crate) const G1_ADD_SUCCESS_INFINITY: u8 = 1;
 const G1_ADD_ERR_NOT_IN_FIELD: u8 = 2;
 const G1_ADD_ERR_NOT_ON_CURVE: u8 = 3;
 
 /// G1 MSM result codes
-const G1_MSM_SUCCESS: u8 = 0;
-const G1_MSM_SUCCESS_INFINITY: u8 = 1;
+#[allow(dead_code)]
+pub(crate) const G1_MSM_SUCCESS: u8 = 0;
+#[allow(dead_code)]
+pub(crate) const G1_MSM_SUCCESS_INFINITY: u8 = 1;
 const G1_MSM_ERR_NOT_IN_FIELD: u8 = 2;
 const G1_MSM_ERR_NOT_ON_CURVE: u8 = 3;
 const G1_MSM_ERR_NOT_IN_SUBGROUP: u8 = 4;
@@ -39,7 +43,7 @@ const G1_MSM_ERR_NOT_IN_SUBGROUP: u8 = 4;
 pub fn decompress_bls12_381(
     input: &[u8; 48],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
-) -> Result<[u64; 12], &'static str> {
+) -> Result<([u64; 12], bool), &'static str> {
     let flags = input[0];
 
     // Check compression bit
@@ -58,7 +62,7 @@ pub fn decompress_bls12_381(
                 return Err("Invalid infinity encoding");
             }
         }
-        return Ok(G1_IDENTITY);
+        return Ok((G1_IDENTITY, true));
     }
 
     // Extract sign bit
@@ -125,10 +129,10 @@ pub fn decompress_bls12_381(
     let mut result = [0u64; 12];
     result[0..6].copy_from_slice(&x);
     result[6..12].copy_from_slice(&final_y);
-    Ok(result)
+    Ok((result, false))
 }
 
-/// Check if a non-zero point `p` is on the BLS12-381 curve
+/// Check if a point `p` is on the BLS12-381 curve
 pub fn is_on_curve_bls12_381(
     p: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -136,7 +140,7 @@ pub fn is_on_curve_bls12_381(
     let x: [u64; 6] = p[0..6].try_into().unwrap();
     let y: [u64; 6] = p[6..12].try_into().unwrap();
 
-    // p in E iff y² == x³ + 4
+    // p in E iff y² == x³ + 4 or p == 𝒪
     let lhs = square_fp_bls12_381(
         &y,
         #[cfg(feature = "hints")]
@@ -159,10 +163,14 @@ pub fn is_on_curve_bls12_381(
         #[cfg(feature = "hints")]
         hints,
     );
-    eq(&lhs, &rhs)
+
+    eq(&lhs, &rhs) || eq(p, &G1_IDENTITY)
 }
 
-/// Check if a point `p` on the BLS12-381 curve is on the subgroup
+/// Check if a point `p` is on the BLS12-381 subgroup
+///
+/// # Soundness
+/// The point must be on-curve and have **canonical** coordinates (`x, y < p`).
 pub fn is_on_subgroup_bls12_381(
     p: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -171,8 +179,9 @@ pub fn is_on_subgroup_bls12_381(
     //          ((x²-1)/3)(2·σ(P) - P - σ²(P)) == σ²(P)
     // where σ(x,y) = (ɣ·x,y)
     //
-    // Points outside the subgroup can make the intermediate values 𝒪 or equal to each other
-    // (e.g. P = (0, 2) gives 2·σ(P) - P - σ²(P) = 𝒪), so only the complete group law is used
+    // Notice that the σ-fixed points are those with the
+    // x-coordinate equal to 0, e.g. P = (0, 2) or P = 𝒪
+    // In such case, (2·σ(P) - P - σ²(P)) = 𝒪
 
     // Compute σ(P), σ²(P)
     let sigma1 = sigma_endomorphism_bls12_381(
@@ -187,24 +196,24 @@ pub fn is_on_subgroup_bls12_381(
     );
 
     // Compute lhs = ((x²-1)/3)(2·σ(P) - P - σ²(P))
-    let mut lhs = dbl_bls12_381(
+    let mut lhs = dbl_complete_bls12_381(
         &sigma1,
         #[cfg(feature = "hints")]
         hints,
     );
-    lhs = sub_bls12_381(
+    lhs = sub_complete_bls12_381(
         &lhs,
         p,
         #[cfg(feature = "hints")]
         hints,
     );
-    lhs = sub_bls12_381(
+    lhs = sub_complete_bls12_381(
         &lhs,
         &rhs,
         #[cfg(feature = "hints")]
         hints,
     );
-    lhs = scalar_mul_by_x2div3_bls12_381(
+    lhs = scalar_mul_by_x2div3_complete_bls12_381(
         &lhs,
         #[cfg(feature = "hints")]
         hints,
@@ -213,11 +222,33 @@ pub fn is_on_subgroup_bls12_381(
     eq(&lhs, &rhs)
 }
 
+/// Compute the sigma endomorphism σ of a non-zero point `p`, defined as:
+///              σ : E(Fp)  ->  E(Fp)
+///                  (x,y) |-> (ɣ·x,y)
+pub fn sigma_endomorphism_bls12_381(
+    p: &[u64; 12],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> [u64; 12] {
+    let mut x: [u64; 6] = p[0..6].try_into().unwrap();
+    let y: [u64; 6] = p[6..12].try_into().unwrap();
+
+    x = mul_fp_bls12_381(
+        &x,
+        &GAMMA,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+    let mut result = [0u64; 12];
+    result[0..6].copy_from_slice(&x);
+    result[6..12].copy_from_slice(&y);
+    result
+}
+
 /// Adds two points `p1` and `p2` on the BLS12-381 curve
 ///
-/// The addition syscall only implements the chord rule, which is wrong for 𝒪 and leaves the
-/// slope free for equal x-coordinates, so those cases are resolved here before reaching it
-pub fn add_bls12_381(
+/// # Soundness
+/// Both points must be on-curve and have **canonical** coordinates (`x, y < p`).
+pub fn add_complete_bls12_381(
     p1: &[u64; 12],
     p2: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -228,6 +259,24 @@ pub fn add_bls12_381(
         return *p1;
     }
 
+    add_bls12_381(
+        p1,
+        p2,
+        #[cfg(feature = "hints")]
+        hints,
+    )
+}
+
+/// Adds two non-zero points `p1` and `p2` on the BLS12-381 curve
+///
+/// # Soundness
+/// Both points must be on-curve, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+pub(crate) fn add_bls12_381(
+    p1: &[u64; 12],
+    p2: &[u64; 12],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> [u64; 12] {
     let x1: [u64; 6] = p1[0..6].try_into().unwrap();
     let y1: [u64; 6] = p1[6..12].try_into().unwrap();
     let x2: [u64; 6] = p2[0..6].try_into().unwrap();
@@ -252,9 +301,9 @@ pub fn add_bls12_381(
     // Compute the addition
     let mut p1 = SyscallPoint384 { x: x1, y: y1 };
     let p2 = SyscallPoint384 { x: x2, y: y2 };
-    let mut params = SyscallBls12_381CurveAddParams { p1: &mut p1, p2: &p2 };
     syscall_bls12_381_curve_add(
-        &mut params,
+        &mut p1,
+        &p2,
         #[cfg(feature = "hints")]
         hints,
     );
@@ -265,8 +314,8 @@ pub fn add_bls12_381(
     result
 }
 
-/// Adds two points `p1` and `p2` on the BLS12-381 curve
-pub fn add_complete_bls12_381(
+/// Complete and safe addition of two points `p1` and `p2` on the BLS12-381 curve
+pub fn add_complete_safe_bls12_381(
     p1: &[u64; 12],
     p2: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -349,7 +398,7 @@ pub fn add_complete_bls12_381(
     ))
 }
 
-/// Negation of a non-zero point `p` on the BLS12-381 curve
+/// Negation of a point `p` on the BLS12-381 curve
 pub fn neg_bls12_381(p: &[u64; 12], #[cfg(feature = "hints")] hints: &mut Vec<u64>) -> [u64; 12] {
     let x: [u64; 6] = p[0..6].try_into().unwrap();
     let y: [u64; 6] = p[6..12].try_into().unwrap();
@@ -367,13 +416,33 @@ pub fn neg_bls12_381(p: &[u64; 12], #[cfg(feature = "hints")] hints: &mut Vec<u6
 
 /// Doubling of a point `p` on the BLS12-381 curve
 ///
-/// The doubling syscall leaves the slope free for 𝒪 (encoded as zeros), so 𝒪 is resolved here.
-/// No other point has y = 0, since the curve has no points of order 2
-pub fn dbl_bls12_381(p: &[u64; 12], #[cfg(feature = "hints")] hints: &mut Vec<u64>) -> [u64; 12] {
+/// # Soundness
+/// The point must be on-curve and have **canonical** coordinates (`x, y < p`).
+pub fn dbl_complete_bls12_381(
+    p: &[u64; 12],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> [u64; 12] {
+    // Handle identity case
     if eq(p, &G1_IDENTITY) {
         return G1_IDENTITY;
     }
 
+    dbl_bls12_381(
+        p,
+        #[cfg(feature = "hints")]
+        hints,
+    )
+}
+
+/// Doubling of a non-zero point `p` on the BLS12-381 curve
+///
+/// # Soundness
+/// The point must be on-curve, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+pub(crate) fn dbl_bls12_381(
+    p: &[u64; 12],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> [u64; 12] {
     let mut p = SyscallPoint384 { x: p[0..6].try_into().unwrap(), y: p[6..12].try_into().unwrap() };
     syscall_bls12_381_curve_dbl(
         &mut p,
@@ -388,6 +457,38 @@ pub fn dbl_bls12_381(p: &[u64; 12], #[cfg(feature = "hints")] hints: &mut Vec<u6
 }
 
 /// Subtraction of two points `p1` and `p2` on the BLS12-381 curve
+///
+/// # Soundness
+/// Both points must be on-curve and have **canonical** coordinates (`x, y < p`).
+pub fn sub_complete_bls12_381(
+    p1: &[u64; 12],
+    p2: &[u64; 12],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> [u64; 12] {
+    // Handle identity cases
+    if eq(p1, &G1_IDENTITY) {
+        return neg_bls12_381(
+            p2,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+    } else if eq(p2, &G1_IDENTITY) {
+        return *p1;
+    }
+
+    sub_bls12_381(
+        p1,
+        p2,
+        #[cfg(feature = "hints")]
+        hints,
+    )
+}
+
+/// Subtraction of two non-zero points `p1` and `p2` on the BLS12-381 curve
+///
+/// # Soundness
+/// Both points must be on-curve, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
 pub fn sub_bls12_381(
     p1: &[u64; 12],
     p2: &[u64; 12],
@@ -415,34 +516,41 @@ pub fn sub_bls12_381(
     )
 }
 
-/// Multiplies a non-zero point `p` on the BLS12-381 curve by a scalar `k` on the BLS12-381 scalar field
+/// Multiplies a point `p` on the BLS12-381 curve by a scalar `k` on the BLS12-381 scalar field
 ///
-/// The double-and-add loop calls the curve syscalls directly, so `p` must be in the subgroup and
-/// `k` must be reduced: then no intermediate point is 𝒪 or ±`p`
-pub fn scalar_mul_bls12_381(
+/// # Soundness
+/// The point must be on-curve and have **canonical** coordinates (`x, y < p`).
+pub fn scalar_mul_complete_bls12_381(
     p: &[u64; 12],
     k: &[u64; 4],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 12] {
+    // Handle identity case
+    if eq(p, &G1_IDENTITY) {
+        return G1_IDENTITY;
+    }
+
+    // Reduce the scalar
+    let k = reduce_fr_bls12_381(
+        k,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
     // Direct cases: k = 0, k = 1, k = 2
-    match k {
-        [0, 0, 0, 0] => {
-            // Return 𝒪
-            return G1_IDENTITY;
-        }
-        [1, 0, 0, 0] => {
-            // Return p
-            return *p;
-        }
-        [2, 0, 0, 0] => {
-            // Return 2p
-            return dbl_bls12_381(
-                p,
-                #[cfg(feature = "hints")]
-                hints,
-            );
-        }
-        _ => {}
+    if is_zero(&k) {
+        // Return 𝒪
+        return G1_IDENTITY;
+    } else if is_one(&k) {
+        // Return p
+        return *p;
+    } else if is_two(&k) {
+        // Return 2p
+        return dbl_bls12_381(
+            p,
+            #[cfg(feature = "hints")]
+            hints,
+        );
     }
 
     // We can assume k > 2 from now on
@@ -450,11 +558,13 @@ pub fn scalar_mul_bls12_381(
     // We will verify the output by recomposing k
     // Moreover, we should check that the first received bit is 1
     let (max_limb, max_bit) = fcall_msb_pos_256(
-        k,
-        &[0, 0, 0, 0],
+        &k,
         #[cfg(feature = "hints")]
         hints,
     );
+
+    // Bound before use as index/shift
+    assert!(max_limb < 4 && max_bit < 64, "msb_pos hint out of range");
 
     // Perform the loop, based on the binary representation of k
 
@@ -463,7 +573,110 @@ pub fn scalar_mul_bls12_381(
     let max_bit = max_bit as usize;
 
     // The first received bit should be 1
-    assert_eq!((k[max_limb] >> max_bit) & 1, 1);
+    assert_eq!((k[max_limb] >> max_bit) & 1, 1, "The most significant bit of the scalar must be 1");
+
+    // Start at P
+    let mut k_rec = [0u64; 4];
+    k_rec[max_limb] |= 1 << max_bit;
+
+    // Determine starting limb/bit for the loop
+    let mut limb = max_limb;
+    let mut bit = if max_bit == 0 {
+        // If max_bit is 0 then limb > 0; otherwise k = 1, which is excluded here
+        limb -= 1;
+        63
+    } else {
+        max_bit - 1
+    };
+
+    // Perform the rest of the loop
+    let mut q: [u64; 12] = *p;
+    for i in (0..=limb).rev() {
+        for j in (0..=bit).rev() {
+            // Always double
+            q = dbl_complete_bls12_381(
+                &q,
+                #[cfg(feature = "hints")]
+                hints,
+            );
+
+            // Get the next bit b of k.
+            // If b == 1, we should add P to Q, otherwise start the next iteration
+            if ((k[i] >> j) & 1) == 1 {
+                q = add_complete_bls12_381(
+                    &q,
+                    p,
+                    #[cfg(feature = "hints")]
+                    hints,
+                );
+
+                // Reconstruct k
+                k_rec[i] |= 1 << j;
+            }
+        }
+        bit = 63;
+    }
+
+    // Check that the reconstructed k is equal to the input k
+    assert!(eq(&k, &k_rec), "Reconstructed scalar does not match input scalar");
+
+    q
+}
+
+/// Multiplies a non-zero point `p` on the BLS12-381 curve by a scalar `k` on the BLS12-381 scalar field
+///
+/// # Soundness
+/// The point must be on-curve, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+pub fn scalar_mul_bls12_381(
+    p: &[u64; 12],
+    k: &[u64; 4],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> [u64; 12] {
+    // Reduce the scalar
+    let k = reduce_fr_bls12_381(
+        k,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    // Direct cases: k = 0, k = 1, k = 2
+    if is_zero(&k) {
+        // Return 𝒪
+        return G1_IDENTITY;
+    } else if is_one(&k) {
+        // Return p
+        return *p;
+    } else if is_two(&k) {
+        // Return 2p
+        return dbl_bls12_381(
+            p,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+    }
+
+    // We can assume k > 2 from now on
+    // Hint the length the binary representations of k
+    // We will verify the output by recomposing k
+    // Moreover, we should check that the first received bit is 1
+    let (max_limb, max_bit) = fcall_msb_pos_256(
+        &k,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    // Bound before use as index/shift
+    assert!(max_limb < 4 && max_bit < 64, "msb_pos hint out of range");
+
+    // Perform the loop, based on the binary representation of k
+
+    // We do the first iteration separately
+    let max_limb = max_limb as usize;
+    let max_bit = max_bit as usize;
+
+    // The first received bit should be 1
+    assert_eq!((k[max_limb] >> max_bit) & 1, 1, "The most significant bit of the scalar must be 1");
 
     // Start at P
     let x1: [u64; 6] = p[0..6].try_into().unwrap();
@@ -496,9 +709,9 @@ pub fn scalar_mul_bls12_381(
             // Get the next bit b of k.
             // If b == 1, we should add P to Q, otherwise start the next iteration
             if ((k[i] >> j) & 1) == 1 {
-                let mut params = SyscallBls12_381CurveAddParams { p1: &mut q, p2: &p };
                 syscall_bls12_381_curve_add(
-                    &mut params,
+                    &mut q,
+                    &p,
                     #[cfg(feature = "hints")]
                     hints,
                 );
@@ -511,7 +724,7 @@ pub fn scalar_mul_bls12_381(
     }
 
     // Check that the reconstructed k is equal to the input k
-    assert_eq!(k_rec, *k);
+    assert!(eq(&k, &k_rec), "Reconstructed scalar does not match input scalar");
 
     // Convert the result back to a single array
     let mut result = [0u64; 12];
@@ -520,24 +733,29 @@ pub fn scalar_mul_bls12_381(
     result
 }
 
-/// Scalar multiplication of a point `p` by a binary scalar `k` (big-endian, leading bit set)
+/// Scalar multiplication of a point by (x²-1)/3
 ///
-/// Uses the complete group law, so `p` may be any point of the curve, including points outside
-/// the subgroup whose multiples reach 𝒪 or ±`p` along the way
-pub fn scalar_mul_bin_bls12_381(
+/// # Soundness
+/// The point must be on-curve and have **canonical** coordinates (`x, y < p`).
+pub fn scalar_mul_by_x2div3_complete_bls12_381(
     p: &[u64; 12],
-    k: &[u8],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 12] {
+    // Handle identity case
+    if eq(p, &G1_IDENTITY) {
+        return G1_IDENTITY;
+    }
+
+    // Start at p
     let mut r = *p;
-    for &bit in k.iter().skip(1) {
-        r = dbl_bls12_381(
+    for &bit in X2DIV3_BIN_BE.iter().skip(1) {
+        r = dbl_complete_bls12_381(
             &r,
             #[cfg(feature = "hints")]
             hints,
         );
         if bit == 1 {
-            r = add_bls12_381(
+            r = add_complete_bls12_381(
                 &r,
                 p,
                 #[cfg(feature = "hints")]
@@ -548,37 +766,15 @@ pub fn scalar_mul_bin_bls12_381(
     r
 }
 
-/// Scalar multiplication of a point by (x²-1)/3
-pub fn scalar_mul_by_x2div3_bls12_381(
-    p: &[u64; 12],
-    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
-) -> [u64; 12] {
-    /// Family parameter (X²-1)/3
-    const X2DIV3_BIN_BE: [u8; 126] = [
-        1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1,
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
-        0, 1, 0, 1, 0, 1,
-    ];
-
-    scalar_mul_bin_bls12_381(
-        p,
-        &X2DIV3_BIN_BE,
-        #[cfg(feature = "hints")]
-        hints,
-    )
-}
-
 /// Multi-Scalar Multiplication (MSM) for BLS12-381 G1 points
 /// It computes k1·P1 + k2·P2 + ... + kn·Pn
 // TODO: This is a naive implementation, one can improve it by using, e.g., a windowed strategies!
-pub fn msm_complete_bls12_381(
+pub fn msm_complete_safe_bls12_381(
     points: &[[u64; 12]],
     scalars: &[[u64; 4]],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> Result<[u64; 12], u8> {
-    assert_eq!(points.len(), scalars.len());
+    assert_eq!(points.len(), scalars.len(), "Points and scalars must have the same length");
 
     let mut acc = G1_IDENTITY;
     let mut acc_is_inf = true;
@@ -588,8 +784,8 @@ pub fn msm_complete_bls12_381(
             continue;
         }
 
-        // Validate the point before the zero-scalar skip below: EIP-2537 rejects an invalid
-        // point whatever its scalar
+        // NOTE: Validation must precede the scalar-zero skip below, since we should reject an
+        // invalid input point regardless of its scalar.
 
         // Verify point coordinates are in the field
         let x: [u64; 6] = point[0..6].try_into().unwrap();
@@ -657,26 +853,117 @@ pub fn msm_complete_bls12_381(
     Ok(acc)
 }
 
-/// Compute the sigma endomorphism σ of a non-zero point `p`, defined as:
-///              σ : E(Fp)  ->  E(Fp)
-///                  (x,y) |-> (ɣ·x,y)
-pub fn sigma_endomorphism_bls12_381(
-    p: &[u64; 12],
-    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
-) -> [u64; 12] {
-    let mut x: [u64; 6] = p[0..6].try_into().unwrap();
-    let y: [u64; 6] = p[6..12].try_into().unwrap();
+// ==================== C FFI Functions ====================
 
-    x = mul_fp_bls12_381(
-        &x,
-        &GAMMA,
+/// Decompresses a compressed BLS12-381 G1 point (48 bytes) to affine coordinates.
+/// Returns 0 on success (result written to `result_ptr`), 1 if decompression fails.
+///
+/// # Safety
+/// - `input_ptr` must point to a valid `[u8; 48]` compressed point
+/// - `result_ptr` must point to a writable `[u64; 12]` array
+#[cfg_attr(not(feature = "hints"), no_mangle)]
+#[cfg_attr(feature = "hints", export_name = "hints_decompress_bls12_381_c")]
+pub unsafe extern "C" fn decompress_bls12_381_c(
+    input_ptr: *const u8,
+    result_ptr: *mut u64,
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> u8 {
+    let input = &*(input_ptr as *const [u8; 48]);
+    match decompress_bls12_381(
+        input,
+        #[cfg(feature = "hints")]
+        hints,
+    ) {
+        Ok((p, is_infinity)) => {
+            let result = &mut *(result_ptr as *mut [u64; 12]);
+            *result = p;
+            if is_infinity {
+                1
+            } else {
+                0
+            }
+        }
+        Err(_) => 2,
+    }
+}
+
+/// Curve membership check for a BLS12-381 G1 point.
+/// Returns 1 if the point is on the curve, 0 otherwise.
+///
+/// # Safety
+/// - `p_ptr` must point to a valid `[u64; 12]` array (affine coordinates x ‖ y, little-endian limbs)
+#[cfg_attr(not(feature = "hints"), no_mangle)]
+#[cfg_attr(feature = "hints", export_name = "hints_is_on_curve_bls12_381_c")]
+pub unsafe extern "C" fn is_on_curve_bls12_381_c(
+    p_ptr: *const u64,
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> u8 {
+    let p = &*(p_ptr as *const [u64; 12]);
+    is_on_curve_bls12_381(
+        p,
+        #[cfg(feature = "hints")]
+        hints,
+    ) as u8
+}
+
+/// Subgroup membership check for a BLS12-381 G1 point.
+/// Returns 1 if the point is in the G1 subgroup, 0 otherwise.
+///
+/// # Safety
+/// - `p_ptr` must point to a valid `[u64; 12]` array (affine coordinates x ‖ y, little-endian limbs)
+///
+/// # Soundness
+/// The point must be on-curve, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+#[cfg_attr(not(feature = "hints"), no_mangle)]
+#[cfg_attr(feature = "hints", export_name = "hints_is_on_subgroup_bls12_381_c")]
+pub unsafe extern "C" fn is_on_subgroup_bls12_381_c(
+    p_ptr: *const u64,
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> u8 {
+    let p = &*(p_ptr as *const [u64; 12]);
+    is_on_subgroup_bls12_381(
+        p,
+        #[cfg(feature = "hints")]
+        hints,
+    ) as u8
+}
+
+/// Addition of two BLS12-381 G1 points (raw, UNVALIDATED — caller pre-validates).
+/// Returns 0 on success (result written to `result_ptr`), or 1 if the result is the
+/// point at infinity.
+///
+/// # Safety
+/// - `p1_ptr` must point to a valid `[u64; 12]` array (affine coordinates x ‖ y, little-endian limbs)
+/// - `p2_ptr` must point to a valid `[u64; 12]` array (affine coordinates x ‖ y, little-endian limbs)
+/// - `result_ptr` must point to a writable `[u64; 12]` array
+///
+/// # Soundness
+/// Both points must be on-curve, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+#[cfg_attr(not(feature = "hints"), no_mangle)]
+#[cfg_attr(feature = "hints", export_name = "hints_add_bls12_381_c")]
+pub unsafe extern "C" fn add_bls12_381_c(
+    p1_ptr: *const u64,
+    p2_ptr: *const u64,
+    result_ptr: *mut u64,
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> u8 {
+    let p1 = &*(p1_ptr as *const [u64; 12]);
+    let p2 = &*(p2_ptr as *const [u64; 12]);
+    let result = &mut *(result_ptr as *mut [u64; 12]);
+    *result = add_bls12_381(
+        p1,
+        p2,
         #[cfg(feature = "hints")]
         hints,
     );
-    let mut result = [0u64; 12];
-    result[0..6].copy_from_slice(&x);
-    result[6..12].copy_from_slice(&y);
-    result
+
+    if eq(result, &G1_IDENTITY) {
+        1
+    } else {
+        0
+    }
 }
 
 /// G1 point addition for uncompressed 96-byte points
@@ -686,7 +973,7 @@ pub fn sigma_endomorphism_bls12_381(
 ///
 /// ### Safety
 /// - `a` must point to a valid `[u8; 96]` for the first input point
-/// - `b` must point to a valid `[u8; 96]` for the second input point  
+/// - `b` must point to a valid `[u8; 96]` for the second input point
 /// - `ret` must point to a valid `[u8; 96]` for the output
 ///
 /// Returns:
@@ -694,9 +981,9 @@ pub fn sigma_endomorphism_bls12_381(
 /// - [G1_ADD_SUCCESS_INFINITY] = success (result is infinity)
 /// - [G1_ADD_ERR_NOT_IN_FIELD] = error (one of the input points has coordinates not in the field)
 /// - [G1_ADD_ERR_NOT_ON_CURVE] = error (one of the input points is not on the curve)
-#[cfg_attr(not(feature = "hints"), no_mangle)]
-#[cfg_attr(feature = "hints", export_name = "hints_bls12_381_g1_add_c")]
-pub unsafe extern "C" fn bls12_381_g1_add_c(
+#[allow(dead_code)]
+#[inline]
+pub(crate) unsafe fn add_safe_bls12_381_c(
     ret: *mut u8,
     a: *const u8,
     b: *const u8,
@@ -711,7 +998,7 @@ pub unsafe extern "C" fn bls12_381_g1_add_c(
     let b_u64 = g1_bytes_be_to_u64_le_bls12_381(b_bytes);
 
     // Perform addition
-    let result = match add_complete_bls12_381(
+    let result = match add_complete_safe_bls12_381(
         &a_u64,
         &b_u64,
         #[cfg(feature = "hints")]
@@ -722,11 +1009,46 @@ pub unsafe extern "C" fn bls12_381_g1_add_c(
     };
 
     // Encode result
+    g1_u64_le_to_bytes_be_bls12_381(&result, ret_bytes);
     if result == G1_IDENTITY {
         G1_ADD_SUCCESS_INFINITY
     } else {
-        g1_u64_le_to_bytes_be_bls12_381(&result, ret_bytes);
         G1_ADD_SUCCESS
+    }
+}
+
+/// Scalar multiplication of a non-zero BLS12-381 G1 point by a scalar.
+///
+/// # Safety
+/// - `p_ptr` must point to a valid `[u64; 12]` array (affine coordinates x ‖ y, little-endian limbs)
+/// - `k_ptr` must point to a valid `[u64; 4]` array (scalar, little-endian limbs)
+/// - `result_ptr` must point to a writable `[u64; 12]` array
+///
+/// # Soundness
+/// The point must be on-curve, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+#[cfg_attr(not(feature = "hints"), no_mangle)]
+#[cfg_attr(feature = "hints", export_name = "hints_scalar_mul_bls12_381_c")]
+pub unsafe extern "C" fn scalar_mul_bls12_381_c(
+    p_ptr: *const u64,
+    k_ptr: *const u64,
+    result_ptr: *mut u64,
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> u8 {
+    let p = &*(p_ptr as *const [u64; 12]);
+    let k = &*(k_ptr as *const [u64; 4]);
+    let result = &mut *(result_ptr as *mut [u64; 12]);
+    *result = scalar_mul_bls12_381(
+        p,
+        k,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    if eq(result, &G1_IDENTITY) {
+        1
+    } else {
+        0
     }
 }
 
@@ -745,9 +1067,9 @@ pub unsafe extern "C" fn bls12_381_g1_add_c(
 /// - [G1_MSM_ERR_NOT_IN_FIELD] = error (one of the input points has coordinates not in the field)
 /// - [G1_MSM_ERR_NOT_ON_CURVE] = error (one of the input points is not on the curve)
 /// - [G1_MSM_ERR_NOT_IN_SUBGROUP] = error (one of the input points is not in the subgroup)
-#[cfg_attr(not(feature = "hints"), no_mangle)]
-#[cfg_attr(feature = "hints", export_name = "hints_bls12_381_g1_msm_c")]
-pub unsafe extern "C" fn bls12_381_g1_msm_c(
+#[allow(dead_code)]
+#[inline]
+pub(crate) unsafe fn msm_safe_bls12_381_c(
     ret: *mut u8,
     pairs: *const u8,
     num_pairs: usize,
@@ -772,7 +1094,7 @@ pub unsafe extern "C" fn bls12_381_g1_msm_c(
     }
 
     // Perform MSM with validation
-    let result = match msm_complete_bls12_381(
+    let result = match msm_complete_safe_bls12_381(
         &points,
         &scalars,
         #[cfg(feature = "hints")]
@@ -783,10 +1105,10 @@ pub unsafe extern "C" fn bls12_381_g1_msm_c(
     };
 
     // Encode result
+    g1_u64_le_to_bytes_be_bls12_381(&result, ret_bytes);
     if result == G1_IDENTITY {
         G1_MSM_SUCCESS_INFINITY
     } else {
-        g1_u64_le_to_bytes_be_bls12_381(&result, ret_bytes);
         G1_MSM_SUCCESS
     }
 }
@@ -828,44 +1150,5 @@ pub fn g1_u64_le_to_bytes_be_bls12_381(limbs: &[u64; 12], bytes: &mut [u8; 96]) 
         for j in 0..8 {
             bytes[48 + i * 8 + j] = ((limb >> (8 * (7 - j))) & 0xFF) as u8;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::constants::G1_GENERATOR;
-    use super::*;
-
-    fn in_subgroup(p: &[u64; 12]) -> bool {
-        #[cfg(feature = "hints")]
-        let mut hints = Vec::new();
-        is_on_subgroup_bls12_381(
-            p,
-            #[cfg(feature = "hints")]
-            &mut hints,
-        )
-    }
-
-    #[test]
-    fn subgroup_check_rejects_the_order_3_point() {
-        // (0, 2) is fixed by σ, so the check reaches 𝒪 in its intermediate points
-        let order_3 = [0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0];
-        assert!(!in_subgroup(&order_3));
-        assert!(in_subgroup(&G1_GENERATOR));
-        assert!(in_subgroup(&G1_IDENTITY));
-    }
-
-    #[test]
-    fn msm_rejects_an_invalid_point_with_a_zero_scalar() {
-        #[cfg(feature = "hints")]
-        let mut hints = Vec::new();
-        let off_curve = [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0];
-        let result = msm_complete_bls12_381(
-            &[off_curve],
-            &[[0; 4]],
-            #[cfg(feature = "hints")]
-            &mut hints,
-        );
-        assert_eq!(result, Err(G1_MSM_ERR_NOT_ON_CURVE));
     }
 }

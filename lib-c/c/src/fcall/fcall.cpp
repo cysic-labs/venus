@@ -1,11 +1,13 @@
 #include "fcall.hpp"
+#include "../keccakf_cache/keccakf_cache.hpp"
 #include "../common/utils.hpp"
+#include "../common/globals.hpp"
 #include "../bn254/bn254_fe.hpp"
 #include "../bls12_381/bls12_381_fe.hpp"
 #include "../bls12_381/bls12_381.hpp"
-#include "../ec/ec.hpp"
-#include "../secp256r1/secp256r1.hpp"
+#include "../ed25519/ed25519.hpp"
 #include <stdint.h>
+#include <string.h>
 #include <assert.h>
 
 int Fcall (
@@ -16,42 +18,47 @@ int Fcall (
     int iresult;
     switch (ctx->function_id)
     {
-        case FCALL_ID_INVERSE_FP_EC:
+        case FCALL_SECP256K1_FP_INV_ID:
         {
             iresult = InverseFpEcCtx(ctx);
             break;
         }
-        case FCALL_ID_INVERSE_FN_EC:
+        case FCALL_SECP256K1_FN_INV_ID:
         {
             iresult = InverseFnEcCtx(ctx);
             break;
         }
-        case FCALL_ID_SQRT_FP_EC_PARITY:
+        case FCALL_SECP256K1_FP_SQRT_ID:
         {
             iresult = SqrtFpEcParityCtx(ctx);
             break;
         }
-        case FCALL_ID_MSB_POS_256:
+        case FCALL_SECP256K1_GLV_DECOMPOSE_ID:
         {
-            iresult = MsbPos256Ctx(ctx);
+            iresult = Secp256k1GlvDecomposeCtx(ctx);
             break;
         }
-        case FCALL_ID_BN254_FP_INV:
+        case FCALL_SECP256R1_FN_INV_ID:
+        {
+            iresult = InverseFnEcR1Ctx(ctx);
+            break;
+        }
+        case FCALL_BN254_FP_INV_ID:
         {
             iresult = BN254FpInvCtx(ctx);
             break;
         }
-        case FCALL_ID_BN254_FP2_INV:
+        case FCALL_BN254_FP2_INV_ID:
         {
             iresult = BN254ComplexInvCtx(ctx);
             break;
         }
-        case FCALL_ID_BN254_TWIST_ADD_LINE_COEFFS:
+        case FCALL_BN254_TWIST_ADD_LINE_COEFFS_ID:
         {
             iresult = BN254TwistAddLineCoeffsCtx(ctx);
             break;
         }
-        case FCALL_ID_BN254_TWIST_DBL_LINE_COEFFS:
+        case FCALL_BN254_TWIST_DBL_LINE_COEFFS_ID:
         {
             iresult = BN254TwistDblLineCoeffsCtx(ctx);
             break;
@@ -71,6 +78,11 @@ int Fcall (
             iresult = BLS12_381ComplexInvCtx(ctx);
             break;
         }
+        case FCALL_BLS12_381_FP2_SQRT_ID:
+        {
+            iresult = BLS12_381Fp2SqrtCtx(ctx);
+            break;
+        }
         case FCALL_BLS12_381_TWIST_ADD_LINE_COEFFS_ID:
         {
             iresult = BLS12_381TwistAddLineCoeffsCtx(ctx);
@@ -81,39 +93,59 @@ int Fcall (
             iresult = BLS12_381TwistDblLineCoeffsCtx(ctx);
             break;
         }
-        case FCALL_MSB_POS_384_ID:
-        {
-            iresult = MsbPos384Ctx(ctx);
-            break;
-        }
-        case FCALL_BIGINT256_DIV_ID:
-        {
-            iresult = BigInt256DivCtx(ctx);
-            break;
-        }
-        case FCALL_BIG_INT_DIV_ID:
-        {
-            iresult = BigIntDivCtx(ctx);
-            break;
-        }
         case FCALL_BIN_DECOMP_ID:
         {
             iresult = BinDecompCtx(ctx);
             break;
         }
-        case FCALL_BLS12_381_FP2_SQRT_ID:
+        case FCALL_MSB_POS_256_ID:
         {
-            iresult = BLS12_381Fp2SqrtCtx(ctx);
+            iresult = MsbPos256Ctx(ctx);
             break;
         }
-        case FCALL_SECP256K1_ECDSA_VERIFY_ID:
+        case FCALL_MSB_POS_384_ID:
         {
-            iresult = Secp256k1EcdsaVerifyCtx(ctx);
+            iresult = MsbPos384Ctx(ctx);
             break;
         }
-        case FCALL_SECP256R1_ECDSA_VERIFY_ID:
+        case FCALL_UINT256_DIV_ID:
         {
-            iresult = Secp256r1EcdsaVerifyCtx(ctx);
+            iresult = Uint256DivCtx(ctx);
+            break;
+        }
+        case FCALL_UINT256_INV_ID:
+        {
+            iresult = Uint256InvCtx(ctx);
+            break;
+        }
+        case FCALL_UINT256_INV_MOD_ID:
+        {
+            iresult = Uint256InvModCtx(ctx);
+            break;
+        }
+        case FCALL_BIGINT_DIV_ID:
+        {
+            iresult = BigIntDivCtx(ctx);
+            break;
+        }
+        case FCALL_SET_KECCAKF_CACHE_INDEX_ID:
+        {
+            iresult = KeccakfCacheSetIndexCtx(ctx);
+            break;
+        }
+        case FCALL_GET_KECCAKF_CACHE_INDEX_ID:
+        {
+            iresult = KeccakfCacheGetIndexCtx(ctx);
+            break;
+        }
+        case FCALL_ED25519_FP_SQRT_RATIO_ID:
+        {
+            iresult = Ed25519FpSqrtRatioCtx(ctx);
+            break;
+        }
+        case FCALL_RANDOM_SEED_ID:
+        {
+            iresult = RandomSeedCtx(ctx);
             break;
         }
         default:
@@ -174,8 +206,8 @@ int InverseFpEcCtx (
 /****************/
 
 int InverseFnEc (
-    const uint64_t * _a,  // 8 x 64 bits
-    uint64_t * _r  // 8 x 64 bits
+    const uint64_t * _a,  // 4 x 64 bits
+    uint64_t * _r  // 4 x 64 bits
 )
 {
     RawFnec::Element a;
@@ -215,25 +247,55 @@ int InverseFnEcCtx (
 /* FEC SQRT */
 /************/
 
-mpz_class n("0x3fffffffffffffffffffffffffffffffffffffffffffffffffffffffbfffff0c");
-mpz_class p("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
-
-// We use that p = 3 mod 4 => r = a^((p+1)/4) is a square root of a
-// https://www.rieselprime.de/ziki/Modular_square_root
-// n = p+1/4
-// return true if sqrt exists, false otherwise
-
-inline bool sqrtF3mod4(mpz_class &r, const mpz_class &a)
+// r = x^((p+1)/4), for the secp256k1 base field (Montgomery form in and out). Since p = 3 mod 4,
+// r is a square root of x if x has one. The exponent is computed with the addition chain of
+// libsecp256k1 (secp256k1_fe_sqrt(), MIT license): the binary representation of (p+1)/4 has 3
+// blocks of 1s, with lengths 2, 22 and 223, and 2^k - 1 is computed for each block with
+// 1, [2], 3, 6, 9, 11, [22], 44, 88, 176, 220, [223], for 253 squarings and 13 multiplications
+static void SqrtFpEcPow (RawFec::Element &r, const RawFec::Element &x)
 {
-    mpz_class auxa = a;
-    mpz_powm(r.get_mpz_t(), a.get_mpz_t(), n.get_mpz_t(), p.get_mpz_t());
-    if ((r * r) % p != auxa)
-    {
-        auxa = (auxa * 3) % p;
-        mpz_powm(r.get_mpz_t(), auxa.get_mpz_t(), n.get_mpz_t(), p.get_mpz_t());
-        return false;
-    }
-    return true;
+    RawFec::Element x2, x3, x6, x9, x11, x22, x44, x88, x176, x220, x223, t;
+
+    fec.square(x2, x);
+    fec.mul(x2, x2, x);
+    fec.square(x3, x2);
+    fec.mul(x3, x3, x);
+    fec.copy(x6, x3);
+    for (int j = 0; j < 3; j++) fec.square(x6, x6);
+    fec.mul(x6, x6, x3);
+    fec.copy(x9, x6);
+    for (int j = 0; j < 3; j++) fec.square(x9, x9);
+    fec.mul(x9, x9, x3);
+    fec.copy(x11, x9);
+    for (int j = 0; j < 2; j++) fec.square(x11, x11);
+    fec.mul(x11, x11, x2);
+    fec.copy(x22, x11);
+    for (int j = 0; j < 11; j++) fec.square(x22, x22);
+    fec.mul(x22, x22, x11);
+    fec.copy(x44, x22);
+    for (int j = 0; j < 22; j++) fec.square(x44, x44);
+    fec.mul(x44, x44, x22);
+    fec.copy(x88, x44);
+    for (int j = 0; j < 44; j++) fec.square(x88, x88);
+    fec.mul(x88, x88, x44);
+    fec.copy(x176, x88);
+    for (int j = 0; j < 88; j++) fec.square(x176, x176);
+    fec.mul(x176, x176, x88);
+    fec.copy(x220, x176);
+    for (int j = 0; j < 44; j++) fec.square(x220, x220);
+    fec.mul(x220, x220, x44);
+    fec.copy(x223, x220);
+    for (int j = 0; j < 3; j++) fec.square(x223, x223);
+    fec.mul(x223, x223, x3);
+
+    // The final result is assembled using a sliding window over the blocks
+    fec.copy(t, x223);
+    for (int j = 0; j < 23; j++) fec.square(t, t);
+    fec.mul(t, t, x22);
+    for (int j = 0; j < 6; j++) fec.square(t, t);
+    fec.mul(t, t, x2);
+    fec.square(t, t);
+    fec.square(r, t);
 }
 
 int SqrtFpEcParity (
@@ -242,35 +304,35 @@ int SqrtFpEcParity (
     uint64_t * _r  // 1 x 64 bits (sqrt exists) + 4 x 64 bits
 )
 {
-    mpz_class parity(static_cast<unsigned long>(_parity));
-    mpz_class a;
-    array2scalar(_a, a);
-
-    // Call the sqrt function
-    mpz_class r;
-    bool sqrt_exists = sqrtF3mod4(r, a);
+    // r = a^((p+1)/4) is a square root of a if a has one, since p = 3 mod 4
+    // (https://www.rieselprime.de/ziki/Modular_square_root). If r^2 != a, a has none, and the
+    // square root of 3*a, which then exists since 3 is not a square, is returned instead. r^2 is
+    // compared with a as given, so an a >= p is always reported as having no square root
+    RawFec::Element a, am, r, rm, t;
+    array2plain(_a, a);                 // a mod p
+    fec.toMontgomery(am, a);
+    SqrtFpEcPow(rm, am);
+    fec.square(t, rm);
+    fec.fromMontgomery(t, t);           // r^2 mod p
+    bool sqrt_exists = (memcmp(t.v, _a, sizeof(t.v)) == 0);
+    if (!sqrt_exists)
+    {
+        fec.add(t, a, a);
+        fec.add(t, t, a);               // 3*a mod p
+        fec.toMontgomery(am, t);
+        SqrtFpEcPow(rm, am);
+    }
+    fec.fromMontgomery(r, rm);
 
     _r[0] = sqrt_exists;
 
-    // Post-process the result
-    if (r == ScalarMask256)
+    // Return the root with the requested parity, negating it otherwise
+    if ((r.v[0] & 1) != _parity)
     {
-        // This sqrt does not have a solution
-    }
-    else if ((r & 1) == parity)
-    {
-        // Return r as it is, since it has the requested parity
-    }
-    else
-    {
-        // Negate the result
-        RawFec::Element fe;
-        fec.fromMpz(fe, r.get_mpz_t());
-        fe = fec.neg(fe);
-        fec.toMpz(r.get_mpz_t(), fe);
+        fec.neg(r, r);
     }
 
-    scalar2array(r, &_r[1]);
+    plain2array(r, &_r[1]);
 
     return 0;
 }
@@ -309,8 +371,8 @@ uint64_t msb_pos(uint64_t x)
 }
 
 int MsbPos256 (
-    const uint64_t * a, // 8 x 64 bits
-          uint64_t * r  // 2 x 64 bits
+    const uint64_t * a,
+          uint64_t * r
 )
 {
     const uint64_t n = a[0]; // number of inputs
@@ -519,14 +581,15 @@ int BN254TwistDblLineCoeffs (
 
 
     // Compute 𝜆 = 3x²/2y
-    RawFq::Element lambda_real, lambda_imaginary, aux_real, aux_imaginary, three;
+    RawFq::Element lambda_real, lambda_imaginary, aux_real, aux_imaginary, twice_lambda;
     BN254ComplexAddFe(y_real, y_imaginary, y_real, y_imaginary, lambda_real, lambda_imaginary); // 𝜆 = 2y
     BN254ComplexInvFe(lambda_real, lambda_imaginary, lambda_real, lambda_imaginary); // 𝜆 = 1/2y
     BN254ComplexMulFe(x_real, x_imaginary, x_real, x_imaginary, aux_real, aux_imaginary); // aux = x²
     BN254ComplexMulFe(lambda_real, lambda_imaginary, aux_real, aux_imaginary, lambda_real, lambda_imaginary); // 𝜆 = x²/2y
-    bn254.fromUI(three, 3); // 𝜆 = 3x²/2y
-    bn254.mul(lambda_real, lambda_real, three);
-    bn254.mul(lambda_imaginary, lambda_imaginary, three);
+    bn254.add(twice_lambda, lambda_real, lambda_real); // 𝜆 = 3x²/2y, as 2𝜆 + 𝜆
+    bn254.add(lambda_real, twice_lambda, lambda_real);
+    bn254.add(twice_lambda, lambda_imaginary, lambda_imaginary);
+    bn254.add(lambda_imaginary, twice_lambda, lambda_imaginary);
 
     // Compute 𝜇 = y - 𝜆x
     RawFq::Element mu_real, mu_imaginary;
@@ -774,14 +837,15 @@ int BLS12_381TwistDblLineCoeffs (
 
 
     // Compute 𝜆 = 3x²/2y
-    RawBLS12_381_384::Element lambda_real, lambda_imaginary, aux_real, aux_imaginary, three;
+    RawBLS12_381_384::Element lambda_real, lambda_imaginary, aux_real, aux_imaginary, twice_lambda;
     BLS12_381ComplexAddFe(y_real, y_imaginary, y_real, y_imaginary, lambda_real, lambda_imaginary); // 𝜆 = 2y
     BLS12_381ComplexInvFe(lambda_real, lambda_imaginary, lambda_real, lambda_imaginary); // 𝜆 = 1/2y
     BLS12_381ComplexMulFe(x_real, x_imaginary, x_real, x_imaginary, aux_real, aux_imaginary); // aux = x²
     BLS12_381ComplexMulFe(lambda_real, lambda_imaginary, aux_real, aux_imaginary, lambda_real, lambda_imaginary); // 𝜆 = x²/2y
-    bls12_381.fromUI(three, 3); // 𝜆 = 3x²/2y
-    bls12_381.mul(lambda_real, lambda_real, three);
-    bls12_381.mul(lambda_imaginary, lambda_imaginary, three);
+    bls12_381.add(twice_lambda, lambda_real, lambda_real); // 𝜆 = 3x²/2y, as 2𝜆 + 𝜆
+    bls12_381.add(lambda_real, twice_lambda, lambda_real);
+    bls12_381.add(twice_lambda, lambda_imaginary, lambda_imaginary);
+    bls12_381.add(lambda_imaginary, twice_lambda, lambda_imaginary);
 
     // Compute 𝜇 = y - 𝜆x
     RawBLS12_381_384::Element mu_real, mu_imaginary;
@@ -819,12 +883,12 @@ int BLS12_381TwistDblLineCoeffsCtx (
 /***************/
 
 int MsbPos384 (
-    const uint64_t * a, // 12 x 64 bits
+    const uint64_t * a, // 16 x 64 bits: x (6 + 2 padding) || y (6 + 2 padding)
           uint64_t * r  // 2 x 64 bits
 )
 {
     const uint64_t * x = a;
-    const uint64_t * y = &a[6];
+    const uint64_t * y = &a[8];
 
     for (int i=5; i>=0; i--)
     {
@@ -858,10 +922,10 @@ int MsbPos384Ctx (
 }
 
 /*************************************/
-/* BIT INT 256 DIVISION AND REMINDER */
+/*  UINT 256 DIVISION AND REMAINDER  */
 /*************************************/
 
-int BigInt256Div (
+int Uint256Div (
     const uint64_t * _a, // 8 x 64 bits
           uint64_t * _r  // 8 x 64 bits
 )
@@ -879,15 +943,153 @@ int BigInt256Div (
     return 0;
 }
 
-int BigInt256DivCtx (
+int Uint256DivCtx (
     struct FcallContext * ctx  // fcall context
 )
 {
-    int iresult = BigInt256Div(ctx->params, ctx->result);
+    int iresult = Uint256Div(ctx->params, ctx->result);
     if (iresult == 0)
     {
         iresult = 8;
         ctx->result_size = 8;
+    }
+    else
+    {
+        ctx->result_size = 0;
+    }
+    return iresult;
+}
+
+/**********************/
+/* UINT 256 INVERSION */
+/**********************/
+
+// Compute a^(-1) mod 2^256.
+// Output: _r[0] = flag (1 if inverse exists, i.e. a is odd; 0 otherwise)
+//         _r[1..4] = 4 x u64 little-endian inverse (zeroed when flag == 0)
+int Uint256Inv (
+    const uint64_t * _a, // 4 x 64 bits
+          uint64_t * _r  // 1 x 64 bits (flag) + 4 x 64 bits (inverse)
+)
+{
+    mpz_class a;
+    array2scalar(_a, a);
+
+    // 2^256 = ScalarMask256 + 1
+    mpz_class mod256 = ScalarMask256 + 1;
+
+    mpz_class inv;
+    int exists = mpz_invert(inv.get_mpz_t(), a.get_mpz_t(), mod256.get_mpz_t());
+
+    _r[0] = exists ? 1 : 0;
+    if (exists)
+    {
+        scalar2array(inv, &_r[1]);
+    }
+    else
+    {
+        _r[1] = 0;
+        _r[2] = 0;
+        _r[3] = 0;
+        _r[4] = 0;
+    }
+
+    return 0;
+}
+
+int Uint256InvCtx (
+    struct FcallContext * ctx  // fcall context
+)
+{
+    int iresult = Uint256Inv(ctx->params, ctx->result);
+    if (iresult == 0)
+    {
+        iresult = 5;
+        ctx->result_size = 5;
+    }
+    else
+    {
+        ctx->result_size = 0;
+    }
+    return iresult;
+}
+
+/******************************/
+/* UINT 256 MODULAR INVERSION */
+/******************************/
+
+// Compute a^(-1) mod modulus.
+// Output (13 x u64): _r[0]     = flag (1 if inverse exists; 0 otherwise)
+//                    _r[1..4]  = w: the inverse when flag == 1, else gcd(a, modulus)
+//                    _r[5..8]  = qa: a / gcd       (zeroed when flag == 1)
+//                    _r[9..12] = qm: modulus / gcd (zeroed when flag == 1)
+// On the no-inverse path (flag == 0) the gcd together with the cofactors qa, qm form a
+// witness that gcd(a, modulus) > 1, mirroring the Rust host implementation.
+int Uint256InvMod (
+    const uint64_t * _a, // 4 x 64 bits (a) + 4 x 64 bits (modulus)
+          uint64_t * _r  // 1 x 64 bits (flag) + 12 x 64 bits (w, qa, qm)
+)
+{
+    mpz_class a, modulus;
+    array2scalar(_a, a);
+    array2scalar(_a + 4, modulus);
+
+    mpz_class inv;
+    int exists = mpz_invert(inv.get_mpz_t(), a.get_mpz_t(), modulus.get_mpz_t());
+
+    _r[0] = exists ? 1 : 0;
+    if (exists)
+    {
+        // The inverse exists: return it.
+        scalar2array(inv, &_r[1]);
+        for (int i = 5; i < 13; i++) _r[i] = 0;
+    }
+    else
+    {
+        // No inverse exists, i.e. gcd(a, modulus) != 1. Return the gcd together with the
+        // cofactors qa = a / gcd and qm = modulus / gcd as a witness that gcd > 1.
+        mpz_class gcd, qa, qm;
+        mpz_gcd(gcd.get_mpz_t(), a.get_mpz_t(), modulus.get_mpz_t());
+        qa = a / gcd;
+        qm = modulus / gcd;
+        scalar2array(gcd, &_r[1]);
+        scalar2array(qa, &_r[5]);
+        scalar2array(qm, &_r[9]);
+    }
+
+    return 0;
+}
+
+int Uint256InvModCtx (
+    struct FcallContext * ctx  // fcall context
+)
+{
+    int iresult = Uint256InvMod(ctx->params, ctx->result);
+    if (iresult == 0)
+    {
+        iresult = 13;
+        ctx->result_size = 13;
+    }
+    else
+    {
+        ctx->result_size = 0;
+    }
+    return iresult;
+}
+
+/****************************/
+/* ED25519 SQRT RATIO (u/v) */
+/****************************/
+
+int Ed25519FpSqrtRatioCtx (
+    struct FcallContext * ctx  // fcall context
+)
+{
+    int iresult = Ed25519FpSqrtRatio(&ctx->params[0], &ctx->params[4], ctx->result);
+    if (iresult == 0)
+    {
+        iresult = 5;
+        ctx->result_size = 5;
     }
     else
     {
@@ -1047,20 +1249,211 @@ int BLS12_381Fp2SqrtCtx (
     return 0;
 }
 
-int Secp256k1EcdsaVerifyCtx(
-    struct FcallContext * ctx  // fcall context
+/**********************************/
+/* SECP256K1 GLV SCALAR DECOMPOSE  */
+/**********************************/
+
+// Short-basis vectors of the secp256k1 GLV lattice.
+//   A1 = 0x3086D221A7D46BCDE86C90E49284EB15  (== B2)
+//  -B1 = 0xE4437ED6010E88286F547FA90ABFE4C3
+//   A2 = 0x114CA50F7A8E2F3F657C1108D9D44CFD8
+//   N  = order of secp256k1 scalar field
+static const mpz_class GLV_A1 ("3086D221A7D46BCDE86C90E49284EB15", 16);
+static const mpz_class GLV_MINUS_B1 ("E4437ED6010E88286F547FA90ABFE4C3", 16);
+static const mpz_class GLV_A2 ("114CA50F7A8E2F3F657C1108D9D44CFD8", 16);
+static const mpz_class GLV_B2 ("3086D221A7D46BCDE86C90E49284EB15", 16);
+static const mpz_class GLV_N  ("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16);
+
+// round(num / den) for den > 0, signed num.
+static inline mpz_class GlvRoundDiv (const mpz_class & num, const mpz_class & den)
+{
+    mpz_class two_den = den * 2;
+    if (num < 0)
+    {
+        mpz_class abs_num = -num;
+        mpz_class q = (abs_num * 2 + den) / two_den; // trunc-div on non-negative operands == floor
+        return -q;
+    }
+    return (num * 2 + den) / two_den;
+}
+
+// Splits k ∈ [0, n) into (k1, k2) with |k1|, |k2| < 2^128 such that k ≡ k1 + k2·λ (mod n).
+// Result layout: [k1_abs (4 u64 LE), k2_abs (4 u64 LE), sigma1 (1 u64), sigma2 (1 u64)],
+// where sigma_i ∈ {0,1} is the sign of k_i (0 = positive, 1 = negative).
+int Secp256k1GlvDecompose (
+    const uint64_t * _k, // 4 x 64 bits (scalar)
+          uint64_t * _r  // 8 x 64 bits (magnitudes) + 2 x 64 bits (sign bits)
 )
 {
-    secp256k1_ecdsa_verify( &ctx->params[0], &ctx->params[8], &ctx->params[12], &ctx->params[16], &ctx->result[0]);
-    ctx->result_size = 8;
+    mpz_class k;
+    array2scalar(_k, k);
+
+    // c1 ≈ round(B2·k / n), c2 ≈ round(-B1·k / n)
+    mpz_class c1 = GlvRoundDiv(GLV_B2 * k, GLV_N);
+    mpz_class c2 = GlvRoundDiv(GLV_MINUS_B1 * k, GLV_N);
+
+    // k1 = k - c1·A1 - c2·A2
+    // k2 = -c1·B1 - c2·B2 = c1·(-B1) - c2·B2
+    mpz_class k1 = k - c1 * GLV_A1 - c2 * GLV_A2;
+    mpz_class k2 = c1 * GLV_MINUS_B1 - c2 * GLV_B2;
+
+    uint64_t sigma1 = 0;
+    if (k1 < 0) { sigma1 = 1; k1 = -k1; }
+    uint64_t sigma2 = 0;
+    if (k2 < 0) { sigma2 = 1; k2 = -k2; }
+
+    scalar2array(k1, &_r[0]);
+    scalar2array(k2, &_r[4]);
+    _r[8] = sigma1;
+    _r[9] = sigma2;
+
     return 0;
 }
 
-int Secp256r1EcdsaVerifyCtx(
+int Secp256k1GlvDecomposeCtx (
     struct FcallContext * ctx  // fcall context
 )
 {
-    secp256r1_ecdsa_verify( &ctx->params[0], &ctx->params[8], &ctx->params[12], &ctx->params[16], &ctx->result[0]);
-    ctx->result_size = 8;
+    int iresult = Secp256k1GlvDecompose(ctx->params, ctx->result);
+    if (iresult == 0)
+    {
+        iresult = 10;
+        ctx->result_size = 10;
+    }
+    else
+    {
+        ctx->result_size = 0;
+    }
+    return iresult;
+}
+
+/****************************/
+/* SECP256R1 SCALAR INVERSE */
+/****************************/
+
+int InverseFnEcR1 (
+    const uint64_t * _a,  // 4 x 64 bits
+          uint64_t * _r   // 4 x 64 bits
+)
+{
+    RawnSecp256r1::Element a;
+    array2fe(_a, a);
+    if (secp256r1n.isZero(a))
+    {
+        printf("InverseFnEcR1() Division by zero\n");
+        return -1;
+    }
+
+    RawnSecp256r1::Element r;
+    secp256r1n.inv(r, a);
+
+    fe2array(r, _r);
+
     return 0;
+}
+
+int InverseFnEcR1Ctx (
+    struct FcallContext * ctx  // fcall context
+)
+{
+    int iresult = InverseFnEcR1(ctx->params, ctx->result);
+    if (iresult == 0)
+    {
+        iresult = 4;
+        ctx->result_size = 4;
+    }
+    else
+    {
+        ctx->result_size = 0;
+    }
+    return iresult;
+}
+
+/********************/
+/* KECCAK-F CACHE   */
+/********************/
+
+// Asks the cache to register the input state of the next Keccak-f that is executed under the
+// index given as the only parameter. Returns no result
+int KeccakfCacheSetIndexCtx (
+    struct FcallContext * ctx  // fcall context
+)
+{
+    if (ctx->params_size != 1)
+    {
+        printf("KeccakfCacheSetIndexCtx() got params_size=%lu, expected 1\n", ctx->params_size);
+        return -1;
+    }
+    if (ctx->params[0] == KECCAKF_CACHE_INDEX_NOT_FOUND)
+    {
+        printf("KeccakfCacheSetIndexCtx() got the reserved not-found index 0x%lx\n", ctx->params[0]);
+        return -1;
+    }
+
+    keccakf_cache_pending_index = ctx->params[0];
+
+    ctx->result_size = 0;
+    return 0;
+}
+
+// Returns the index the Keccak-f input state given as parameters (25 words) was registered
+// under, or KECCAKF_CACHE_INDEX_NOT_FOUND if it has not been cached
+int KeccakfCacheGetIndexCtx (
+    struct FcallContext * ctx  // fcall context
+)
+{
+    if (ctx->params_size != KECCAKF_STATE_WORDS)
+    {
+        printf("KeccakfCacheGetIndexCtx() got params_size=%lu, expected %d\n",
+            ctx->params_size, KECCAKF_STATE_WORDS);
+        return -1;
+    }
+
+    ctx->result[0] = keccakf_cache_get_index(ctx->params);
+
+    ctx->result_size = 1;
+    return 1;
+}
+
+/***************/
+/* RANDOM SEED */
+/***************/
+
+// Seed of the host randomness generator, provided with each execution
+static uint64_t random_seed[RANDOM_SEED_WORDS] = {0};
+static bool random_seed_set = false;
+
+void fcall_set_random_seed (const uint64_t seed[RANDOM_SEED_WORDS])
+{
+    memcpy(random_seed, seed, sizeof(random_seed));
+    random_seed_set = true;
+}
+
+void fcall_clear_random_seed (void)
+{
+    memset(random_seed, 0, sizeof(random_seed));
+    random_seed_set = false;
+}
+
+// Returns the seed of the host randomness generator. Fails if none was provided, since there is
+// no safe default to fall back to
+int RandomSeedCtx (
+    struct FcallContext * ctx  // fcall context
+)
+{
+    if (ctx->params_size != 0)
+    {
+        printf("RandomSeedCtx() got params_size=%lu, expected 0\n", ctx->params_size);
+        return -1;
+    }
+    if (!random_seed_set)
+    {
+        printf("RandomSeedCtx() called but no random seed was provided\n");
+        return -1;
+    }
+
+    memcpy(ctx->result, random_seed, sizeof(random_seed));
+
+    ctx->result_size = RANDOM_SEED_WORDS;
+    return RANDOM_SEED_WORDS;
 }

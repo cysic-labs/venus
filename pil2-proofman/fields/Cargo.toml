@@ -1,26 +1,27 @@
 [package]
-name = "fields"
+name = "proofman-fields"
+description = "Goldilocks field arithmetic, extensions, Poseidon hashes, Merkle trees, and FRI primitives for PIL2 proofman"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
 keywords = { workspace = true }
+homepage = { workspace = true }
 repository = { workspace = true }
 categories = { workspace = true }
 
 [dependencies]
 paste = "1.0.15"
-proofman-starks-lib-c = { path = "../provers/starks-lib-c", optional = true }
 cfg-if = "1.0"
-
-serde = { workspace = true, features = ["derive"] }
-num-bigint = { workspace = true }
-
-[features]
-default = []
-verify = []
+serde = { version = "1.0.130", default-features = false, features = ["derive"] }
+num-bigint = { version = "0.4", default-features = false }
+blake3 = { workspace = true, default-features = false }
 
 [dev-dependencies]
 rand = { workspace = true }
+# Only for the serde tests of `Bn128`.
+serde_json = { workspace = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("zisk"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(target_vendor, values("zisk"))',
+] }

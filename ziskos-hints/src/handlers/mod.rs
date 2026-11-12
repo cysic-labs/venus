@@ -1,12 +1,25 @@
+/// Hint handlers for big-integer precompiles (e.g. `MODEXP`).
+pub mod bigint;
+/// Hint handler for the BLAKE2b precompile.
 pub mod blake2b;
+/// Hint handlers for the BLS12-381 precompile.
 pub mod bls381;
+/// Hint handlers for the BN254 (alt-bn128) precompile.
 pub mod bn254;
+/// Hint handler for the Keccak-256 precompile.
 pub mod keccak256;
+/// Hint handlers for the KZG point-evaluation precompile.
 pub mod kzg;
-pub mod modexp;
+/// Hint handler for the RIPEMD-160 precompile.
+pub mod ripemd160;
+/// Hint handlers for the secp256k1 precompile.
 pub mod secp256k1;
+/// Hint handlers for the secp256r1 (P-256) precompile.
 pub mod secp256r1;
+/// Hint handler for the SHA-256 precompile.
 pub mod sha256;
+/// Hint handlers for 256-bit unsigned-integer precompiles (e.g. `MULMOD256`).
+pub mod uint256;
 
 /// Macro to generate size, offset, and expected length constants for hint data fields.
 ///
@@ -75,30 +88,25 @@ fn read_field_bytes<'a>(data: &'a [u64], pos: &mut usize) -> anyhow::Result<(&'a
     };
 
     // Make sure we have at least 8 bytes for the length header
-    let len_end =
-        pos.checked_add(8).ok_or_else(|| anyhow::anyhow!("MODEXP hint length offset overflow"))?;
-    if len_end > byte_data.len() {
+    if *pos + 8 > byte_data.len() {
         anyhow::bail!("MODEXP hint data too short to read length");
     }
 
-    // Read length as native-endian u64
-    let len_u64 =
-        u64::from_ne_bytes(byte_data[*pos..len_end].try_into().expect("slice length checked"));
-    let len_bytes = usize::try_from(len_u64)
-        .map_err(|_| anyhow::anyhow!("MODEXP field length does not fit in usize"))?;
-    *pos = len_end;
+    // Read length as little-endian u64 — matches the `to_le_bytes()` encoding written by
+    // `define_hint_ptr!`, so the format is well-defined and portable across host endianness.
+    let len_bytes =
+        u64::from_le_bytes(byte_data[*pos..*pos + 8].try_into().expect("slice length checked"))
+            as usize;
+    *pos += 8;
 
     // Ensure there are enough bytes for the field
-    let field_end = pos
-        .checked_add(len_bytes)
-        .ok_or_else(|| anyhow::anyhow!("MODEXP field length overflow"))?;
-    if field_end > byte_data.len() {
+    if *pos + len_bytes > byte_data.len() {
         anyhow::bail!("MODEXP hint data too short for field");
     }
 
     // Get the slice
-    let field = &byte_data[*pos..field_end];
-    *pos = field_end;
+    let field = &byte_data[*pos..*pos + len_bytes];
+    *pos += len_bytes;
 
     Ok((field, len_bytes))
 }
@@ -126,23 +134,4 @@ fn validate_hint_length<T>(data: &[T], expected_len: usize, hint_name: &str) -> 
         );
     }
     Ok(())
-}
-
-/// Reads the pair count of a hint laid out as `[num_pairs, pairs...]` and checks that the data
-/// holds exactly `num_pairs` pairs of `pair_words` words each. Once it does, the pairs' byte length
-/// cannot overflow, since a pair takes at most `pair_words * 8` bytes.
-#[inline]
-fn read_num_pairs(data: &[u64], pair_words: usize, hint_name: &str) -> anyhow::Result<usize> {
-    let Some(&num_pairs) = data.first() else {
-        anyhow::bail!("{hint_name}: data is empty");
-    };
-    let expected_len = usize::try_from(num_pairs)
-        .ok()
-        .and_then(|num_pairs| num_pairs.checked_mul(pair_words))
-        .and_then(|words| words.checked_add(1))
-        .ok_or_else(|| {
-            anyhow::anyhow!("{hint_name}: pair count {num_pairs} overflows the hint length")
-        })?;
-    validate_hint_length(data, expected_len, hint_name)?;
-    Ok(num_pairs as usize)
 }

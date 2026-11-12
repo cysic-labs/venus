@@ -1,0 +1,122 @@
+#pragma test
+
+// End-to-end tests for Tables.analyze + the get_analyzed_* builtins.
+
+airtemplate TestAnalyzeBasic(int N = 2**4) {
+    // ---- constant ----
+    col fixed C;
+    Tables.fill(7, C, 0, N);
+    int ac = Tables.analyze(C);
+    assert_eq(Tables.get_analyzed_type(ac), 1, "constant type");
+    assert_eq(Tables.get_analyzed_bits(ac), 3, "constant bits (7 -> 3)");
+    const int cp[1] = Tables.get_analyzed_params(ac);
+    assert_eq(cp[0], 7, "constant param value");
+    const int csz[2] = Tables.get_analyzed_size(ac);
+    assert_eq(csz[0], 0, "size offset");
+    assert_eq(csz[1], N, "size count");
+    const int crv[2] = Tables.get_analyzed_range_values(ac);
+    assert_eq(crv[0], 7, "constant range min");
+    assert_eq(crv[1], 7, "constant range max");
+
+    // ---- sequential: first 10, delta 3 ----
+    col fixed S;
+    for (int i = 0; i < N; ++i) {
+        S[i] = 10 + 3*i;
+    }
+    int as = Tables.analyze(S);
+    assert_eq(Tables.get_analyzed_type(as), 2, "sequential type");
+    const int sp[2] = Tables.get_analyzed_params(as);
+    assert_eq(sp[0], 10, "sequential first value");
+    assert_eq(sp[1], 3, "sequential delta");
+    const int srv[2] = Tables.get_analyzed_range_values(as);
+    assert_eq(srv[0], 10, "sequential min");
+    assert_eq(srv[1], 10 + 3*(N-1), "sequential max");
+
+    // ---- cycle: i % 4 ----
+    col fixed CY;
+    for (int i = 0; i < N; ++i) {
+        CY[i] = i % 4;
+    }
+    int acy = Tables.analyze(CY);
+    assert_eq(Tables.get_analyzed_type(acy), 4, "cycle type");
+    const int cyc[3] = Tables.get_analyzed_cycle(acy);
+    assert_eq(cyc[0], 4, "cycle length");
+    assert_eq(cyc[1], N/4, "cycle repetitions");
+    assert_eq(cyc[2], 1, "cycle delta");
+    const int cyp[1] = Tables.get_analyzed_params(acy);
+    assert_eq(cyp[0], 0, "cycle first element");
+
+    // ---- signature: same content -> same signature ----
+    col fixed A1 = [0..N-1];
+    col fixed A2 = [0..N-1];
+    int sig1 = Tables.get_analyzed_signature(Tables.analyze(A1));
+    int sig2 = Tables.get_analyzed_signature(Tables.analyze(A2));
+    assert_eq(sig1 == sig2, 1, "same content -> same signature");
+}
+
+airtemplate TestAnalyzeComparativeSignature(int N = 2**4) {
+    col fixed A = [0..N-1];
+
+    // the analysis carries the comparative signature: same value as the
+    // standalone builtin over the same range
+    int ida = Tables.analyze(A);
+    assert_eq(Tables.get_analyzed_comparative_signature(ida) == Tables.comparative_signature(A), 1,
+              "analyzed comparative signature == comparative_signature");
+
+    // B is A rotated by 3 and shifted by 100 -> same comparative signature
+    col fixed B;
+    int r = 3;
+    int delta = 100;
+    for (int i = 0; i < N; ++i) {
+        B[i] = A[(i + r) % N] + delta;
+    }
+    int idb = Tables.analyze(B);
+    assert_eq(Tables.get_analyzed_comparative_signature(ida) == Tables.get_analyzed_comparative_signature(idb), 1,
+              "comparative signature invariant to rotation + delta");
+
+    // ...while the plain content signature does differ
+    assert_eq(Tables.get_analyzed_signature(ida) == Tables.get_analyzed_signature(idb), 0,
+              "content signature differs");
+
+    // full flow: filter by comparative signature, then recover row_offset + delta
+    if (Tables.get_analyzed_comparative_signature(ida) == Tables.get_analyzed_comparative_signature(idb)) {
+        int off = Tables.compatible_offset(A, 0, B, 0, N);
+        assert_eq(off, r, "compatible_offset returns the row_offset");
+        int d = B[0] - A[off];
+        assert_eq(d, delta, "delta recovered from the row_offset");
+        // the returned row_offset describes every row of B in terms of A
+        for (int i = 0; i < N; ++i) {
+            assert_eq(B[i], A[(i + off) % N] + d, `row ${i} expressed through the row_offset`);
+        }
+    }
+}
+
+airtemplate TestAnalyzeNothing(int N = 2**3) {
+    col fixed NO;
+    NO[0] = 3; NO[1] = 1; NO[2] = 4; NO[3] = 1;
+    NO[4] = 5; NO[5] = 9; NO[6] = 2; NO[7] = 6;
+    int an = Tables.analyze(NO);
+    assert_eq(Tables.get_analyzed_type(an), 0, "nothing type");
+    const int nrv[2] = Tables.get_analyzed_range_values(an);
+    assert_eq(nrv[0], 1, "nothing min");
+    assert_eq(nrv[1], 9, "nothing max");
+    assert_eq(Tables.get_analyzed_bits(an), 4, "nothing bits (9 -> 4)");
+}
+
+airtemplate TestAnalyzePartitions(int N = 2**17) {
+    col fixed P;
+    Tables.fill(5, P, 0, 2**16);
+    Tables.fill(9, P, 2**16, 2**16);
+    int ap = Tables.analyze(P);
+    assert_eq(Tables.get_analyzed_type(ap), 3, "constant-partitions type");
+    const int parts[2] = Tables.get_analyzed_partitions(ap);
+    assert_eq(parts[0], 5, "partition 0 = 5");
+    assert_eq(parts[1], 9, "partition 1 = 9");
+}
+
+airgroup TestTableAnalyze {
+    TestAnalyzeBasic();
+    TestAnalyzeComparativeSignature();
+    TestAnalyzeNothing();
+    TestAnalyzePartitions();
+}

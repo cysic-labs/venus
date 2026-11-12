@@ -51,35 +51,40 @@
 //!
 //! The zisk_core crate contains basic structures and functionality used by several other modules:
 //! opcodes, instructions and transpilation
-pub mod elf2rom;
-pub mod elf_extraction;
 pub mod fcall;
+pub mod frops;
+pub mod frops_asm;
+pub mod frops_regions;
 pub mod helpers;
 pub mod inst_context;
 pub mod mem;
-pub mod riscv2zisk;
-pub mod riscv2zisk_context;
+mod operations;
+pub mod ops_core;
+mod ops_core_context;
+pub mod rom_layout;
 mod utils;
 pub mod zisk_definitions;
 pub mod zisk_inst;
 pub mod zisk_inst_builder;
 pub mod zisk_ops;
+pub mod zisk_ops_costs;
 pub mod zisk_registers;
 pub mod zisk_required_operation;
 pub mod zisk_rom;
 pub mod zisk_rom_2_asm;
+pub mod ziskbin;
 
-pub use elf2rom::*;
 pub use fcall::*;
+pub use frops::*;
 pub use helpers::*;
 pub use inst_context::*;
 pub use mem::*;
-pub use riscv2zisk::*;
-pub use riscv2zisk_context::*;
+pub use rom_layout::*;
 pub use utils::*;
 pub use zisk_definitions::*;
 pub use zisk_inst::*;
 pub use zisk_inst_builder::*;
+pub use zisk_ops_costs::*;
 pub use zisk_registers::*;
 pub use zisk_required_operation::*;
 pub use zisk_rom::*;

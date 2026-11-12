@@ -1,19 +1,22 @@
 use std::{
     collections::HashMap,
     fs, process,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::Instant,
 };
 
+use crossbeam_queue::SegQueue;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "stats")]
-use zisk_pil::*;
 
 use crate::Stats;
 
 /// Trait for types that can be converted to a stats ID.
 /// Implemented for `u64` (raw ID), `StatsScope`, and references `&T` where `T: IntoStatsId`.
 pub trait IntoStatsId {
+    /// Converts the implementing type into a `u64` stats ID.
     fn as_stats_id(&self) -> u64;
 }
 
@@ -69,6 +72,7 @@ macro_rules! stats_begin {
     };
 }
 
+/// This macro generates code related to starting a stats scope.
 #[cfg(not(feature = "stats"))]
 #[macro_export]
 macro_rules! stats_begin {
@@ -101,6 +105,7 @@ macro_rules! stats_end {
     };
 }
 
+/// This macro generates code related to ending a stats scope.
 #[cfg(not(feature = "stats"))]
 #[macro_export]
 macro_rules! stats_end {
@@ -129,6 +134,7 @@ macro_rules! stats_mark {
     };
 }
 
+/// This macro generates code related to recording a stats mark event.
 #[cfg(not(feature = "stats"))]
 #[macro_export]
 macro_rules! stats_mark {
@@ -163,21 +169,25 @@ impl StatsScope {
         Self { parent_id, id, name, index }
     }
 
+    /// Returns the parent ID of the stats scope.
     #[inline]
     pub fn parent_id(&self) -> u64 {
         self.parent_id
     }
 
+    /// Returns the ID of the stats scope.
     #[inline]
     pub fn id(&self) -> u64 {
         self.id
     }
 
+    /// Returns the name of the stats scope.
     #[inline]
     pub fn name(&self) -> &'static str {
         self.name
     }
 
+    /// Returns the index of the stats scope.
     #[inline]
     pub fn index(&self) -> usize {
         self.index
@@ -190,31 +200,40 @@ pub struct StatsScope;
 
 #[cfg(not(feature = "stats"))]
 impl StatsScope {
+    /// Returns a zero ID for the parent scope when stats are disabled.
     #[inline]
     pub fn parent_id(&self) -> u64 {
         0
     }
 
+    /// Returns a zero ID for the current scope when stats are disabled.
     #[inline]
     pub fn id(&self) -> u64 {
         0
     }
 
+    /// Returns an empty name when stats are disabled.
     #[inline]
     pub fn name(&self) -> &'static str {
         ""
     }
 
+    /// Returns a zero index when stats are disabled.
     #[inline]
     pub fn index(&self) -> usize {
         0
     }
 }
 
+/// The `ExecutorStatsEvent` enum defines the types of events that can be recorded in the executor stats,
+/// including the beginning and end of a scope, as well as mark events for specific checkpoints.
 #[derive(Debug, Clone)]
 pub enum ExecutorStatsEvent {
+    /// Indicates the beginning of a stats scope.
     Begin,
+    /// Indicates the end of a stats scope.
     End,
+    /// Represents a mark event, which is a single point in time (not a scope) used for recording specific checkpoints or events.
     Mark,
 }
 
@@ -228,85 +247,133 @@ struct ExecutorStatsEntry {
     timestamp: Instant,
 }
 
-#[derive(Debug, Clone)]
+/// The `ExecutorStats` struct is responsible for collecting and managing statistics
+/// related to the execution of tasks or operations.
+///
+/// All recording operations (`add_stat`, `next_id`) are lock-free so they can be
+/// called concurrently from rayon worker threads without serializing on a global
+/// mutex — important because lock contention would distort the very timings this
+/// profiler measures. Entries are pushed onto a lock-free [`SegQueue`]; the cold
+/// reporting paths (`store_stats`, `print_stats`) drain that queue into `finalized`
+/// once, so they remain non-destructive and may be called repeatedly.
+#[derive(Debug, Default)]
 pub struct ExecutorStats {
-    start_time: Instant,
-    last_id: u64,
-    stats: Vec<ExecutorStatsEntry>,
-    pub witness_stats: HashMap<usize, Stats>,
-}
-
-impl Default for ExecutorStats {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Reference instant for relative timestamps. Touched only on the cold
+    /// set/reset/report paths, so a plain `Mutex` is fine (never contended).
+    start_time: Mutex<Option<Instant>>,
+    /// Monotonic unique-id source. Lock-free.
+    last_id: AtomicU64,
+    /// Lock-free queue of not-yet-reported entries (the hot path pushes here).
+    pending: SegQueue<ExecutorStatsEntry>,
+    /// Entries already drained from `pending` by a reporting call, kept so that
+    /// `store_stats`/`print_stats` are non-destructive and idempotent.
+    finalized: Mutex<Vec<ExecutorStatsEntry>>,
+    /// A mapping of witness statistics, where the key is an airgroup ID and the value is a `Stats` struct containing relevant metrics.
+    witness_stats: Mutex<HashMap<usize, Stats>>,
+    /// Wall-clock milliseconds spent in `ChunkDataCollector::collect`.
+    collect_phase_wall_ms: AtomicU64,
 }
 
 impl ExecutorStats {
+    /// Creates a new `ExecutorStats` instance with default values.
     pub fn new() -> Self {
-        Self {
-            start_time: Instant::now(),
-            last_id: 0,
-            stats: Vec::new(),
-            witness_stats: HashMap::new(),
-        }
+        Self::default()
     }
 
-    pub fn reset(&mut self) {
-        self.start_time = Instant::now();
-        self.last_id = 0;
-        self.stats.clear();
-        self.witness_stats.clear();
+    /// Resets the executor stats by clearing all collected statistics and resetting the start time and last ID.
+    ///
+    /// # Preconditions
+    /// Must not be called concurrently with `add_stat`/`next_id`; otherwise the `pending`
+    /// drain loop may not terminate and recorded stats may be lost.
+    pub fn reset(&self) {
+        *self.start_time.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.last_id.store(0, Ordering::Relaxed);
+        while self.pending.pop().is_some() {}
+        self.finalized.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.witness_stats.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.collect_phase_wall_ms.store(0, Ordering::Relaxed);
     }
 
+    /// Adds a new statistic entry to the executor stats. Lock-free.
     pub fn add_stat(
-        &mut self,
+        &self,
         parent_id: u64,
         id: u64,
         name: &'static str,
         index: usize,
         event: ExecutorStatsEvent,
     ) {
-        let stat =
-            ExecutorStatsEntry { parent_id, id, name, index, event, timestamp: Instant::now() };
-        self.stats.push(stat);
+        self.pending.push(ExecutorStatsEntry {
+            parent_id,
+            id,
+            name,
+            index,
+            event,
+            timestamp: Instant::now(),
+        });
     }
 
-    pub fn set_start_time(&mut self, start_time: Instant) {
-        self.start_time = start_time;
+    /// Sets the start time for the executor stats, which is used as a reference point for calculating timestamps of events.
+    pub fn set_start_time(&self, start_time: Instant) {
+        *self.start_time.lock().unwrap_or_else(|e| e.into_inner()) = Some(start_time);
     }
 
-    pub fn next_id(&mut self) -> u64 {
-        self.last_id += 1;
-        self.last_id
+    /// Generates the next unique ID for a new stats entry. Lock-free.
+    pub fn next_id(&self) -> u64 {
+        self.last_id.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    #[cfg(feature = "stats")]
-    fn _air_name(_airgroup_id: usize, air_id: usize) -> String {
-        match air_id {
-            val if val == MAIN_AIR_IDS[0] => "Main".to_string(),
-            val if val == ROM_AIR_IDS[0] => "ROM".to_string(),
-            val if val == MEM_AIR_IDS[0] => "MEM".to_string(),
-            val if val == ROM_DATA_AIR_IDS[0] => "ROM_DATA".to_string(),
-            val if val == INPUT_DATA_AIR_IDS[0] => "INPUT_DATA".to_string(),
-            val if val == DMA_PRE_POST_AIR_IDS[0] => "DMA_PRE_POST".to_string(),
-            val if val == MEM_ALIGN_AIR_IDS[0] => "MEM_ALIGN".to_string(),
-            val if val == MEM_ALIGN_BYTE_AIR_IDS[0] => "MEM_ALIGN_BYTE".to_string(),
-            val if val == MEM_ALIGN_READ_BYTE_AIR_IDS[0] => "MEM_ALIGN_READ_BYTE".to_string(),
-            val if val == MEM_ALIGN_WRITE_BYTE_AIR_IDS[0] => "MEM_ALIGN_WRITE_BYTE".to_string(),
-            val if val == ARITH_AIR_IDS[0] => "ARITH".to_string(),
-            val if val == ARITH_EQ_AIR_IDS[0] => "ARITH_EQ".to_string(),
-            val if val == ARITH_EQ_384_AIR_IDS[0] => "ARITH_EQ_384".to_string(),
-            val if val == BINARY_AIR_IDS[0] => "BINARY".to_string(),
-            val if val == BINARY_ADD_AIR_IDS[0] => "BINARY_ADD".to_string(),
-            val if val == BINARY_EXTENSION_AIR_IDS[0] => "BINARY_EXTENSION".to_string(),
-            val if val == ADD_256_AIR_IDS[0] => "ADD_256".to_string(),
-            val if val == KECCAKF_AIR_IDS[0] => "KECCAKF".to_string(),
-            val if val == SHA_256_F_AIR_IDS[0] => "SHA_256_F".to_string(),
-            val if val == POSEIDON_2_AIR_IDS[0] => "POSEIDON_2".to_string(),
-            val if val == SPECIFIED_RANGES_AIR_IDS[0] => "SPECIFIED_RANGES".to_string(),
-            _ => format!("Unknown air_id: {air_id}"),
+    /// Inserts witness statistics for a specific airgroup ID.
+    pub fn insert_witness_stats(&self, airgroup_id: usize, stats: Stats) {
+        self.witness_stats.lock().unwrap_or_else(|e| e.into_inner()).insert(airgroup_id, stats);
+    }
+
+    /// Sets the witness duration for a specific airgroup ID.
+    pub fn set_witness_duration(&self, airgroup_id: usize, duration: u128) {
+        if let Some(stats) =
+            self.witness_stats.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&airgroup_id)
+        {
+            stats.witness_duration = duration;
         }
+    }
+
+    /// Adds the wall time of one `collect` call. Accumulates because `collect`
+    /// may run more than once per proof, and those calls are sequential.
+    pub fn add_collect_phase_wall_ms(&self, ms: u64) {
+        self.collect_phase_wall_ms.fetch_add(ms, Ordering::Relaxed);
+    }
+
+    /// Total wall time spent in `collect`, in milliseconds.
+    pub fn collect_phase_wall_ms(&self) -> u64 {
+        self.collect_phase_wall_ms.load(Ordering::Relaxed)
+    }
+
+    /// Returns a snapshot of the witness statistics collected so far.
+    pub fn witness_stats(&self) -> HashMap<usize, Stats> {
+        self.witness_stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Returns the reference start time used for relative timestamps.
+    ///
+    /// If `set_start_time` was never called, the reference is lazily initialized
+    /// to "now" and persisted, so subsequent report calls reuse the same value and
+    /// stay idempotent (rather than each picking a fresh `Instant::now()`).
+    fn resolved_start_time(&self) -> Instant {
+        let mut start_time = self.start_time.lock().unwrap_or_else(|e| e.into_inner());
+        *start_time.get_or_insert_with(Instant::now)
+    }
+
+    /// Drains any pending entries into `finalized` and returns the full set,
+    /// ordered by timestamp. Non-destructive across repeated calls.
+    fn collect_sorted(&self) -> Vec<ExecutorStatsEntry> {
+        let mut finalized = self.finalized.lock().unwrap_or_else(|e| e.into_inner());
+        while let Some(entry) = self.pending.pop() {
+            finalized.push(entry);
+        }
+        let mut entries = finalized.clone();
+        drop(finalized);
+        entries.sort_by_key(|e| e.timestamp);
+        entries
     }
 
     /// Stores stats in JSON and CSV file formats
@@ -320,10 +387,12 @@ impl ExecutorStats {
             event: String,
             timestamp: u64,
         }
-        let mut tasks: Vec<Task> = Vec::new();
 
-        for stat in &self.stats {
-            let task = Task {
+        let start_time = self.resolved_start_time();
+        let tasks: Vec<Task> = self
+            .collect_sorted()
+            .into_iter()
+            .map(|stat| Task {
                 parent_id: stat.parent_id,
                 id: stat.id,
                 name: stat.name.to_string(),
@@ -333,13 +402,9 @@ impl ExecutorStats {
                     ExecutorStatsEvent::End => "End".to_string(),
                     ExecutorStatsEvent::Mark => "Mark".to_string(),
                 },
-                timestamp: stat.timestamp.duration_since(self.start_time).as_nanos() as u64,
-            };
-            tasks.push(task);
-        }
-
-        // Order by timestamp
-        tasks.sort_by_key(|task| task.timestamp);
+                timestamp: stat.timestamp.saturating_duration_since(start_time).as_nanos() as u64,
+            })
+            .collect();
 
         tracing::info!("Collected a total of {} statistics", tasks.len());
 
@@ -347,7 +412,13 @@ impl ExecutorStats {
         /////////////////////
 
         // Convert to pretty-printed JSON
-        let json = serde_json::to_string_pretty(&tasks).unwrap();
+        let json = match serde_json::to_string_pretty(&tasks) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::error!("Failed to serialize stats to JSON: {e}");
+                return;
+            }
+        };
 
         // Write to file
         let json_file_name = format!("stats_{}.json", process::id());
@@ -374,8 +445,10 @@ impl ExecutorStats {
 
     /// Prints stats
     pub fn print_stats(&self) {
-        println!("Collected a total of {} statistics", self.stats.len());
-        for stat in &self.stats {
+        let start_time = self.resolved_start_time();
+        let entries = self.collect_sorted();
+        println!("Collected a total of {} statistics", entries.len());
+        for stat in &entries {
             println!(
                 "parent_id={} id={} name={} index={} event={:?} timestamp={}",
                 stat.parent_id,
@@ -383,25 +456,33 @@ impl ExecutorStats {
                 stat.name,
                 stat.index,
                 stat.event,
-                stat.timestamp.duration_since(self.start_time).as_nanos() as u64
+                stat.timestamp.saturating_duration_since(start_time).as_nanos() as u64
             );
         }
     }
 }
 
+/// The `ExecutorStatsHandle` struct provides a cheap, cloneable handle to a shared
+/// [`ExecutorStats`] collector. Since `ExecutorStats` is internally synchronized
+/// (lock-free on the recording path), the handle is just a shared pointer and every
+/// method forwards directly to the inner collector.
 #[derive(Debug, Default, Clone)]
 pub struct ExecutorStatsHandle {
-    inner: Arc<Mutex<ExecutorStats>>,
+    inner: Arc<ExecutorStats>,
 }
 
 impl ExecutorStatsHandle {
+    /// Creates a new `ExecutorStatsHandle` instance.
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Resets the executor stats by clearing all collected statistics and resetting the start time and last ID.
     pub fn reset(&self) {
-        self.inner.lock().unwrap().reset();
+        self.inner.reset();
     }
 
+    /// Adds a new statistic entry to the executor stats.
     pub fn add_stat(
         &self,
         parent_id: u64,
@@ -410,41 +491,56 @@ impl ExecutorStatsHandle {
         index: usize,
         event: ExecutorStatsEvent,
     ) {
-        self.inner.lock().unwrap().add_stat(parent_id, id, name, index, event);
+        self.inner.add_stat(parent_id, id, name, index, event);
     }
 
+    /// Sets the start time for the executor stats, which is used as a reference point for calculating timestamps of events.
     pub fn set_start_time(&self, start_time: Instant) {
-        self.inner.lock().unwrap().set_start_time(start_time);
+        self.inner.set_start_time(start_time);
     }
 
+    /// Generates the next unique ID for a new stats entry.
     pub fn next_id(&self) -> u64 {
-        self.inner.lock().unwrap().next_id()
+        self.inner.next_id()
     }
 
-    #[cfg(feature = "stats")]
-    pub fn _air_name(&self, airgroup_id: usize, air_id: usize) -> String {
-        ExecutorStats::_air_name(airgroup_id, air_id)
-    }
-
+    /// Stores stats in JSON and CSV file formats
     pub fn store_stats(&self) {
-        self.inner.lock().unwrap().store_stats();
+        self.inner.store_stats();
     }
 
+    /// Prints stats
     pub fn print_stats(&self) {
-        self.inner.lock().unwrap().print_stats();
+        self.inner.print_stats();
     }
 
-    pub fn get_inner(&self) -> Arc<Mutex<ExecutorStats>> {
+    /// Returns the shared `ExecutorStats` instance.
+    pub fn get_inner(&self) -> Arc<ExecutorStats> {
         self.inner.clone()
     }
 
-    pub fn insert_witness_stats(&self, airgroup_id: usize, stats: Stats) {
-        self.inner.lock().unwrap().witness_stats.insert(airgroup_id, stats);
+    /// Returns a snapshot of the witness statistics collected so far.
+    pub fn witness_stats(&self) -> HashMap<usize, Stats> {
+        self.inner.witness_stats()
     }
 
+    /// Inserts witness statistics for a specific airgroup ID.
+    pub fn insert_witness_stats(&self, airgroup_id: usize, stats: Stats) {
+        self.inner.insert_witness_stats(airgroup_id, stats);
+    }
+
+    /// Sets the witness duration for a specific airgroup ID.
     pub fn set_witness_duration(&self, airgroup_id: usize, duration: u128) {
-        if let Some(stats) = self.inner.lock().unwrap().witness_stats.get_mut(&airgroup_id) {
-            stats.witness_duration = duration;
-        }
+        self.inner.set_witness_duration(airgroup_id, duration);
+    }
+
+    /// Adds the wall time of one `collect` call.
+    pub fn add_collect_phase_wall_ms(&self, ms: u64) {
+        self.inner.add_collect_phase_wall_ms(ms);
+    }
+
+    /// Total wall time spent in `collect`, in milliseconds.
+    pub fn collect_phase_wall_ms(&self) -> u64 {
+        self.inner.collect_phase_wall_ms()
     }
 }

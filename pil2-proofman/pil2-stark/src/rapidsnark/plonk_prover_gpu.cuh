@@ -77,6 +77,11 @@ namespace PlonkGPU {
         std::thread asyncTransferPolsBatch1;  // zkey batch 1 (QC,S1,S2,S3 coefs → slot 8)
         std::thread asyncTransferPolsBatch2;  // zkey batch 2 (QM,QL,QR,QO coefs → slot 6)
         std::thread asyncEvalNTT;             // evalConstPols=true: H2D + NTT for 9 eval polys
+        // Joins the threads above that are still running, and waits for the device work they and
+        // round0 queued. prove() joins them as it goes; without this, a prover freed or pre-allocated
+        // again with no prove() in between (a final witness that failed) frees what they still write,
+        // or assigns over a joinable std::thread, which calls std::terminate.
+        void joinAsyncThreads();
         size_t pinnedSize = 0;
         void* pinnedS = nullptr;
         void* pinnedQ = nullptr;
@@ -84,9 +89,6 @@ namespace PlonkGPU {
 
         void* d_unifiedBuffer = nullptr;  // Single GPU allocation for all buffers
         uint64_t unifiedBufferSize = 0;
-        uint64_t unifiedBufferCapacity = 0;        // bytes of a d_unifiedBuffer provided by the caller
-        void* d_witnessAdditionsBuffer = nullptr;  // own allocation of the witness and additions data, when
-                                                   // a provided d_unifiedBuffer only holds the static buffers
 
         // alias for specific regions of d_unifiedBuffer
         void* d_staticEvalsBuffer = nullptr;
@@ -151,6 +153,7 @@ namespace PlonkGPU {
        
         BinFileUtils::BinFile* fdZkeyPtr = nullptr;
 
+        int gpuId = 0;
         bool preAllocated = false;
         bool isMyDeviceBuffer = false;
         bool precomputedPinned = false;
@@ -158,6 +161,7 @@ namespace PlonkGPU {
 
     public:
         PlonkProverGPU(Engine &E);
+        PlonkProverGPU(Engine &E, int gpuId);
         PlonkProverGPU(Engine &E, void* reservedMemoryPtr, uint64_t reservedMemorySize);
 
         ~PlonkProverGPU();
@@ -166,8 +170,11 @@ namespace PlonkGPU {
 
         u_int32_t getNPublic() const { return zkey->nPublic; }
 
-        void preAllocate(void* unified_buffer_gpu, uint64_t unified_buffer_size);
-        void releaseWitnessAdditionsBuffer();
+        void preAllocate(void* unified_buffer_gpu);
+
+        // Total device bytes round0 carves out of the unified buffer.
+        // Valid after setZkey(); used to size an externally provided buffer.
+        uint64_t computeUnifiedBufferSize();
 
         std::tuple <std::vector<uint8_t>, std::vector<uint8_t>> prove(BinFileUtils::BinFile *fdZkey, BinFileUtils::BinFile *fdWtns);
         std::tuple <std::vector<uint8_t>, std::vector<uint8_t>> prove(BinFileUtils::BinFile *fdZkey, FrElement *wtns, WtnsUtils::Header* wtnsHeader = NULL);
@@ -176,7 +183,7 @@ namespace PlonkGPU {
         std::tuple <std::vector<uint8_t>, std::vector<uint8_t>> prove(FrElement *wtns, WtnsUtils::Header* wtnsHeader = NULL);
 
     protected:
-        void initialize(void* reservedMemoryPtr, uint64_t reservedMemorySize = 0);
+        void initialize(void* reservedMemoryPtr, uint64_t reservedMemorySize = 0, int gpuId = 0);
 
         void removePrecomputedData();
 

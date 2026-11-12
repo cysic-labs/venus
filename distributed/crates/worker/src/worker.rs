@@ -1,69 +1,269 @@
 use anyhow::Result;
-use cargo_zisk::commands::get_proving_key;
+use borsh::{BorshDeserialize, BorshSerialize};
 use proofman::{AggProofs, AggProofsRegister, ContributionsInfo};
-use rom_setup::{assembly_file_paths, get_elf_data_hash, DEFAULT_CACHE_PATH};
-use std::fs;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use zisk_cluster_common::{AggregationParams, DataCtx, InputSourceDto, JobPhase, WorkerState};
+use zisk_cluster_common::{ContributionsMessage, ProveMessage};
+use zisk_cluster_common::{HintsSourceDto, StreamDataDto, StreamMessageKind};
+use zisk_cluster_common::{JobId, PartitionInfo};
 use zisk_common::io::{StreamSource, ZiskStdin};
-use zisk_common::ElfBinaryFromFile;
-use zisk_common::ZiskExecutorTime;
-use zisk_distributed_common::{AggregationParams, DataCtx, InputSourceDto, JobPhase, WorkerState};
-use zisk_distributed_common::{ComputeCapacity, JobId, PartitionInfo, WorkerId};
-use zisk_distributed_common::{ContributionsMessage, ProveMessage, StreamMessage};
-use zisk_distributed_common::{HintsSourceDto, StreamDataDto, StreamMessageKind};
-use zisk_sdk::{Asm, Emu, ProverClient, ZiskBackend, ZiskProgramPK, ZiskProver};
+use zisk_common::{
+    AirInstanceCount, ProgramVK, Proof, ProofKind, RandomSeed, SetupKey, SnarkProtocol,
+    StatsCostPerType, ZiskExecutorTime, ZiskPaths,
+};
+use zisk_prover_backend::GuestProgram;
+use zisk_prover_backend::{
+    snark_protocol_of_key, Asm, AsmOptions, BackendProverOpts, Emu, ProverClientBuilder,
+    ProverEngine, ProverJob, ZiskBackend, ZiskProver,
+};
 
 use crate::stream_ordering::StreamOrderingActor;
+use crate::worker_node::CANCEL_DONE_TAG;
 
 use proofman::ProvePhaseInputs;
 use proofman::WitnessInfo;
-use proofman_common::ParamsGPU;
 use proofman_common::ProofOptions;
 use proofman_common::{json_to_debug_instances_map, DebugInfo};
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::ProverServiceConfigDto;
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct SetupMessage {
+    hash_id: String,
+    program_name: String,
+    elf_bytes: Vec<u8>,
+    with_hints: bool,
+    emulator_only: bool,
+}
+
+/// What a `Cancel` broadcast carries: the job whose work the peer ranks stop, for
+/// their logs. See [`crate::worker_node::begin_cluster_recovery`].
+#[derive(BorshSerialize, BorshDeserialize)]
+struct CancelMessage {
+    job_id: String,
+}
+
+/// The broadcast that tells the peer ranks to stop `job_id`'s work and reply.
+pub(crate) fn cancel_broadcast(job_id: &str) -> Result<Vec<u8>> {
+    borsh::to_vec(&(WorkerMpiTag::Cancel, CancelMessage { job_id: job_id.to_string() }))
+        .map_err(|e| anyhow::anyhow!("Failed to serialize Cancel MPI broadcast: {e}"))
+}
+
+/// Tag byte used as the first byte of every MPI broadcast message.
+///
+/// Variants must stay in this order (Borsh encodes variant index, not the repr value).
+/// The first six entries intentionally mirror `JobPhase` so that existing messages
+/// remain wire-compatible; `Setup` is only used for the worker-internal setup broadcast
+/// and has no meaning in the coordinator's `JobPhase`.
+#[repr(u8)]
+#[derive(BorshSerialize, BorshDeserialize, PartialEq)]
+pub(crate) enum WorkerMpiTag {
+    Execution,
+    Contributions,
+    Prove,
+    Aggregate,
+    ContributionsInputsStream,
+    ContributionsHintsStream,
+    Setup,
+    /// Stop the current job's work and reply: rank 0's recovery.
+    Cancel,
+}
+
+/// Timeout for waiting for the stream-ordering actor to finish its current
+/// `process_hints` call when shutting it down between proves.
+const STREAM_ACTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `body` inside `catch_unwind`; on unwind, log and invoke `on_panic`.
+/// Each `spawn_blocking` compute body uses this so a guest panic surfaces as
+/// a failure `LoopEvent` instead of silently killing the worker thread.
+fn run_panic_guarded<B, P>(label: &str, job_id: &JobId, body: B, on_panic: P)
+where
+    B: FnOnce(),
+    P: FnOnce(),
+{
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    if outcome.is_err() {
+        error!("{label} task panicked for {job_id}; emitting failure result");
+        on_panic();
+    }
+}
+
+/// In-flight work handed back by a cancel so the caller can drain it off the
+/// event loop before the prover/shmem is reset for the next job. Both handles
+/// ride the same drain path, so no cancel can leave half its cleanup pending.
+#[derive(Default)]
+pub struct CancelledWork {
+    /// The compute task (proofman/executor round-trip), if one was running.
+    /// Its presence is the authoritative "had a live computation" signal.
+    pub compute: Option<JoinHandle<()>>,
+    /// The stream-ordering thread's shutdown+join task, if a stream was active.
+    pub stream: Option<JoinHandle<()>>,
+}
 
 /// Result from computation tasks
 #[derive(Debug)]
 pub enum ComputationResult {
-    Challenge {
+    /// Execution-only task (no proof generation)
+    Execution {
+        /// The job this result belongs to.
         job_id: JobId,
+        /// Whether the task succeeded.
         success: bool,
-        result: Result<(WitnessInfo, ZiskExecutorTime, Vec<ContributionsInfo>)>,
+        /// On success: `(witness_info, exec_time, instances, executed_steps, cost_per_type, plan)`.
+        #[allow(clippy::type_complexity)]
+        result: Result<(
+            WitnessInfo,
+            ZiskExecutorTime,
+            u64,
+            u64,
+            StatsCostPerType,
+            Vec<AirInstanceCount>,
+        )>, // (witness_info, exec_time, instances, executed_steps, cost_per_type, plan)
+        /// When the originating task was received (for latency accounting).
         task_received_time: Option<chrono::DateTime<chrono::Utc>>,
     },
-    Proofs {
+    /// Partial contribution with challenges
+    Contribution {
+        /// The job this result belongs to.
         job_id: JobId,
+        /// Whether the task succeeded.
         success: bool,
+        /// On success: `(witness_info, exec_time, contributions, instances, cost_per_type)`.
+        result:
+            Result<(WitnessInfo, ZiskExecutorTime, Vec<ContributionsInfo>, u64, StatsCostPerType)>,
+        /// When the originating task was received.
+        task_received_time: Option<chrono::DateTime<chrono::Utc>>,
+    },
+    /// Partial proofs produced by the prove phase.
+    Proofs {
+        /// The job this result belongs to.
+        job_id: JobId,
+        /// Whether the task succeeded.
+        success: bool,
+        /// The per-airgroup partial proofs on success.
         result: Result<Vec<AggProofs>>,
     },
+    /// Aggregated proof produced by the aggregate phase.
     AggProof {
+        /// The job this result belongs to.
         job_id: JobId,
+        /// Whether the task succeeded.
         success: bool,
-        result: Result<Option<Vec<Vec<u64>>>>,
+        /// On success: a partial drain's proofs, the final proof, or `None` for an absorb.
+        result: Result<Option<Vec<AggProofs>>>,
+        /// Steps executed for the job (carried through for reporting).
         executed_steps: u64,
+        /// The kind of proof produced.
+        proof_type: ProofKind,
+        /// Number of AIR instances (carried through for reporting).
+        instances: u64,
+        /// This drain produced the job's final proof.
+        final_proof: bool,
+        /// The task was a drain, so it must return a proof.
+        drain: bool,
+    },
+    /// Recurser setup or prove result. The blocking handler builds
+    /// the full ack (`SetupAggregationProgramAck` / `RunAggregateProofsAck`)
+    /// itself; the event loop just forwards it to the coordinator. Carried this
+    /// way so the heavy work runs off the message loop (heartbeats keep flowing)
+    /// without threading recurser-specific shaping through this shared enum.
+    RecurserAck {
+        /// The job this ack belongs to.
+        job_id: JobId,
+        /// The fully-formed ack message to forward to the coordinator.
+        ack: zisk_cluster_api::WorkerMessage,
+    },
+    /// Guest-program setup finished off the message loop. The event loop does the
+    /// `&mut self` registration (map inserts) and forwards the `SetupProgramAck`,
+    /// so the heavy `setup_internal`/ELF write runs without blocking heartbeats.
+    SetupProgramComplete {
+        /// The job the setup was requested for.
+        job_id: JobId,
+        /// The worker that ran the setup (echoed back in the ack).
+        worker_id: String,
+        /// Hash id of the guest program that was set up.
+        hash_id: String,
+        /// Whether the program was set up with hints.
+        with_hints: bool,
+        /// Whether the program was set up for emulation only.
+        emulator_only: bool,
+        /// On success: the verification key and the loaded guest program to register.
+        result: Result<(ProgramVK, Arc<GuestProgram>)>,
     },
 }
 
+/// Events driving the worker event loop. Compute results and recovery
+/// completions share one channel — same lifetime, single source of truth.
+///
+/// `Computation` is intentionally large (it carries the full witness payload);
+/// boxing it would add a heap allocation per event through the hot loop channel
+/// for no benefit, so the size disparity with `RecoveryComplete` is accepted.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum LoopEvent {
+    /// A computation task finished (boxed because it carries a large payload).
+    Computation(Box<ComputationResult>),
+    /// A recovery handshake completed.
+    RecoveryComplete(zisk_cluster_api::WorkerRecoveryComplete),
+}
+
+/// Typed sender so call sites read `send_computation` / `send_recovery_complete`
+/// rather than wrapping variants by hand.
+#[derive(Clone)]
+pub struct LoopEventSender(mpsc::UnboundedSender<LoopEvent>);
+
+/// Zero-sized send error: callers discard the payload, so we don't carry the
+/// returned `LoopEvent` around just to retrieve it.
+#[derive(Debug)]
+pub struct LoopChannelClosed;
+
+impl std::fmt::Display for LoopChannelClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("worker event loop channel closed")
+    }
+}
+
+impl std::error::Error for LoopChannelClosed {}
+
+impl LoopEventSender {
+    /// Wrap an unbounded channel sender.
+    pub fn new(tx: mpsc::UnboundedSender<LoopEvent>) -> Self {
+        Self(tx)
+    }
+
+    /// Send a computation result to the event loop.
+    pub fn send_computation(&self, result: ComputationResult) -> Result<(), LoopChannelClosed> {
+        self.0.send(LoopEvent::Computation(Box::new(result))).map_err(|_| LoopChannelClosed)
+    }
+
+    /// Send a recovery-complete event to the event loop.
+    pub fn send_recovery_complete(
+        &self,
+        rc: zisk_cluster_api::WorkerRecoveryComplete,
+    ) -> Result<(), LoopChannelClosed> {
+        self.0.send(LoopEvent::RecoveryComplete(rc)).map_err(|_| LoopChannelClosed)
+    }
+}
+
+/// Resolved prover configuration for a worker (keys, backend, and tuning knobs).
 pub struct ProverConfig {
-    /// Path to the ELF file
-    pub elf: PathBuf,
-
-    /// Path to the ASM file (optional)
-    pub asm: Option<PathBuf>,
-
-    /// Path to the ASM ROM file (optional)
-    pub asm_rom: Option<PathBuf>,
-
     /// Flag indicating whether to use the prebuilt emulator
     pub emulator: bool,
 
     /// Path to the proving key
     pub proving_key: PathBuf,
+
+    /// Path to the SNARK proving key
+    pub proving_key_snark: Option<PathBuf>,
+
+    /// Protocol of the final SNARK the SNARK proving key is set up for, when there is one
+    pub snark_protocol: Option<SnarkProtocol>,
 
     /// Verbosity level for logging
     pub verbose: u8,
@@ -74,46 +274,54 @@ pub struct ProverConfig {
     /// Additional options for the ASM runner
     // pub asm_runner_options: AsmRunnerOptions,
 
-    /// Base port for ASM services
-    pub asm_port: Option<u16>,
-
     /// Flag to unlock mapped memory
     pub unlock_mapped_memory: bool,
 
     /// Flag to redirect ASM emulator output to file
     pub asm_out_file: bool,
 
-    /// Flag to verify constraints
-    pub verify_constraints: bool,
-
-    /// Flag to enable aggregation
-    pub aggregation: bool,
-
-    /// Preallocate resources
-    pub gpu_params: Option<ParamsGPU>,
-
-    /// Whether to use shared tables in the witness library
-    pub shared_tables: bool,
-
-    /// Whether to use RMA for communication
-    pub rma: bool,
-
     /// Whether to use minimal memory mode
     pub minimal_memory: bool,
 
-    /// Whether to include precompile hints in the assembly generation
-    pub hints: bool,
+    /// Enable GPU acceleration
+    pub gpu: bool,
+
+    /// Run mops planner on CPU even with GPU proving (leaves proof generation on GPU)
+    pub cpu_mops: bool,
+
+    /// Preload the SNARK proving key on startup (only with a `proving_key_snark`)
+    pub preload_snark: bool,
+
+    /// Maximum number of GPU streams
+    pub max_streams: Option<usize>,
+
+    /// Maximum number of per-GPU recursive (aggregation) streams
+    pub max_recursive_streams: Option<usize>,
+
+    /// Number of threads for witness computation
+    pub number_threads_witness: Option<usize>,
+
+    /// Maximum witness buffers stored in memory
+    pub max_witness_stored: Option<usize>,
 }
 
 impl ProverConfig {
-    pub fn load(mut prover_service_config: ProverServiceConfigDto) -> Result<Self> {
-        if !prover_service_config.elf.exists() {
-            return Err(anyhow::anyhow!(
-                "ELF file '{}' not found.",
-                prover_service_config.elf.display()
-            ));
-        }
-        let proving_key = get_proving_key(prover_service_config.proving_key.as_ref());
+    /// Resolve a [`ProverConfig`] from the raw DTO, filling in default key
+    /// paths, building the debug info, and forcing the emulator backend on macOS.
+    pub fn load(prover_service_config: ProverServiceConfigDto) -> Result<Self> {
+        let proving_key = ZiskPaths::get_proving_key(prover_service_config.proving_key.as_ref());
+        let proving_key_snark = if prover_service_config.snark {
+            Some(ZiskPaths::get_proving_key_snark(prover_service_config.proving_key_snark.as_ref()))
+        } else {
+            None
+        };
+        // Reported at registration, where the coordinator requires the same of every worker. A
+        // key that is not a final SNARK key stops the worker here, not at a job's SNARK.
+        let snark_protocol = proving_key_snark
+            .as_deref()
+            .map(snark_protocol_of_key)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("--snark needs a final SNARK proving key, but {e}"))?;
         let debug_info = match &prover_service_config.debug {
             None => DebugInfo::default(),
             Some(None) => DebugInfo::new_debug(),
@@ -122,101 +330,28 @@ impl ProverConfig {
             }
         };
 
-        let home = std::env::var("HOME").map(PathBuf::from).map_err(|_| {
-            anyhow::anyhow!(
-                "HOME environment variable not set, cannot determine default cache path"
-            )
-        })?;
-
-        let default_cache_path = home.join(DEFAULT_CACHE_PATH);
-        if !default_cache_path.exists() {
-            if let Err(e) = fs::create_dir_all(default_cache_path.clone()) {
-                if e.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(anyhow::anyhow!("Failed to create the cache directory: {e:?}"));
-                }
-            }
-        }
+        let preload_snark = prover_service_config.snark && prover_service_config.preload_snark;
 
         let emulator =
             if cfg!(target_os = "macos") { true } else { prover_service_config.emulator };
-        let mut asm_rom = None;
-        if emulator {
-            prover_service_config.asm = None;
-        } else if prover_service_config.asm.is_none() {
-            let stem = prover_service_config
-                .elf
-                .file_stem()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "ELF path '{}' does not have a file stem.",
-                        prover_service_config.elf.display()
-                    )
-                })?
-                .to_str()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "ELF file stem for '{}' is not valid UTF-8.",
-                        prover_service_config.elf.display()
-                    )
-                })?;
-            let elf =
-                ElfBinaryFromFile::new(&prover_service_config.elf, prover_service_config.hints)?;
-
-            let hash = get_elf_data_hash(&elf)
-                .map_err(|e| anyhow::anyhow!("Error computing ELF hash: {}", e))?;
-            let [asm_mt_path, asm_rh_path, _] =
-                assembly_file_paths(&default_cache_path, stem, &hash, prover_service_config.hints);
-            asm_rom = Some(asm_rh_path);
-            prover_service_config.asm = Some(asm_mt_path);
-        }
-        if let Some(asm_path) = &prover_service_config.asm {
-            if !asm_path.exists() {
-                return Err(anyhow::anyhow!("ASM file not found at {:?}", asm_path.display()));
-            }
-        }
-
-        if let Some(asm_rom) = &asm_rom {
-            if !asm_rom.exists() {
-                return Err(anyhow::anyhow!("ASM file not found at {:?}", asm_rom.display()));
-            }
-        }
-        let mut gpu_params = None;
-        if prover_service_config.preallocate
-            || prover_service_config.max_streams.is_some()
-            || prover_service_config.number_threads_witness.is_some()
-            || prover_service_config.max_witness_stored.is_some()
-        {
-            let mut gpu_params_new = ParamsGPU::new(prover_service_config.preallocate);
-            if let Some(max_streams) = prover_service_config.max_streams {
-                gpu_params_new.with_max_number_streams(max_streams);
-            }
-            if let Some(number_threads_witness) = prover_service_config.number_threads_witness {
-                gpu_params_new.with_number_threads_pools_witness(number_threads_witness);
-            }
-            if let Some(max_witness_stored) = prover_service_config.max_witness_stored {
-                gpu_params_new.with_max_witness_stored(max_witness_stored);
-            }
-            gpu_params = Some(gpu_params_new);
-        }
 
         Ok(ProverConfig {
-            elf: prover_service_config.elf.clone(),
-            asm: prover_service_config.asm.clone(),
-            asm_rom,
             emulator,
             proving_key,
+            proving_key_snark,
+            snark_protocol,
             verbose: prover_service_config.verbose,
             debug_info,
-            asm_port: prover_service_config.asm_port,
             unlock_mapped_memory: prover_service_config.unlock_mapped_memory,
             asm_out_file: prover_service_config.asm_out_file,
-            verify_constraints: prover_service_config.verify_constraints,
-            aggregation: prover_service_config.aggregation,
-            gpu_params,
-            shared_tables: prover_service_config.shared_tables,
-            rma: prover_service_config.rma,
             minimal_memory: prover_service_config.minimal_memory,
-            hints: prover_service_config.hints,
+            gpu: prover_service_config.gpu,
+            cpu_mops: prover_service_config.cpu_mops,
+            max_streams: prover_service_config.max_streams,
+            max_recursive_streams: prover_service_config.max_recursive_streams,
+            number_threads_witness: prover_service_config.number_threads_witness,
+            max_witness_stored: prover_service_config.max_witness_stored,
+            preload_snark,
         })
     }
 }
@@ -224,163 +359,464 @@ impl ProverConfig {
 /// Current job context
 #[derive(Debug, Clone)]
 pub struct JobContext {
+    /// The job's id.
     pub job_id: JobId,
+    /// Content hash of the guest program being proven.
+    pub hash_id: String,
+    /// Input/hints data context for the job.
     pub data_ctx: DataCtx,
+    /// Seed every emulation of the job runs with.
+    pub random_seed: RandomSeed,
+    /// This worker's rank within the job.
     pub rank_id: u32,
+    /// Total number of workers assigned to the job.
     pub total_workers: u32,
-    pub allocation: Vec<u32>, // Worker allocation for this job, vector of all computed units assigned
-    pub total_compute_units: u32, // Total compute units for the whole job
+    /// Per-worker compute-unit allocation for this job.
+    pub allocation: Vec<u32>,
+    /// Total compute units across the whole job.
+    pub total_compute_units: u32,
+    /// Current phase of the job.
     pub phase: JobPhase,
+    /// Steps executed so far.
     pub executed_steps: u64,
+    /// Number of AIR instances for the job.
+    pub instances: u64,
+    /// When the current task was received (for latency accounting).
     pub task_received_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// A ZisK worker over backend `T`: holds the prover, the current job context
+/// and in-flight compute/MPI tasks, and the set-up guest programs.
 pub struct Worker<T: ZiskBackend + 'static> {
-    _worker_id: WorkerId,
-    _compute_capacity: ComputeCapacity,
     state: WorkerState,
     current_job: Option<Arc<Mutex<JobContext>>>,
     current_computation: Option<JoinHandle<()>>,
+
+    /// MPI peer-rank task handle. Held across `handle_mpi_broadcast_request`
+    /// iterations so the loop can keep receiving stream broadcasts (input
+    /// data, hints) WHILE the task runs — without this, rank 1 would block
+    /// inside `handle_mpi_broadcast_request.await` and never consume the
+    /// streamed input its ASM child needs to make progress.
+    current_mpi_task: Option<JoinHandle<()>>,
 
     prover: Arc<ZiskProver<T>>,
     prover_config: ProverConfig,
 
     stream_actor: Option<StreamOrderingActor>,
-    pk: Arc<ZiskProgramPK>,
+    /// All set-up programs, keyed by hash_id. Supports multiple concurrent programs.
+    guest_programs: HashMap<String, Arc<GuestProgram>>,
+    /// The job on the prover, from [`Self::prepare_for_new_job`] until
+    /// [`Self::end_job`], and by each of its phase tasks while it runs. On the
+    /// assembly backend it holds the shared memory every program in the process
+    /// uses, so that no setup rewrites it under the job.
+    prover_job: Option<Arc<ProverJob>>,
+    /// Two setups for the same program (one with hints, one without) coexist independently.
+    program_vks: HashMap<SetupKey, ProgramVK>,
 }
 
 impl<T: ZiskBackend + 'static> Worker<T> {
-    pub fn new_emu(
-        worker_id: WorkerId,
-        compute_capacity: ComputeCapacity,
-        prover_config: ProverConfig,
-    ) -> Result<Worker<Emu>> {
-        let prover = Arc::new(
-            ProverClient::builder()
-                .emu()
-                .prove()
-                .aggregation(true)
-                .proving_key_path(prover_config.proving_key.clone())
-                .verbose(prover_config.verbose)
-                .shared_tables(prover_config.shared_tables)
-                .gpu(prover_config.gpu_params.clone())
-                .build()?,
-        );
+    /// The proving key this worker's prover was built on -- the explicit
+    /// `--proving-key` when one was configured, else the global default. Anything
+    /// bound to the key the prover actually loaded must resolve it through here.
+    pub fn proving_key(&self) -> &std::path::Path {
+        &self.prover_config.proving_key
+    }
 
-        let elf = ElfBinaryFromFile::new(&prover_config.elf, prover_config.hints)?;
-        let (pk, _) = prover.setup(&elf)?;
+    /// Build an emulator-backed worker from the resolved prover config.
+    pub fn new_emu(prover_config: ProverConfig) -> Result<Worker<Emu>> {
+        let mut prover_options = BackendProverOpts::default()
+            .proving_key(prover_config.proving_key.clone())
+            .verbose(prover_config.verbose)
+            .aggregation(true);
+
+        // `load` resolves a SNARK key exactly when --snark is set.
+        if let Some(pk) = &prover_config.proving_key_snark {
+            prover_options =
+                prover_options.proving_key_snark(pk.clone()).snark(prover_config.preload_snark);
+        }
+
+        if prover_config.minimal_memory {
+            prover_options = prover_options.minimal_memory();
+        }
+        if prover_config.gpu {
+            prover_options = prover_options.gpu();
+        }
+        if prover_config.cpu_mops {
+            prover_options = prover_options.cpu_mops();
+        }
+        if let Some(max_streams) = prover_config.max_streams {
+            prover_options = prover_options.max_streams(max_streams);
+        }
+        if let Some(max_recursive_streams) = prover_config.max_recursive_streams {
+            prover_options = prover_options.max_recursive_streams(max_recursive_streams);
+        }
+        if let Some(threads) = prover_config.number_threads_witness {
+            prover_options = prover_options.number_threads_witness(threads);
+        }
+        if let Some(max) = prover_config.max_witness_stored {
+            prover_options = prover_options.max_witness_stored(max);
+        }
+
+        let prover = Arc::new(
+            ProverClientBuilder::new().emu().prove().with_prover_options(prover_options).build()?,
+        );
 
         Ok(Worker::<Emu> {
-            _worker_id: worker_id,
-            _compute_capacity: compute_capacity,
             state: WorkerState::Disconnected,
             current_job: None,
             current_computation: None,
+            current_mpi_task: None,
+            guest_programs: HashMap::new(),
+            prover_job: None,
+            program_vks: HashMap::new(),
             prover,
             prover_config,
-            pk: Arc::new(pk),
             stream_actor: None,
         })
     }
 
-    pub fn new_asm(
-        worker_id: WorkerId,
-        compute_capacity: ComputeCapacity,
-        prover_config: ProverConfig,
-    ) -> Result<Worker<Asm>> {
+    /// Build an ASM-backed worker (distributed mode) from the resolved config.
+    pub fn new_asm(prover_config: ProverConfig) -> Result<Worker<Asm>> {
+        let mut prover_options = BackendProverOpts::default()
+            .proving_key(prover_config.proving_key.clone())
+            .verbose(prover_config.verbose)
+            .aggregation(true);
+
+        // `load` resolves a SNARK key exactly when --snark is set.
+        if let Some(pk) = &prover_config.proving_key_snark {
+            prover_options =
+                prover_options.proving_key_snark(pk.clone()).snark(prover_config.preload_snark);
+        }
+
+        if prover_config.minimal_memory {
+            prover_options = prover_options.minimal_memory();
+        }
+        if prover_config.gpu {
+            prover_options = prover_options.gpu();
+        }
+        if prover_config.cpu_mops {
+            prover_options = prover_options.cpu_mops();
+        }
+        if let Some(max_streams) = prover_config.max_streams {
+            prover_options = prover_options.max_streams(max_streams);
+        }
+        if let Some(max_recursive_streams) = prover_config.max_recursive_streams {
+            prover_options = prover_options.max_recursive_streams(max_recursive_streams);
+        }
+        if let Some(threads) = prover_config.number_threads_witness {
+            prover_options = prover_options.number_threads_witness(threads);
+        }
+        if let Some(max) = prover_config.max_witness_stored {
+            prover_options = prover_options.max_witness_stored(max);
+        }
+
+        // ASM-specific options for distributed worker
+        let mut asm_options = AsmOptions::default();
+        if prover_config.unlock_mapped_memory {
+            asm_options = asm_options.unlock_mapped_memory();
+        }
+        if prover_config.asm_out_file {
+            asm_options = asm_options.asm_out_file();
+        }
+        asm_options = asm_options.is_distributed();
+        prover_options = prover_options.with_asm_options(asm_options);
+
         let prover = Arc::new(
-            ProverClient::builder()
-                .asm()
-                .prove()
-                .aggregation(true)
-                .proving_key_path(prover_config.proving_key.clone())
-                .verbose(prover_config.verbose)
-                .shared_tables(prover_config.shared_tables)
-                .asm_path_opt(prover_config.asm.clone())
-                .base_port_opt(prover_config.asm_port)
-                .unlock_mapped_memory(prover_config.unlock_mapped_memory)
-                .asm_out_file(prover_config.asm_out_file)
-                .gpu(prover_config.gpu_params.clone())
-                .is_distributed(true)
-                .build()?,
+            ProverClientBuilder::new().asm().prove().with_prover_options(prover_options).build()?,
         );
 
-        let elf = ElfBinaryFromFile::new(&prover_config.elf, prover_config.hints)?;
-        let (pk, _) = prover.setup(&elf)?;
-
         Ok(Worker::<Asm> {
-            _worker_id: worker_id,
-            _compute_capacity: compute_capacity,
             state: WorkerState::Disconnected,
             current_job: None,
             current_computation: None,
+            current_mpi_task: None,
             prover,
             prover_config,
-            pk: Arc::new(pk),
             stream_actor: None,
+            guest_programs: HashMap::new(),
+            prover_job: None,
+            program_vks: HashMap::new(),
         })
     }
 
+    /// This worker's local MPI rank.
     pub fn local_rank(&self) -> i32 {
         self.prover.local_rank()
     }
 
+    /// This worker's global MPI rank.
     pub fn world_rank(&self) -> i32 {
         self.prover.world_rank()
     }
 
+    /// Number of MPI ranks sharing this job (`1` when MPI is unused).
+    pub fn n_processes(&self) -> i32 {
+        self.prover.n_processes()
+    }
+
+    /// Content-addressed skip check: returns the cached VK if this program was
+    /// already set up for the given `(hash_id, with_hints, emulator_only)`.
+    pub fn program_vk(
+        &self,
+        hash_id: &str,
+        with_hints: bool,
+        emulator_only: bool,
+    ) -> Option<ProgramVK> {
+        self.program_vks.get(&SetupKey::new(hash_id, with_hints, emulator_only)).cloned()
+    }
+
+    /// Records a completed setup (guest program + VK) so later job dispatch can
+    /// find them and skip re-setup. Takes `&mut self`, so it runs on the event
+    /// loop — see `WorkerNode`'s `SetupProgramComplete` handling.
+    pub fn register_setup(
+        &mut self,
+        hash_id: &str,
+        with_hints: bool,
+        emulator_only: bool,
+        program: Arc<GuestProgram>,
+        vk: ProgramVK,
+    ) {
+        self.guest_programs.insert(hash_id.to_string(), program);
+        self.program_vks.insert(SetupKey::new(hash_id, with_hints, emulator_only), vk);
+    }
+
+    /// Blocking setup compute: broadcasts the ELF to secondary MPI ranks and runs
+    /// `setup_internal`. Runs on a blocking pool, without the `&mut self` map
+    /// access, which stays on the event loop via [`Self::register_setup`]. Does not
+    /// touch `self`.
+    pub fn setup_compute(
+        prover: &ZiskProver<T>,
+        hash_id: &str,
+        with_hints: bool,
+        emulator_only: bool,
+        guest_program: &Arc<GuestProgram>,
+    ) -> Result<ProgramVK> {
+        // Broadcast ELF to secondary MPI ranks before setup (they have no gRPC connection).
+        let message = SetupMessage {
+            hash_id: hash_id.to_string(),
+            program_name: guest_program.name().to_string(),
+            elf_bytes: guest_program.elf().to_vec(),
+            with_hints,
+            emulator_only,
+        };
+        let mut serialized = borsh::to_vec(&(WorkerMpiTag::Setup, message))
+            .map_err(|e| anyhow::anyhow!("Failed to serialize Setup MPI broadcast: {}", e))?;
+        prover.mpi_broadcast(&mut serialized)?;
+
+        let vk = prover.prover.setup_internal(guest_program, with_hints, emulator_only)?;
+        Ok(vk)
+    }
+
+    /// Steps executed by the prover so far.
+    pub fn get_executed_steps(&self) -> u64 {
+        self.prover.executed_steps()
+    }
+
+    /// The worker's current lifecycle state.
     pub fn state(&self) -> &WorkerState {
         &self.state
     }
 
+    /// The resolved prover configuration.
     pub fn connection_config(&self) -> &ProverConfig {
         &self.prover_config
     }
 
+    /// Set the worker's lifecycle state.
     pub fn set_state(&mut self, state: WorkerState) {
         self.state = state;
     }
 
+    /// The current job context, if a job is active.
     pub fn current_job(&self) -> Option<Arc<Mutex<JobContext>>> {
         self.current_job.clone()
     }
 
+    /// Set (or clear, with `None`) the current job context. Clearing it ends the job.
     pub fn set_current_job(&mut self, job: Option<JobContext>) {
         if let Some(job) = job {
             self.current_job = Some(Arc::new(Mutex::new(job)));
         } else {
             self.current_job = None;
+            self.end_job();
         }
     }
 
+    /// End the job on the prover, once its last phase that uses the prover's shared
+    /// memory has run. A phase task still running keeps it until it returns.
+    ///
+    /// Ending a job can wait, for the ROM-histogram runner it joins: when this is the last
+    /// reference, it ends on the blocking pool rather than on the event loop. The next job
+    /// waits for it to end before it begins.
+    pub fn end_job(&mut self) {
+        let Some(job) = self.prover_job.take() else { return };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => drop(runtime.spawn_blocking(move || drop(job))),
+            Err(_) => drop(job),
+        }
+    }
+
+    /// Whether a job on the prover has begun and not ended.
+    pub fn has_job(&self) -> bool {
+        self.prover_job.is_some()
+    }
+
+    /// Take the current compute task handle, leaving `None`.
     pub fn take_current_computation(&mut self) -> Option<JoinHandle<()>> {
         self.current_computation.take()
     }
 
+    /// Store the handle of the in-flight compute task.
     pub fn set_current_computation(&mut self, handle: JoinHandle<()>) {
+        if self.has_live_computation() {
+            // Overwriting a live handle DETACHES the running task (drop of a
+            // tokio JoinHandle does not abort): the old proofman computation
+            // keeps running, invisible to cancel/recovery, and can corrupt this
+            // or the next job's GPU work. The dispatch guards should make this
+            // unreachable; scream if it ever happens.
+            tracing::error!(
+                "[DETACHED-COMPUTATION] set_current_computation called while previous computation is still running — old task is now untracked"
+            );
+        }
         self.current_computation = Some(handle);
     }
 
-    pub fn cancel_current_computation(&mut self) {
-        if let Some(handle) = self.current_computation.take() {
-            handle.abort();
-        }
-
-        // Drop the actor on a blocking thread: closes the channel, which signals the ordering
-        // thread to exit, without blocking the Tokio runtime worker thread.
-        if let Some(stream_actor) = self.stream_actor.take() {
-            tokio::task::spawn_blocking(move || {
-                drop(stream_actor);
-            });
-        }
+    /// True while a previously dispatched computation task is still running.
+    /// Used to refuse duplicate phase dispatches: a second concurrent
+    /// `prove_phase`/contribution on the same proofman corrupts stream and
+    /// challenge state (proofs bound to mixed state -> spurious verification
+    /// failures at aggregation).
+    pub fn has_live_computation(&self) -> bool {
+        self.current_computation.as_ref().is_some_and(|h| !h.is_finished())
     }
 
+    /// The Vadcop verification key (`minimal` selects the minimal variant).
+    pub fn get_vadcop_vk(&self, minimal: bool) -> Result<Vec<u64>> {
+        self.prover.get_vadcop_vk(minimal)
+    }
+
+    /// Hash family the loaded proving key was generated with (e.g. "Poseidon1" / "Poseidon2").
+    pub fn hash(&self) -> Result<String> {
+        self.prover.hash()
+    }
+
+    /// Aggregation arity of the loaded proving key, reported at registration.
+    pub fn aggregation_arity(&self) -> usize {
+        self.prover.aggregation_arity()
+    }
+
+    /// Protocol of the final SNARK of the SNARK proving key, if any, reported at registration.
+    pub fn snark_protocol(&self) -> Option<SnarkProtocol> {
+        self.prover_config.snark_protocol
+    }
+
+    /// A shared handle to the underlying prover.
+    pub fn prover_arc(&self) -> Arc<ZiskProver<T>> {
+        self.prover.clone()
+    }
+
+    /// The set-up guest program for `hash_id`, if any.
+    pub fn guest_program(&self, hash_id: &str) -> Option<Arc<GuestProgram>> {
+        self.guest_programs.get(hash_id).cloned()
+    }
+
+    /// Signals cancellation so the in-flight `executor::execute` returns Err
+    /// (its Err arm does the ASM cleanup). Returns the compute handle rather
+    /// than dropping it, so recovery can await it off the event loop — letting
+    /// the ASM child finish resetting before a new job reuses its shmem.
+    pub fn cancel_current_computation(&mut self) -> CancelledWork {
+        let had_live_compute = self.has_live_computation();
+        let had_job_context = self.current_job.is_some() || self.has_job();
+        let had_stream_actor = self.stream_actor.is_some();
+        let should_cancel = had_live_compute || had_job_context || had_stream_actor;
+
+        if should_cancel {
+            if let Err(e) = self.prover.cancel() {
+                tracing::warn!("cancel_current_computation: prover.cancel failed: {e:#}");
+            }
+        }
+
+        let compute = self.current_computation.take();
+        if had_live_compute {
+            self.prover.notify_cluster_cancellation();
+        }
+
+        // Shut the ordering thread down on the blocking pool and hand the join
+        // handle back so the caller drains it (off the event loop, via the same
+        // path as the compute handle) before the next job's `prover.reset()`.
+        // A still-running old ordering thread would otherwise race `process_hints`
+        // on the new stream against the shared HintsProcessor.
+        let stream = self.stream_actor.take().map(|stream_actor| {
+            tokio::task::spawn_blocking(move || {
+                stream_actor.shutdown_and_join(STREAM_ACTOR_SHUTDOWN_TIMEOUT);
+            })
+        });
+
+        CancelledWork { compute, stream }
+    }
+
+    /// Cancels any in-flight computation and clears the current job context.
+    /// Returns the compute handle (if any) for recovery to await — see
+    /// [`Self::cancel_current_computation`].
+    pub fn clear_current_job(&mut self) -> CancelledWork {
+        let cancelled = self.cancel_current_computation();
+        self.current_job = None;
+        self.end_job();
+        cancelled
+    }
+
+    /// Begin a new job on this worker: end the previous one, wait until the prover is
+    /// idle, begin the job on it, and (re)activate services. See [`Self::end_job`].
+    pub fn prepare_for_new_job(
+        &mut self,
+        hash_id: &str,
+        with_hints: bool,
+        is_first_process: bool,
+    ) -> Result<Arc<ProverJob>> {
+        // Beginning this job waits for the previous one to end.
+        self.end_job();
+
+        let program_id = self
+            .guest_programs
+            .get(hash_id)
+            .ok_or_else(|| anyhow::anyhow!("Guest program not found for hash_id={hash_id}"))?
+            .program_id
+            .clone();
+
+        // GATE: register_program/reset/set_active_services do NOT take proofman's
+        // `computing` mutex, so they can run concurrently with a still-live
+        // `_generate_proof` from a cancelled previous job (the CancelStaleJob
+        // reconnect path flips the worker Ready via SetupProgramAck without
+        // waiting for the cancelled compute to drain). Resetting proving state
+        // under a live proof corrupts it -> internally inconsistent proofs in
+        // the NEXT job. Block here until the prover is truly idle; log loudly
+        // if we actually had to wait — each occurrence is a caught overlap.
+        let wait_start = std::time::Instant::now();
+        self.prover.wait_until_proofman_ready();
+        let waited = wait_start.elapsed();
+        if waited.as_millis() > 50 {
+            tracing::error!(
+                "[LATE-DRAIN] prepare_for_new_job waited {:?} for a previous computation to exit before reset — premature-Ready overlap caught and prevented",
+                waited
+            );
+        }
+
+        let job = Arc::new(self.prover.begin_job_for(&program_id, with_hints)?);
+        self.prover.set_active_services(is_first_process)?;
+        self.prover_job = Some(Arc::clone(&job));
+        Ok(job)
+    }
+
+    /// Install a fresh [`JobContext`] as the current job and mark the worker
+    /// `Computing`. Returns the shared context handle.
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
     pub fn new_job(
         &mut self,
         job_id: JobId,
+        hash_id: String,
         data_ctx: DataCtx,
+        seed: RandomSeed,
         rank_id: u32,
         total_workers: u32,
         allocation: Vec<u32>,
@@ -389,7 +825,9 @@ impl<T: ZiskBackend + 'static> Worker<T> {
     ) -> Arc<Mutex<JobContext>> {
         let current_job = Arc::new(Mutex::new(JobContext {
             job_id: job_id.clone(),
+            hash_id,
             data_ctx,
+            random_seed: seed,
             rank_id,
             total_workers,
             allocation,
@@ -397,6 +835,7 @@ impl<T: ZiskBackend + 'static> Worker<T> {
             phase: JobPhase::Contributions,
             executed_steps: 0,
             task_received_time,
+            instances: 0,
         }));
         self.current_job = Some(current_job.clone());
 
@@ -405,25 +844,36 @@ impl<T: ZiskBackend + 'static> Worker<T> {
         current_job
     }
 
+    /// Broadcast the contribution task to peer ranks, then spawn the local
+    /// contribution computation. Returns the compute task handle.
     pub async fn handle_partial_contribution(
         &self,
         job: Arc<Mutex<JobContext>>,
-        tx: mpsc::UnboundedSender<ComputationResult>,
+        tx: LoopEventSender,
     ) -> Result<JoinHandle<()>> {
         self.partial_contribution_mpi_broadcast(&job).await?;
         Ok(self.partial_contribution(job, tx))
     }
 
+    /// Broadcast the contribution-phase inputs to secondary MPI ranks.
     pub async fn partial_contribution_mpi_broadcast(&self, job: &Mutex<JobContext>) -> Result<()> {
+        // No peers to broadcast to, and serializing copies the whole payload.
+        // `MpiCtx::broadcast` already no-ops below 2 ranks, so this only skips
+        // the serialization; it is point-to-point, so no peer is left probing.
+        if self.n_processes() <= 1 {
+            return Ok(());
+        }
+
         let mut serialized = {
             let job = job.lock().await;
 
             let phase_inputs = ProvePhaseInputs::Contributions();
 
-            let options = self.get_proof_options(false);
+            let options = self.get_prove_options(false);
 
             let message = ContributionsMessage {
                 job_id: job.job_id.clone(),
+                hash_id: job.hash_id.clone(),
                 phase_inputs,
                 options,
                 input_source: job.data_ctx.input_source.clone(),
@@ -433,158 +883,380 @@ impl<T: ZiskBackend + 'static> Worker<T> {
                     allocation: job.allocation.clone(),
                     worker_idx: job.rank_id as usize,
                 },
+                random_seed: *job.random_seed.as_bytes(),
             };
 
-            borsh::to_vec(&(JobPhase::Contributions, message)).unwrap()
+            borsh::to_vec(&(WorkerMpiTag::Contributions, message)).map_err(|e| {
+                anyhow::anyhow!("Failed to serialize Contributions MPI broadcast: {}", e)
+            })?
         };
 
         self.prover.mpi_broadcast(&mut serialized)?;
         Ok(())
     }
 
+    /// Broadcast the execution-only task to peer ranks, then spawn the local
+    /// execution. Returns the compute task handle.
+    pub async fn handle_execution_only(
+        &self,
+        job: Arc<Mutex<JobContext>>,
+        tx: LoopEventSender,
+    ) -> Result<JoinHandle<()>> {
+        self.execution_only_mpi_broadcast(&job).await?;
+        Ok(self.execution_only(job, tx))
+    }
+
+    /// Broadcast the execution-only inputs to secondary MPI ranks.
+    pub async fn execution_only_mpi_broadcast(&self, job: &Mutex<JobContext>) -> Result<()> {
+        // No peers to broadcast to, and serializing copies the whole payload.
+        // `MpiCtx::broadcast` already no-ops below 2 ranks, so this only skips
+        // the serialization; it is point-to-point, so no peer is left probing.
+        if self.n_processes() <= 1 {
+            return Ok(());
+        }
+
+        let mut serialized = {
+            let job = job.lock().await;
+
+            let phase_inputs = ProvePhaseInputs::Contributions();
+
+            let options = self.get_execution_options();
+
+            let message = ContributionsMessage {
+                job_id: job.job_id.clone(),
+                hash_id: job.hash_id.clone(),
+                phase_inputs,
+                options,
+                input_source: job.data_ctx.input_source.clone(),
+                hints_source: job.data_ctx.hints_source.clone(),
+                partition_info: PartitionInfo {
+                    total_compute_units: job.total_compute_units as usize,
+                    allocation: job.allocation.clone(),
+                    worker_idx: job.rank_id as usize,
+                },
+                random_seed: *job.random_seed.as_bytes(),
+            };
+
+            borsh::to_vec(&(WorkerMpiTag::Execution, message)).map_err(|e| {
+                anyhow::anyhow!("Failed to serialize Execution MPI broadcast: {}", e)
+            })?
+        };
+
+        self.prover.mpi_broadcast(&mut serialized)?;
+        Ok(())
+    }
+
+    /// Broadcast the prove task (with challenges) to peer ranks, then spawn the
+    /// local prove computation. Returns the compute task handle.
     pub async fn handle_prove(
         &self,
         job: Arc<Mutex<JobContext>>,
         challenges: Vec<ContributionsInfo>,
-        tx: mpsc::UnboundedSender<ComputationResult>,
+        tx: LoopEventSender,
     ) -> Result<JoinHandle<()>> {
         self.prove_mpi_broadcast(&job, challenges.clone()).await?;
         Ok(self.prove(job, challenges, tx))
     }
 
+    /// Broadcast the prove-phase inputs (challenges) to secondary MPI ranks.
     pub async fn prove_mpi_broadcast(
         &self,
         job: &Mutex<JobContext>,
         challenges: Vec<ContributionsInfo>,
     ) -> Result<()> {
+        // No peers to broadcast to, and serializing copies the whole payload.
+        // `MpiCtx::broadcast` already no-ops below 2 ranks, so this only skips
+        // the serialization; it is point-to-point, so no peer is left probing.
+        if self.n_processes() <= 1 {
+            return Ok(());
+        }
+
         let mut serialized = {
             let job = job.lock().await;
 
             let phase_inputs = proofman::ProvePhaseInputs::Internal(challenges);
 
-            let options = self.get_proof_options(false);
+            let options = self.get_prove_options(false);
 
             let message = ProveMessage { job_id: job.job_id.clone(), phase_inputs, options };
 
-            borsh::to_vec(&(JobPhase::Prove, message)).unwrap()
+            borsh::to_vec(&(WorkerMpiTag::Prove, message))
+                .map_err(|e| anyhow::anyhow!("Failed to serialize Prove MPI broadcast: {}", e))?
         };
 
         self.prover.mpi_broadcast(&mut serialized)?;
         Ok(())
     }
 
-    pub fn handle_aggregate(
+    /// Spawn the aggregation of the given worker proofs. Returns the task handle.
+    pub fn handle_aggregate_proofs(
         &self,
         job: Arc<Mutex<JobContext>>,
         agg_params: AggregationParams,
-        tx: mpsc::UnboundedSender<ComputationResult>,
+        tx: LoopEventSender,
     ) -> JoinHandle<()> {
         self.aggregate(job, agg_params, tx)
     }
 
+    /// Spawn the local contribution computation on a blocking task, emitting a
+    /// [`ComputationResult::Contribution`] to `tx` when done.
     pub fn partial_contribution(
         &self,
         job: Arc<Mutex<JobContext>>,
-        tx: mpsc::UnboundedSender<ComputationResult>,
+        tx: LoopEventSender,
     ) -> JoinHandle<()> {
         let prover = self.prover.clone();
-        let pk = self.pk.clone();
-        let options = self.get_proof_options(false);
+        let options = self.get_prove_options(false);
+        // Held by the task too, so the job outlives it.
+        let prover_job = self.prover_job.clone();
 
         tokio::task::spawn_blocking(move || {
-            let guard = job.blocking_lock();
-            let job_id = guard.job_id.clone();
-
-            info!("Computing Contribution for {job_id}");
-
-            let phase_inputs = proofman::ProvePhaseInputs::Contributions();
-            let inputs_source = guard.data_ctx.input_source.clone();
-            let hints_source = guard.data_ctx.hints_source.clone();
-            let partition_info = PartitionInfo {
-                total_compute_units: guard.total_compute_units as usize,
-                allocation: guard.allocation.clone(),
-                worker_idx: guard.rank_id as usize,
+            let (job_id, task_received_time) = {
+                let guard = job.blocking_lock();
+                (guard.job_id.clone(), guard.task_received_time)
             };
-            drop(guard);
-            let result = Self::execute_contribution_task(
-                job_id.clone(),
-                &prover,
-                phase_inputs,
-                inputs_source,
-                hints_source,
-                partition_info,
-                &pk,
-                options,
-            );
+            let tx_panic = tx.clone();
+            let job_id_panic = job_id.clone();
 
-            let mut guard = job.blocking_lock();
-            guard.executed_steps = prover.executed_steps();
-            let task_received_time = guard.task_received_time;
-            drop(guard);
+            run_panic_guarded(
+                "Contribution",
+                &job_id,
+                || {
+                    let guard = job.blocking_lock();
+                    info!("Computing Contribution for {job_id}");
 
-            let (witness_info, zisk_execution_time) = prover
-                .get_execution_info()
-                .unwrap_or_else(|_| (WitnessInfo::default(), ZiskExecutorTime::default()));
+                    let phase_inputs = proofman::ProvePhaseInputs::Contributions();
+                    let inputs_source = guard.data_ctx.input_source.clone();
+                    let hints_source = guard.data_ctx.hints_source.clone();
+                    let seed = guard.random_seed;
+                    let partition_info = PartitionInfo {
+                        total_compute_units: guard.total_compute_units as usize,
+                        allocation: guard.allocation.clone(),
+                        worker_idx: guard.rank_id as usize,
+                    };
+                    drop(guard);
+                    let result = match prover_job.as_deref() {
+                        Some(prover_job) => Self::execute_contribution_task(
+                            job_id.clone(),
+                            &prover,
+                            prover_job,
+                            phase_inputs,
+                            inputs_source,
+                            hints_source,
+                            seed,
+                            partition_info,
+                            options,
+                        ),
+                        None => {
+                            Err(anyhow::anyhow!("contribution started without a job on the prover"))
+                        }
+                    };
 
-            match result {
-                Ok(data) => {
-                    let _ = tx.send(ComputationResult::Challenge {
-                        job_id,
-                        success: true,
-                        result: Ok((witness_info, zisk_execution_time, data)),
-                        task_received_time,
-                    });
-                }
-                Err(error) => {
-                    error!("Contribution computation failed for {}: {}", job_id, error);
-                    let _ = tx.send(ComputationResult::Challenge {
-                        job_id,
+                    let (witness_info, zisk_execution_time) = prover
+                        .get_execution_info()
+                        .unwrap_or_else(|_| (WitnessInfo::default(), ZiskExecutorTime::default()));
+
+                    let instances = witness_info.total_instances as u64;
+                    let cost_per_type = prover.execution_cost_per_type();
+
+                    let mut guard = job.blocking_lock();
+                    guard.instances = instances;
+                    guard.executed_steps = prover.executed_steps();
+                    drop(guard);
+
+                    let computation = match result {
+                        Ok(data) => ComputationResult::Contribution {
+                            job_id: job_id.clone(),
+                            success: true,
+                            result: Ok((
+                                witness_info,
+                                zisk_execution_time,
+                                data,
+                                instances,
+                                cost_per_type,
+                            )),
+                            task_received_time,
+                        },
+                        Err(error) => {
+                            error!("Contribution computation failed for {job_id}: {error}");
+                            ComputationResult::Contribution {
+                                job_id: job_id.clone(),
+                                success: false,
+                                result: Err(error),
+                                task_received_time,
+                            }
+                        }
+                    };
+                    if tx.send_computation(computation).is_err() {
+                        warn!("Failed to send contribution result: event loop channel closed");
+                    }
+                },
+                || {
+                    let _ = tx_panic.send_computation(ComputationResult::Contribution {
+                        job_id: job_id_panic,
                         success: false,
-                        result: Err(error),
+                        result: Err(anyhow::anyhow!("contribution task panicked")),
                         task_received_time,
                     });
-                }
-            }
+                },
+            );
         })
     }
 
+    /// Spawn the local execution-only computation on a blocking task, emitting a
+    /// [`ComputationResult::Execution`] to `tx` when done.
+    pub fn execution_only(
+        &self,
+        job: Arc<Mutex<JobContext>>,
+        tx: LoopEventSender,
+    ) -> JoinHandle<()> {
+        let prover = self.prover.clone();
+        // Held by the task too, so the job outlives it.
+        let prover_job = self.prover_job.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let (job_id, task_received_time) = {
+                let guard = job.blocking_lock();
+                (guard.job_id.clone(), guard.task_received_time)
+            };
+            let tx_panic = tx.clone();
+            let job_id_panic = job_id.clone();
+
+            run_panic_guarded(
+                "Execution",
+                &job_id,
+                || {
+                    let guard = job.blocking_lock();
+                    info!("Computing Execution (execution-only) for {job_id}");
+
+                    let inputs_source = guard.data_ctx.input_source.clone();
+                    let hints_source = guard.data_ctx.hints_source.clone();
+                    let seed = guard.random_seed;
+                    let partition_info = PartitionInfo {
+                        total_compute_units: guard.total_compute_units as usize,
+                        allocation: guard.allocation.clone(),
+                        worker_idx: guard.rank_id as usize,
+                    };
+                    drop(guard);
+
+                    // Execute the program (same as contribution) but without generating challenges
+                    let result = match prover_job.as_deref() {
+                        Some(prover_job) => Self::execute_execution_task(
+                            &prover,
+                            prover_job,
+                            inputs_source,
+                            hints_source,
+                            seed,
+                            partition_info,
+                        ),
+                        None => {
+                            Err(anyhow::anyhow!("execution started without a job on the prover"))
+                        }
+                    };
+
+                    {
+                        let mut guard = job.blocking_lock();
+                        guard.executed_steps = prover.executed_steps();
+                    }
+
+                    let (witness_info, zisk_execution_time) = prover
+                        .get_execution_info()
+                        .unwrap_or_else(|_| (WitnessInfo::default(), ZiskExecutorTime::default()));
+
+                    let computation = match result {
+                        Ok((num_instances, publics)) => {
+                            let instances = num_instances as u64;
+                            let executed_steps = prover.executed_steps();
+                            let cost_per_type = prover.execution_cost_per_type();
+                            let plan = prover.execution_plan();
+                            job.blocking_lock().instances = instances;
+
+                            // witness_info.publics is empty in execution-only mode (no witness
+                            // phase), so override with the publics from ExecuteOutput.
+                            let mut wi = witness_info;
+                            wi.publics = publics;
+
+                            ComputationResult::Execution {
+                                job_id: job_id.clone(),
+                                success: true,
+                                result: Ok((
+                                    wi,
+                                    zisk_execution_time,
+                                    instances,
+                                    executed_steps,
+                                    cost_per_type,
+                                    plan,
+                                )),
+                                task_received_time,
+                            }
+                        }
+                        Err(error) => {
+                            error!("Execution-only computation failed for {job_id}: {error}");
+                            ComputationResult::Execution {
+                                job_id: job_id.clone(),
+                                success: false,
+                                result: Err(error),
+                                task_received_time,
+                            }
+                        }
+                    };
+                    if tx.send_computation(computation).is_err() {
+                        warn!("Failed to send execution result: event loop channel closed");
+                    }
+                },
+                || {
+                    let _ = tx_panic.send_computation(ComputationResult::Execution {
+                        job_id: job_id_panic,
+                        success: false,
+                        result: Err(anyhow::anyhow!("execution task panicked")),
+                        task_received_time,
+                    });
+                },
+            );
+        })
+    }
+
+    /// Run the contribution phase synchronously: set up stdin/hints and the
+    /// partition, then generate this worker's contribution challenges.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_contribution_task(
         job_id: JobId,
         prover: &ZiskProver<T>,
+        job: &ProverJob,
         phase_inputs: ProvePhaseInputs,
         input_source: InputSourceDto,
         hints_source: HintsSourceDto,
+        seed: RandomSeed,
         partition_info: PartitionInfo,
-        pk: &ZiskProgramPK,
         options: ProofOptions,
     ) -> Result<Vec<ContributionsInfo>> {
         let phase = proofman::ProvePhase::Contributions;
 
         let stdin = match input_source {
             InputSourceDto::InputPath(inputs_uri) => ZiskStdin::from_file(inputs_uri)?,
-            InputSourceDto::InputData(input_data) => ZiskStdin::from_vec(input_data),
-            InputSourceDto::InputNull => ZiskStdin::null(),
+            // `from_vec` needs an owned `Vec`.
+            InputSourceDto::InputData(input_data) => ZiskStdin::from_vec(input_data.to_vec()),
+            InputSourceDto::InputNull => ZiskStdin::new(),
         };
 
-        match hints_source {
-            HintsSourceDto::HintsPath(hints_uri) => {
-                let hints_stream = StreamSource::from_uri(hints_uri)?;
-                pk.register_hints_stream(hints_stream)?;
-            }
-            HintsSourceDto::HintsStream(_hints_uri) => {
-                // For HintsStream, the worker will receive hint data via StreamData gRPC messages
-                // routed through the stream ordering actor into the hints processor.
-                // No need to set hints_stream on prover for this case
-            }
-            HintsSourceDto::HintsNull => {
-                // No hints to set
+        if prover.world_rank() == 0 {
+            match hints_source {
+                HintsSourceDto::HintsPath(hints_uri) => {
+                    let hints_stream = StreamSource::from_uri(hints_uri)?;
+                    prover.register_hints_stream(job, hints_stream)?;
+                }
+                HintsSourceDto::HintsData(hints_data) => {
+                    let hints_stream = StreamSource::from_vec(hints_data.to_vec());
+                    prover.register_hints_stream(job, hints_stream)?;
+                }
+                HintsSourceDto::HintsStream(_) | HintsSourceDto::HintsNull => {
+                    // HintsStream: data is delivered via route_stream_data → actor → process_hints.
+                    // HintsNull: nothing to register.
+                }
             }
         }
 
-        prover.set_stdin(stdin)?;
-
-        prover.register_program(pk)?;
+        prover.set_stdin_and_random_seed(stdin, seed)?;
 
         if matches!(phase_inputs, ProvePhaseInputs::Contributions()) {
             prover.set_partition(
@@ -607,39 +1279,141 @@ impl<T: ZiskBackend + 'static> Worker<T> {
             }
             Err(err) => {
                 error!("Failed to generate proof for {job_id}: {:?}", err);
-                return Err(anyhow::anyhow!("Failed to generate proof"));
+                return Err(err.context("Failed to generate proof"));
             }
         };
 
         Ok(challenge)
     }
 
+    /// Run the execute-only phase synchronously and return
+    /// `(num_instances, public_outputs)`. Ends with every rank agreeing on whether
+    /// they all succeeded, so all ranks finish before success is reported.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_execution_task(
+        prover: &ZiskProver<T>,
+        job: &ProverJob,
+        input_source: InputSourceDto,
+        hints_source: HintsSourceDto,
+        seed: RandomSeed,
+        partition_info: PartitionInfo,
+    ) -> Result<(usize, Vec<u64>)> {
+        let outcome =
+            Self::run_execution(prover, job, input_source, hints_source, seed, partition_info);
+        // `execute` has no implicit MPI sync (each rank runs its own partition
+        // independently). Every rank says whether its own ran, failed or not, so
+        // that they all end the execution together, and all fail if any did: a rank
+        // left waiting for the others could never stop for a recovery.
+        let all_ok = prover.cluster_all_ok(outcome.is_ok());
+        let outcome = outcome?;
+        if !all_ok {
+            return Err(anyhow::anyhow!("another MPI rank failed its part of the execution"));
+        }
+        Ok(outcome)
+    }
+
+    /// [`Self::execute_execution_task`] on this rank alone.
+    fn run_execution(
+        prover: &ZiskProver<T>,
+        job: &ProverJob,
+        input_source: InputSourceDto,
+        hints_source: HintsSourceDto,
+        seed: RandomSeed,
+        partition_info: PartitionInfo,
+    ) -> Result<(usize, Vec<u64>)> {
+        let stdin = match input_source {
+            InputSourceDto::InputPath(inputs_uri) => ZiskStdin::from_file(inputs_uri)?,
+            // `from_vec` needs an owned `Vec`.
+            InputSourceDto::InputData(input_data) => ZiskStdin::from_vec(input_data.to_vec()),
+            InputSourceDto::InputNull => ZiskStdin::new(),
+        };
+
+        if prover.world_rank() == 0 {
+            match hints_source {
+                HintsSourceDto::HintsPath(hints_uri) => {
+                    let hints_stream = StreamSource::from_uri(hints_uri)?;
+                    prover.register_hints_stream(job, hints_stream)?;
+                }
+                HintsSourceDto::HintsData(hints_data) => {
+                    let hints_stream = StreamSource::from_vec(hints_data.to_vec());
+                    prover.register_hints_stream(job, hints_stream)?;
+                }
+                HintsSourceDto::HintsStream(_) | HintsSourceDto::HintsNull => {
+                    // HintsStream: data is delivered via route_stream_data → actor → process_hints.
+                    // HintsNull: nothing to register.
+                }
+            }
+        }
+
+        prover.set_partition(
+            partition_info.total_compute_units,
+            partition_info.allocation.clone(),
+            partition_info.worker_idx,
+        )?;
+
+        let result = prover.execute_in(job, stdin, seed)?;
+
+        let num_instances = prover.get_execution_info()?.0.total_instances;
+
+        let publics_u64 = result.get_publics().public_u64();
+
+        Ok((num_instances, publics_u64))
+    }
+
+    /// Wrap an existing vadcop proof into a minimal or SNARK proof.
+    /// `proof_data` is a bincode-encoded `Proof`.
+    /// Returns the bincode-encoded wrapped `Proof`.
+    pub fn execute_wrap_task(
+        prover: &ZiskProver<T>,
+        proof_data: Vec<u8>,
+        proof_dest: i32,
+    ) -> Result<Vec<u8>> {
+        let proof_kind = match proof_dest {
+            1 => ProofKind::VadcopFinalMinimal,
+            2 => ProofKind::Snark,
+            _ => anyhow::bail!("Unsupported proof_dest for wrap: {}", proof_dest),
+        };
+
+        // from_bincode does not check the shape a saved proof has; the backend indexes into it.
+        let proof = Proof::from_bincode(&proof_data)
+            .and_then(|p| p.ensure_saveable().map(|()| p))
+            .map_err(|e| anyhow::anyhow!("Invalid proof for wrap: {}", e))?;
+
+        let result = prover.wrap_proof(&proof, proof_kind).run()?;
+
+        let wrapped = result.get_proof();
+
+        let result_bytes = wrapped
+            .to_bincode()
+            .map_err(|e| anyhow::anyhow!("Failed to serialize wrapped proof: {}", e))?;
+
+        Ok(result_bytes)
+    }
+
     /// Routes an incoming `StreamData` message to the per-job ordering actor.
+    pub fn append_raw_input(&self, data: &[u8]) -> Result<()> {
+        self.prover.append_raw_input(data)
+    }
+
     ///
-    /// - `Start`: initialises the `HintsProcessor` (if needed), resets it, and spawns the actor.
+    /// - `Start`: spawns a new `StreamOrderingActor`. Resetting shmem and setting
+    ///   active services are NOT done here — they are handled synchronously by
+    ///   `prepare_for_new_job` before the contribution task is spawned, so reset
+    ///   is guaranteed to happen before the C services start reading and before
+    ///   any data is written via `process_hints`.
     /// - `Data` / `End`: enqueues the message into the actor's channel — O(1), non-blocking.
     ///
     /// The actor thread owns the reorder buffer and calls `process_hints` in sequence order.
-    pub async fn route_stream_data(
-        &mut self,
-        stream_data: StreamDataDto,
-        is_first_partition: bool,
-    ) -> Result<()> {
+    pub async fn route_stream_data(&mut self, stream_data: StreamDataDto) -> Result<()> {
         match &stream_data.stream_type {
             StreamMessageKind::Start => {
                 let job_id = stream_data.job_id.clone();
 
-                self.pk.reset();
+                let processor = self.prover.get_hints_processor()?;
 
-                let processor = self.pk.get_hints_processor().ok_or_else(|| {
-                    anyhow::anyhow!("HintsProcessor not found for job {}", job_id)
-                })?;
-
-                if let Some(r) = self.pk.asm_resources.as_ref() {
-                    r.set_active_services(is_first_partition)?;
-                }
-
-                // Replace any existing actor (handles reconnect / job restart)
+                // Replace any existing actor — `prepare_for_new_job` already ran
+                // `cancel_current_computation`, which joined the previous actor's
+                // worker thread, so this assignment can't race a stale process_hints.
                 self.stream_actor = Some(StreamOrderingActor::new(processor, job_id));
             }
             StreamMessageKind::Data | StreamMessageKind::End => match &self.stream_actor {
@@ -656,6 +1430,7 @@ impl<T: ZiskBackend + 'static> Worker<T> {
         Ok(())
     }
 
+    /// Assign this worker's partition (compute units, allocation, index).
     pub fn set_partition(
         &self,
         total_compute_units: usize,
@@ -665,43 +1440,67 @@ impl<T: ZiskBackend + 'static> Worker<T> {
         self.prover.set_partition(total_compute_units, allocation, worker_idx)
     }
 
+    /// Spawn the local prove computation on a blocking task, emitting a
+    /// [`ComputationResult::Proofs`] to `tx` when done.
     pub fn prove(
         &self,
         job: Arc<Mutex<JobContext>>,
         challenges: Vec<ContributionsInfo>,
-        tx: mpsc::UnboundedSender<ComputationResult>,
+        tx: LoopEventSender,
     ) -> JoinHandle<()> {
         let prover = self.prover.clone();
-        let options = self.get_proof_options(false);
+        let options = self.get_prove_options(false);
+        // Held by the task too, so the job outlives it.
+        let prover_job = self.prover_job.clone();
 
         tokio::task::spawn_blocking(move || {
+            let _prover_job = prover_job;
             let job_id = job.blocking_lock().job_id.clone();
+            let tx_panic = tx.clone();
+            let job_id_panic = job_id.clone();
 
-            info!("Computing Prove for {job_id}");
+            run_panic_guarded(
+                "Prove",
+                &job_id,
+                || {
+                    info!("Computing Prove for {job_id}");
 
-            let phase_inputs = proofman::ProvePhaseInputs::Internal(challenges);
-            let result = Self::execute_prove_task(job_id.clone(), &prover, phase_inputs, options);
+                    let phase_inputs = proofman::ProvePhaseInputs::Internal(challenges);
+                    let result =
+                        Self::execute_prove_task(job_id.clone(), &prover, phase_inputs, options);
 
-            match result {
-                Ok(data) => {
-                    let _ = tx.send(ComputationResult::Proofs {
-                        job_id,
-                        success: true,
-                        result: Ok(data),
-                    });
-                }
-                Err(error) => {
-                    error!("Prove computation failed for {}: {}", job_id, error);
-                    let _ = tx.send(ComputationResult::Proofs {
-                        job_id,
+                    let computation = match result {
+                        Ok(data) => ComputationResult::Proofs {
+                            job_id: job_id.clone(),
+                            success: true,
+                            result: Ok(data),
+                        },
+                        Err(error) => {
+                            error!("Prove computation failed for {job_id}: {error}");
+                            ComputationResult::Proofs {
+                                job_id: job_id.clone(),
+                                success: false,
+                                result: Err(error),
+                            }
+                        }
+                    };
+                    if tx.send_computation(computation).is_err() {
+                        warn!("Failed to send prove result: event loop channel closed");
+                    }
+                },
+                || {
+                    let _ = tx_panic.send_computation(ComputationResult::Proofs {
+                        job_id: job_id_panic,
                         success: false,
-                        result: Err(error),
+                        result: Err(anyhow::anyhow!("prove task panicked")),
                     });
-                }
-            }
+                },
+            );
         })
     }
 
+    /// Run the internal prove phase synchronously and return this worker's
+    /// partial proofs.
     pub fn execute_prove_task(
         job_id: JobId,
         prover: &ZiskProver<T>,
@@ -731,44 +1530,60 @@ impl<T: ZiskBackend + 'static> Worker<T> {
         Ok(proof)
     }
 
+    /// Register peer worker proofs and spawn the join/aggregate computation,
+    /// emitting a [`ComputationResult::AggProof`] to `tx` when done.
     pub fn aggregate(
         &self,
         job: Arc<Mutex<JobContext>>,
         agg_params: AggregationParams,
-        tx: mpsc::UnboundedSender<ComputationResult>,
+        tx: LoopEventSender,
     ) -> JoinHandle<()> {
         let prover = self.prover.clone();
-        let options = self.get_proof_options(agg_params.compressed);
+        let options =
+            self.get_prove_options(agg_params.proof_type == ProofKind::VadcopFinalMinimal);
 
         let agg_proofs_register: Vec<AggProofsRegister> = agg_params
             .agg_proofs
             .iter()
             .map(|v| AggProofsRegister {
                 airgroup_id: v.airgroup_id,
-                worker_indexes: vec![v.worker_idx as usize],
+                worker_indexes: v.worker_indexes.iter().map(|&i| i as usize).collect(),
             })
             .collect();
 
-        if let Err(error) = prover.register_aggregated_proofs(agg_proofs_register) {
-            let job_guard = job.blocking_lock();
-            let job_id = job_guard.job_id.clone();
-            let executed_steps = job_guard.executed_steps;
-
-            let _ = tx.send(ComputationResult::AggProof {
-                job_id,
-                success: false,
-                result: Err(error),
-                executed_steps,
-            });
-
-            return tokio::spawn(async {});
-        }
-
         tokio::task::spawn_blocking(move || {
-            let (job_id, executed_steps) = {
+            let (job_id, executed_steps, instances) = {
                 let guard = job.blocking_lock();
-                (guard.job_id.clone(), guard.executed_steps)
+                (guard.job_id.clone(), guard.executed_steps, guard.instances)
             };
+
+            // Recovery: drop what this worker holds before re-absorbing a lost node's inputs.
+            if agg_params.reset_state {
+                prover.reset_aggregation_state();
+            }
+
+            // Register peer proofs on the blocking thread: it can fail, and the
+            // error path reads job context via `blocking_lock`, which panics when
+            // called on an async runtime thread. (This previously ran inline on the
+            // event-loop thread, so a registration failure crashed the loop.)
+            if let Err(error) = prover.register_worker_proofs(agg_proofs_register) {
+                if tx
+                    .send_computation(ComputationResult::AggProof {
+                        job_id,
+                        success: false,
+                        result: Err(error),
+                        executed_steps,
+                        proof_type: agg_params.proof_type,
+                        instances,
+                        final_proof: agg_params.final_proof,
+                        drain: agg_params.last_proof,
+                    })
+                    .is_err()
+                {
+                    warn!("Failed to send aggregation register error: event loop channel closed");
+                }
+                return;
+            }
 
             info!("Starting aggregation step for {job_id}");
 
@@ -778,53 +1593,81 @@ impl<T: ZiskBackend + 'static> Worker<T> {
                 .map(|v| AggProofs {
                     airgroup_id: v.airgroup_id,
                     proof: v.values.clone(),
-                    worker_indexes: vec![v.worker_idx as usize],
+                    worker_indexes: v.worker_indexes.iter().map(|&i| i as usize).collect(),
                 })
                 .collect();
 
-            let result = prover.aggregate_proofs(
+            let result = prover.join_worker_proofs(
                 agg_proofs,
                 agg_params.last_proof,
                 agg_params.final_proof,
+                agg_params.keep_resident,
                 &options,
             );
 
             match result {
                 Ok(data) => {
-                    let proof = data
-                        .map(|proof| proof.agg_proofs.into_iter().map(|p| p.proof).collect())
-                        .unwrap_or_default();
-                    let _ = tx.send(ComputationResult::AggProof {
-                        job_id,
-                        success: true,
-                        result: Ok(Some(proof)),
-                        executed_steps,
-                    });
+                    if tx
+                        .send_computation(ComputationResult::AggProof {
+                            job_id,
+                            success: true,
+                            result: Ok(data.map(|d| d.agg_proofs)),
+                            executed_steps,
+                            proof_type: agg_params.proof_type,
+                            instances,
+                            final_proof: agg_params.final_proof,
+                            drain: agg_params.last_proof,
+                        })
+                        .is_err()
+                    {
+                        warn!("Failed to send aggregation result: event loop channel closed");
+                    }
                 }
                 Err(error) => {
                     tracing::error!("Aggregation failed for {}: {}", job_id, error);
-                    let _ = tx.send(ComputationResult::AggProof {
-                        job_id,
-                        success: false,
-                        result: Err(error),
-                        executed_steps,
-                    });
+                    if tx
+                        .send_computation(ComputationResult::AggProof {
+                            job_id,
+                            success: false,
+                            result: Err(error),
+                            executed_steps,
+                            proof_type: agg_params.proof_type,
+                            instances,
+                            final_proof: agg_params.final_proof,
+                            drain: agg_params.last_proof,
+                        })
+                        .is_err()
+                    {
+                        warn!("Failed to send aggregation error: event loop channel closed");
+                    }
                 }
             }
         })
     }
 
-    fn get_proof_options(&self, compressed: bool) -> ProofOptions {
+    /// Proof options for the prove/contribution/aggregation phases.
+    /// Aggregation must always be enabled so proofman returns partial proof data.
+    fn get_prove_options(&self, minimal: bool) -> ProofOptions {
         ProofOptions {
-            verify_constraints: self.prover_config.verify_constraints,
-            aggregation: self.prover_config.aggregation,
+            verify_constraints: false,
+            aggregation: true,
             verify_proofs: false,
-            save_proofs: false,
-            test_mode: false,
-            output_dir_path: None,
-            rma: self.prover_config.rma,
+            rma: true,
             minimal_memory: self.prover_config.minimal_memory,
-            compressed,
+            compressed: minimal,
+        }
+    }
+
+    /// Proof options for execution-only phase.
+    /// No aggregation needed; verify_constraints follows worker config.
+    fn get_execution_options(&self) -> ProofOptions {
+        ProofOptions {
+            verify_constraints: true,
+            aggregation: false,
+            verify_proofs: false,
+            rma: true,
+            minimal_memory: self.prover_config.minimal_memory,
+            compressed: false,
         }
     }
 
@@ -832,93 +1675,206 @@ impl<T: ZiskBackend + 'static> Worker<T> {
     // MPI Broadcast handlers for receiving and executing tasks
     // --------------------------------------------------------------------------
 
-    pub async fn handle_mpi_broadcast_request(&self) -> Result<()> {
+    /// Receive one MPI broadcast on a secondary rank and act on its tag:
+    /// feed stream data to the running task, or run setup/execution/
+    /// contribution/prove (with recovery on failure). Aggregate is rejected.
+    pub async fn handle_mpi_broadcast_request(&mut self) -> Result<()> {
         let mut bytes: Vec<u8> = Vec::new();
 
         self.prover.mpi_broadcast(&mut bytes)?;
 
-        // extract byte 0 to decide the option
-        let phase: JobPhase = borsh::from_slice(&bytes[0..1]).unwrap();
+        if bytes.is_empty() {
+            return Err(anyhow::anyhow!("Empty MPI broadcast received"));
+        }
+
+        let tag: WorkerMpiTag = borsh::from_slice(&bytes[0..1])
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize MPI broadcast tag: {}", e))?;
 
         let prover = self.prover.clone();
-        let pk = self.pk.clone();
-        let options = self.get_proof_options(false);
+        let options = self.get_prove_options(false);
 
-        if phase == JobPhase::ContributionsHintsStream {
-            if let Some(r) = pk.asm_resources.as_ref() {
-                let message: StreamMessage = borsh::from_slice(&bytes[1..]).unwrap();
-                if let Err(e) = r.submit_hint_direct(&message.data) {
-                    tracing::error!("Failed to submit hints: {}", e);
-                }
-            } else {
-                tracing::error!("Hints sink is not configured for ContributionsHintsStream");
+        match tag {
+            // Stream broadcasts must run synchronously and concurrently with
+            // the in-flight task: the running ASM child is waiting on the
+            // `input_avail`/`hint_avail` semaphores that submit_input /
+            // submit_hint post. If we awaited the task here we'd never get
+            // around to feeding it.
+            WorkerMpiTag::ContributionsHintsStream => {
+                prover.submit_hint(&bytes)?;
             }
-        } else if phase == JobPhase::ContributionsInputsStream {
-            if let Some(inputs_shmem_writer) =
-                pk.asm_resources.as_ref().map(|r| r.inputs_shmem_writer.clone())
-            {
-                let message: StreamMessage = borsh::from_slice(&bytes[1..]).unwrap();
-                let reinterpreted_data = unsafe {
-                    std::slice::from_raw_parts(
-                        message.data.as_ptr() as *const u8,
-                        message.data.len() * std::mem::size_of::<u64>(),
-                    )
-                };
-                if let Err(e) = inputs_shmem_writer.append_input(reinterpreted_data) {
-                    tracing::error!("Failed to submit inputs: {}", e);
-                }
-            } else {
-                tracing::error!("Inputs sink is not configured for ContributionsInputsStream");
+            WorkerMpiTag::ContributionsInputsStream => {
+                prover.submit_input(&bytes)?;
             }
-        } else {
-            tokio::task::spawn_blocking(move || match phase {
-                JobPhase::Contributions => {
-                    let message: ContributionsMessage = borsh::from_slice(&bytes[1..]).unwrap();
+            WorkerMpiTag::Setup => {
+                self.await_current_mpi_task().await;
+                // The previous job is over; its hold on the shared memory would keep
+                // this setup from starting its services.
+                self.end_job();
+                let message: SetupMessage = borsh::from_slice(&bytes[1..]).map_err(|e| {
+                    anyhow::anyhow!("Failed to deserialize Setup MPI broadcast: {}", e)
+                })?;
 
-                    let result = Self::execute_contribution_task(
-                        message.job_id,
-                        &prover,
-                        message.phase_inputs,
-                        message.input_source,
-                        message.hints_source,
-                        message.partition_info,
-                        &pk,
-                        message.options,
-                    );
-                    if let Err(e) = result {
-                        tracing::error!(
-                                "Error during Contributions MPI broadcast execution: {}. Waiting for new job...",
-                                e
-                            );
-                    }
-                }
-                JobPhase::Prove => {
-                    let message: ProveMessage = borsh::from_slice(&bytes[1..]).unwrap();
+                let guest_program =
+                    Arc::new(GuestProgram::from_bytes(message.program_name, message.elf_bytes));
+                let gp_clone = guest_program.clone();
+                let with_hints = message.with_hints;
+                let emulator_only = message.emulator_only;
+                let setup_result = tokio::task::spawn_blocking(move || {
+                    prover.prover.setup_internal(&gp_clone, with_hints, emulator_only)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("Setup spawn_blocking panicked: {}", e));
+                setup_result??;
 
-                    let result = Self::execute_prove_task(
-                        message.job_id,
-                        &prover,
-                        message.phase_inputs,
-                        options,
-                    );
-                    if let Err(e) = result {
-                        error!(
-                            "Error during Prove MPI broadcast execution: {}. Waiting for new job...",
+                self.guest_programs.insert(message.hash_id.clone(), guest_program);
+            }
+            WorkerMpiTag::Execution | WorkerMpiTag::Contributions => {
+                self.await_current_mpi_task().await;
+
+                let message: ContributionsMessage =
+                    borsh::from_slice(&bytes[1..]).map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to deserialize Contributions/Execution MPI broadcast: {}",
                             e
-                        );
-                    }
-                }
+                        )
+                    })?;
 
-                JobPhase::Aggregate => {
-                    unreachable!("Aggregate phase is not supported in MPI broadcast");
-                }
-                JobPhase::ContributionsHintsStream | JobPhase::ContributionsInputsStream => {
-                    unreachable!(
-                        "Stream phases should be handled separately and not reach this point"
-                    );
-                }
-            });
+                let with_hints = !matches!(message.hints_source, HintsSourceDto::HintsNull);
+                let is_first_process =
+                    message.partition_info.allocation.contains(&0) && self.world_rank() == 0;
+                let job =
+                    self.prepare_for_new_job(&message.hash_id, with_hints, is_first_process)?;
+
+                let is_execution = matches!(tag, WorkerMpiTag::Execution);
+                let world_rank = self.world_rank();
+                let seed = RandomSeed::new(message.random_seed);
+                let handle = tokio::task::spawn_blocking(move || {
+                    let run = || -> Result<()> {
+                        if is_execution {
+                            Self::execute_execution_task(
+                                &prover,
+                                &job,
+                                message.input_source,
+                                message.hints_source,
+                                seed,
+                                message.partition_info,
+                            )?;
+                        } else {
+                            Self::execute_contribution_task(
+                                message.job_id,
+                                &prover,
+                                &job,
+                                message.phase_inputs,
+                                message.input_source,
+                                message.hints_source,
+                                seed,
+                                message.partition_info,
+                                message.options,
+                            )?;
+                        }
+                        Ok(())
+                    };
+
+                    // A failure reaches rank 0 through the job's collectives, and its
+                    // recovery stops this rank too; see `stop_cancelled_job`.
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            error!("MPI broadcast task failed: {}. Waiting for new job...", e);
+                        }
+                        Err(_) => {
+                            error!(
+                                "MPI broadcast task panicked on rank {world_rank}. Waiting for new job..."
+                            );
+                        }
+                    }
+                });
+                self.current_mpi_task = Some(handle);
+            }
+            WorkerMpiTag::Prove => {
+                self.await_current_mpi_task().await;
+
+                let message: ProveMessage = borsh::from_slice(&bytes[1..]).map_err(|e| {
+                    anyhow::anyhow!("Failed to deserialize Prove MPI broadcast: {}", e)
+                })?;
+
+                let world_rank = self.world_rank();
+                // Held by the task too, so the job outlives it.
+                let job = self.prover_job.clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let _job = job;
+                    let task_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            Self::execute_prove_task(
+                                message.job_id,
+                                &prover,
+                                message.phase_inputs,
+                                options,
+                            )
+                        }));
+                    // As for the contribution's: rank 0's recovery stops this rank.
+                    match task_result {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            error!("MPI Prove task failed: {}. Waiting for new job...", e);
+                        }
+                        Err(_) => {
+                            error!(
+                                "MPI Prove task panicked on rank {world_rank}. Waiting for new job..."
+                            );
+                        }
+                    }
+                });
+                self.current_mpi_task = Some(handle);
+            }
+            WorkerMpiTag::Aggregate => {
+                return Err(anyhow::anyhow!("Aggregate phase is not supported in MPI broadcast"));
+            }
+            WorkerMpiTag::Cancel => {
+                let message: CancelMessage = borsh::from_slice(&bytes[1..]).map_err(|e| {
+                    anyhow::anyhow!("Failed to deserialize Cancel MPI broadcast: {}", e)
+                })?;
+                self.stop_cancelled_job(&message.job_id).await;
+            }
         }
         Ok(())
+    }
+
+    /// A peer rank's part of rank 0's recovery: stop the cancelled job's task, end
+    /// the job, and reply once the prover is idle, which rank 0 waits for.
+    async fn stop_cancelled_job(&mut self, job_id: &str) {
+        let world_rank = self.world_rank();
+        warn!("[Recovery] rank {world_rank}: job {job_id} cancelled; stopping its work");
+        // Only while the job is held: its end resets the ASM services' cancel flag,
+        // which would otherwise reach the next job.
+        if self.has_job() {
+            if let Err(e) = self.prover.cancel() {
+                warn!("[Recovery] rank {world_rank}: cancelling the prover failed: {e:#}");
+            }
+        }
+        self.await_current_mpi_task().await;
+        self.end_job();
+
+        let prover = self.prover.clone();
+        let replied = tokio::task::spawn_blocking(move || {
+            prover.wait_until_proofman_ready();
+            prover.mpi_send(0, CANCEL_DONE_TAG, &[]);
+        })
+        .await;
+        match replied {
+            Ok(()) => info!("[Recovery] rank {world_rank}: job {job_id} stopped; told rank 0"),
+            Err(e) => error!("[Recovery] rank {world_rank}: replying to rank 0 failed: {e}"),
+        }
+    }
+
+    /// Joins the previous MPI peer-rank task before starting a new one.
+    /// Errors and panics from the joined task are logged here so the loop
+    /// keeps running; rank 0's recovery handles a failed job.
+    async fn await_current_mpi_task(&mut self) {
+        if let Some(handle) = self.current_mpi_task.take() {
+            if let Err(e) = handle.await {
+                error!("MPI broadcast task join failed: {e}");
+            }
+        }
     }
 }

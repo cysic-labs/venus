@@ -3,10 +3,13 @@ use std::sync::{Arc, RwLock};
 use proofman_common::{
     write_custom_commit_trace, AirInstance, BufferPool, FromTrace, ProofCtx, ProofmanResult, SetupCtx, init_gpu_setup,
 };
-use witness::WitnessComponent;
-use fields::PrimeField64;
+use proofman_witness::WitnessComponent;
+use proofman_fields::PrimeField64;
 
-use crate::{BuildPublicValues, FibonacciSquareAirValues, FibonacciSquareRomTrace, FibonacciSquareTrace, MERKLE_TREE_ARITY};
+use crate::{
+    BuildPublicValues, FibonacciSquareAirGroupValues, FibonacciSquareAirValues, FibonacciSquareRomTrace,
+    FibonacciSquareTrace,
+};
 
 pub struct FibonacciSquare {
     instance_ids: RwLock<Vec<usize>>,
@@ -46,15 +49,11 @@ impl<F: PrimeField64> WitnessComponent<F> for FibonacciSquare {
 
             tracing::debug!("··· Starting witness computation stage {}", 1);
 
-            // The publics stay locked while the view is alive, so read them and release the lock.
-            let (module, mut a, mut b) = {
-                let publics = BuildPublicValues::from_vec_guard(pctx.get_publics());
-                (
-                    F::as_canonical_u64(&publics.module),
-                    F::as_canonical_u64(&publics.in1),
-                    F::as_canonical_u64(&publics.in2),
-                )
-            };
+            let mut publics = BuildPublicValues::from_vec_guard(pctx.get_publics());
+
+            let module = F::as_canonical_u64(&publics.module);
+            let mut a = F::as_canonical_u64(&publics.in1);
+            let mut b = F::as_canonical_u64(&publics.in2);
 
             let mut trace = FibonacciSquareTrace::new_from_vec_zeroes(buffer_pool.take_buffer())?;
 
@@ -70,20 +69,28 @@ impl<F: PrimeField64> WitnessComponent<F> for FibonacciSquare {
                 trace[i].b = F::from_u64(b);
             }
 
-            BuildPublicValues::from_vec_guard(pctx.get_publics()).out = trace[trace.num_rows() - 1].b;
+            publics.out = trace[trace.num_rows() - 1].b;
 
             let mut air_values = FibonacciSquareAirValues::<F>::new();
             air_values.fibo1[0] = F::from_u64(1);
             air_values.fibo1[1] = F::from_u64(2);
             air_values.fibo3 = [F::from_u64(5), F::from_u64(5), F::from_u64(5)];
 
-            let air_instance = AirInstance::new_from_trace(FromTrace::new(&mut trace).with_air_values(&mut air_values));
+            let mut air_group_values = FibonacciSquareAirGroupValues::<F>::new();
+            // Stage-1 airgroupvalue bound by `L1 * (fibo_ag1 - fibo1[0]) === 0`.
+            air_group_values.fibo_ag1 = F::from_u64(1);
+
+            let air_instance = AirInstance::new_from_trace(
+                FromTrace::new(&mut trace).with_air_values(&mut air_values).with_airgroup_values(&mut air_group_values),
+            );
             pctx.add_air_instance(air_instance, instance_id);
         }
         Ok(())
     }
 
     fn gen_custom_commits_fixed(&self, pctx: Arc<ProofCtx<F>>, sctx: Arc<SetupCtx<F>>) -> ProofmanResult<()> {
+        proofman_starks_lib_c::set_hash_family_c(&pctx.global_info.hash);
+
         let buffer = vec![F::ZERO; FibonacciSquareRomTrace::<F>::ROW_SIZE * FibonacciSquareRomTrace::<F>::NUM_ROWS];
         let mut trace_rom = FibonacciSquareRomTrace::new_from_vec_zeroes(buffer)?;
 
@@ -96,8 +103,9 @@ impl<F: PrimeField64> WitnessComponent<F> for FibonacciSquare {
 
         let setup = sctx.get_setup(trace_rom.airgroup_id(), trace_rom.air_id())?;
         let blowup_factor = 1 << (setup.stark_info.stark_struct.n_bits_ext - setup.stark_info.stark_struct.n_bits);
-        init_gpu_setup(setup.stark_info.stark_struct.n_bits_ext)?;
-        write_custom_commit_trace::<F>(&pctx, &mut trace_rom, blowup_factor, MERKLE_TREE_ARITY, &file_name)?;
+        init_gpu_setup(&pctx.global_info.hash, pctx.gpu)?;
+        let merkle_tree_arity = setup.stark_info.stark_struct.merkle_tree_arity as u64;
+        write_custom_commit_trace::<F>(&pctx, &mut trace_rom, blowup_factor, merkle_tree_arity, &file_name)?;
         Ok(())
     }
 }

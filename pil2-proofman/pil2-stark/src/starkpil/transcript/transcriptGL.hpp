@@ -3,7 +3,10 @@
 
 #include "goldilocks_base_field.hpp"
 #include "goldilocks_cubic_extension.hpp"
+#include "starks_api_internal.hpp"
+#include "poseidon_goldilocks.hpp"
 #include "poseidon2_goldilocks.hpp"
+#include "blake3_core.hpp"
 #include "zklog.hpp"
 
 
@@ -22,6 +25,14 @@ private:
 
     Goldilocks::Element *inputs;
 
+    // blake3 state: the transcript is blake3(canonical-LE stream) and challenges
+    // come from its XOF. The sponge members above are unused on this path.
+    blake3core::Hasher b3;
+    uint64_t b3_xof[8];
+    uint32_t b3_offset = 0;  // words consumed from b3_xof
+    uint32_t b3_ob = 0;      // which XOF output block b3_xof holds
+    bool b3_xof_valid = false;
+
 public:
 
 
@@ -37,8 +48,8 @@ public:
     {
         this->arity = arity;
         transcriptStateSize = HASH_SIZE;
-        transcriptPendingSize = 4*(arity - 1);
-        transcriptOutSize = 4*arity;
+        transcriptPendingSize = 4 * (arity - 1);
+        transcriptOutSize     = 4 * arity;
 
         state = new Goldilocks::Element[transcriptOutSize];
         pending = new Goldilocks::Element[transcriptPendingSize];
@@ -48,6 +59,11 @@ public:
         std::memset(state, 0, transcriptOutSize * sizeof(Goldilocks::Element));
         std::memset(pending, 0, transcriptPendingSize * sizeof(Goldilocks::Element));
         std::memset(out, 0, transcriptOutSize * sizeof(Goldilocks::Element));
+
+        b3.init();
+        b3_offset = 0;
+        b3_ob = 0;
+        b3_xof_valid = false;
     }
     ~TranscriptGL()
     {

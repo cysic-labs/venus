@@ -1,55 +1,48 @@
 [package]
 name = "proofman"
+description = "PIL2 proof manager: orchestrates witness generation, STARK proving, recursion, and SNARK wrapping"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
 keywords = { workspace = true }
+homepage = { workspace = true }
 repository = { workspace = true }
 categories = { workspace = true }
 
-build = "build.rs"
-
 [dependencies]
-proofman-common = { path = "../common" }
-proofman-macros = { path = "../macros" }
-proofman-hints = { path = "../hints" }
-proofman-util = { path = "../util" }
-proofman-starks-lib-c = { path = "../provers/starks-lib-c" }
-proofman-verifier = { path = "../verifier" }
-curves = { path = "../curves" }
-witness = { path = "../witness" }
-pil-std-lib = { workspace = true }
+proofman-common = { workspace = true }
+proofman-macros = { workspace = true }
+proofman-hints = { workspace = true }
+proofman-util = { workspace = true }
+proofman-starks-lib-c = { workspace = true }
+proofman-verifier = { workspace = true }
+pil2-std-lib = { workspace = true }
+# The pilfflonk final SNARK of the wrap (src/pilfflonk_wrap.rs): its key, prover, proof and JS
+# verifier, and the wrap's witness. Neither depends on this crate.
+proofman-pilfflonk = { workspace = true }
+pilfflonk-wrap-witness = { workspace = true }
 
 tracing.workspace = true
-fields.workspace = true
+proofman-curves.workspace = true
+proofman-witness.workspace = true
+proofman-fields.workspace = true
 libloading.workspace = true
 colored.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 rayon.workspace = true
-num-bigint.workspace = true
 num-traits.workspace = true
-bytemuck.workspace = true
 bincode.workspace = true
 blake3.workspace = true
+tempfile.workspace = true
 crossbeam-channel.workspace = true
 borsh.workspace = true
-tokio.workspace = true
 tokio-util.workspace = true
 csv.workspace = true
 chrono = "0.4.42"
-
-# Distributed mode (mpi) is only supported on Linux x86_64
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-mpi = { version = "0.8.0" }
+mpi = { workspace = true, optional = true }
 
 [features]
-default = []
-no_lib_link = ["proofman-common/no_lib_link"]
-disable_distributed = []
+default = ["mpi"]
+mpi = ["dep:mpi", "proofman-common/mpi"]
 diagnostic = ["proofman-macros/diagnostic", "proofman-common/diagnostic"]
-packed = ["proofman-common/packed"]
-gpu = ["proofman-common/gpu", "proofman-starks-lib-c/gpu"]
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(distributed)'] }

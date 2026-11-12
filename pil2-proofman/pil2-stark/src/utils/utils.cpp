@@ -11,68 +11,11 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <arpa/inet.h>
-#include <atomic>
-#include <cerrno>
-#include <cstring>
-#include <limits>
-#include <algorithm>
 #include "utils.hpp"
+#include "pack_columns.hpp"
 
 using namespace std;
 using namespace std::filesystem;
-
-// Reads exactly `size` bytes starting at file offset `skipBytes` into `buffer`, splitting the
-// read into `numChunks` parallel preads. Short reads and read errors fail the whole load.
-static bool readFdParallelExact(
-    int fd,
-    void *buffer,
-    uint64_t size,
-    uint64_t skipBytes,
-    int numChunks,
-    const string &fileName,
-    const string &context,
-    bool shouldExit)
-{
-    size_t chunkSize = size / numChunks;
-    size_t remainder = size - numChunks * chunkSize;
-    std::atomic<bool> failed(false);
-    std::atomic<int> failedErrno(0);
-
-    #pragma omp parallel for num_threads(numChunks)
-    for(int i=0; i<numChunks; i++){
-        size_t chunkSize_ = i == numChunks - 1 ? chunkSize + remainder : chunkSize;
-        if (chunkSize_ == 0) {
-            continue;
-        }
-        uint64_t offset = skipBytes + i * chunkSize;
-        size_t done = 0;
-        while (done < chunkSize_) {
-            ssize_t readed = pread(fd, (uint8_t*)buffer + i * chunkSize + done, chunkSize_ - done, offset + done);
-            if (readed <= 0) {
-                failed.store(true, std::memory_order_relaxed);
-                int expected = 0;
-                failedErrno.compare_exchange_strong(expected, readed < 0 ? errno : 0, std::memory_order_relaxed);
-                break;
-            }
-            done += (size_t)readed;
-        }
-    }
-
-    if (failed.load(std::memory_order_relaxed)) {
-        int err = failedErrno.load(std::memory_order_relaxed);
-        string message = context + " failed to read " + fileName;
-        if (err != 0) {
-            message += ": ";
-            message += strerror(err);
-        } else {
-            message += ": unexpected EOF";
-        }
-        zklog.error(message);
-        if(shouldExit) exitProcess();
-        return false;
-    }
-    return true;
-}
 
 void printCallStack(void)
 {
@@ -269,29 +212,14 @@ uint64_t fileSize (const string &fileName)
 
 bool loadFileParallel(void* buffer, const string &fileName, uint64_t size, bool exit, uint64_t skipBytes) {
 
-    if (skipBytes > std::numeric_limits<uint64_t>::max() - size) {
-        zklog.error("loadFileParallel() requested size overflows for file " + fileName);
-        if(exit) exitProcess();
-        return false;
-    }
-    uint64_t expectedSize = size + skipBytes;
-
-    int fd = open(fileName.c_str(), O_RDONLY);
-    if (fd == -1) {
-        zklog.error("loadFileParallel() failed to open file " + fileName + ": " + strerror(errno));
-        if(exit) exitProcess();
-        return false;
-    }
-
+    // Check file size
     struct stat sb;
-    if (fstat(fd, &sb) == -1) {
-        zklog.error("loadFileParallel() failed calling fstat() of file " + fileName + ": " + strerror(errno));
-        close(fd);
+    if (lstat(fileName.c_str(), &sb) == -1) {
+        zklog.error("loadFileParallel() failed calling lstat() of file " + fileName);
         if(exit) exitProcess();
         return false;
     }
-    if ((uint64_t)sb.st_size != expectedSize) {
-        close(fd);
+    if ((uint64_t)sb.st_size != size + skipBytes) {
         if(exit) {
             zklog.error("loadFileParallel() found size of file " + fileName + " to be " + to_string(sb.st_size) + " B instead of " + to_string(size) + " B");
             exitProcess();
@@ -299,38 +227,46 @@ bool loadFileParallel(void* buffer, const string &fileName, uint64_t size, bool 
         return false;
     }
 
-    bool ok = readFdParallelExact(fd, buffer, size, skipBytes, 8, fileName, "loadFileParallel()", exit);
-    close(fd);
-    return ok;
+    // Determine the number of chunks and the size of each chunk
+    size_t numChunks = 8; //omp_get_max_threads()/2;
+    if(numChunks == 0 ) numChunks = 1;
+    size_t chunkSize = size / numChunks;
+    size_t remainder = size - numChunks*chunkSize;
+    
+    #pragma omp parallel for num_threads(numChunks)
+    for(size_t i=0; i<numChunks; i++){
+        // Open the file
+        FILE* file = fopen(fileName.c_str(), "rb");
+        if(file == NULL){
+            zklog.error("loadFileParallel() failed to open the file");
+            exitProcess();
+        }
+        size_t chunkSize_ = i == numChunks -1 ? chunkSize + remainder : chunkSize;
+        size_t offset = skipBytes + i * chunkSize;
+        fseek(file, offset, SEEK_SET);
+        size_t readed = fread((uint8_t*)buffer + i * chunkSize, 1, chunkSize_, file);
+        if(readed != chunkSize_){
+            zklog.error("loadFileParallel() failed to read the file");
+        }
+        fclose(file);
+    }
+
+    return true;
 }
 
-bool loadFileParallel_block(void* buffer, const string &fileName, uint64_t block_size, bool exit, uint32_t skip_blocks) {
+bool loadFileParallel_block(void* buffer, const string &fileName, uint64_t block_size, bool exit, uint32_t skip_blocks, uint64_t header_skip_bytes) {
 
-    if (block_size == 0 || skip_blocks > std::numeric_limits<uint64_t>::max() / block_size) {
-        zklog.error("loadFileParallel_block() invalid block range for file " + fileName);
-        if(exit) exitProcess();
-        return false;
-    }
-    uint64_t block_start_offset = (uint64_t)skip_blocks * block_size;
-
-    int fd = open(fileName.c_str(), O_RDONLY);
-    if (fd == -1) {
-        zklog.error("loadFileParallel_block() failed to open file " + fileName + ": " + strerror(errno));
-        if(exit) exitProcess();
-        return false;
-    }
-
+    // Check file size
     struct stat sb;
-    if (fstat(fd, &sb) == -1) {
-        zklog.error("loadFileParallel_block() failed calling fstat() of file " + fileName + ": " + strerror(errno));
-        close(fd);
+    if (lstat(fileName.c_str(), &sb) == -1) {
+        zklog.error("loadFileParallel_block() failed calling lstat() of file " + fileName);
         if(exit) exitProcess();
         return false;
     }
 
     // Validate that the file is large enough for the requested block start
+    uint64_t block_start_offset = header_skip_bytes + (uint64_t)skip_blocks * block_size;
     if ((uint64_t)sb.st_size <= block_start_offset) {
-        close(fd);
         zklog.error("loadFileParallel_block() file " + fileName + " size " + to_string(sb.st_size) + 
                    " is smaller than block start offset " + to_string(block_start_offset) + " bytes");
         if(exit) exitProcess();
@@ -340,27 +276,45 @@ bool loadFileParallel_block(void* buffer, const string &fileName, uint64_t block
     // Calculate actual block size (might be smaller for the last block)
     uint64_t actual_block_size = std::min(block_size, (uint64_t)sb.st_size - block_start_offset);
 
-    bool ok = readFdParallelExact(fd, buffer, actual_block_size, block_start_offset, 4, fileName, "loadFileParallel_block()", exit);
-    close(fd);
-    return ok;
+    // Determine the number of chunks and the size of each chunk
+    size_t numChunks = 4; 
+    if(numChunks == 0 ) numChunks = 1;
+    size_t chunkSize = actual_block_size / numChunks;
+    size_t remainder = actual_block_size - numChunks*chunkSize;
+    
+    #pragma omp parallel for num_threads(numChunks)
+    for(size_t i=0; i<numChunks; i++){
+        // Open the file
+        FILE* file = fopen(fileName.c_str(), "rb");
+        if(file == NULL){
+            zklog.error("loadFileParallel_block() failed to open the file");
+            if(exit) exitProcess();
+        }
+        size_t chunkSize_ = i == numChunks -1 ? chunkSize + remainder : chunkSize;
+        size_t offset = block_start_offset + i * chunkSize;
+        fseek(file, offset, SEEK_SET);
+        size_t readed = fread((uint8_t*)buffer + i * chunkSize, 1, chunkSize_, file);
+        if(readed != chunkSize_){
+            zklog.error("loadFileParallel_block() failed to read the file, expected " + 
+                       to_string(chunkSize_) + " bytes, got " + to_string(readed));
+            fclose(file);
+            if(exit) exitProcess();
+        }
+        fclose(file);
+    }
+
+    return true;
 }
 
 void* loadFileParallel(const string &fileName, uint64_t size) {
 
-    int fd = open(fileName.c_str(), O_RDONLY);
-    if (fd == -1) {
-        zklog.error("loadFileParallel() failed to open file " + fileName + ": " + strerror(errno));
-        exitProcess();
-    }
-
+    // Check file size
     struct stat sb;
-    if (fstat(fd, &sb) == -1) {
-        zklog.error("loadFileParallel() failed calling fstat() of file " + fileName + ": " + strerror(errno));
-        close(fd);
+    if (lstat(fileName.c_str(), &sb) == -1) {
+        zklog.error("loadFileParallel() failed calling lstat() of file " + fileName);
         exitProcess();
     }
     if ((uint64_t)sb.st_size != size) {
-        close(fd);
         zklog.error("loadFileParallel() found size of file " + fileName + " to be " + to_string(sb.st_size) + " B instead of " + to_string(size) + " B");
         exitProcess();
     }
@@ -368,17 +322,33 @@ void* loadFileParallel(const string &fileName, uint64_t size) {
     // Allocate memory
     void* buffer = malloc(size);
     if (buffer == NULL) {
-        close(fd);
         zklog.error("loadFileParallel() failed calling malloc() of size: " + to_string(size));
         exitProcess();
     }
 
-    if (!readFdParallelExact(fd, buffer, size, 0, 8, fileName, "loadFileParallel()", true)) {
-        close(fd);
-        free(buffer);
-        exitProcess();
+    // Determine the number of chunks and the size of each chunk
+    size_t numChunks = 8; //omp_get_max_threads()/2;
+    if(numChunks == 0 ) numChunks = 1;
+    size_t chunkSize = size / numChunks;
+    size_t remainder = size - numChunks*chunkSize;
+    
+    #pragma omp parallel for num_threads(numChunks)
+    for(size_t i=0; i<numChunks; i++){
+        // Open the file
+        FILE* file = fopen(fileName.c_str(), "rb");
+        if(file == NULL){
+            zklog.error("loadFileParallel() failed to open the file");
+            exitProcess();
+        }
+        size_t chunkSize_ = i == numChunks -1 ? chunkSize + remainder : chunkSize;
+        size_t offset = i * chunkSize;
+        fseek(file, offset, SEEK_SET);
+        size_t readed = fread((uint8_t*)buffer + offset, 1, chunkSize_, file);
+        if(readed != chunkSize_){
+            zklog.error("loadFileParallel() failed to read the file");
+        }
+        fclose(file);
     }
-    close(fd);
 
     return buffer;
 }
@@ -436,33 +406,6 @@ void pack_cpu(
     const uint64_t *pack_info,
     uint64_t words_per_row
 ) {
-    for (uint64_t row = 0; row < nRows; ++row) {
-        uint64_t* packed_row = &dst[row * words_per_row];
-        uint64_t word = 0;
-        uint64_t bit_offset = 0;
-        uint64_t word_idx = 0;
-
-        for (uint64_t c = 0; c < nCols; ++c) {
-            uint64_t nbits = pack_info[c];
-            uint64_t val = src[row * nCols + c] & ((nbits == 64) ? ~0ULL : ((1ULL << nbits) - 1ULL));
-            uint64_t bits_left = 64 - bit_offset;
-
-            if (nbits <= bits_left) {
-                word |= (val << bit_offset);
-                bit_offset += nbits;
-                if (bit_offset == 64) {
-                    packed_row[word_idx++] = word;
-                    word = 0;
-                    bit_offset = 0;
-                }
-            } else {
-                word |= (val << bit_offset);
-                packed_row[word_idx++] = word;
-                word = val >> bits_left;
-                bit_offset = nbits - bits_left;
-            }
-        }
-
-        if (bit_offset > 0) packed_row[word_idx] = word;
-    }
+    packRowsBits(src, dst, nRows, nCols, pack_info, words_per_row);
 }
+

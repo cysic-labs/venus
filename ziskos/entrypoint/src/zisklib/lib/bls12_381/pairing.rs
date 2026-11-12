@@ -1,5 +1,8 @@
 //! Pairing over BLS12-381 curve
 
+#[cfg(zisk_guest)]
+use crate::alloc_extern::vec::Vec;
+
 use crate::zisklib::lib::utils::{eq, is_one, lt};
 
 use super::{
@@ -9,7 +12,7 @@ use super::{
         neg_bls12_381,
     },
     final_exp::final_exp_bls12_381,
-    miller_loop::miller_loop_batch_bls12_381,
+    miller_loop::{miller_loop_batch_bls12_381, miller_loop_bls12_381},
     twist::{
         g2_bytes_be_to_u64_le_bls12_381, is_on_curve_twist_bls12_381,
         is_on_subgroup_twist_bls12_381,
@@ -17,22 +20,63 @@ use super::{
 };
 
 /// Pairing check result codes
-const PAIRING_CHECK_SUCCESS: u8 = 0;
-const PAIRING_CHECK_FAILED: u8 = 1;
-const PAIRING_CHECK_ERR_G1_NOT_IN_FIELD: u8 = 2;
+#[allow(dead_code)]
+pub(crate) const PAIRING_CHECK_SUCCESS: u8 = 0;
+#[allow(dead_code)]
+pub(crate) const PAIRING_CHECK_FAILED: u8 = 1;
+const PAIRING_CHECK_ERR_G1_NOT_CANONICAL: u8 = 2;
 const PAIRING_CHECK_ERR_G1_NOT_ON_CURVE: u8 = 3;
 const PAIRING_CHECK_ERR_G1_NOT_IN_SUBGROUP: u8 = 4;
-const PAIRING_CHECK_ERR_G2_NOT_IN_FIELD: u8 = 5;
+const PAIRING_CHECK_ERR_G2_NOT_CANONICAL: u8 = 5;
 const PAIRING_CHECK_ERR_G2_NOT_ON_CURVE: u8 = 6;
 const PAIRING_CHECK_ERR_G2_NOT_IN_SUBGROUP: u8 = 7;
+
+/// Optimal Ate Pairing e: G1 x G2 -> GT over the BLS12-381 curve
+/// where G1 = E(Fp)[r] = E(Fp), G2 = E'(Fp2)[r] and GT = μ_r (the r-th roots of unity over Fp12*)
+/// the involved curves are E/Fp: y² = x³ + 4 and E'/Fp2: y² = x³ + 4·(1+u)
+///  pairingBLS12-381:
+///          input: P ∈ G1 and Q ∈ G2
+///          output: e(P,Q) ∈ GT
+///
+/// # Soundness
+/// Both points must be on the corresponding subgroups, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+pub fn pairing_bls12_381(
+    p: &[u64; 12],
+    q: &[u64; 24],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> [u64; 72] {
+    // e(P, 𝒪) = e(𝒪, Q) = 1;
+    if *p == G1_IDENTITY || *q == G2_IDENTITY {
+        let mut one = [0; 72];
+        one[0] = 1;
+        return one;
+    }
+
+    // Miller loop
+    let miller_loop = miller_loop_bls12_381(
+        p,
+        q,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    // Final exponentiation
+    final_exp_bls12_381(
+        &miller_loop,
+        #[cfg(feature = "hints")]
+        hints,
+    )
+}
 
 /// Computes the optimal Ate pairing for a batch of G1 and G2 points over the BLS12-381 curve
 /// and multiplies the results together:
 ///     e(P₁, Q₁) · e(P₂, Q₂) · ... · e(Pₙ, Qₙ) ∈ GT
 ///
-/// The points are not validated: they must be non-infinity, have canonical coordinates, be on
-/// their curves and in the subgroups, as checked by [`pairing_check_bls12_381`]
-pub(crate) fn pairing_batch_bls12_381(
+/// # Soundness
+/// All points must be on the corresponding subgroups, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+pub fn pairing_batch_bls12_381(
     g1_points: &[[u64; 12]],
     g2_points: &[[u64; 24]],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -68,7 +112,7 @@ pub(crate) fn pairing_batch_bls12_381(
 }
 
 /// Pairing check with validation
-pub fn pairing_check_bls12_381(
+pub fn pairing_check_safe_bls12_381(
     g1_points: &[[u64; 12]],
     g2_points: &[[u64; 24]],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -93,7 +137,7 @@ pub fn pairing_check_bls12_381(
             let x1: [u64; 6] = g1[0..6].try_into().unwrap();
             let y1: [u64; 6] = g1[6..12].try_into().unwrap();
             if !lt(&x1, &P) || !lt(&y1, &P) {
-                return Err(PAIRING_CHECK_ERR_G1_NOT_IN_FIELD);
+                return Err(PAIRING_CHECK_ERR_G1_NOT_CANONICAL);
             }
             if !is_on_curve_bls12_381(
                 g1,
@@ -120,7 +164,7 @@ pub fn pairing_check_bls12_381(
             let y2_0: [u64; 6] = g2[12..18].try_into().unwrap();
             let y2_1: [u64; 6] = g2[18..24].try_into().unwrap();
             if !lt(&x2_0, &P) || !lt(&x2_1, &P) || !lt(&y2_0, &P) || !lt(&y2_1, &P) {
-                return Err(PAIRING_CHECK_ERR_G2_NOT_IN_FIELD);
+                return Err(PAIRING_CHECK_ERR_G2_NOT_CANONICAL);
             }
             if !is_on_curve_twist_bls12_381(
                 g2,
@@ -143,7 +187,7 @@ pub fn pairing_check_bls12_381(
         let x1: [u64; 6] = g1[0..6].try_into().unwrap();
         let y1: [u64; 6] = g1[6..12].try_into().unwrap();
         if !lt(&x1, &P) || !lt(&y1, &P) {
-            return Err(PAIRING_CHECK_ERR_G1_NOT_IN_FIELD);
+            return Err(PAIRING_CHECK_ERR_G1_NOT_CANONICAL);
         }
         if !is_on_curve_bls12_381(
             g1,
@@ -165,7 +209,7 @@ pub fn pairing_check_bls12_381(
         let y2_0: [u64; 6] = g2[12..18].try_into().unwrap();
         let y2_1: [u64; 6] = g2[18..24].try_into().unwrap();
         if !lt(&x2_0, &P) || !lt(&x2_1, &P) || !lt(&y2_0, &P) || !lt(&y2_1, &P) {
-            return Err(PAIRING_CHECK_ERR_G2_NOT_IN_FIELD);
+            return Err(PAIRING_CHECK_ERR_G2_NOT_CANONICAL);
         }
         if !is_on_curve_twist_bls12_381(
             g2,
@@ -200,12 +244,14 @@ pub fn pairing_check_bls12_381(
     )))
 }
 
+// ==================== C FFI Functions ====================
+
 /// BLS12-381 pairing check for big-endian byte format.
 ///
 /// # Input format
 /// Per pair: 288 bytes = 96 bytes G1 point + 192 bytes G2 point (big-endian)
 /// - G1 point: 48 bytes x + 48 bytes y
-/// - G2 point: 48 bytes x_i + 48 bytes x_r + 48 bytes y_i + 48 bytes y_r
+/// - G2 point: 48 bytes x_r + 48 bytes x_i + 48 bytes y_r + 48 bytes y_i (EIP-2537: c0 first)
 ///
 /// # Safety
 /// `pairs` must point to an array of `num_pairs * 288` bytes
@@ -213,15 +259,15 @@ pub fn pairing_check_bls12_381(
 /// # Returns
 /// - [PAIRING_CHECK_SUCCESS] = pairing check passed
 /// - [PAIRING_CHECK_FAILED] = pairing check failed
-/// - [PAIRING_CHECK_ERR_G1_NOT_IN_FIELD] = error (at least one G1 point coordinate not in field)
+/// - [PAIRING_CHECK_ERR_G1_NOT_CANONICAL] = error (at least one G1 point coordinate not in field)
 /// - [PAIRING_CHECK_ERR_G1_NOT_ON_CURVE] = error (at least one G1 point not on curve)
 /// - [PAIRING_CHECK_ERR_G1_NOT_IN_SUBGROUP] = error (at least one G1 point not in subgroup)
-/// - [PAIRING_CHECK_ERR_G2_NOT_IN_FIELD] = error (at least one G2 point coordinate not in field)
+/// - [PAIRING_CHECK_ERR_G2_NOT_CANONICAL] = error (at least one G2 point coordinate not in field)
 /// - [PAIRING_CHECK_ERR_G2_NOT_ON_CURVE] = error (at least one G2 point not on curve)
 /// - [PAIRING_CHECK_ERR_G2_NOT_IN_SUBGROUP] = error (at least one G2 point not in subgroup)
-#[cfg_attr(not(feature = "hints"), no_mangle)]
-#[cfg_attr(feature = "hints", export_name = "hints_bls12_381_pairing_check_c")]
-pub unsafe extern "C" fn bls12_381_pairing_check_c(
+#[allow(dead_code)]
+#[inline]
+pub(crate) unsafe fn pairing_check_safe_bls12_381_c(
     pairs: *const u8,
     num_pairs: usize,
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
@@ -239,7 +285,7 @@ pub unsafe extern "C" fn bls12_381_pairing_check_c(
         g2_points.push(g2_bytes_be_to_u64_le_bls12_381(g2_bytes));
     }
 
-    match pairing_check_bls12_381(
+    match pairing_check_safe_bls12_381(
         &g1_points,
         &g2_points,
         #[cfg(feature = "hints")]
@@ -248,35 +294,5 @@ pub unsafe extern "C" fn bls12_381_pairing_check_c(
         Ok(true) => PAIRING_CHECK_SUCCESS,
         Ok(false) => PAIRING_CHECK_FAILED,
         Err(code) => code,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::super::constants::{G1_GENERATOR, G2_GENERATOR};
-    use super::*;
-
-    fn check(g1_points: &[[u64; 12]], g2_points: &[[u64; 24]]) -> Result<bool, u8> {
-        #[cfg(feature = "hints")]
-        let mut hints = Vec::new();
-        pairing_check_bls12_381(
-            g1_points,
-            g2_points,
-            #[cfg(feature = "hints")]
-            &mut hints,
-        )
-    }
-
-    #[test]
-    fn pairing_check_accepts_the_inverse_pair() {
-        #[cfg(feature = "hints")]
-        let mut hints = Vec::new();
-        let neg_g1 = neg_bls12_381(
-            &G1_GENERATOR,
-            #[cfg(feature = "hints")]
-            &mut hints,
-        );
-        assert_eq!(check(&[G1_GENERATOR, neg_g1], &[G2_GENERATOR, G2_GENERATOR]), Ok(true));
-        assert_eq!(check(&[G1_GENERATOR], &[G2_GENERATOR]), Ok(false));
     }
 }

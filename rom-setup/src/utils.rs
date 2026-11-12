@@ -1,41 +1,22 @@
-use anyhow::Result;
-use fields::{Goldilocks, PrimeField64};
-use proofman_common::{
-    write_custom_commit_trace, GlobalInfo, ProofCtx, ProofType, ProofmanError, ProofmanResult,
-    StarkInfo,
-};
-use sm_rom::RomSM;
-use std::env;
+use anyhow::{Context, Result};
+use proofman_common::{write_custom_commit_trace, ProofCtx, ProofmanError, ProofmanResult};
+use proofman_fields::{Goldilocks, PrimeField64};
 use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use zisk_common::{ElfBinaryFromFile, ElfBinaryLike};
+use zisk_common::{ZiskPaths, PROGRAM_VK_LEN};
 use zisk_pil::{RomRomTrace, PILOUT_HASH};
+use zisk_sm_rom::CustomRom;
 
-pub const DEFAULT_CACHE_PATH: &str = ".zisk/cache";
+pub use zisk_common::HashMode;
 
-/// Largest ROM blowup factor, as a power of two, accepted from a proving key.
-const MAX_ROM_BLOWUP_BITS: u64 = 32;
-
-/// Gets the user's home directory as specified by the HOME environment variable.
-pub fn get_home_dir() -> String {
-    env::var("HOME").expect("get_home_dir() failed to get HOME environment variable")
-}
-
-/// Gets the default zisk folder location in the home installation directory.
-pub fn get_default_zisk_path() -> PathBuf {
-    let zisk_path = format!("{}/.zisk", get_home_dir());
-    PathBuf::from(zisk_path)
-}
-
+/// Resolve the artifact output directory, defaulting to the ZisK cache when
+/// `output_dir` is `None`. Creates the directory if needed and returns its
+/// canonical absolute path.
 pub fn get_output_path(output_dir: &Option<PathBuf>) -> Result<PathBuf> {
     let output_path = if output_dir.is_none() {
-        let cache_path = std::env::var("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join(DEFAULT_CACHE_PATH))
-            .unwrap_or_else(|_| panic!("$HOME environment variable is not set"));
-
+        let cache_path = ZiskPaths::global().cache.clone();
         ensure_dir_exists(&cache_path);
         cache_path
     } else {
@@ -44,134 +25,125 @@ pub fn get_output_path(output_dir: &Option<PathBuf>) -> Result<PathBuf> {
     };
 
     let output_path = fs::canonicalize(&output_path)
-        .unwrap_or_else(|_| panic!("Failed to get absolute path for {output_path:?}"));
+        .with_context(|| format!("Failed to get absolute path for {output_path:?}"))?;
 
     Ok(output_path)
 }
 
+/// Build the ROM custom-commit trace for `elf`, write it to `rom_buffer_path`,
+/// and return its Merkle root (the raw material for the verkey).
 pub fn gen_elf_hash<F: PrimeField64>(
     pctx: &ProofCtx<F>,
     elf: &[u8],
     rom_buffer_path: &Path,
-    blowup_factor: u64,
-    merkle_tree_arity: u64,
+    hash_mode: HashMode,
 ) -> ProofmanResult<Vec<F>> {
-    let buffer = vec![F::ZERO; RomRomTrace::<F>::NUM_ROWS * RomRomTrace::<F>::ROW_SIZE];
-    let mut custom_rom_trace: RomRomTrace<F> = RomRomTrace::new_from_vec(buffer)?;
-
-    RomSM::compute_custom_trace_rom(elf, &mut custom_rom_trace);
+    let mut custom_rom_trace =
+        CustomRom::build::<F>(elf).map_err(|e| ProofmanError::InvalidParameters(e.to_string()))?;
 
     write_custom_commit_trace(
         pctx,
         &mut custom_rom_trace,
-        blowup_factor,
-        merkle_tree_arity,
+        hash_mode.blowup_factor(),
+        hash_mode.merkle_tree_arity(),
         rom_buffer_path,
     )
 }
 
-pub fn get_elf_vk(verkey_path: &Path) -> Result<Option<Vec<u8>>> {
+/// Read a verification key (a `PROGRAM_VK_LEN` array of little-endian `u64`s)
+/// from `verkey_path`. Returns `None` if the file does not exist.
+pub fn get_elf_vk(verkey_path: &Path) -> Result<Option<Vec<u64>>> {
     if !verkey_path.exists() {
         return Ok(None);
     }
 
     let mut file = File::open(verkey_path)?;
-    let mut root_bytes = [0u8; 32];
-    file.read_exact(&mut root_bytes)?;
-    Ok(Some(root_bytes.to_vec()))
+    let mut vk = vec![0u64; PROGRAM_VK_LEN];
+    for word in vk.iter_mut() {
+        let mut buf = [0u8; 8];
+        file.read_exact(&mut buf)?;
+        *word = u64::from_le_bytes(buf);
+    }
+    Ok(Some(vk))
 }
 
+/// Read the ELF at `elf_path` and return the hex-encoded blake3 hash of its
+/// bytes. See [`get_elf_data_hash`] for the in-memory variant.
 pub fn get_elf_data_hash_from_path(elf_path: &Path) -> Result<String> {
-    get_elf_data_hash(&ElfBinaryFromFile::new(elf_path, false)?)
-}
+    let elf_data =
+        fs::read(elf_path).with_context(|| format!("Error reading ELF file: {elf_path:?}"))?;
 
-pub fn get_elf_data_hash(elf: &impl ElfBinaryLike) -> Result<String> {
-    let hash = blake3::hash(elf.elf()).to_hex().to_string();
+    let hash = blake3::hash(&elf_data).to_hex().to_string();
+
     Ok(hash)
 }
 
+/// The hex-encoded blake3 hash of `elf`. This is the content address used to
+/// name and locate all of a program's cached artifacts.
+pub fn get_elf_data_hash(elf: &[u8]) -> String {
+    blake3::hash(elf).to_hex().to_string()
+}
+
+/// Build the cache path of the ROM custom-commit binary for `hash`.
+///
+/// The filename encodes the ELF hash, PILOUT hash, row count, and hash-mode
+/// parameters (plus a `_gpu` suffix when `gpu` is set) so incompatible setups
+/// never collide.
 pub fn get_elf_bin_file_path_with_hash(
     hash: &str,
     default_cache_path: &Path,
-    blowup_factor: u64,
-    arity: u64,
+    gpu: bool,
+    hash_mode: HashMode,
 ) -> Result<PathBuf> {
     let pilout_hash = PILOUT_HASH;
 
     let n = RomRomTrace::<Goldilocks>::NUM_ROWS;
 
-    let gpu = if cfg!(feature = "gpu") { "_gpu" } else { "" };
+    let gpu_suffix = if gpu { "_gpu" } else { "" };
     let rom_cache_file_name = format!(
-        "{}_{}_{}_{}_{}{}.bin",
+        "{}_{}_{}_{}_{}_{}{}.bin",
         hash,
         pilout_hash,
-        &n.to_string(),
-        &blowup_factor.to_string(),
-        &arity.to_string(),
-        gpu
+        n,
+        hash_mode.file_tag(),
+        hash_mode.blowup_factor(),
+        hash_mode.merkle_tree_arity(),
+        gpu_suffix
     );
 
     Ok(default_cache_path.join(rom_cache_file_name))
 }
 
+/// Build the cache path of the verkey (`.verkey.bin`) file for `hash`,
+/// mirroring the naming scheme of [`get_elf_bin_file_path_with_hash`].
 pub fn get_elf_bin_verkey_file_path_with_hash(
     hash: &str,
     default_cache_path: &Path,
-    blowup_factor: u64,
-    arity: u64,
+    hash_mode: HashMode,
 ) -> Result<PathBuf> {
     let pilout_hash = PILOUT_HASH;
 
     let n = RomRomTrace::<Goldilocks>::NUM_ROWS;
 
-    let gpu = if cfg!(feature = "gpu") { "_gpu" } else { "" };
     let rom_cache_file_name = format!(
-        "{}_{}_{}_{}_{}{}.verkey.bin",
+        "{}_{}_{}_{}_{}_{}.verkey.bin",
         hash,
         pilout_hash,
-        &n.to_string(),
-        &blowup_factor.to_string(),
-        &arity.to_string(),
-        gpu
+        n,
+        hash_mode.file_tag(),
+        hash_mode.blowup_factor(),
+        hash_mode.merkle_tree_arity(),
     );
 
     Ok(default_cache_path.join(rom_cache_file_name))
 }
 
-pub struct RomInfo {
-    pub blowup_factor: u64,
-    pub merkle_tree_arity: u64,
-}
-
-pub fn get_rom_info(proving_key_path: &Path) -> ProofmanResult<RomInfo> {
-    let global_info =
-        GlobalInfo::new(proving_key_path).expect("Failed to load global info from proving key");
-    let (airgroup_id, air_id) = global_info.get_air_id("Zisk", "Rom");
-    let setup_path = global_info.get_air_setup_path(airgroup_id, air_id, &ProofType::Basic);
-    let stark_info_path = setup_path.display().to_string() + ".starkinfo.json";
-    let stark_info_json = std::fs::read_to_string(&stark_info_path)
-        .unwrap_or_else(|_| panic!("Failed to read file {}", &stark_info_path));
-    let stark_info = StarkInfo::from_json(&stark_info_json);
-
-    // The ROM trace size is fixed by the PIL, so the proving key must match it, and the blowup
-    // must be a sane power of two.
-    let n_bits = stark_info.stark_struct.n_bits;
-    let n_bits_ext = stark_info.stark_struct.n_bits_ext;
-    let rom_bits = RomRomTrace::<Goldilocks>::NUM_ROWS.trailing_zeros() as u64;
-    if n_bits != rom_bits || n_bits_ext < n_bits || n_bits_ext - n_bits > MAX_ROM_BLOWUP_BITS {
-        return Err(ProofmanError::InvalidSetup(format!(
-            "{stark_info_path} has nBits {n_bits} and nBitsExt {n_bits_ext}, expected nBits \
-             {rom_bits} and a blowup of at most 2^{MAX_ROM_BLOWUP_BITS}"
-        )));
-    }
-
-    Ok(RomInfo {
-        blowup_factor: 1 << (n_bits_ext - n_bits),
-        merkle_tree_arity: stark_info.stark_struct.merkle_tree_arity,
-    })
-}
-
-pub fn ensure_dir_exists(path: &PathBuf) {
+/// Create `path` (and any missing parents) if it does not already exist.
+///
+/// # Panics
+/// Panics if the directory cannot be created for a reason other than it
+/// already existing.
+pub fn ensure_dir_exists(path: &Path) {
     if let Err(e) = std::fs::create_dir_all(path) {
         if e.kind() != std::io::ErrorKind::AlreadyExists {
             panic!("Failed to create cache directory {path:?}: {e}");

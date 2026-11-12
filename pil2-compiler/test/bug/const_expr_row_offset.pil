@@ -1,0 +1,43 @@
+// A row offset on a `const expr` reference must survive the packing into the
+// pilout: the reference carries the offset, so the packer has to emit an
+// instance of the expression shifted by it instead of reusing the unshifted one.
+//
+// Checked by test/const_expr_row_offset.js, which reads the generated pilout:
+// the offsets only exist there, an `-e` run never reaches the packer.
+
+airtemplate A_NoFactor (const int N = 2**8) {
+    col witness a;
+    col witness b;
+    const expr g = a + b;
+    expr r = 0;
+    for (int i = 0; i < 3; ++i) { 
+        r = r + (i)'g * (i + 7); 
+    }
+    r === 0;
+}
+airtemplate B_WithParam (const int N = 2**8, const int PRE = 0) { }
+
+// The same const expr used unshifted and shifted inside one expression: the
+// shifted use must not collapse onto the unshifted one.
+airtemplate OneLevel (const int N = 2**8) {
+    col witness a, b;
+    const expr s = a + b;
+    s - 's === 0;
+}
+
+// The shift has to reach a const expr nested inside another one, otherwise the
+// unshifted part cancels out and the constraint says less than it should.
+airtemplate Nested (const int N = 2**8) {
+    col witness o2, o3;
+    const expr inner = 1 - (o2 + o3);
+    const expr outer = inner + o2 * 2 + o3 * 3;
+    outer - 'outer === 0;
+}
+
+airgroup Bug3 {
+    A_NoFactor();
+    B_WithParam(PRE: 0) alias B0;
+    B_WithParam(PRE: 1) alias B1;
+    OneLevel();
+    Nested();
+}

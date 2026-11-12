@@ -1,43 +1,20 @@
 use std::sync::Arc;
 
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use rayon::prelude::*;
 
-use pil_std_lib::Std;
 use proofman_common::{AirInstance, FromTrace, ProofmanResult};
 use proofman_util::{timer_start_trace, timer_stop_and_log_trace};
+use std::marker::PhantomData;
 use zisk_core::zisk_ops::ZiskOp;
-use zisk_pil::{DMA_ROM_ID, DUAL_RANGE_7_BITS_ID};
+use zisk_pil::{DmaTrace, DmaTraceRow, DmaTraceRowOps, DmaTraceRowPacked};
 
-use crate::{dma::dma_rom::DmaRom, dma_trace, DmaInput, DmaModule, DMA_ROM_WITH_MEMCMP_SIZE};
-use precompiles_helpers::DmaInfo;
-
-#[cfg(feature = "packed")]
-pub use zisk_pil::{DmaTracePacked, DmaTraceRowPacked};
-
-#[cfg(not(feature = "packed"))]
-pub use zisk_pil::{DmaTrace, DmaTraceRow};
-
-#[cfg(feature = "packed")]
-type DmaTraceRowType<F> = DmaTraceRowPacked<F>;
-#[cfg(feature = "packed")]
-type DmaTraceType<F> = DmaTracePacked<F>;
-
-#[cfg(not(feature = "packed"))]
-type DmaTraceRowType<F> = DmaTraceRow<F>;
-#[cfg(not(feature = "packed"))]
-type DmaTraceType<F> = DmaTrace<F>;
+use crate::{dma_trace, DmaInput, DmaModule};
+use zisk_precomp_helpers::DmaInfo;
 
 /// The `DmaSM` struct encapsulates the logic of the Dma State Machine.
 pub struct DmaSM<F: PrimeField64> {
-    /// Reference to the PIL2 standard library.
-    pub std: Arc<Std<F>>,
-
-    pub rom_table_id: usize,
-    pub dual_range_7_bits_id: usize,
-    pub range_22_bits_id: usize,
-    pub range_24_bits_id: usize,
-    pub range_16_bits_id: usize,
+    _phantom: PhantomData<F>,
 }
 
 impl<F: PrimeField64> DmaSM<F> {
@@ -45,23 +22,8 @@ impl<F: PrimeField64> DmaSM<F> {
     ///
     /// # Returns
     /// A new `DmaSM` instance.
-    pub fn new(std: Arc<Std<F>>) -> Arc<Self> {
-        Arc::new(Self {
-            std: std.clone(),
-            rom_table_id: std.get_virtual_table_id(DMA_ROM_ID).expect("Failed to get dma rom ID"),
-            dual_range_7_bits_id: std
-                .get_virtual_table_id(DUAL_RANGE_7_BITS_ID)
-                .expect("Failed to get dual 7-bits table ID"),
-            range_22_bits_id: std
-                .get_range_id(0, 0x3F_FFFF, None)
-                .expect("Failed to get 22b table ID"),
-            range_24_bits_id: std
-                .get_range_id(0, 0xFF_FFFF, None)
-                .expect("Failed to get 24b table ID"),
-            range_16_bits_id: std
-                .get_range_id(0, 0xFFFF, None)
-                .expect("Failed to get 16b table ID"),
-        })
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { _phantom: PhantomData })
     }
 
     /// Processes a slice of operation data, updating the trace.
@@ -71,17 +33,11 @@ impl<F: PrimeField64> DmaSM<F> {
     /// * `input` - The operation data to process.
     #[allow(clippy::too_many_arguments)]
     #[inline(always)]
-    pub fn process_slice(
+    pub fn process_slice<R: DmaTraceRowOps<F>>(
         &self,
         input: &DmaInput,
         // row_offset: usize,
-        trace: &mut DmaTraceRowType<F>,
-        local_dual_7_bits_multiplicities: &mut [u64],
-        local_22_bits_values: &mut Vec<u32>,
-        local_24_bits_values: &mut Vec<u32>,
-        local_24_bits_low_values: &mut [u32],
-        local_16_bits_multiplicities: &mut [u32],
-        local_rom_multiplicities: &mut [u64],
+        trace: &mut R,
     ) {
         let count = DmaInfo::get_count(input.encoded);
         let count_lt_256 = count < 256;
@@ -92,15 +48,6 @@ impl<F: PrimeField64> DmaSM<F> {
         let l_count = (count & 0xFF) as u16 + 256 * count_ge_256 as u16;
         trace.set_l_count(l_count);
 
-        // to increase performance because the 99.99% of count is < 64K => h_count < 256
-        if h_count < 256 {
-            local_24_bits_low_values[h_count as usize] += 1;
-        } else {
-            local_24_bits_values.push(h_count);
-        }
-
-        // The address columns hold the low 32 bits; the high words are only nonzero when
-        // count == 0, an operation that touches no memory
         let src = input.src as u32;
         let dst = input.dst as u32;
         let h_src64 = src >> 10;
@@ -118,11 +65,6 @@ impl<F: PrimeField64> DmaSM<F> {
         trace.set_l_dst64(l_dst64);
         trace.set_dst_hi((input.dst >> 32) as u32);
         trace.set_dst_offset(dst as u8 & 0x07);
-
-        local_22_bits_values.push(h_src64);
-        local_22_bits_values.push(h_dst64);
-        let dual_7_bits_row = ((l_src64 as usize) << 7) | l_dst64 as usize;
-        local_dual_7_bits_multiplicities[dual_7_bits_row] += 1;
 
         trace.set_main_step(input.step);
 
@@ -142,7 +84,6 @@ impl<F: PrimeField64> DmaSM<F> {
         if use_src {
             trace.set_src_offset_after_pre((src_offset + pre_count) % 8);
         }
-        let mut result_nz = false;
         match input.op {
             ZiskOp::DMA_MEMCPY => trace.set_sel_memcpy(true),
             ZiskOp::DMA_XMEMCPY => {
@@ -169,24 +110,18 @@ impl<F: PrimeField64> DmaSM<F> {
                 //     DmaInfo::to_string(input.encoded)
                 // );
 
-                let diff_chunk = count_diff as u16;
-                trace.set_count_diff_chunks(0, diff_chunk);
-                local_16_bits_multiplicities[diff_chunk as usize] += 1;
+                let count_diff_chunks = [count_diff as u16, (count_diff >> 16) as u16];
+                trace.set_all_count_diff_chunks(&count_diff_chunks);
 
-                let diff_chunk = (count_diff >> 16) as u16;
-                trace.set_count_diff_chunks(1, diff_chunk);
-                local_16_bits_multiplicities[diff_chunk as usize] += 1;
                 if pre_result_nz {
                     let result = DmaInfo::get_memcmp_res_as_u64(input.encoded);
-                    trace.set_bus_pre_result(0, result as u32);
-                    trace.set_bus_pre_result(1, (result >> 32) as u32);
-                    result_nz = true;
+                    let bus_pre_result = [result as u32, (result >> 32) as u32];
+                    trace.set_all_bus_pre_result(&bus_pre_result);
                 }
                 if post_result_nz {
                     let result = DmaInfo::get_memcmp_res_as_u64(input.encoded);
-                    trace.set_bus_post_result(0, result as u32);
-                    trace.set_bus_post_result(1, (result >> 32) as u32);
-                    result_nz = true;
+                    let bus_post_result = [result as u32, (result >> 32) as u32];
+                    trace.set_all_bus_post_result(&bus_post_result);
                 }
             }
             ZiskOp::DMA_INPUTCPY => trace.set_sel_inputcpy(true),
@@ -198,9 +133,6 @@ impl<F: PrimeField64> DmaSM<F> {
             }
             _ => panic!("Invalid DMA operation {}", input.op),
         }
-
-        let rom_index = DmaRom::get_row(dst & 0x07, src & 0x07, count, result_nz, use_src);
-        local_rom_multiplicities[rom_index] += 1;
     }
 
     /// Processes a slice of operation data, updating the trace.
@@ -209,29 +141,17 @@ impl<F: PrimeField64> DmaSM<F> {
     /// * `trace` - A mutable reference to the Dma trace.
     /// * `input` - The operation data to process.
     #[inline(always)]
-    pub fn process_empty_slice(&self, trace: &mut DmaTraceRowType<F>) {
+    pub fn process_empty_slice<R: DmaTraceRowOps<F>>(&self, trace: &mut R) {
         // trace was initialized with zeroes
         trace.set_count_lt_256(true);
     }
-}
-impl<F: PrimeField64> DmaModule<F> for DmaSM<F> {
-    fn get_name(&self) -> &'static str {
-        "dma"
-    }
-    /// Computes the witness for a series of inputs and produces an `AirInstance`.
-    ///
-    /// # Arguments
-    /// * `sctx` - The setup context containing the setup data.
-    /// * `inputs` - A slice of operations to process.
-    ///
-    /// # Returns
-    /// An `AirInstance` containing the computed witness data.
-    fn compute_witness(
+
+    fn compute_witness_inner<R: DmaTraceRowOps<F> + Copy + Send>(
         &self,
         inputs: &[Vec<DmaInput>],
         trace_buffer: Vec<F>,
     ) -> ProofmanResult<AirInstance<F>> {
-        let mut trace = DmaTraceType::<F>::new_from_vec_zeroes(trace_buffer)?;
+        let mut trace = DmaTrace::<R>::new_from_vec_zeroes(trace_buffer)?;
         let num_rows = trace.num_rows();
 
         let total_inputs: usize = inputs.iter().map(|c| c.len()).sum();
@@ -241,117 +161,20 @@ impl<F: PrimeField64> DmaModule<F> for DmaSM<F> {
 
         timer_start_trace!(DMA_TRACE);
 
-        // Split the dma_trace.buffer into slices matching each inner vector’s length.
+        // Split the dma_trace.buffer into slices matching each inner vector's length.
         let flat_inputs: Vec<_> = inputs.iter().flatten().collect();
         let trace_rows = trace.buffer.as_mut_slice();
-
         // Calculate optimal chunk size
         let num_threads = rayon::current_num_threads();
         let chunk_size = std::cmp::max(1, flat_inputs.len() / num_threads);
 
-        // TODO: add new interface with u32 to std to be used with global_rom_multiplicities
-        // Split the add256_trace.buffer into slices matching each inner vector’s length.
-        let (
-            global_dual_7_bits_multiplicities,
-            global_22_bits_values,
-            global_24_bits_values,
-            global_24_bits_low_values,
-            global_16_bits_multiplicities,
-            global_rom_multiplicities,
-        ) = flat_inputs
-            .par_chunks(chunk_size)
-            .zip(trace_rows.par_chunks_mut(chunk_size))
-            // .enumerate()
-            // .map(|(chunk_idx, (input_chunk, trace_chunk))| {
-            .map(|(input_chunk, trace_chunk)| {
-                // Local array shared by this chunk
-                let mut local_dual_7_bits_multiplicities = vec![0u64; 1 << 14];
-                let mut local_22_bits_values = Vec::<u32>::with_capacity(inputs.len() * 2);
-                let mut local_24_bits_values = Vec::<u32>::new();
-                let mut local_24_bits_low_values = vec![0u32; 256];
-                let mut local_16_bits_multiplicities = vec![0u32; 1 << 16];
-                let mut local_rom_multiplicities = vec![0u64; DMA_ROM_WITH_MEMCMP_SIZE];
-
-                // let chunk_offset = chunk_idx * chunk_size;
-                // Sum all local arrays into a global one
-                // for (local_idx, (input, trace_row)) in
-                //     input_chunk.iter().zip(trace_chunk.iter_mut()).enumerate()
+        flat_inputs.par_chunks(chunk_size).zip(trace_rows.par_chunks_mut(chunk_size)).for_each(
+            |(input_chunk, trace_chunk)| {
                 for (input, trace_row) in input_chunk.iter().zip(trace_chunk.iter_mut()) {
-                    // let row_offset = chunk_offset + local_idx;
-                    self.process_slice(
-                        input,
-                        //row_offset,
-                        trace_row,
-                        &mut local_dual_7_bits_multiplicities,
-                        &mut local_22_bits_values,
-                        &mut local_24_bits_values,
-                        &mut local_24_bits_low_values,
-                        &mut local_16_bits_multiplicities,
-                        &mut local_rom_multiplicities,
-                    );
+                    self.process_slice(input, trace_row);
                 }
-                (
-                    local_dual_7_bits_multiplicities,
-                    local_22_bits_values,
-                    local_24_bits_values,
-                    local_24_bits_low_values,
-                    local_16_bits_multiplicities,
-                    local_rom_multiplicities,
-                )
-            })
-            .reduce(
-                // Identity: create empty accumulators
-                || {
-                    (
-                        vec![0u64; 1 << 14],
-                        Vec::new(),
-                        Vec::new(),
-                        vec![0u32; 256],
-                        vec![0u32; 1 << 16],
-                        vec![0u64; DMA_ROM_WITH_MEMCMP_SIZE],
-                    )
-                },
-                // Combine two results
-                |mut acc, local| {
-                    // Merge multiplicities (element-wise addition)
-                    for (i, &val) in local.0.iter().enumerate() {
-                        acc.0[i] += val;
-                    }
-                    // Concatenate value vectors
-                    acc.1.extend(local.1);
-                    acc.2.extend(local.2);
-                    // Merge low values (element-wise addition)
-                    for (i, &val) in local.3.iter().enumerate() {
-                        acc.3[i] += val;
-                    }
-                    for (i, &val) in local.4.iter().enumerate() {
-                        acc.4[i] += val;
-                    }
-                    for (i, &val) in local.5.iter().enumerate() {
-                        acc.5[i] += val;
-                    }
-                    acc
-                },
-            );
-
-        // for i in [
-        //     78643, 78832, 78833, 78834, 82529, 82530, 82531, 85171, 85172, 85173, 87342, 87343,
-        //     87344, 103310, 103470, 103471, 103472, 105228, 105229, 105230, 105444, 53605, 86086,
-        // ] {
-        //     println!("TRACE[{i}]={:?}", trace_rows[i]);
-        // }
-        self.std
-            .inc_virtual_rows_ranged(self.dual_range_7_bits_id, &global_dual_7_bits_multiplicities);
-        self.std.range_checks(self.range_24_bits_id, global_24_bits_low_values);
-        self.std.inc_virtual_rows_ranged(self.rom_table_id, &global_rom_multiplicities);
-        self.std.range_checks(self.range_16_bits_id, global_16_bits_multiplicities);
-
-        for value in global_22_bits_values {
-            self.std.range_check(self.range_22_bits_id, value as i64, 1);
-        }
-        for value in global_24_bits_values {
-            self.std.range_check(self.range_24_bits_id, value as i64, 1);
-        }
+            },
+        );
 
         if total_inputs < num_rows {
             self.process_empty_slice(&mut trace_rows[total_inputs]);
@@ -363,5 +186,22 @@ impl<F: PrimeField64> DmaModule<F> for DmaSM<F> {
         timer_stop_and_log_trace!(DMA_TRACE);
         let from_trace = FromTrace::new(&mut trace);
         Ok(AirInstance::new_from_trace(from_trace))
+    }
+}
+impl<F: PrimeField64> DmaModule<F> for DmaSM<F> {
+    fn get_name(&self) -> &'static str {
+        "dma"
+    }
+    fn compute_witness(
+        &self,
+        inputs: &[Vec<DmaInput>],
+        trace_buffer: Vec<F>,
+        packed: bool,
+    ) -> ProofmanResult<AirInstance<F>> {
+        if packed {
+            self.compute_witness_inner::<DmaTraceRowPacked<F>>(inputs, trace_buffer)
+        } else {
+            self.compute_witness_inner::<DmaTraceRow<F>>(inputs, trace_buffer)
+        }
     }
 }

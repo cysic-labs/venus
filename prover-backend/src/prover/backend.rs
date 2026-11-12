@@ -1,0 +1,950 @@
+use crate::create_debug_info;
+use crate::BackendProverOpts;
+use crate::{
+    ExecuteOutput, ProveOutput, VerifyConstraintsOutput, ZiskAggPhaseResult, ZiskPhaseResult,
+};
+use anyhow::Result;
+use colored::Colorize;
+use mpi::traits::{Communicator, Destination, MatchedReceiveVec, Source};
+use proofman::get_vadcop_final_proof_vkey;
+use proofman::{
+    AggProofs, AggProofsRegister, ProofMan, ProvePhase, ProvePhaseInputs, ProvePhaseResult,
+    SnarkProof, SnarkProtocol, SnarkWrapper, WitnessInfo,
+};
+use proofman_common::{ProofCtx, ProofOptions, RowInfo};
+use proofman_fields::Goldilocks;
+use proofman_util::{timer_start_info, timer_stop_and_log_info};
+use proofman_verifier::VadcopFinalProof;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use zisk_asm_runner::HintsShmem;
+use zisk_cluster_common::StreamMessage;
+use zisk_common::io::StreamSource;
+use zisk_common::stats_mark;
+use zisk_common::ZiskExecutorTime;
+use zisk_common::{io::ZiskStdin, ExecutorStatsHandle, RandomSeed, ZiskExecutorSummary};
+use zisk_common::{
+    program_publics, HashMode, PlonkVkBlob, PlonkVkey, ProgramVK, Proof, ProofBody, ProofKind,
+    PublicValues, VadcopKind, PROGRAM_VK_LEN,
+};
+use zisk_executor::{AsmJob, AsmResources, EmulatorAsm, ZiskExecutor};
+use zisk_precomp_hints::HintsProcessor;
+use zisk_recurser::prove::{
+    prove_recurser_aggregator, register_recurser_setup, ProveRecurserAggregatorOptions,
+    RegisteredRecurser,
+};
+
+pub(crate) struct ProverBackend {
+    proofman: ProofMan<Goldilocks>,
+    snark_wrapper: Option<SnarkWrapper<Goldilocks>>,
+    executor: Arc<ZiskExecutor<Goldilocks>>,
+    proving_key_path: PathBuf,
+    proving_key_snark_path: Option<PathBuf>,
+    /// Recurser setups registered with `proofman`, keyed by `recurser_id`.
+    /// A recurser must be registered (via [`register_recurser`]) before it can
+    /// prove — the same register-then-prove lifecycle as a regular program.
+    registered_recursers: std::sync::Mutex<HashMap<String, RegisteredRecurser>>,
+    /// The program [`Self::register_program`] last registered, as its ROM path and
+    /// hints mode, so that registering it again is skipped.
+    registered_program: std::sync::Mutex<Option<(PathBuf, bool)>>,
+}
+
+impl ProverBackend {
+    pub fn new(
+        proofman: ProofMan<Goldilocks>,
+        snark_wrapper: Option<SnarkWrapper<Goldilocks>>,
+        executor: Arc<ZiskExecutor<Goldilocks>>,
+        proving_key_path: PathBuf,
+        proving_key_snark_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            proofman,
+            snark_wrapper,
+            executor,
+            proving_key_path,
+            proving_key_snark_path,
+            registered_recursers: std::sync::Mutex::new(HashMap::new()),
+            registered_program: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn asm_emulator(&self) -> Option<&EmulatorAsm> {
+        self.executor.asm_emulator()
+    }
+
+    pub(crate) fn set_asm_resources(&self, resources: Arc<AsmResources>) -> Result<()> {
+        self.executor.set_asm_resources(resources).map_err(Into::into)
+    }
+
+    pub(crate) fn clear_asm_resources(&self) -> Result<()> {
+        self.executor.clear_asm_resources().map_err(Into::into)
+    }
+
+    pub(crate) fn submit_hint(&self, bytes: &[u8]) -> Result<()> {
+        let message: StreamMessage = borsh::from_slice(&bytes[1..])
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize hint StreamMessage: {}", e))?;
+        self.asm_emulator()
+            .ok_or_else(|| {
+                anyhow::anyhow!("ASM resources not initialized, cannot submit hint data")
+            })?
+            .submit_hint_direct(&message.data)
+            .map_err(|e| anyhow::anyhow!("Failed to submit hint data: {}", e))
+    }
+
+    pub(crate) fn submit_input(&self, bytes: &[u8]) -> Result<()> {
+        let message: StreamMessage = borsh::from_slice(&bytes[1..])
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize input StreamMessage: {}", e))?;
+        // SAFETY: Vec<u64> is heap-allocated with 8-byte alignment. Viewing its bytes as
+        // &[u8] is valid because u8 has no alignment requirement, the pointer arithmetic
+        // is in-bounds, and the lifetime is tied to `message` which outlives this scope.
+        let reinterpreted_data = unsafe {
+            std::slice::from_raw_parts(
+                message.data.as_ptr() as *const u8,
+                message.data.len() * std::mem::size_of::<u64>(),
+            )
+        };
+        self.asm_emulator()
+            .ok_or_else(|| {
+                anyhow::anyhow!("ASM resources not initialized, cannot append input data")
+            })?
+            .append_raw_input(reinterpreted_data)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn append_raw_input(&self, bytes: &[u8]) -> Result<()> {
+        self.asm_emulator()
+            .ok_or_else(|| {
+                anyhow::anyhow!("ASM resources not initialized, cannot append raw input")
+            })?
+            .append_raw_input(bytes)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn register_hints_stream(&self, stream: StreamSource) -> Result<()> {
+        self.asm_emulator()
+            .ok_or_else(|| {
+                anyhow::anyhow!("ASM resources not initialized, cannot register hints stream")
+            })?
+            .set_hints_stream_src(stream)
+            .map_err(|e| anyhow::anyhow!("Failed to set hints stream source: {}", e))
+    }
+
+    pub(crate) fn register_inputs_stream(&self, stream: StreamSource) -> Result<()> {
+        self.asm_emulator()
+            .ok_or_else(|| {
+                anyhow::anyhow!("ASM resources not initialized, cannot register inputs stream")
+            })?
+            .set_inputs_stream_src(stream)
+            .map_err(|e| anyhow::anyhow!("Failed to set inputs stream source: {}", e))
+    }
+
+    pub(crate) fn get_hints_processor(&self) -> Result<Arc<HintsProcessor<HintsShmem>>> {
+        match self.asm_emulator() {
+            Some(a) => a.get_hints_processor().map_err(Into::into),
+            None => {
+                Err(anyhow::anyhow!("ASM resources not initialized, cannot get hints processor"))
+            }
+        }
+    }
+
+    pub(crate) fn set_active_services(&self, is_first_process: bool) -> Result<()> {
+        if let Some(asm) = self.asm_emulator() {
+            asm.set_active_services(is_first_process)?;
+        }
+        Ok(())
+    }
+
+    /// Retires what the previous run left, for a run on the Rust emulator, which begins
+    /// no assembly job; see `ZiskExecutor::reset_for_new_job`.
+    pub(crate) fn reset(&self) -> Result<()> {
+        self.executor.reset_for_new_job().map_err(Into::into)
+    }
+
+    /// Builds now what proofman otherwise builds in the first job's reset and keeps for the
+    /// rest of the process: on the GPU, the multiplicity state in the late region and the
+    /// streaming-commit programs and tables. Every proving entry point resets anyway, so
+    /// this only moves the work. Call it before any job; a failure is left to the first
+    /// job, whose reset repeats it.
+    pub(crate) fn warm_up(&self) {
+        timer_start_info!(WARMING_UP_PROOFMAN);
+        if let Err(e) = self.proofman.reset() {
+            tracing::warn!("Proofman warm-up failed, the first job will retry it: {e}");
+        }
+        timer_stop_and_log_info!(WARMING_UP_PROOFMAN);
+    }
+
+    /// Begins a job on the assembly backend; see `ZiskExecutor::begin_asm_job`.
+    pub(crate) fn begin_asm_job(&self, resources: Arc<AsmResources>) -> Result<AsmJob> {
+        self.executor.begin_asm_job(resources).map_err(Into::into)
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.proofman.cancel();
+    }
+
+    pub(crate) fn signal_cancellation(&self) -> Result<()> {
+        if let Some(asm) = self.asm_emulator() {
+            asm.signal_cancellation()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn wait_until_proofman_ready(&self) {
+        self.proofman.wait_until_proofman_ready();
+    }
+
+    pub fn get_pctx(&self) -> Result<Arc<ProofCtx<Goldilocks>>> {
+        Ok(self.proofman.get_wcm().get_pctx())
+    }
+
+    /// Hash family the loaded proving key was generated with (e.g. "Poseidon1" / "Poseidon2").
+    pub fn hash(&self) -> Result<String> {
+        Ok(self.get_pctx()?.global_info.hash.clone())
+    }
+
+    /// Loaded proving key's hash family as a [`HashMode`]. Errors if the key's
+    /// recorded hash is not a recognized mode.
+    pub fn hash_mode(&self) -> Result<HashMode> {
+        let hash = self.hash()?;
+        hash.parse::<HashMode>().map_err(|e| {
+            anyhow::anyhow!("proving key hash {hash:?} is not a recognized HashMode: {e}")
+        })
+    }
+
+    /// Registers a program's ROM with the executor and proofman, unless it is the
+    /// program last registered and nothing has been set up since: building its
+    /// instruction table is not free, and consecutive jobs often run one program.
+    pub fn register_program(
+        &self,
+        zisk_rom: Arc<zisk_core::ZiskRom>,
+        rom_bin_path: &std::path::Path,
+        with_hints: bool,
+    ) -> Result<()> {
+        let key = (rom_bin_path.to_path_buf(), with_hints);
+        let mut registered =
+            self.registered_program.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if registered.as_ref() == Some(&key) {
+            return Ok(());
+        }
+        // Cleared first, so that a registration failing part way is never trusted.
+        *registered = None;
+        // Indexed Main: register this program's table before `set_rom` moves the Arc, on the
+        // same gate the executor uses to pick the compact row.
+        if self.executor.is_packed() {
+            let table = ziskemu::Emu::build_main_instr_table::<Goldilocks>(&zisk_rom);
+            let words_per_entry =
+                zisk_pil::MainTraceRowInstrTable::<Goldilocks>::PACKED_WORDS as u64;
+            let num_entries = zisk_rom.sorted_pc_list.len() as u64;
+            tracing::info!(
+                "Main indexed packing: compact rows + {}-entry instruction table ({:.1} MB)",
+                num_entries,
+                (table.len() * std::mem::size_of::<u64>()) as f64 / 1e6,
+            );
+            self.proofman
+                .register_instruction_table(
+                    zisk_pil::MAIN_AIRGROUP_ID,
+                    zisk_pil::MAIN_AIR_ID,
+                    &table,
+                    num_entries,
+                    words_per_entry,
+                )
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        }
+
+        self.executor.set_rom(zisk_rom, with_hints)?;
+
+        let custom_commits_map = HashMap::from([("rom".to_string(), rom_bin_path.to_path_buf())]);
+        self.proofman
+            .register_custom_commits(custom_commits_map)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        *registered = Some(key);
+        Ok(())
+    }
+
+    /// Makes the next [`Self::register_program`] register in full. Called by every
+    /// setup and recurser registration, which may change what proofman holds.
+    pub(crate) fn forget_registered_program(&self) {
+        *self.registered_program.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    pub fn set_stdin_and_random_seed(&self, stdin: ZiskStdin, seed: RandomSeed) -> Result<()> {
+        self.executor.set_stdin_and_random_seed(stdin, seed).map_err(Into::into)
+    }
+
+    pub fn execution_result(&self) -> Result<(ZiskExecutorSummary, ExecutorStatsHandle)> {
+        Ok(self.executor.get_execution_result())
+    }
+
+    pub(crate) fn execute(&self, stdin: ZiskStdin, seed: RandomSeed) -> Result<ExecuteOutput> {
+        self.executor.set_stdin_and_random_seed(stdin, seed)?;
+
+        let start = std::time::Instant::now();
+
+        self.proofman
+            .execute_from_lib(None)
+            .map_err(|e| anyhow::anyhow!("Error generating execution: {}", e))?;
+
+        let elapsed = start.elapsed();
+
+        let (result, _) = self.executor.get_execution_result();
+
+        let publics = self.proofman.get_publics();
+
+        Ok(ExecuteOutput::new(elapsed, result, &publics))
+    }
+
+    pub(crate) fn stats(
+        &self,
+        stdin: ZiskStdin,
+        seed: RandomSeed,
+        debug_info: Option<Option<String>>,
+        minimal_memory: bool,
+        _mpi_node: Option<u32>,
+    ) -> Result<(i32, i32, Option<ExecutorStatsHandle>)> {
+        let debug_info = create_debug_info(debug_info, self.proving_key_path.clone())?;
+
+        self.executor.set_stdin_and_random_seed(stdin, seed)?;
+
+        let rank_info = self.proofman.get_rank_info();
+
+        let mut is_active = true;
+
+        if let Some(mpi_node) = _mpi_node {
+            if rank_info.local_rank != mpi_node as i32 {
+                is_active = false;
+            }
+        }
+
+        self.proofman.split_active_processes(is_active);
+
+        if !is_active {
+            println!(
+                "{}: {}",
+                format!("Rank {}", rank_info.local_rank).bright_yellow().bold(),
+                "Inactive rank, skipping computation.".bright_yellow()
+            );
+
+            return Ok((rank_info.world_rank, rank_info.n_processes, None));
+        }
+
+        self.proofman
+            .compute_witness_from_lib(
+                &debug_info,
+                ProofOptions::new(false, false, false, false, false, minimal_memory),
+            )
+            .map_err(|e| anyhow::anyhow!("Error generating execution: {}", e))?;
+
+        let (_, stats): (ZiskExecutorSummary, ExecutorStatsHandle) =
+            self.executor.get_execution_result();
+
+        Ok((rank_info.world_rank, rank_info.n_processes, Some(stats)))
+    }
+
+    pub(crate) fn get_instance_trace(
+        &self,
+        instance_id: usize,
+        first_row: usize,
+        num_rows: usize,
+        offset: Option<usize>,
+    ) -> Result<Vec<RowInfo>> {
+        self.proofman
+            .get_instance_trace(instance_id, first_row, num_rows, offset)
+            .map_err(|e| anyhow::anyhow!("Error getting instance trace: {}", e))
+    }
+
+    pub(crate) fn get_instance_air_values(&self, instance_id: usize) -> Result<Vec<u64>> {
+        self.proofman
+            .get_instance_air_values(instance_id)
+            .map_err(|e| anyhow::anyhow!("Error getting instance AIR values: {}", e))
+    }
+
+    pub(crate) fn get_instance_fixed(
+        &self,
+        instance_id: usize,
+        first_row: usize,
+        num_rows: usize,
+        offset: Option<usize>,
+    ) -> Result<Vec<RowInfo>> {
+        self.proofman
+            .get_instance_fixed(instance_id, first_row, num_rows, offset)
+            .map_err(|e| anyhow::anyhow!("Error getting instance fixed: {}", e))
+    }
+
+    pub(crate) fn verify_constraints(
+        &self,
+        stdin: ZiskStdin,
+        seed: RandomSeed,
+        debug_info: Option<Option<String>>,
+    ) -> Result<VerifyConstraintsOutput> {
+        let start = std::time::Instant::now();
+
+        let debug_info = create_debug_info(debug_info, self.proving_key_path.clone())?;
+
+        self.executor.set_stdin_and_random_seed(stdin, seed)?;
+
+        self.proofman
+            .verify_proof_constraints_from_lib(&debug_info)
+            .map_err(|e| anyhow::anyhow!("Error generating proof: {}", e))?;
+        let elapsed = start.elapsed();
+
+        let (result, _stats) = self.executor.get_execution_result();
+
+        stats_mark!(_stats, 0, "END", 0);
+
+        #[cfg(feature = "stats")]
+        _stats.store_stats();
+
+        let publics = self.proofman.get_publics();
+
+        Ok(VerifyConstraintsOutput::new(result, elapsed.as_millis() as u64, &publics))
+    }
+
+    pub(crate) fn prove(
+        &self,
+        stdin: ZiskStdin,
+        seed: RandomSeed,
+        proof_kind: ProofKind,
+        prover_options: BackendProverOpts,
+    ) -> Result<ProveOutput> {
+        if proof_kind == ProofKind::Snark && self.snark_wrapper.is_none() {
+            return Err(anyhow::anyhow!(
+                "Snark wrapper is not initialized. Cannot generate snark proof."
+            ));
+        }
+
+        let start = std::time::Instant::now();
+
+        self.executor.set_stdin_and_random_seed(stdin, seed)?;
+
+        let minimal = matches!(proof_kind, ProofKind::VadcopFinalMinimal);
+
+        self.proofman.set_partition(1, vec![0], 0)?;
+
+        self.proofman.set_barrier();
+        let proof = self
+            .proofman
+            .generate_proof_from_lib(
+                ProvePhaseInputs::Full(),
+                ProofOptions::new(
+                    false,
+                    prover_options.aggregation,
+                    true,
+                    minimal,
+                    prover_options.verify_proofs,
+                    prover_options.minimal_memory,
+                ),
+                ProvePhase::Full,
+            )
+            .map_err(|e| anyhow::anyhow!("Error generating proof: {}", e))?;
+
+        let proof = match proof {
+            ProvePhaseResult::Full(_, proof) => proof,
+            _ => None,
+        };
+
+        let (execution_result, _stats) = self.executor.get_execution_result();
+
+        // Store the stats in stats.json
+        stats_mark!(_stats, 0, "END", 0);
+
+        #[cfg(feature = "stats")]
+        _stats.store_stats();
+
+        self.proofman.set_barrier();
+
+        match (proof_kind, proof) {
+            (ProofKind::Snark, Some(vadcop_proof)) => {
+                let vadcop_vk_u64 = self.get_vadcop_vk(minimal)?;
+
+                // Freshly proven vadcop_final proof — stamp the default
+                // vadcop_final verkey (no override).
+                let snark_proof = self.final_snark_proof(&vadcop_proof, None)?;
+
+                let program_vk = ProgramVK::new_from_publics_with_mode(
+                    &vadcop_proof.public_values,
+                    self.hash_mode()?,
+                );
+                let body = self.snark_proof_body(
+                    snark_proof,
+                    &vadcop_proof.public_values,
+                    vadcop_vk_u64.clone(),
+                )?;
+                Ok(ProveOutput::new(
+                    execution_result,
+                    start.elapsed(),
+                    Proof::new(body, program_vk),
+                )
+                .with_produced_under(Some(vadcop_vk_u64))
+                .with_produced_snark_vkey())
+            }
+            (_, Some(p)) => {
+                let zisk_vk = self.get_vadcop_vk(minimal)?;
+                Ok(ProveOutput::new(
+                    execution_result,
+                    start.elapsed(),
+                    Proof::new(
+                        ProofBody::Vadcop {
+                            proof: p.proof,
+                            zisk_vk: zisk_vk.clone(),
+                            // A freshly proven leaf is a raw vadcop_final proof
+                            // (Final, flag=1) or its compressed form (Minimal).
+                            // Recurser (aggregated) proofs come from the fold path.
+                            kind: if minimal { VadcopKind::Minimal } else { VadcopKind::Final },
+                            hash: self.hash()?,
+                            // Store the canonical flag-free view; proofman's raw
+                            // publics carry the is_vadcop_final_proof flag at index 0
+                            // for non-minimal proofs (captured in `kind` above).
+                            publics_full: program_publics(&p.public_values).to_vec(),
+                        },
+                        ProgramVK::new_from_publics_with_mode(&p.public_values, self.hash_mode()?),
+                    ),
+                )
+                .with_produced_under(Some(zisk_vk)))
+            }
+            // proofman returns a final proof only when aggregating, and then on rank 0 only;
+            // elsewhere there is none to return.
+            (_, None)
+                if !prover_options.aggregation || self.proofman.get_rank_info().world_rank != 0 =>
+            {
+                Ok(ProveOutput::new_null(execution_result, start.elapsed()))
+            }
+            (_, None) => Err(anyhow::anyhow!("proving finished without a final proof on rank 0")),
+        }
+    }
+
+    /// Compress a vadcop_final proof into its minimal form. The flag is re-added
+    /// from `source_kind`: `FinalCompressed` verifies all 69 words before
+    /// stripping index 0.
+    ///
+    /// Leaves only. A minimal proof has no flag to re-add, and the result is labelled
+    /// `VadcopKind::Minimal` -- which for an aggregate would erase the marker
+    /// `Proof::verify` keys the recursion-domain check on, letting a foreign subtree
+    /// through. Both are refused rather than silently losing the distinction.
+    pub(crate) fn minimal(
+        &self,
+        proof: &[u64],
+        publics_full: &[u64],
+        source_kind: VadcopKind,
+        seed: Option<RandomSeed>,
+    ) -> Result<ProveOutput> {
+        match source_kind {
+            VadcopKind::Minimal => {
+                return Err(anyhow::anyhow!(
+                    "Cannot compress an already-minimal proof: it carries no \
+                     is_vadcop_final_proof flag and the compression circuit cannot verify it"
+                ))
+            }
+            VadcopKind::Recurser => {
+                return Err(anyhow::anyhow!(
+                    "Cannot compress an aggregated proof: the compressed form is labelled \
+                     Minimal, which would drop the recursion-domain check that binds its \
+                     subtree to this recurser"
+                ))
+            }
+            VadcopKind::Final => {}
+        }
+
+        let start = std::time::Instant::now();
+
+        let hash = self.hash()?;
+        let vadcop_final_proof = VadcopFinalProof::new(
+            proof.to_vec(),
+            source_kind.stark_publics(publics_full),
+            false,
+            hash.clone(),
+        );
+
+        let minimal_proof = self
+            .proofman
+            .generate_vadcop_final_proof_compressed(&vadcop_final_proof)
+            .map_err(|e| anyhow::anyhow!("Error generating minimal proof: {}", e))?;
+
+        let time = start.elapsed();
+
+        let zisk_vk = self.get_vadcop_vk(true)?;
+        let program_vk =
+            ProgramVK::new_from_publics_with_mode(&minimal_proof.public_values, self.hash_mode()?);
+        let proof = Proof::new(
+            ProofBody::Vadcop {
+                proof: minimal_proof.proof.clone(),
+                zisk_vk: zisk_vk.clone(),
+                kind: VadcopKind::Minimal,
+                hash,
+                publics_full: minimal_proof.public_values,
+            },
+            program_vk,
+        );
+
+        // No guest runs here; the result keeps the seed of the execution the source proof
+        // attests to.
+        Ok(ProveOutput::new(ZiskExecutorSummary::default(), time, proof)
+            .with_random_seed(seed)
+            .with_produced_under(Some(zisk_vk)))
+    }
+
+    /// SNARK-wrap a vadcop_final proof. `source_kind` supplies the flag `RecursiveF`
+    /// expects, and selects the verification root (see below).
+    pub(crate) fn snark(
+        &self,
+        proof: &[u64],
+        publics_full: &[u64],
+        source_kind: VadcopKind,
+        seed: Option<RandomSeed>,
+    ) -> Result<ProveOutput> {
+        if self.snark_wrapper.is_none() {
+            return Err(anyhow::anyhow!(
+                "Snark wrapper is not initialized. Cannot generate snark proof."
+            ));
+        }
+
+        if source_kind.is_minimal() {
+            return Err(anyhow::anyhow!(
+                "Cannot SNARK-wrap a minimal proof: RecursiveF consumes the uncompressed \
+                 vadcop_final proof, not its compressed form"
+            ));
+        }
+
+        let start = std::time::Instant::now();
+
+        let vadcop_final_proof = VadcopFinalProof::new(
+            proof.to_vec(),
+            source_kind.stark_publics(publics_full),
+            false,
+            self.hash()?,
+        );
+
+        // The verkey RecursiveF verifies under, and the `rootCVadcopFinal` hashed
+        // into the SNARK's publics. One key, chosen by kind: a leaf uses the
+        // default vadcop_final setup verkey (as the fresh prove+wrap path stamps),
+        // an aggregate the recurser verkey the aggregator writes into its output VK
+        // slots. Reading those slots for a leaf would pick up its ROM root instead.
+        // An aggregate's rootc comes from its input, so it is not this setup's key.
+        let (rootc, produced_under) = match source_kind {
+            VadcopKind::Recurser => {
+                (program_publics(publics_full)[..PROGRAM_VK_LEN].to_vec(), None)
+            }
+            _ => {
+                let vk = self.get_vadcop_vk(false)?;
+                (vk.clone(), Some(vk))
+            }
+        };
+        let verkey_override = produced_under.is_none().then_some(rootc.as_slice());
+
+        let snark_proof = self.final_snark_proof(&vadcop_final_proof, verkey_override)?;
+
+        let time = start.elapsed();
+
+        let body = self.snark_proof_body(snark_proof, &vadcop_final_proof.public_values, rootc)?;
+        let proof = Proof::new(
+            body,
+            ProgramVK::new_from_publics_with_mode(
+                &vadcop_final_proof.public_values,
+                self.hash_mode()?,
+            ),
+        );
+
+        // No guest runs here; the result keeps the seed of the execution the source proof
+        // attests to.
+        Ok(ProveOutput::new(ZiskExecutorSummary::default(), time, proof)
+            .with_random_seed(seed)
+            .with_produced_under(produced_under)
+            .with_produced_snark_vkey())
+    }
+
+    /// The proof body of a final SNARK proof, by the protocol that proved it: the key sets the
+    /// protocol up, so the caller does not choose it. `rootc` is the key the recursivef verified
+    /// under, which the SNARK's public digest commits to.
+    fn snark_proof_body(
+        &self,
+        snark_proof: SnarkProof,
+        vadcop_public_values: &[u64],
+        rootc: Vec<u64>,
+    ) -> Result<ProofBody> {
+        let proving_key_snark = self.proving_key_snark_path.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Proving key snark path is required for SNARK proofs")
+        })?;
+        let publics = PublicValues::new_from_u64(vadcop_public_values);
+        // The canonical flag-free view, matching every producer of a SNARK body. Storing the
+        // raw 69-word vector left consumers to strip the flag themselves.
+        let publics_full = program_publics(vadcop_public_values).to_vec();
+
+        match snark_proof.protocol_id {
+            id if id == SnarkProtocol::Plonk.protocol_id() => {
+                let verkey_path = proving_key_snark.join("final").join("final.verkey.json");
+                let plonk_vkey = PlonkVkey::load(&verkey_path)?;
+                Ok(ProofBody::Plonk {
+                    proof_bytes: snark_proof.proof_bytes,
+                    plonk_vk: Box::new(PlonkVkBlob { vadcop_vk: rootc.clone(), plonk_vkey }),
+                    publics,
+                    publics_full,
+                    // The key RecursiveF verified under, so `Proof::verify` reproduces the
+                    // circuit's `publicsHash` preimage.
+                    rootc,
+                })
+            }
+            id if id == SnarkProtocol::Pilfflonk.protocol_id() => {
+                let vkey_path = pilfflonk_vkey_path(proving_key_snark)?;
+                let vkey_json = std::fs::read_to_string(&vkey_path).map_err(|e| {
+                    anyhow::anyhow!("Cannot read the pilfflonk vkey {}: {e}", vkey_path.display())
+                })?;
+                Ok(ProofBody::Pilfflonk {
+                    proof_bytes: snark_proof.proof_bytes,
+                    vkey_json,
+                    publics,
+                    publics_full,
+                    rootc,
+                })
+            }
+            id => Err(anyhow::anyhow!("Unsupported snark protocol id: {id}")),
+        }
+    }
+
+    pub(crate) fn prove_phase(
+        &self,
+        phase_inputs: ProvePhaseInputs,
+        options: ProofOptions,
+        phase: ProvePhase,
+    ) -> Result<ZiskPhaseResult> {
+        self.proofman
+            .generate_proof_from_lib(phase_inputs, options, phase.clone())
+            .map_err(|e| anyhow::anyhow!("Error generating proof in phase {:?}: {}", phase, e))
+    }
+
+    pub(crate) fn set_partition(
+        &self,
+        total_compute_units: usize,
+        allocation: Vec<u32>,
+        rank_id: usize,
+    ) -> Result<()> {
+        Ok(self.proofman.set_partition(total_compute_units, allocation, rank_id)?)
+    }
+
+    pub(crate) fn get_execution_info(&self) -> Result<(WitnessInfo, ZiskExecutorTime)> {
+        let witness_info = self.proofman.get_witness_info();
+        let (execution_result, _) = self.executor.get_execution_result();
+        Ok((witness_info, execution_result.executor_time))
+    }
+
+    pub(crate) fn aggregation_arity(&self) -> usize {
+        self.proofman.aggregation_arity()
+    }
+
+    pub(crate) fn reset_aggregation_state(&self) {
+        self.proofman.reset_aggregation_state()
+    }
+
+    pub(crate) fn register_worker_proofs(&self, agg_proofs: Vec<AggProofsRegister>) -> Result<()> {
+        self.proofman
+            .register_aggregated_proofs(agg_proofs)
+            .map_err(|e| anyhow::anyhow!("Error registering aggregate proof: {}", e))
+    }
+
+    pub(crate) fn join_worker_proofs(
+        &self,
+        agg_proofs: Vec<AggProofs>,
+        last_proof: bool,
+        final_proof: bool,
+        keep_resident: bool,
+        options: &ProofOptions,
+    ) -> Result<Option<ZiskAggPhaseResult>> {
+        let result = self
+            .proofman
+            .receive_aggregated_proofs(agg_proofs, last_proof, final_proof, keep_resident, options)
+            .map_err(|e| anyhow::anyhow!("Error aggregating proofs: {}", e))?;
+
+        Ok(result.map(|agg| ZiskAggPhaseResult { agg_proofs: agg }))
+    }
+
+    /// Register a recurser setup with proofman so it can later prove. The same
+    /// lifecycle as registering a program: do this once, then prove many times.
+    /// Idempotent — re-registering an already-registered `recurser_id` is cheap.
+    pub(crate) fn register_recurser(&self, output_dir: &str, recurser_id: &str) -> Result<()> {
+        if self.registered_recursers.lock().unwrap().contains_key(recurser_id) {
+            return Ok(());
+        }
+        self.forget_registered_program();
+        let registered = register_recurser_setup(&self.proofman, output_dir, recurser_id)
+            .map_err(|e| anyhow::anyhow!("recurser registration failed: {e:#}"))?;
+        self.registered_recursers.lock().unwrap().insert(recurser_id.to_string(), registered);
+        Ok(())
+    }
+
+    /// Fold two proofs through a previously-registered recurser. Errors if the
+    /// recurser was not registered first via [`register_recurser`].
+    pub(crate) fn prove_recurser(
+        &self,
+        recurser_id: &str,
+        proof_a: &VadcopFinalProof,
+        proof_b: &VadcopFinalProof,
+        free_a: &[u64],
+        free_b: &[u64],
+        root_c_recurser_agg: Option<[u64; 4]>,
+    ) -> Result<VadcopFinalProof> {
+        self.forget_registered_program();
+        let registered =
+            self.registered_recursers.lock().unwrap().get(recurser_id).cloned().ok_or_else(
+                || {
+                    anyhow::anyhow!(
+                        "recurser '{recurser_id}' is not registered; call register_recurser first"
+                    )
+                },
+            )?;
+
+        let opts = ProveRecurserAggregatorOptions {
+            registered: &registered,
+            proof_a,
+            proof_b,
+            free_a,
+            free_b,
+            root_c_recurser_agg,
+        };
+        prove_recurser_aggregator(&self.proofman, &opts)
+            .map_err(|e| anyhow::anyhow!("recurser proof generation failed: {e:#}"))
+    }
+
+    /// The final SNARK of a vadcop_final proof. It goes through `ProofMan`, not the wrapper
+    /// directly: a blake3 key's wrapper takes a recursivef proof, which `ProofMan` proves first.
+    fn final_snark_proof(
+        &self,
+        vadcop_final_proof: &VadcopFinalProof,
+        verkey_override: Option<&[u64]>,
+    ) -> Result<SnarkProof> {
+        let snark_wrapper = self.snark_wrapper.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Snark wrapper is not initialized. Cannot generate snark proof.")
+        })?;
+        Ok(self.proofman.generate_final_snark_proof(
+            snark_wrapper,
+            vadcop_final_proof,
+            verkey_override,
+        )?)
+    }
+
+    pub(crate) fn get_vadcop_vk(&self, minimal: bool) -> Result<Vec<u64>> {
+        Ok(get_vadcop_final_proof_vkey(&self.proving_key_path, minimal)?)
+    }
+
+    pub(crate) fn mpi_broadcast(&self, data: &mut Vec<u8>) -> Result<()> {
+        self.proofman.mpi_broadcast(data);
+        Ok(())
+    }
+
+    pub(crate) fn notify_cluster_cancellation(&self) {
+        self.proofman.notify_cancellation();
+    }
+
+    pub(crate) fn cluster_barrier(&self) {
+        self.proofman.set_barrier();
+    }
+
+    /// Whether every rank succeeded, from each one's `ok`: a collective, which
+    /// every rank must call.
+    pub(crate) fn cluster_all_ok(&self, ok: bool) -> bool {
+        self.proofman.get_wcm().get_pctx().mpi_ctx.all_finished_ok(ok)
+    }
+
+    /// Send `data` to MPI rank `dest`, tagged `tag`.
+    pub(crate) fn mpi_send(&self, dest: i32, tag: i32, data: &[u8]) {
+        let pctx = self.proofman.get_wcm().get_pctx();
+        pctx.mpi_ctx.world.process_at_rank(dest).send_with_tag(data, tag);
+    }
+
+    /// A message tagged `tag` from any rank, if one has arrived: its source rank and
+    /// its data.
+    pub(crate) fn mpi_try_receive(&self, tag: i32) -> Option<(i32, Vec<u8>)> {
+        let pctx = self.proofman.get_wcm().get_pctx();
+        let (message, status) =
+            pctx.mpi_ctx.world.any_process().immediate_matched_probe_with_tag(tag)?;
+        let source = status.source_rank();
+        let (data, _) = (message, status).matched_receive_vec::<u8>();
+        Some((source, data))
+    }
+
+    /// End every rank of the MPI job, this one included, with exit `code`.
+    pub(crate) fn abort_cluster(&self, code: i32) -> ! {
+        self.proofman.get_wcm().get_pctx().mpi_ctx.world.abort(code)
+    }
+}
+
+/// The `pilfflonk.vkey.json` of a key set up with `--final-snark pilfflonk`, in
+/// `provingKeySnark/final/provingKey/<name>/pilfflonk/`. There is one `<name>`, the setup's.
+fn pilfflonk_vkey_path(proving_key_snark: &std::path::Path) -> Result<PathBuf> {
+    let dir = proving_key_snark.join("final").join("provingKey");
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| anyhow::anyhow!("Cannot read {}: {e}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path().join("pilfflonk").join("pilfflonk.vkey.json"))
+        .filter(|path| path.is_file())
+        .collect();
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        n => Err(anyhow::anyhow!(
+            "Expected one pilfflonk.vkey.json under {}/<name>/pilfflonk/, found {n}",
+            dir.display()
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pilfflonk_vkey_path;
+    use std::path::{Path, PathBuf};
+
+    /// A `provingKeySnark/` in a fresh directory, removed on drop.
+    struct SnarkKeyDir(PathBuf);
+
+    impl SnarkKeyDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "pilfflonk_vkey_{tag}_{}_{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn add_vkey(&self, name: &str) {
+            let dir = self.0.join("final").join("provingKey").join(name).join("pilfflonk");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("pilfflonk.vkey.json"), "{}").unwrap();
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for SnarkKeyDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_pilfflonk_vkey_is_the_one_under_the_setups_name() {
+        let key = SnarkKeyDir::new("one");
+        key.add_vkey("zisk");
+        let path = pilfflonk_vkey_path(key.path()).unwrap();
+        assert!(path.ends_with("final/provingKey/zisk/pilfflonk/pilfflonk.vkey.json"), "{path:?}");
+    }
+
+    #[test]
+    fn a_plonk_key_has_no_pilfflonk_vkey() {
+        let key = SnarkKeyDir::new("none");
+        std::fs::create_dir_all(key.path().join("final")).unwrap();
+        std::fs::write(key.path().join("final").join("final.zkey"), "").unwrap();
+        assert!(pilfflonk_vkey_path(key.path()).is_err());
+    }
+
+    /// Two names would mean two setups in one key, and picking one would verify against the wrong vkey.
+    #[test]
+    fn two_pilfflonk_vkeys_are_refused() {
+        let key = SnarkKeyDir::new("two");
+        key.add_vkey("zisk");
+        key.add_vkey("other");
+        let err = pilfflonk_vkey_path(key.path()).unwrap_err().to_string();
+        assert!(err.contains("found 2"), "{err}");
+    }
+}

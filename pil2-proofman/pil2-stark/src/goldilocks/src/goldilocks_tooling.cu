@@ -1,0 +1,149 @@
+#include "goldilocks_tooling.cuh"
+#include "cuda_utils.cuh"
+#include "goldilocks_trace_layout.cuh"
+#include "stream_commit.cuh"
+
+// When the source is already host-pinned (e.g. via register_host_memory) and
+// large, skip the pinned-staging double-buffer and issue a single direct H2D.
+// Self-selecting: a non-pinned source returns false and falls through to the
+// staged path, so this is always safe to attempt.
+static bool copy_direct_registered_h2d_if_enabled(const void *src, void *dst, uint64_t total_size, cudaStream_t stream)
+{
+    if (total_size < 16 * 1024 * 1024) return false;
+
+    cudaPointerAttributes attrs;
+    cudaError_t attrErr = cudaPointerGetAttributes(&attrs, src);
+    if (attrErr != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    // Only take the fast path when src is host memory the driver can DMA directly.
+    if (attrs.type != cudaMemoryTypeHost) return false;
+
+    CHECKCUDAERR(cudaMemcpyAsync(dst, src, total_size, cudaMemcpyHostToDevice, stream));
+    return true;
+}
+
+// Kernel: row-major input -> destination layout `layout` (see getBufferOffset).
+// Uses blockIdx.x for rows (which can be very large) and blockIdx.y for cols.
+__global__ void fromRowMajorToColMajor(
+    const uint64_t nRows,
+    const uint64_t nCols,
+    const uint64_t* __restrict__ input,
+    uint64_t* __restrict__ output,
+    Layout layout
+) {
+    uint64_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t col = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (row < nRows && col < nCols) {
+        uint64_t inputOffset = row * nCols + col;
+        uint64_t outputOffset = getBufferOffset(row, col, nRows, nCols, layout);
+        output[outputOffset] = input[inputOffset];
+    }
+}
+
+void fromRowMajorToColMajor(
+    uint64_t nRows,
+    uint64_t nCols,
+    gl64_t* src,
+    gl64_t* dst,
+    Layout layout,
+    cudaStream_t stream
+) {
+    if (nCols == 0 || nRows == 0) return;
+    if (layout == Layout::ColMajor && nCols > 64) {
+        scTransposePacked((const uint64_t *)src, (uint64_t *)dst, nRows, nCols, stream);
+        return;
+    }
+    dim3 block(TILE_HEIGHT, TILE_WIDTH);
+    dim3 grid((nRows + block.x - 1) / block.x,
+              (nCols + block.y - 1) / block.y);
+    fromRowMajorToColMajor<<<grid, block, 0, stream>>>(nRows, nCols, (uint64_t*)src, (uint64_t*)dst, layout);
+    CHECKCUDAERR(cudaGetLastError());
+}
+
+#ifndef __GOLDILOCKS_ENV__
+void copy_to_device_in_chunks(
+    DeviceCommitBuffers* d_buffers,
+    const void* src,
+    void* dst,
+    uint64_t total_size,
+    uint64_t streamId,
+    TimerGPU &timer,
+    // Off for a copy that runs outside the window the category report is divided by: counting it
+    // there puts its time in the numerator and not the denominator. Such a copy gets a timer of its
+    // own instead -- see STARK_GPU_WITNESS in gen_recursive_proof_gpu.
+    bool categorize
+    ){
+    cudaSetDevice(d_buffers->streamsData[streamId].gpuId);
+    cudaStream_t stream = d_buffers->streamsData[streamId].stream;
+
+    // One direct copy: traces come from a page-locked pool, and the driver stages pageable
+    // sources itself.
+    if (categorize) { TimerStartCategoryGPU(timer, H2D_COPY); }
+    CHECKCUDAERR(cudaMemcpyAsync(dst, src, total_size, cudaMemcpyHostToDevice, stream));
+    // Gates recycling the host trace buffer (see wait_trace_h2d_done).
+
+    cudaEventRecord(d_buffers->streamsData[streamId].trace_copy_event, stream);
+    if (categorize) { TimerStopCategoryGPU(timer, H2D_COPY); }
+}
+
+void copy_to_device_in_chunks(
+    const uint8_t* src,
+    uint8_t* dst,
+    uint64_t total_size_bytes,
+    uint8_t* pinnedBuffer,
+    uint64_t pinnedBufferSize,
+    cudaStream_t stream
+){
+    if (copy_direct_registered_h2d_if_enabled(src, dst, total_size_bytes, stream)) return;
+
+     uint64_t block_size = pinnedBufferSize/2;
+    
+    uint8_t *pinned_buffer = pinnedBuffer;
+    uint8_t *pinned_buffer_extra = (uint8_t *)pinnedBuffer + block_size;
+    uint64_t nBlocks = (total_size_bytes + block_size - 1) / block_size;
+
+    uint8_t *pinned_buffer_temp;
+    
+    uint64_t copySizeBlock = std::min(block_size, total_size_bytes);
+    std::memcpy(pinned_buffer_extra, (const uint8_t*)src, copySizeBlock);
+
+    for (uint64_t i = 1; i < nBlocks; ++i) {
+        CHECKCUDAERR(cudaStreamSynchronize(stream));
+
+        pinned_buffer_temp = pinned_buffer;
+        pinned_buffer = pinned_buffer_extra;
+        pinned_buffer_extra = pinned_buffer_temp;
+
+        uint64_t copySizeBlockPrev = std::min(block_size, total_size_bytes - (i - 1) * block_size);
+
+        CHECKCUDAERR(cudaMemcpyAsync(
+            (uint8_t*)dst + (i - 1) * block_size,
+            pinned_buffer,
+            copySizeBlockPrev,
+            cudaMemcpyHostToDevice,
+            stream));
+
+        uint64_t copySizeBlock = std::min(block_size, total_size_bytes - i * block_size);
+        std::memcpy(pinned_buffer_extra, (const uint8_t*)src + i * block_size, copySizeBlock);
+    }
+
+    CHECKCUDAERR(cudaStreamSynchronize(stream));
+    
+    uint64_t copySizeBlockFinal = std::min(block_size, total_size_bytes - (nBlocks - 1) * block_size);
+    
+    CHECKCUDAERR(cudaMemcpyAsync(
+        (uint8_t*)dst + (nBlocks - 1) * block_size,
+        pinned_buffer_extra,
+        copySizeBlockFinal,
+        cudaMemcpyHostToDevice,
+        stream
+    ));
+
+    CHECKCUDAERR(cudaStreamSynchronize(stream));
+
+}
+
+#endif // __GOLDILOCKS_ENV__

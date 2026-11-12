@@ -1,5 +1,6 @@
 const { log2 } = require("./utils.js");
 const Context = require('./context.js');
+const COLORS = require("./colors.js");
 const FixedFile = require('./fixed_file.js');
 const ExternFixedFile = require('./extern_fixed_file.js');
 const path = require('path');
@@ -22,15 +23,16 @@ module.exports = class Air {
         }
         Air._airnames[this.name] = Context.sourceRef;
         this.outputFixedFile = Context.config.fixedToFile ? this.name + '.fixed' : false;
+        let fixedToTxt = Context.config.fixedToTxt === true || (Array.isArray(Context.config.fixedToTxt) && Context.config.fixedToTxt.includes(this.name))
+        this.outputFixedTxt = fixedToTxt ? this.name + '.txt' : false;
         this.externFixedFiles = []; 
         this.info = {};
     }    
     setInfo(info) {
         this.info = info;
     }
-
     get rows () {
-        if (this.rowsUsed === false) {
+        if (this.rowsUsed === false && this._rows > 0) {
             this.rowsUsed = Context.sourceRef;
         }
         return this._rows;
@@ -39,6 +41,7 @@ module.exports = class Air {
         if (this.rowsUsed !== false) {
             throw new Error(`Cannot update N after it has been used. N was first used at ${this.rowsUsed}, but you're attempting to modify it at ${Context.sourceRef}`);
         }
+        console.log(`  > Setting rows: ${value}`);
         this._rows = value;
     }
     declareAirValue(name, lengths = [], data = {}) {
@@ -65,7 +68,7 @@ module.exports = class Air {
     // Unused function to load all fixed file columns together
     loadFiledFiles() {
         for (const [filename, fixedFile] of Object.entries(this.loadFixedFiles)) {            
-            console.log(`  > Loading fixed file ${filename} ...`);
+            console.log(`  > Loading fixed file ${COLORS.filename(filename)} ...`);
             fixedFile.loadFromFile(filename);
         }
     }
@@ -73,8 +76,14 @@ module.exports = class Air {
         if (typeof filename !== 'string') {
             throw new Error(`Invalid extern fixed file name ${filename} on ${Context.sourceRef}`);
         }
-        console.log(`  > Loading extern fixed file ${filename} ...`);
-        this.externFixedFiles.push(new ExternFixedFile(filename, {...Context.config, fileDir: path.dirname(Context.fullFilename), basePath: Context.basePath}));
+        console.log(`  > Loading extern fixed file ${COLORS.filename(filename)} ...`);
+        let eff = new ExternFixedFile(filename, {...Context.config, fileDir: path.dirname(Context.fullFilename), basePath: Context.basePath});
+        if (this._rows == 0) {
+            this.updateRows(eff.rows);
+        } else if (this._rows !== eff.rows) {
+            throw new Error(`Extern fixed file ${filename} has ${eff.rows} rows, but air ${this.name} has ${this._rows} rows. Mismatch at ${Context.sourceRef}`);
+        }
+        this.externFixedFiles.push(eff);
     }
     findExternFixedCol(colname) {
         let data = false;
@@ -83,5 +92,10 @@ module.exports = class Air {
             if (data !== false) break;
         }
         return data;
+    }
+    onEnd() {
+        if (this.outputFixedTxt) {
+            Context.processor.exportFixedToTxt(this.outputFixedTxt);
+        }
     }
 }

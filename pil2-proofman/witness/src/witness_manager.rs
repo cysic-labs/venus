@@ -2,11 +2,23 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock, Mutex};
 use std::path::PathBuf;
 
-use fields::PrimeField64;
-use proofman_common::{BufferPool, DebugInfo, RankInfo, ModeName, ProofCtx, ProofmanResult, SetupCtx};
+use proofman_fields::PrimeField64;
+use proofman_common::{BufferPool, DebugInfo, RankInfo, ModeName, ProofCtx, ProofmanResult, SetupCtx, WitnessState};
 use crate::WitnessComponent;
 use libloading::Library;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The lifecycle answers "does this instance have its witness". Only stage 1 produces one: later
+/// stages run over a trace that already exists, so they must bypass the gate -- it would refuse
+/// every instance as `Done` and silently skip the component.
+const WITNESS_STAGE: u32 = 1;
+
+/// Dedup while keeping the caller's order. The filters below used to iterate a `HashSet`, discarding
+/// the caller's dispatch order and varying it run to run.
+fn dedup_preserving_order(ids: &[usize]) -> Vec<usize> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    ids.iter().copied().filter(|id| seen.insert(*id)).collect()
+}
 
 pub const MAX_COMPONENTS: usize = 1000;
 
@@ -51,7 +63,8 @@ impl<F: PrimeField64> WitnessManager<F> {
 
     pub fn set_init_witness(&self, init: bool, library: Library) {
         self.init.store(init, Ordering::SeqCst);
-        self.library.lock().unwrap().replace(library);
+        let _ = self.library.lock().unwrap().take();
+        std::mem::forget(library);
     }
 
     pub fn is_init_witness(&self) -> bool {
@@ -68,6 +81,14 @@ impl<F: PrimeField64> WitnessManager<F> {
 
     pub fn register_component_std(&self, component: Arc<dyn WitnessComponent<F>>) {
         self.components_std.write().unwrap().push(component);
+    }
+
+    /// Whether a witness library has registered any component through `register_component`.
+    /// Deliberately ignores `components_std` (the std library registers those on its own): the
+    /// callers gate work only the external witness library can do, such as producing the
+    /// custom-commit fixed files.
+    pub fn has_witness_lib_components(&self) -> bool {
+        !self.components.read().unwrap().is_empty()
     }
 
     pub fn gen_custom_commits_fixed(&self) -> ProofmanResult<()> {
@@ -107,13 +128,12 @@ impl<F: PrimeField64> WitnessManager<F> {
 
     pub fn debug(&self, instance_ids: &[usize], debug_info: &DebugInfo) -> ProofmanResult<()> {
         if debug_info.std_mode.name == ModeName::Debug {
+            let unique = dedup_preserving_order(instance_ids);
             for (idx, component) in self.components.read().unwrap().iter().enumerate() {
-                let ids_hash_set: HashSet<usize> = instance_ids.iter().cloned().collect();
-
-                let instance_ids_filtered: Vec<usize> = ids_hash_set
+                let instance_ids_filtered: Vec<usize> = unique
                     .iter()
                     .filter(|id| self.components_instance_ids[idx].read().unwrap().contains(id))
-                    .cloned() // turn &&usize → usize
+                    .cloned()
                     .collect();
 
                 if !instance_ids_filtered.is_empty() {
@@ -129,6 +149,9 @@ impl<F: PrimeField64> WitnessManager<F> {
         Ok(())
     }
 
+    /// Takes no ownership: the default impl queues through `announce_witness_ready`, which needs the
+    /// instance still queueable. The old `!calculated` filter read the channel backlog as untouched.
+    /// Like `calculate_witness`, only stage 1 is filtered by the lifecycle.
     pub fn pre_calculate_witness(
         &self,
         stage: u32,
@@ -136,25 +159,20 @@ impl<F: PrimeField64> WitnessManager<F> {
         n_cores: usize,
         buffer_pool: &dyn BufferPool<F>,
     ) -> ProofmanResult<()> {
+        let unique = dedup_preserving_order(instance_ids);
         for (idx, component) in self.components.read().unwrap().iter().enumerate() {
-            let instance_ids_filtered = {
-                let mut instance_ids_filtered = Vec::new();
-                let mut seen = HashSet::new();
-                let component_instance_ids = self.components_instance_ids[idx].read().unwrap();
+            let mut instance_ids_filtered = Vec::new();
 
-                for &id in instance_ids {
-                    if !seen.insert(id) {
-                        continue;
-                    }
-                    if component_instance_ids.contains(&id)
-                        && (self.pctx.dctx_is_my_process_instance(id)? || self.pctx.dctx_is_table(id))
-                        && !self.pctx.dctx_is_instance_calculated(id)
-                    {
-                        instance_ids_filtered.push(id);
-                    }
+            for id in &unique {
+                // Only what has not had a witness yet in this phase. `Evicted` is excluded with
+                // `Done`: it already had one, and preparing it again is what re-announced it.
+                if self.owns(idx, *id)?
+                    && (stage != WITNESS_STAGE
+                        || matches!(self.pctx.dctx_witness_state(*id), WitnessState::Absent | WitnessState::Queued))
+                {
+                    instance_ids_filtered.push(*id);
                 }
-                instance_ids_filtered
-            };
+            }
 
             if !instance_ids_filtered.is_empty() {
                 component.pre_calculate_witness(
@@ -174,7 +192,7 @@ impl<F: PrimeField64> WitnessManager<F> {
                     stage,
                     self.pctx.clone(),
                     self.sctx.clone(),
-                    instance_ids,
+                    &unique,
                     n_cores,
                     buffer_pool,
                 )?;
@@ -183,6 +201,22 @@ impl<F: PrimeField64> WitnessManager<F> {
         Ok(())
     }
 
+    /// This component handles this instance, and it belongs to this process.
+    fn owns(&self, idx: usize, id: usize) -> ProofmanResult<bool> {
+        Ok(self.components_instance_ids[idx].read().unwrap().contains(&id)
+            && (self.pctx.dctx_is_my_process_instance(id)? || self.pctx.dctx_is_table(id)))
+    }
+
+    /// Hand back every instance a hook owned, `Done` only for those whose trace is now resident.
+    fn release_all(&self, owned: &[usize]) {
+        for id in owned {
+            let produced = self.pctx.is_air_instance_stored(*id);
+            self.pctx.dctx_release_witness(*id, produced);
+        }
+    }
+
+    /// Compute the stage-1 witnesses of `instance_ids` that nobody else owns or has already
+    /// produced. Later stages run over an existing trace and bypass the gate entirely.
     pub fn calculate_witness(
         &self,
         stage: u32,
@@ -190,38 +224,35 @@ impl<F: PrimeField64> WitnessManager<F> {
         n_cores: usize,
         buffer_pool: &dyn BufferPool<F>,
     ) -> ProofmanResult<()> {
+        let unique = dedup_preserving_order(instance_ids);
+        let gated = stage == WITNESS_STAGE;
         for (idx, component) in self.components.read().unwrap().iter().enumerate() {
-            let instance_ids_filtered = {
-                let mut instance_ids_filtered = Vec::new();
-                let mut seen = HashSet::new();
-                let component_instance_ids = self.components_instance_ids[idx].read().unwrap();
+            // Two passes on purpose: the fallible one first. Mixed into the acquire loop, an error
+            // on a later id would return with the earlier ones stuck in `Running` -- unreleasable,
+            // and never computable again.
+            let mut candidates = Vec::new();
+            for id in &unique {
+                if self.owns(idx, *id)? {
+                    candidates.push(*id);
+                }
+            }
+            let owned: Vec<usize> =
+                candidates.into_iter().filter(|id| !gated || self.pctx.dctx_try_acquire_witness(*id)).collect();
 
-                for &id in instance_ids {
-                    if !seen.insert(id) {
-                        continue;
-                    }
-                    if component_instance_ids.contains(&id)
-                        && (self.pctx.dctx_is_my_process_instance(id)? || self.pctx.dctx_is_table(id))
-                        && !self.pctx.dctx_is_instance_calculated(id)
-                    {
-                        instance_ids_filtered.push(id);
+            if !owned.is_empty() {
+                let ids = owned.as_slice();
+                if gated {
+                    // Reported, not skipped: a component may legitimately take its buffer early.
+                    for id in ids.iter().filter(|id| self.pctx.is_air_instance_stored(**id)) {
+                        self.pctx.note_witness_recomputed_over_trace(*id);
                     }
                 }
-                instance_ids_filtered
-            };
-
-            if !instance_ids_filtered.is_empty() {
-                for id in &instance_ids_filtered {
-                    self.pctx.dctx_set_instance_calculated(*id);
+                let result =
+                    component.calculate_witness(stage, self.pctx.clone(), self.sctx.clone(), ids, n_cores, buffer_pool);
+                if gated {
+                    self.release_all(ids);
                 }
-                component.calculate_witness(
-                    stage,
-                    self.pctx.clone(),
-                    self.sctx.clone(),
-                    &instance_ids_filtered,
-                    n_cores,
-                    buffer_pool,
-                )?;
+                result?;
             }
         }
 
@@ -231,7 +262,7 @@ impl<F: PrimeField64> WitnessManager<F> {
                     stage,
                     self.pctx.clone(),
                     self.sctx.clone(),
-                    instance_ids,
+                    &unique,
                     n_cores,
                     buffer_pool,
                 )?;

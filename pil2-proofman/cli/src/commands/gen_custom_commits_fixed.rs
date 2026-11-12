@@ -2,13 +2,13 @@
 use clap::Parser;
 use libloading::{Library, Symbol};
 use std::sync::Arc;
-use proofman_common::{MpiCtx, ParamsGPU, ProofCtx, ProofType, SetupCtx, SetupsVadcop};
+use proofman_common::{init_gpu_setup, CustomCommitValidation, MpiCtx, ProofCtx, ProofType, SetupCtx, SetupsVadcop};
 use std::{collections::HashMap, path::PathBuf};
 use colored::Colorize;
 use crate::commands::field::Field;
-use witness::{WitnessLibInitFn, WitnessManager};
+use proofman_witness::{WitnessLibInitFn, WitnessManager};
 
-use fields::Goldilocks;
+use proofman_fields::Goldilocks;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -37,6 +37,9 @@ pub struct GenCustomCommitsFixedCmd {
 
     #[clap(short = 'c', long, value_name="KEY=VALUE", num_args(1..))]
     pub custom_commits: Vec<String>,
+
+    #[clap(short = 'g', long, default_value_t = false)]
+    pub gpu: bool,
 }
 
 impl GenCustomCommitsFixedCmd {
@@ -51,23 +54,25 @@ impl GenCustomCommitsFixedCmd {
         }
 
         let mpi_ctx = Arc::new(MpiCtx::new());
-        let mut pctx = ProofCtx::create_ctx(self.proving_key.clone(), false, self.verbose.into(), mpi_ctx)?;
+        let mut pctx = ProofCtx::create_ctx(self.proving_key.clone(), false, self.verbose.into(), mpi_ctx, self.gpu)?;
 
         tracing::info!("{}", format!("{} GenCustomCommitsFixed", format!("{: >12}", "Command").bright_green().bold()));
         tracing::info!("");
 
-        let params_gpu = ParamsGPU::new(false);
-        let sctx = Arc::new(SetupCtx::<Goldilocks>::new(&pctx.global_info, &ProofType::Basic, false, &params_gpu, &[]));
+        // This command generates the commit files, so it cannot size from them: worst case.
+        let sctx = Arc::new(SetupCtx::<Goldilocks>::new(&pctx.global_info, &ProofType::Basic, false, self.gpu)?);
 
-        let setups_vadcop = Arc::new(SetupsVadcop::new(&pctx.global_info, false, false, &params_gpu, &[]));
-        pctx.set_device_buffers(&sctx, &setups_vadcop, false, &params_gpu)?;
-        pctx.initialize_custom_commits(custom_commits_map, &sctx, true)?;
+        init_gpu_setup(&pctx.global_info.hash, self.gpu)?;
+
+        let setups_vadcop = Arc::new(SetupsVadcop::new(&pctx.global_info, false, false, self.gpu, None)?);
+        pctx.set_device_buffers(&sctx, &setups_vadcop, false, self.gpu, 1, 1, false, 0, 0, 0, 0)?;
+        pctx.initialize_custom_commits(custom_commits_map, &sctx, CustomCommitValidation::Skip)?;
+
+        // Before wcm, so that it is dropped after it: wcm holds what the library made.
+        let library = unsafe { Library::new(&self.witness_lib)? };
 
         let pctx = Arc::new(pctx);
         let wcm = Arc::new(WitnessManager::new(pctx.clone(), sctx.clone()));
-
-        // Load the witness computation dynamic library
-        let library = unsafe { Library::new(&self.witness_lib)? };
 
         let witness_lib: Symbol<WitnessLibInitFn<Goldilocks>> = unsafe { library.get(b"init_library")? };
         let mut witness_lib = witness_lib(self.verbose.into(), None)?;

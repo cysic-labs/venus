@@ -1,0 +1,2483 @@
+//! * Defines the operations that can be executed in Zisk as part of an instruction.
+//! * The macro `define_ops` is used to define every operation, including its opcode, human-readable
+//!   name, type, etc.
+//! * The opcode operation functions are called `op_<opcode>`, they accept 2 input parameters a and
+//!   b, and return 2 output results c and flag.
+//! * The `opc_<opcode>` functions are wrappers over the `op_<opcode>` functions that accept an
+//!   `InstContext` (instruction context) as input/output parameter, containg a, b, c and flag
+//!   attributes.
+
+#![allow(unused)]
+
+use zisk_precomp_helpers::{DmaInfo, Poseidon2Params, POSEIDON2_KOALABEAR};
+use ziskos::zisklib::fcall_proxy;
+
+use crate::{
+    blake2br, blake2sf, blake3f, operations::*, sha256f, EmulationMode, InstContext, Mem,
+    ZiskOperationType, ZiskRequiredOperation, ADD256_COST, ADD_U_W_COST, ARITHA32_COST,
+    ARITHAM32_COST, ARITH_256_COST, ARITH_BN254_COST, ARITH_EQ_384_COST, ARITH_EQ_COST,
+    ARITH_SECP256K1_COST, BINARY_ADD_COST, BINARY_COST, BINARY_E_COST, BLAKE2B_COST, BLAKE2S_COST,
+    BLAKE3_COST, DMA_64_ALIGNED_COST, DMA_COST, DMA_INPUTCPY_COST, DMA_MEMCMP_COST,
+    DMA_MEMCPY_COST, DMA_MEMSET_COST, DMA_PRE_POST_COST, DMA_UNALIGNED_COST, EXTRA_PARAMS_ADDR,
+    FCALL_COST, INPUT_ADDR, INTERNAL_COST, JUMP_DEST_COST, KECCAK_COST, M64, MAX_INPUT_SIZE,
+    POSEIDON2_KOALABEAR_COST, POSEIDON_COST, REG_A0, SHA256_COST, SH_ADD_COST, SH_ADD_U_W_COST,
+    SLL_U_W_COST, SYS_ADDR, TWISTED_EDWARDS_COST,
+};
+use crate::{BLAKE2B_GAP_SHIFT, BLAKE2B_RD_CHAIN, BLAKE2B_WR_CHAIN};
+use paste::paste;
+use proofman_fields::{
+    poseidon1_hash, poseidon2_hash, Goldilocks, Poseidon1_16, Poseidon2_16, PrimeField64,
+};
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display},
+    num::Wrapping,
+    str::FromStr,
+};
+use tiny_keccak::keccakf;
+use ziskos::zisklib::{
+    keccakf_cache::KECCAKF_STATE_WORDS, FCALL_GET_KECCAKF_CACHE_INDEX_ID, FCALL_INPUT_READY_ID,
+    FCALL_RANDOM_SEED_ID, FCALL_SET_KECCAKF_CACHE_INDEX_ID, RANDOM_SEED_WORDS,
+};
+
+use crate::ops_core::*;
+use crate::ops_core_context::*;
+use crate::{FCALL_PARAMS_MAX_SIZE, FCALL_RESULT_MAX_SIZE};
+
+/// Determines the type of a [`ZiskOp`].
+///
+/// The type will be used to assign the proof generation of a main state machine operation result to
+/// the corresponding secondary state machine.
+/// The type can be: internal (no proof required), arith, binary, etc.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum OpType {
+    Internal,
+    Arith,
+    ArithA32,
+    ArithAm32,
+    Binary,
+    BinaryE,
+    Keccak,
+    Sha256,
+    Poseidon,
+    PubOut,
+    ArithEq,
+    Fcall,
+    ArithEq384,
+    BigInt,
+    Evm,
+    Dma,
+    Blake2b,
+    Profile,
+    TwistedEdwards,
+    Blake3,
+    Blake2s,
+    Poseidon2KoalaBear,
+}
+
+impl From<OpType> for ZiskOperationType {
+    fn from(op_type: OpType) -> Self {
+        match op_type {
+            OpType::Internal => ZiskOperationType::Internal,
+            OpType::Arith | OpType::ArithA32 | OpType::ArithAm32 => ZiskOperationType::Arith,
+            OpType::Binary => ZiskOperationType::Binary,
+            OpType::BinaryE => ZiskOperationType::BinaryE,
+            OpType::Keccak => ZiskOperationType::Keccak,
+            OpType::Sha256 => ZiskOperationType::Sha256,
+            OpType::Poseidon => ZiskOperationType::Poseidon,
+            OpType::PubOut => ZiskOperationType::PubOut,
+            OpType::ArithEq => ZiskOperationType::ArithEq,
+            OpType::Fcall => ZiskOperationType::Fcall,
+            OpType::ArithEq384 => ZiskOperationType::ArithEq384,
+            OpType::BigInt => ZiskOperationType::BigInt,
+            OpType::Evm => ZiskOperationType::Evm,
+            OpType::Dma => ZiskOperationType::Dma,
+            OpType::Blake2b => ZiskOperationType::Blake2b,
+            OpType::Profile => ZiskOperationType::Profile,
+            OpType::TwistedEdwards => ZiskOperationType::TwistedEdwards,
+            OpType::Blake3 => ZiskOperationType::Blake3,
+            OpType::Blake2s => ZiskOperationType::Blake2s,
+            OpType::Poseidon2KoalaBear => ZiskOperationType::Poseidon2KoalaBear,
+        }
+    }
+}
+
+impl Display for OpType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Internal => write!(f, "i"),
+            Self::Arith => write!(f, "a"),
+            Self::ArithA32 => write!(f, "a32"),
+            Self::ArithAm32 => write!(f, "am32"),
+            Self::Binary => write!(f, "b"),
+            Self::BinaryE => write!(f, "BinaryE"),
+            Self::Keccak => write!(f, "Keccak"),
+            Self::Sha256 => write!(f, "Sha256"),
+            Self::Poseidon => write!(f, "Poseidon"),
+            Self::PubOut => write!(f, "PubOut"),
+            Self::ArithEq => write!(f, "Arith256"),
+            Self::Fcall => write!(f, "Fcall"),
+            Self::ArithEq384 => write!(f, "Arith384"),
+            Self::BigInt => write!(f, "BigInt"),
+            Self::Evm => write!(f, "Evm"),
+            Self::Dma => write!(f, "Dma"),
+            Self::Blake2b => write!(f, "Blake2b"),
+            Self::Profile => write!(f, "Profile"),
+            Self::TwistedEdwards => write!(f, "TwistedEdwards"),
+            Self::Blake3 => write!(f, "Blake3"),
+            Self::Blake2s => write!(f, "Blake2s"),
+            Self::Poseidon2KoalaBear => write!(f, "Poseidon2KoalaBear"),
+        }
+    }
+}
+
+impl FromStr for OpType {
+    type Err = InvalidOpTypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "i" => Ok(Self::Internal),
+            "a" => Ok(Self::Arith),
+            "a32" => Ok(Self::ArithA32),
+            "am32" => Ok(Self::ArithAm32),
+            "b" => Ok(Self::Binary),
+            "be" => Ok(Self::BinaryE),
+            "k" => Ok(Self::Keccak),
+            "s" => Ok(Self::Sha256),
+            "p" => Ok(Self::Poseidon),
+            "aeq" => Ok(Self::ArithEq),
+            "fcall" => Ok(Self::Fcall),
+            "aeq384" => Ok(Self::ArithEq384),
+            "bint" => Ok(Self::BigInt),
+            "evm" => Ok(Self::Evm),
+            "dma" => Ok(Self::Dma),
+            "b2b" => Ok(Self::Blake2b),
+            "profile" => Ok(Self::Profile),
+            "twisted_edwards" => Ok(Self::TwistedEdwards),
+            "b3" => Ok(Self::Blake3),
+            "b2s" => Ok(Self::Blake2s),
+            "p2kb" => Ok(Self::Poseidon2KoalaBear),
+            _ => Err(InvalidOpTypeError),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct InvalidOpTypeError;
+
+impl Display for InvalidOpTypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid operation type")
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct InvalidNameError;
+
+impl Display for InvalidNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid op name")
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct InvalidCodeError;
+
+impl Display for InvalidCodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid op code")
+    }
+}
+/// Trait for gathering operation statistics
+pub trait OpStats {
+    fn mem_align_read(&mut self, addr: u64, count: usize);
+    fn mem_align_write(&mut self, addr: u64, count: usize);
+    fn set_variable_cost(&mut self, cost: u64);
+}
+
+/// Stats gathering function that does nothing (used as default)
+#[inline(always)]
+pub fn ops_none(_ctx: &InstContext, _stats: &mut dyn OpStats) {
+    // No-op implementation
+}
+
+/// Internal macro used to define all ops in the [`ZiskOp`] enum
+macro_rules! define_ops {
+    ( $( ($name:ident, $str_name:expr, $type:ident, $cost:expr, $code:expr, $input_size:expr, $output_size:expr, $call_fn:ident, $call_ab_fn:ident, $call_stats_fn:ident ) ),* $(,)? ) => {
+		/// Represents an operation that can be executed in Zisk.
+		///
+		/// All relevant metadata associated with the operation can be efficiently accessed via
+		/// the const methods on this enum.
+        #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+        #[repr(u8)]
+        pub enum ZiskOp {
+            $(
+                $name = $code,
+            )*
+        }
+
+        impl ZiskOp {
+            $(
+                paste! {
+                    pub const [<$str_name:upper>]: u8 = $code;
+                }
+            )*
+
+            /// Minimum opcode value across all defined operations
+            pub const MIN_OPCODE: u8 = {
+                const CODES: &[u8] = &[$($code),*];
+                let mut min = 2; // flag and copyb are reserved for internal use, so we can start from 2
+                let mut i = 1;
+                while i < CODES.len() {
+                    if CODES[i] > 1 && CODES[i] < min {
+                        min = CODES[i];
+                    }
+                    i += 1;
+                }
+                min
+            };
+
+            /// Maximum opcode value across all defined operations
+            pub const MAX_OPCODE: u8 = {
+                const CODES: &[u8] = &[$($code),*];
+                let mut max = CODES[0];
+                let mut i = 1;
+                while i < CODES.len() {
+                    if CODES[i] > max {
+                        max = CODES[i];
+                    }
+                    i += 1;
+                }
+                max
+            };
+
+            // Count opcodes
+            pub const OPCODES_COUNT: usize = {
+                const CODES: &[u8] = &[$($code),*];
+                CODES.len()
+            };
+
+			/// Returns the (string) name of the operation
+            pub const fn name(&self) -> &'static str {
+                match self {
+                    $(
+                        Self::$name => $str_name,
+                    )*
+                }
+            }
+
+			/// Returns the [`OpType`] of the operation
+            pub const fn op_type(&self) -> OpType {
+                match self {
+                    $(
+                        Self::$name => OpType::$type,
+                    )*
+                }
+            }
+
+			/// Returns cost required to execute the operation
+            pub const fn cost(&self) -> u64 {
+                match self {
+                    $(
+                        Self::$name => $cost,
+                    )*
+                }
+            }
+
+			/// Returns the raw op code of the operation
+            pub const fn code(&self) -> u8 {
+                match self {
+                    $(
+                        Self::$name => $code,
+                    )*
+                }
+            }
+
+			/// Returns the input data size of the operation
+            pub const fn input_size(&self) -> u64 {
+                match self {
+                    $(
+                        Self::$name => $input_size,
+                    )*
+                }
+            }
+
+			/// Returns the input data size of the operation
+            pub const fn output_size(&self) -> u64 {
+                match self {
+                    $(
+                        Self::$name => $output_size,
+                    )*
+                }
+            }
+
+            /// Executes the operation on the given [`InstContext`]
+			#[inline(always)]
+            pub fn call(&self, ctx: &mut InstContext) {
+                match self {
+                    $(
+                        Self::$name => $call_fn(ctx),
+                    )*
+                }
+            }
+
+            /// Returns the call function of the operation
+            pub const fn get_call_function(&self) -> fn(&mut InstContext) -> () {
+                match self {
+                    $(
+                        Self::$name => $call_fn,
+                    )*
+                }
+            }
+
+            /// Executes the operation to obtain extra stats on the given [`InstContext`]
+            #[inline(always)]
+            pub fn call_stats(&self, ctx: &InstContext, stats: &mut dyn OpStats) {
+                match self {
+                    $(
+                        Self::$name => $call_stats_fn(ctx, stats),
+                    )*
+                }
+            }
+
+            /// Returns the call function for extra stats
+            pub const fn get_call_stats_function(&self) -> fn(&InstContext, &mut dyn OpStats) -> () {
+                match self {
+                    $(
+                        Self::$name => $call_stats_fn,
+                    )*
+                }
+            }
+
+
+			/// Executes the operation on the given inputs `a` and `b`
+			#[inline(always)]
+            pub fn call_ab(&self, a: u64, b: u64) -> (u64, bool) {
+                match self {
+                    $(
+                        Self::$name => $call_ab_fn(a, b),
+                    )*
+                }
+            }
+
+			/// Executes the operation on the given inputs `a` and `b`
+			#[inline(always)]
+            pub fn is_precompiled(&self) -> bool {
+                match self {
+                    $(
+                        Self::$name => $input_size > 0,
+                    )*
+                }
+            }
+
+
+			/// Attempts to create a [`ZiskOp`] from a string name, returning an error if the
+			/// name is invalid
+            pub fn try_from_name(st: &str) -> Result<ZiskOp, InvalidNameError> {
+                match st {
+                    $(
+                        $str_name => Ok(Self::$name),
+                    )*
+                    _ => Err(InvalidNameError)
+                }
+            }
+
+			/// Attempts to create a [`ZiskOp`] from a raw op code, returning an error if the
+			/// code is invalid
+            pub const fn try_from_code(code: u8) -> Result<ZiskOp, InvalidCodeError> {
+                match code {
+                    $(
+                        $code => Ok(Self::$name),
+                    )*
+                    _ => Err(InvalidCodeError)
+                }
+            }
+
+			/// Executes opcodes, only if it does not require instruction context (e.g. it does
+			/// not have to access memory).
+			///
+			/// Panics if the opcode is invalid or does not support this operation.
+			#[inline(always)]
+			pub fn execute(code: u8, a: u64, b: u64) -> (u64, bool) {
+				match code {
+					$(
+						$code => Self::$name.call_ab(a, b),
+					)*
+					_ => panic!("Invalid opcode: {}", code),
+				}
+			}
+        }
+    };
+}
+
+/// Table of Zisk opcode definitions: enum, name, type, cost, code and implementation functions
+/// This table is the backbone of the Zisk processor, it determines what functionality is supported,
+/// and what state machine is responsible of proving the execution of every opcode, based on its
+/// type.
+define_ops! {
+    (Flag, "flag", Internal, INTERNAL_COST, 0x00, 0, 0, opc_flag, op_flag, ops_none),
+    (CopyB, "copyb", Internal, INTERNAL_COST, 0x01, 0, 0, opc_copyb, op_copyb, ops_none),
+
+    // Binary
+    //
+    // Binary proves an opcode and its m32 variant at opcode+0x10 with the same air: `mode32` is a
+    // free witness, so from `b_op` it can always also prove `b_op + 0x10`. Every opcode assigned
+    // to Binary therefore reserves opcode+0x10 as well, even when no m32 variant exists: giving
+    // that slot to a different operation would let Binary satisfy it with the wrong semantics.
+    (Minu, "minu", Binary, BINARY_COST, 0x02, 0, 0, opc_minu, op_minu, ops_none),
+    (Min, "min", Binary, BINARY_COST, 0x03, 0, 0, opc_min, op_min, ops_none),
+    (Maxu, "maxu", Binary, BINARY_COST, 0x04, 0, 0, opc_maxu, op_maxu, ops_none),
+    (Max, "max", Binary, BINARY_COST, 0x05, 0, 0, opc_max, op_max, ops_none),
+    (Ltu, "ltu", Binary, BINARY_COST, 0x06, 0, 0, opc_ltu, op_ltu, ops_none),
+    (Lt, "lt", Binary, BINARY_COST, 0x07, 0, 0, opc_lt, op_lt, ops_none),
+    // Opcode 0x08 is reserved for binary
+    (Eq, "eq", Binary, BINARY_COST, 0x09, 0, 0, opc_eq, op_eq, ops_none),
+    (Add, "add", Binary, BINARY_ADD_COST, 0x0a, 0, 0, opc_add, op_add, ops_none),
+    (Sub, "sub", Binary, BINARY_COST, 0x0b, 0, 0, opc_sub, op_sub, ops_none),
+    (Leu, "leu", Binary, BINARY_COST, 0x0c, 0, 0, opc_leu, op_leu, ops_none),
+    (Le, "le", Binary, BINARY_COST, 0x0d, 0, 0, opc_le, op_le, ops_none),
+    (And, "and", Binary, BINARY_COST, 0x0e, 0, 0, opc_and, op_and, ops_none),
+    (Or, "or", Binary, BINARY_COST, 0x0f, 0, 0, opc_or, op_or, ops_none),
+    (Xor, "xor", Binary, BINARY_COST, 0x10, 0, 0, opc_xor, op_xor, ops_none),
+    // Opcode 0x11 is available
+    (MinuW, "minu_w", Binary, BINARY_COST, 0x12, 0, 0, opc_minu_w, op_minu_w, ops_none),
+    (MinW, "min_w", Binary, BINARY_COST, 0x13, 0, 0, opc_min_w, op_min_w, ops_none),
+    (MaxuW, "maxu_w", Binary, BINARY_COST, 0x14, 0, 0, opc_maxu_w, op_maxu_w, ops_none),
+    (MaxW, "max_w", Binary, BINARY_COST, 0x15, 0, 0, opc_max_w, op_max_w, ops_none),
+    (LtuW, "ltu_w", Binary, BINARY_COST, 0x16, 0, 0, opc_ltu_w, op_ltu_w, ops_none),
+    (LtW, "lt_w", Binary, BINARY_COST, 0x17, 0, 0, opc_lt_w, op_lt_w, ops_none),
+    // Opcode 0x18 is reserved for binary
+    (EqW, "eq_w", Binary, BINARY_COST, 0x19, 0, 0, opc_eq_w, op_eq_w, ops_none),
+    (AddW, "add_w", Binary, BINARY_COST, 0x1a, 0, 0, opc_add_w, op_add_w, ops_none),
+    (SubW, "sub_w", Binary, BINARY_COST, 0x1b, 0, 0, opc_sub_w, op_sub_w, ops_none),
+    (LeuW, "leu_w", Binary, BINARY_COST, 0x1c, 0, 0, opc_leu_w, op_leu_w, ops_none),
+    (LeW, "le_w", Binary, BINARY_COST, 0x1d, 0, 0, opc_le_w, op_le_w, ops_none),
+    // Opcodes 0x1e,0x1f,0x20 are reserved for binary
+
+    // Binary Extension
+    (Sll, "sll", BinaryE, BINARY_E_COST, 0x21, 0, 0, opc_sll, op_sll, ops_none),
+    (Srl, "srl", BinaryE, BINARY_E_COST, 0x22, 0, 0, opc_srl, op_srl, ops_none),
+    (Sra, "sra", BinaryE, BINARY_E_COST, 0x23, 0, 0, opc_sra, op_sra, ops_none),
+    (SllW, "sll_w", BinaryE, BINARY_E_COST, 0x24, 0, 0, opc_sll_w, op_sll_w, ops_none),
+    (SrlW, "srl_w", BinaryE, BINARY_E_COST, 0x25, 0, 0, opc_srl_w, op_srl_w, ops_none),
+    (SraW, "sra_w", BinaryE, BINARY_E_COST, 0x26, 0, 0, opc_sra_w, op_sra_w, ops_none),
+    (SignExtendB, "signextend_b", BinaryE, BINARY_E_COST, 0x27, 0, 0, opc_signextend_b, op_signextend_b, ops_none),
+    (SignExtendH, "signextend_h", BinaryE, BINARY_E_COST, 0x28, 0, 0, opc_signextend_h, op_signextend_h, ops_none),
+    (SignExtendW, "signextend_w", BinaryE, BINARY_E_COST, 0x29, 0, 0, opc_signextend_w, op_signextend_w, ops_none),
+
+    // Bit manipulation extensions (Zbb, Zba, Zbs, Zbc, Zbkb, Zbkc, Zbkx) - proved by BinaryExtension
+    (Rev8, "rev8", BinaryE, BINARY_E_COST, 0x30, 0, 0, opc_rev8, op_rev8, ops_none),
+    (Pack, "pack", BinaryE, BINARY_E_COST, 0x31, 0, 0, opc_pack, op_pack, ops_none),
+    (PackH, "pack_h", BinaryE, BINARY_E_COST, 0x32, 0, 0, opc_pack_h, op_pack_h, ops_none),
+    (PackW, "pack_w", BinaryE, BINARY_E_COST, 0x33, 0, 0, opc_pack_w, op_pack_w, ops_none),
+    (Rol, "rol", BinaryE, BINARY_E_COST, 0x34, 0, 0, opc_rol, op_rol, ops_none),
+    (RolW, "rol_w", BinaryE, BINARY_E_COST, 0x35, 0, 0, opc_rol_w, op_rol_w, ops_none),
+    (Ror, "ror", BinaryE, BINARY_E_COST, 0x36, 0, 0, opc_ror, op_ror, ops_none),
+    (RorW, "ror_w", BinaryE, BINARY_E_COST, 0x37, 0, 0, opc_ror_w, op_ror_w, ops_none),
+    (Clz, "clz", BinaryE, BINARY_E_COST, 0x38, 0, 0, opc_clz, op_clz, ops_none),
+    (ClzW, "clz_w", BinaryE, BINARY_E_COST, 0x39, 0, 0, opc_clz_w, op_clz_w, ops_none),
+    (Ctz, "ctz", BinaryE, BINARY_E_COST, 0x3a, 0, 0, opc_ctz, op_ctz, ops_none),
+    (CtzW, "ctz_w", BinaryE, BINARY_E_COST, 0x3b, 0, 0, opc_ctz_w, op_ctz_w, ops_none),
+    (Cpop, "cpop", BinaryE, BINARY_E_COST, 0x3c, 0, 0, opc_cpop, op_cpop, ops_none),
+    (CpopW, "cpop_w", BinaryE, BINARY_E_COST, 0x3d, 0, 0, opc_cpop_w, op_cpop_w, ops_none),
+    (OrcB, "orc_b", BinaryE, BINARY_E_COST, 0x3e, 0, 0, opc_orc_b, op_orc_b, ops_none),
+    (Bclr, "bclr", BinaryE, BINARY_E_COST, 0x3f, 0, 0, opc_bclr, op_bclr, ops_none),
+    (Bext, "bext", BinaryE, BINARY_E_COST, 0x40, 0, 0, opc_bext, op_bext, ops_none),
+    (Binv, "binv", BinaryE, BINARY_E_COST, 0x41, 0, 0, opc_binv, op_binv, ops_none),
+    (Bset, "bset", BinaryE, BINARY_E_COST, 0x42, 0, 0, opc_bset, op_bset, ops_none),
+    (SllUW, "sll_u_w", BinaryE, SLL_U_W_COST, 0x43, 0, 0, opc_sll_u_w, op_sll_u_w, ops_none),
+
+    // Bit manipulation extensions (Zbb, Zba, Zbs, Zbkb) - proved by Binary
+    //
+    // These have no m32 variant, so their opcode+0x10 shadow (0x62-0x68) must stay empty; see the
+    // note on the base binary block above. Opcodes 0x50,0x51 are LT_ABS_NP,LT_ABS_PN: internal
+    // comparisons that Arith assumes and Binary proves, so they are not ZisK opcodes, but they
+    // take up this space (and reserve their own shadows 0x60,0x61) all the same.
+    (Brev8, "brev8", Binary, BINARY_COST, 0x52, 0, 0, opc_brev8, op_brev8, ops_none),
+    (Andn, "andn", Binary, BINARY_COST, 0x53, 0, 0, opc_andn, op_andn, ops_none),
+    (Orn, "orn", Binary, BINARY_COST, 0x54, 0, 0, opc_orn, op_orn, ops_none),
+    (Xnor, "xnor", Binary, BINARY_COST, 0x55, 0, 0, opc_xnor, op_xnor, ops_none),
+    (Sh1add, "sh1add", Binary, BINARY_COST, 0x56, 0, 0, opc_sh1add, op_sh1add, ops_none),
+    (Sh2add, "sh2add", Binary, BINARY_COST, 0x57, 0, 0, opc_sh2add, op_sh2add, ops_none),
+    (Sh3add, "sh3add", Binary, BINARY_COST, 0x58, 0, 0, opc_sh3add, op_sh3add, ops_none),
+    // Opcode 0x59 is LTU_DIV: the bus tag of the LTU that Arith injects on every division (not a
+    // ZisK opcode, see state-machines/binary/src/binary_constants.rs)
+    // ZisK-only alignment predicate (no RISC-V instruction, no m32 variant): c = flag = 1 iff a or b
+    // is not a multiple of 8. Guards the fast path of the 8-byte aligned routines
+    (Unal8, "unal8", Binary, BINARY_COST, 0x5a, 0, 0, opc_unal8, op_unal8, ops_none),
+    // Opcodes 0x5b-0x5f are reserved for binary
+    // Opcodes 0x60-0x6a are the m32 shadows of 0x50-0x5a and must stay empty. Only 0x62-0x6a come
+    // from ops with no m32 variant: shxadd_w does not exist in RISC-V, brev8_w / andn_w / orn_w /
+    // xnor_w are not opcodes either, unal8 has no 32-bit meaning, and 0x69 shadows the LTU_DIV tag
+    // Opcodes 0x6b-0x6f are the shadows of the reserved 0x5b-0x5f
+
+    // "Software" opcodes (0x90 - 0x9F): these are not proved by any air. They are either never
+    // emitted as a single instruction (the transpiler decomposes them, and the opcode only exists
+    // to carry the cost of the resulting sequence) or only reachable through an experimental
+    // `*_native` transpiler feature, which has no table rows behind it yet
+
+    (AddUW, "add_u_w", BinaryE, ADD_U_W_COST, 0x90, 0, 0, opc_add_u_w, op_add_u_w, ops_none),
+    (Sh1addUW, "sh1add_u_w", BinaryE, SH_ADD_U_W_COST, 0x91, 0, 0, opc_sh1add_u_w, op_sh1add_u_w, ops_none),
+    (Sh2addUW, "sh2add_u_w", BinaryE, SH_ADD_U_W_COST, 0x92, 0, 0, opc_sh2add_u_w, op_sh2add_u_w, ops_none),
+    (Sh3addUW, "sh3add_u_w", BinaryE, SH_ADD_U_W_COST, 0x93, 0, 0, opc_sh3add_u_w, op_sh3add_u_w, ops_none),
+    // Opcode 0x94 is available: sll_u_w lives at 0x43 because, unlike the ops above, it is proved
+    // natively by BinaryExtension
+    (Clmul, "clmul", BinaryE, BINARY_E_COST, 0x95, 0, 0, opc_clmul, op_clmul, ops_none),
+    (ClmulH, "clmul_h", BinaryE, BINARY_E_COST, 0x96, 0, 0, opc_clmul_h, op_clmul_h, ops_none),
+    (ClmulR, "clmul_r", BinaryE, BINARY_E_COST, 0x97, 0, 0, opc_clmul_r, op_clmul_r, ops_none),
+    (Xperm4, "xperm4", BinaryE, BINARY_E_COST, 0x98, 0, 0, opc_xperm4, op_xperm4, ops_none),
+    (Xperm8, "xperm8", BinaryE, BINARY_E_COST, 0x99, 0, 0, opc_xperm8, op_xperm8, ops_none),
+    (CzeroEqz, "czero_eqz", BinaryE, BINARY_E_COST, 0x9a, 0, 0, opc_czero_eqz, op_czero_eqz, ops_none),
+    (CzeroNez, "czero_nez", BinaryE, BINARY_E_COST, 0x9b, 0, 0, opc_czero_nez, op_czero_nez, ops_none),
+
+    // Opcodes 0x9c-0x9f are reserved for "software" opcodes
+
+    (PubOut, "pubout", PubOut, 0, 0xa0, 0, 0, opc_pubout, op_pubout, ops_none),
+
+    (Mulu, "mulu", ArithAm32, ARITHAM32_COST, 0xb0, 0, 0, opc_mulu, op_mulu, ops_none),
+    (Muluh, "muluh", ArithAm32, ARITHAM32_COST, 0xb1, 0, 0, opc_muluh, op_muluh, ops_none),
+    (Mulsuh, "mulsuh", ArithAm32, ARITHAM32_COST, 0xb3, 0, 0, opc_mulsuh, op_mulsuh, ops_none),
+    (Mul, "mul", ArithAm32, ARITHAM32_COST, 0xb4, 0, 0, opc_mul, op_mul, ops_none),
+    (Mulh, "mulh", ArithAm32, ARITHAM32_COST, 0xb5, 0, 0, opc_mulh, op_mulh, ops_none),
+    (MulW, "mul_w", ArithAm32, ARITHAM32_COST, 0xb6, 0, 0, opc_mul_w, op_mul_w, ops_none),
+    (Divu, "divu", ArithAm32, ARITHAM32_COST, 0xb8, 0, 0, opc_divu, op_divu, ops_none),
+    (Remu, "remu", ArithAm32, ARITHAM32_COST, 0xb9, 0, 0, opc_remu, op_remu, ops_none),
+    (Div, "div", ArithAm32, ARITHAM32_COST, 0xba, 0, 0, opc_div, op_div, ops_none),
+    (Rem, "rem", ArithAm32, ARITHAM32_COST, 0xbb, 0, 0, opc_rem, op_rem, ops_none),
+    (DivuW, "divu_w", ArithA32, ARITHA32_COST, 0xbc, 0, 0, opc_divu_w, op_divu_w, ops_none),
+    (RemuW, "remu_w", ArithA32, ARITHA32_COST, 0xbd, 0, 0, opc_remu_w, op_remu_w, ops_none),
+    (DivW, "div_w", ArithA32, ARITHA32_COST, 0xbe, 0, 0, opc_div_w, op_div_w, ops_none),
+    (RemW, "rem_w", ArithA32, ARITHA32_COST, 0xbf, 0, 0, opc_rem_w, op_rem_w, ops_none),
+    // input_size = 8: one synthesized minimal-trace header word (count + number of loaded
+    // source words), followed by the loaded words themselves via data_ext_len.
+    (JumpDest, "jump_dest", Evm, JUMP_DEST_COST, 0xc0, 8, 0, opc_jump_dest, op_jump_dest, ops_jump_dest),
+    (Poseidon2KoalaBear, "poseidon2_koalabear", Poseidon2KoalaBear, POSEIDON2_KOALABEAR_COST, 0xc1, 64, 64, opc_poseidon2_koalabear, op_poseidon2_koalabear, ops_poseidon2_koalabear),
+    // opcodes 0xc2-0xcf are available
+
+    (DmaMemCpy, "dma_memcpy", Dma, DMA_MEMCPY_COST, 0xd0, 8, 0, opc_dma_memcpy, op_dma_memcpy, ops_dma_memcpy),
+    (DmaMemCmp, "dma_memcmp", Dma, DMA_MEMCMP_COST, 0xd1, 16, 0, opc_dma_memcmp, op_dma_memcmp, ops_dma_memcmp),
+    (DmaInputCpy, "dma_inputcpy", Dma, DMA_INPUTCPY_COST, 0xd2, 8, 0, opc_dma_inputcpy, op_dma_inputcpy, ops_dma_inputcpy),
+    (DmaXMemCpy, "dma_xmemcpy", Dma, DMA_MEMCPY_COST, 0xd6, 8, 0, opc_dma_xmemcpy, op_dma_xmemcpy, ops_dma_xmemcpy),
+    (DmaXMemCmp, "dma_xmemcmp", Dma, DMA_MEMCMP_COST, 0xd7, 16, 0, opc_dma_xmemcmp, op_dma_xmemcmp, ops_dma_xmemcmp),
+    (DmaXMemSet, "dma_xmemset", Dma, DMA_MEMSET_COST, 0xd9, 8, 0, opc_dma_xmemset, op_dma_xmemset, ops_dma_xmemset),
+    // opcodes 0xd2-0xd9 future reserved for dma operations (memset, memcpy256, memcmp256)
+    // opcodes 0xda-0xdf reserved for dma extra operations (costs)
+    // opcodes 0xe0 is available
+    (Profile, "profile", Profile, 0, 0xe0, 0, 0, opc_profile, op_profile, ops_profile),
+    (Poseidon2, "poseidon2", Poseidon, POSEIDON_COST, 0xeb, 128, 128, opc_poseidon2, op_poseidon2, ops_poseidon2),
+    (Poseidon1, "poseidon1", Poseidon, POSEIDON_COST, 0xec, 128, 128, opc_poseidon1, op_poseidon1, ops_poseidon1),
+    (Arith384Mod, "arith384_mod", ArithEq384, ARITH_EQ_384_COST, 0xe2, 232, 48, opc_arith384_mod, op_arith384_mod, ops_arith384_mod),
+    (Bls12_381CurveAdd, "bls12_381_curve_add", ArithEq384, ARITH_EQ_384_COST, 0xe3, 192, 96, opc_bls12_381_curve_add, op_bls12_381_curve_add, ops_bls12_381_curve_add),
+    (Bls12_381CurveDbl, "bls12_381_curve_dbl", ArithEq384, ARITH_EQ_384_COST, 0xe4, 96, 96, opc_bls12_381_curve_dbl, op_bls12_381_curve_dbl, ops_bls12_381_curve_dbl),
+    (Bls12_381ComplexAdd, "bls12_381_complex_add", ArithEq384, ARITH_EQ_384_COST, 0xe5, 192, 96, opc_bls12_381_complex_add, op_bls12_381_complex_add, ops_bls12_381_complex_add),
+    (Bls12_381ComplexSub, "bls12_381_complex_sub", ArithEq384, ARITH_EQ_384_COST, 0xe6, 192, 96, opc_bls12_381_complex_sub, op_bls12_381_complex_sub, ops_bls12_381_complex_sub),
+    (Bls12_381ComplexMul, "bls12_381_complex_mul", ArithEq384, ARITH_EQ_384_COST, 0xe7, 192, 96, opc_bls12_381_complex_mul, op_bls12_381_complex_mul, ops_bls12_381_complex_mul),
+    (Add256, "add256", BigInt, ADD256_COST, 0xf0, 104, 32, opc_add256, op_add256, ops_add256),
+    (BabyJubJubAdd, "babyjubjub_add", TwistedEdwards, TWISTED_EDWARDS_COST, 0xed, 128, 64, opc_babyjubjub_add, op_babyjubjub_add, ops_babyjubjub_add),
+    (Ed25519Add, "ed25519_add", TwistedEdwards, TWISTED_EDWARDS_COST, 0xe1, 128, 64, opc_ed25519_add, op_ed25519_add, ops_ed25519_add),
+    (Keccak, "keccak", Keccak, KECCAK_COST, 0xf1, 200, 200, opc_keccak, op_keccak, ops_keccak),
+    (Arith256, "arith256", ArithEq, ARITH_256_COST, 0xf2, 136, 64, opc_arith256, op_arith256, ops_arith256),
+    (Arith256Mod, "arith256_mod", ArithEq, ARITH_256_COST, 0xf3, 168, 32, opc_arith256_mod, op_arith256_mod, ops_arith256_mod),
+    (Secp256k1Add, "secp256k1_add", ArithEq, ARITH_SECP256K1_COST, 0xf4, 128, 64, opc_secp256k1_add, op_secp256k1_add, ops_secp256k1_add),
+    (Secp256k1Dbl, "secp256k1_dbl", ArithEq, ARITH_SECP256K1_COST, 0xf5, 64, 64, opc_secp256k1_dbl, op_secp256k1_dbl, ops_secp256k1_dbl),
+    (Secp256r1Add, "secp256r1_add", ArithEq, ARITH_EQ_COST, 0xe8, 128, 64, opc_secp256r1_add, op_secp256r1_add, ops_secp256r1_add),
+    (Secp256r1Dbl, "secp256r1_dbl", ArithEq, ARITH_EQ_COST, 0xe9, 64, 64, opc_secp256r1_dbl, op_secp256r1_dbl, ops_secp256r1_dbl),
+    (Blake2b, "blake2b", Blake2b, BLAKE2B_COST, 0xea, 264, 128, opc_blake2b, op_blake2b, ops_blake2b),
+    (Blake3, "blake3", Blake3, BLAKE3_COST, 0xee, 128, 64, opc_blake3, op_blake3, ops_blake3),
+    (Blake2s, "blake2s", Blake2s, BLAKE2S_COST, 0xef, 128, 64, opc_blake2s, op_blake2s, ops_blake2s),
+    (FcallParam, "fcall_param", Fcall, FCALL_COST, 0xf6, 0, 0, opc_fcall_param, op_fcall_param, ops_none),
+    (Fcall, "fcall", Fcall, FCALL_COST, 0xf7, 0, 0, opc_fcall, op_fcall, ops_none),
+    (FcallGet, "fcall_get", Fcall, FCALL_COST, 0xf8, 0, 0, opc_fcall_get, op_fcall_get, ops_none),
+    (Sha256, "sha256", Sha256, SHA256_COST, 0xf9, 96, 112, opc_sha256, op_sha256, ops_sha256),
+    (Bn254CurveAdd, "bn254_curve_add", ArithEq, ARITH_BN254_COST, 0xfa, 128, 64, opc_bn254_curve_add, op_bn254_curve_add, ops_bn254_curve_add),
+    (Bn254CurveDbl, "bn254_curve_dbl", ArithEq, ARITH_BN254_COST, 0xfb, 64, 64, opc_bn254_curve_dbl, op_bn254_curve_dbl, ops_bn254_curve_dbl),
+    (Bn254ComplexAdd, "bn254_complex_add", ArithEq, ARITH_BN254_COST, 0xfc, 128, 64, opc_bn254_complex_add, op_bn254_complex_add, ops_bn254_complex_add),
+    (Bn254ComplexSub, "bn254_complex_sub", ArithEq, ARITH_BN254_COST, 0xfd, 128, 64, opc_bn254_complex_sub, op_bn254_complex_sub, ops_bn254_complex_sub),
+    (Bn254ComplexMul, "bn254_complex_mul", ArithEq, ARITH_BN254_COST, 0xfe, 128, 64, opc_bn254_complex_mul, op_bn254_complex_mul, ops_bn254_complex_mul),
+    // halt reads no memory: input_size 0, so it is not a precompile and the minimal
+    // trace replay of a failed execution consumes no memory reads for it
+    (Halt, "halt", Internal, INTERNAL_COST, 0xff, 0, 0, opc_halt, op_halt, ops_none),
+}
+
+/* PRECOMPILED operations */
+
+/// Performs a Keccak-f hash over a 1600-bits input state stored in memory at the address
+/// specified by register A0, and stores the output state in the same memory address
+#[inline(always)]
+pub fn opc_keccak(ctx: &mut InstContext) {
+    // Get address from b (a = step)
+    let address = ctx.b;
+    if address & 0x7 != 0 {
+        panic!("opc_keccak() found address not aligned to 8 bytes");
+    }
+
+    // Allocate room for 25 u64 = 128 bytes = 1600 bits
+    const WORDS: usize = 25;
+    let mut data = [0u64; WORDS];
+
+    // Index this permutation must be cached under, if fcall_set_keccakf_cache_index() asked for
+    // it. It is consumed whatever the emulation mode is, so that a request always applies to the
+    // Keccak-f that follows it
+    let cache_index = ctx.keccakf_cache.take_pending_index();
+
+    // Get input data from memory or from the precompiled context
+    match ctx.emulation_mode {
+        EmulationMode::Mem => {
+            // Read data from the memory address
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = ctx.mem.read(address + (8 * i as u64), 8);
+            }
+
+            // Cache the input state, before it is overwritten by the permutation
+            if let Some(index) = cache_index {
+                ctx.keccakf_cache.store(&data, index);
+            }
+
+            // Call keccakf
+            keccakf(&mut data);
+
+            // Write data to the memory address
+            for (i, d) in data.iter().enumerate() {
+                ctx.mem.write(address + (8 * i as u64), *d, 8);
+            }
+        }
+        EmulationMode::GenerateMemReads => {
+            // Read data from the memory address
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = ctx.mem.read(address + (8 * i as u64), 8);
+            }
+
+            // Copy data to the precompiled context
+            ctx.precompiled.input_data.clear();
+            for (i, d) in data.iter_mut().enumerate() {
+                ctx.precompiled.input_data.push(*d);
+            }
+
+            // Cache the input state, before it is overwritten by the permutation
+            if let Some(index) = cache_index {
+                ctx.keccakf_cache.store(&data, index);
+            }
+
+            // Call keccakf
+            keccakf(&mut data);
+
+            // Write data to the memory address
+            for (i, d) in data.iter().enumerate() {
+                ctx.mem.write(address + (8 * i as u64), *d, 8);
+            }
+
+            // Write data to the precompiled context
+            ctx.precompiled.output_data.clear();
+            for (i, d) in data.iter_mut().enumerate() {
+                ctx.precompiled.output_data.push(*d);
+            }
+        }
+        EmulationMode::ConsumeMemReads => {
+            // Check input data has the expected length
+            if ctx.precompiled.input_data.len() != WORDS {
+                panic!(
+                    "opc_keccak() found ctx.precompiled.input_data.len={} != {}",
+                    ctx.precompiled.input_data.len(),
+                    WORDS
+                );
+            }
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Keccak can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_keccak(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_keccak() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_keccak(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_direct_data(ctx, stats, 25, 25);
+}
+
+/// Performs a Sha256-f hash over the 256-bit state at address a and the 512-bit input block at
+/// address b, and stores the output state back at address a
+#[inline(always)]
+pub fn opc_sha256(ctx: &mut InstContext) {
+    // Allocate room for 12 u64 = 96 bytes = 768 bits: state[4] (at a) and input[8] (at b)
+    const WORDS: usize = 4 + 8;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 4, 8, &mut data, "sha256");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        // Get the state and input slices
+        let (state_slice, input_slice) = data.split_at_mut(4);
+        let state: &mut [u64; 4] = state_slice.try_into().unwrap();
+        let input: &[u64; 8] = input_slice[..8].try_into().unwrap();
+
+        // Compute the sha output with the fastest implementation available
+        sha256f(state, input);
+
+        // the new state overwrites the old one (address a)
+        for (i, d) in state.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Sha256 can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_sha256(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_sha256() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_sha256(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 4, 8, 4);
+}
+
+/// Performs a Poseidon2 hash over a 16 elements stored in memory at the address
+/// specified by register A0, and stores the output state in the same memory address
+#[inline(always)]
+pub fn opc_poseidon2(ctx: &mut InstContext) {
+    // Get address from b (a = step)
+    let address = ctx.b;
+    if address & 0x7 != 0 {
+        panic!("opc_poseidon2() found address not aligned to 8 bytes");
+    }
+
+    // Allocate room for 16 u64 = 128 bytes = 1024 bits
+    const WORDS: usize = 16;
+    let mut data = [0u64; WORDS];
+
+    // Get input data from memory or from the precompiled context
+    match ctx.emulation_mode {
+        EmulationMode::Mem => {
+            // Read data from the memory address
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = ctx.mem.read(address + (8 * i as u64), 8);
+            }
+
+            // Call poseidon2
+            let data_gl = data.map(Goldilocks::new);
+            let res_gl = poseidon2_hash::<Goldilocks, Poseidon2_16, 16>(&data_gl);
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = res_gl[i].as_canonical_u64();
+            }
+
+            // Write data to the memory address
+            for (i, d) in data.iter().enumerate() {
+                ctx.mem.write(address + (8 * i as u64), *d, 8);
+            }
+        }
+        EmulationMode::GenerateMemReads => {
+            // Read data from the memory address
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = ctx.mem.read(address + (8 * i as u64), 8);
+            }
+
+            // Copy data to the precompiled context
+            ctx.precompiled.input_data.clear();
+            for (i, d) in data.iter_mut().enumerate() {
+                ctx.precompiled.input_data.push(*d);
+            }
+
+            // Call poseidon2
+            let data_gl = data.map(Goldilocks::new);
+            let res_gl = poseidon2_hash::<Goldilocks, Poseidon2_16, 16>(&data_gl);
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = res_gl[i].as_canonical_u64();
+            }
+
+            // Write data to the memory address
+            for (i, d) in data.iter().enumerate() {
+                ctx.mem.write(address + (8 * i as u64), *d, 8);
+            }
+
+            // Write data to the precompiled context
+            ctx.precompiled.output_data.clear();
+            for (i, d) in data.iter_mut().enumerate() {
+                ctx.precompiled.output_data.push(*d);
+            }
+        }
+        EmulationMode::ConsumeMemReads => {
+            // Check input data has the expected length
+            if ctx.precompiled.input_data.len() != WORDS {
+                panic!(
+                    "opc_poseidon2() found ctx.precompiled.input_data.len={} != {}",
+                    ctx.precompiled.input_data.len(),
+                    WORDS
+                );
+            }
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Poseidon2 can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_poseidon2(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_poseidon2() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_poseidon2(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_direct_data(ctx, stats, 16, 16);
+}
+
+/// Poseidon2 over a 31-bit field (see `Poseidon2Params`): permutes the `W / 2` u64 words at the
+/// address in b in place, two lanes per word in the instance's memory form (`io_scale * x`). A lane
+/// that is not below P is not a valid input: the execution fails.
+#[inline(always)]
+fn opc_poseidon2_non_native<const W: usize>(
+    ctx: &mut InstContext,
+    params: &Poseidon2Params<W>,
+    name: &str,
+) {
+    let address = ctx.b;
+    if address & 0x7 != 0 {
+        panic!("opc_{name}() found address not aligned to 8 bytes");
+    }
+    let words = W / 2;
+
+    if ctx.emulation_mode == EmulationMode::ConsumeMemReads {
+        if ctx.precompiled.input_data.len() != words {
+            panic!(
+                "opc_{name}() found ctx.precompiled.input_data.len={} != {words}",
+                ctx.precompiled.input_data.len()
+            );
+        }
+    } else {
+        let mut buffer = [0u64; W];
+        let data = &mut buffer[..words];
+        for (i, d) in data.iter_mut().enumerate() {
+            *d = ctx.mem.read(address + (8 * i as u64), 8);
+        }
+        let generate = ctx.emulation_mode == EmulationMode::GenerateMemReads;
+        if generate {
+            ctx.precompiled.input_data.clear();
+            ctx.precompiled.input_data.extend_from_slice(data);
+        }
+        if let Err(lane) = params.permute_words(data) {
+            panic!("opc_{name}() found non-canonical field element at lane {lane}");
+        }
+        for (i, d) in data.iter().enumerate() {
+            ctx.mem.write(address + (8 * i as u64), *d, 8);
+        }
+        if generate {
+            ctx.precompiled.output_data.clear();
+            ctx.precompiled.output_data.extend_from_slice(data);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Poseidon2 over KoalaBear, width 16 (`POSEIDON2_KOALABEAR`).
+#[inline(always)]
+pub fn opc_poseidon2_koalabear(ctx: &mut InstContext) {
+    opc_poseidon2_non_native(ctx, &POSEIDON2_KOALABEAR, "poseidon2_koalabear");
+}
+
+/// Unimplemented. Poseidon2 KoalaBear can only be called from the system call context via
+/// InstContext. This is provided just for completeness.
+#[inline(always)]
+pub fn op_poseidon2_koalabear(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_poseidon2_koalabear() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_poseidon2_koalabear(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_direct_data(ctx, stats, 8, 8);
+}
+
+/// Performs a Poseidon1 hash over a 16 elements stored in memory at the address
+/// specified by register A0, and stores the output state in the same memory address
+#[inline(always)]
+pub fn opc_poseidon1(ctx: &mut InstContext) {
+    // Get address from b (a = step)
+    let address = ctx.b;
+    if address & 0x7 != 0 {
+        panic!("opc_poseidon1() found address not aligned to 8 bytes");
+    }
+
+    // Allocate room for 16 u64 = 128 bytes = 1024 bits
+    const WORDS: usize = 16;
+    let mut data = [0u64; WORDS];
+
+    // Get input data from memory or from the precompiled context
+    match ctx.emulation_mode {
+        EmulationMode::Mem => {
+            // Read data from the memory address
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = ctx.mem.read(address + (8 * i as u64), 8);
+            }
+
+            // Call poseidon1
+            let data_gl = data.map(Goldilocks::new);
+            let res_gl = poseidon1_hash::<Goldilocks, Poseidon1_16, 16>(&data_gl);
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = res_gl[i].as_canonical_u64();
+            }
+
+            // Write data to the memory address
+            for (i, d) in data.iter().enumerate() {
+                ctx.mem.write(address + (8 * i as u64), *d, 8);
+            }
+        }
+        EmulationMode::GenerateMemReads => {
+            // Read data from the memory address
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = ctx.mem.read(address + (8 * i as u64), 8);
+            }
+
+            // Copy data to the precompiled context
+            ctx.precompiled.input_data.clear();
+            for (i, d) in data.iter_mut().enumerate() {
+                ctx.precompiled.input_data.push(*d);
+            }
+
+            // Call poseidon1
+            let data_gl = data.map(Goldilocks::new);
+            let res_gl = poseidon1_hash::<Goldilocks, Poseidon1_16, 16>(&data_gl);
+            for (i, d) in data.iter_mut().enumerate() {
+                *d = res_gl[i].as_canonical_u64();
+            }
+
+            // Write data to the memory address
+            for (i, d) in data.iter().enumerate() {
+                ctx.mem.write(address + (8 * i as u64), *d, 8);
+            }
+
+            // Write data to the precompiled context
+            ctx.precompiled.output_data.clear();
+            for (i, d) in data.iter_mut().enumerate() {
+                ctx.precompiled.output_data.push(*d);
+            }
+        }
+        EmulationMode::ConsumeMemReads => {
+            // Check input data has the expected length
+            if ctx.precompiled.input_data.len() != WORDS {
+                panic!(
+                    "opc_poseidon1() found ctx.precompiled.input_data.len={} != {}",
+                    ctx.precompiled.input_data.len(),
+                    WORDS
+                );
+            }
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Poseidon1 can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_poseidon1(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_poseidon1() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_poseidon1(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_direct_data(ctx, stats, 16, 16);
+}
+
+/// Whether Blake2br can prove a blake2b round's static argument: no gap unless it reads its state
+/// from a chain, and then a gap in [1, 255] (the trace's `gap` is a byte).
+pub fn blake2b_gap_is_provable(index: u64) -> bool {
+    let gap = index >> BLAKE2B_GAP_SHIFT;
+    if index & BLAKE2B_RD_CHAIN != 0 {
+        (1..=u8::MAX as u64).contains(&gap)
+    } else {
+        gap == 0
+    }
+}
+
+#[inline(always)]
+pub fn opc_blake2b(ctx: &mut InstContext) {
+    const WORDS: usize = 1 + 2 * 16; // index (static argument), state[16] (at a), input[16] (at b)
+    let mut data = [0u64; WORDS];
+
+    // The round index and chain mode travel as the static argument of the instruction
+    let index = ctx.extended_arg as u64;
+    let rd_chain = index & BLAKE2B_RD_CHAIN != 0;
+    let wr_chain = index & BLAKE2B_WR_CHAIN != 0;
+    let replay = ctx.emulation_mode == EmulationMode::ConsumeMemReads;
+    let gap = index >> BLAKE2B_GAP_SHIFT;
+    assert!(
+        blake2b_gap_is_provable(index),
+        "[blake2b] gap {gap} not provable (rd_chain: {rd_chain}) at PC:0x{:08X} STEP:{}",
+        ctx.pc,
+        ctx.step
+    );
+    if rd_chain && !replay && ctx.step.wrapping_sub(gap) != ctx.blake2b_step {
+        panic!(
+            "[blake2b] chained round without a blake2b round {gap} steps back at PC:0x{:08X} STEP:{}",
+            ctx.pc,
+            ctx.step
+        );
+    }
+    ctx.blake2b_step = ctx.step;
+
+    // A chained round logs its input only if the chunk does not have it yet (see min_trace_words)
+    let cached = rd_chain && ctx.blake2b_chain_cached;
+    if cached && replay {
+        data[0] = index;
+        data[1..].copy_from_slice(&ctx.blake2b_chain);
+        ctx.precompiled.input_data.clear();
+        ctx.precompiled.input_data.extend_from_slice(&data);
+    } else {
+        precompiled_load_abx_data(ctx, &[index], 16, 16, &mut data, "blake2b");
+        if cached {
+            ctx.precompiled.input_data.clear();
+        }
+    }
+
+    if !replay || wr_chain {
+        // Get the state and input slices (data[0] is the index)
+        let (_, rest) = data.split_at_mut(1);
+        let (state_slice, input_slice) = rest.split_at_mut(16);
+        let state: &mut [u64; 16] = state_slice.try_into().unwrap();
+        let input: &[u64; 16] = input_slice[..16].try_into().unwrap();
+
+        // Compute the blake2br output with the fastest implementation available
+        blake2br(index, state, input);
+
+        if wr_chain {
+            ctx.blake2b_chain[..16].copy_from_slice(state);
+            ctx.blake2b_chain[16..].copy_from_slice(input);
+            ctx.blake2b_chain_cached = true;
+        }
+
+        // the new state overwrites the old one (address a)
+        if !replay {
+            for (i, d) in state.iter().enumerate() {
+                ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+            }
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Blake2b can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_blake2b(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_blake2b() is not implemented");
+}
+
+/// Performs the Blake3 permutation (7 rounds of G-mixing, no feed-forward) over a 16-u32 state,
+/// reading the state at address a and the input block at address b, and writing the permuted state
+/// back at address a.
+#[inline(always)]
+pub fn opc_blake3(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8; // state[8] (at a), input[8] (at b)
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "blake3");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        // Get the state and input slices
+        let (state_slice, input_slice) = data.split_at_mut(8);
+        let state: &mut [u64; 8] = state_slice.try_into().unwrap();
+        let input: &[u64; 8] = input_slice[..8].try_into().unwrap();
+
+        // Compute the blake3f output
+        blake3f(state, input);
+
+        // the new state overwrites the old one (address a)
+        for (i, d) in state.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Blake3 can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_blake3(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_blake3() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_blake3(ctx: &InstContext, stats: &mut dyn OpStats) {
+    // State (at a) is read and written back (8 words), input (at b) is read only (8 words).
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+/// Performs the Blake2s permutation (the 10 rounds of G-mixing, no feed-forward) over a 16-u32 state,
+/// reading the state at address a and the input block at address b, and writing the permuted state
+/// back at address a.
+#[inline(always)]
+pub fn opc_blake2s(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8; // state[8] (at a), input[8] (at b)
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "blake2s");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        // Get the state and input slices
+        let (state_slice, input_slice) = data.split_at_mut(8);
+        let state: &mut [u64; 8] = state_slice.try_into().unwrap();
+        let input: &[u64; 8] = input_slice[..8].try_into().unwrap();
+
+        // Compute the blake2sf output
+        blake2sf(state, input);
+
+        // the new state overwrites the old one (address a)
+        for (i, d) in state.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Blake2s can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_blake2s(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_blake2s() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_blake2s(ctx: &InstContext, stats: &mut dyn OpStats) {
+    // State (at a) is read and written back (8 words), input (at b) is read only (8 words).
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+#[inline(always)]
+pub fn ops_blake2b(ctx: &InstContext, stats: &mut dyn OpStats) {
+    // State (at a) is read and written back (16 words), input (at b) is read only (16 words); the
+    // round index is a static argument and touches no memory, nor does a chained state.
+    let rd = if ctx.extended_arg as u64 & BLAKE2B_RD_CHAIN != 0 { 0 } else { 16 };
+    let wr = if ctx.extended_arg as u64 & BLAKE2B_WR_CHAIN != 0 { 0 } else { 16 };
+    precompiled_stats_ab_data(ctx, stats, rd, rd, wr);
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub fn precompiled_load_data(
+    ctx: &mut InstContext,
+    params_count: usize,
+    load_indirections: usize,
+    load_chunks: usize,
+    load_rem: usize,
+    direct_load_param_idx: Option<usize>,
+    data: &mut [u64],
+    title: &str,
+) {
+    internal_precompiled_load_data(
+        ctx,
+        params_count,
+        load_indirections,
+        load_chunks,
+        load_rem,
+        0,
+        direct_load_param_idx,
+        data,
+        title,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub fn precompiled_load_data_with_result(
+    ctx: &mut InstContext,
+    params_count: usize,
+    load_indirections: usize,
+    load_chunks: usize,
+    load_rem: usize,
+    direct_load_param_idx: Option<usize>,
+    data: &mut [u64],
+    title: &str,
+) {
+    internal_precompiled_load_data(
+        ctx,
+        params_count,
+        load_indirections,
+        load_chunks,
+        load_rem,
+        1,
+        direct_load_param_idx,
+        data,
+        title,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn internal_precompiled_load_data(
+    ctx: &mut InstContext,
+    params_count: usize,
+    load_indirections: usize,
+    load_chunks: usize,
+    load_rem: usize,
+    result: usize,
+    direct_load_param_idx: Option<usize>, // Index of the load parameters that isn't an indirection
+    data: &mut [u64],
+    title: &str,
+) {
+    let address = ctx.b;
+    if address & 0x7 != 0 {
+        panic!(
+            "[{title}] precompiled_check_address() found address 0x{address:08X} not aligned \
+               to 8 bytes at PC:0x{:08X} STEP:{}",
+            ctx.pc, ctx.step
+        );
+    }
+    if let EmulationMode::ConsumeMemReads = ctx.emulation_mode {
+        // Check input data has the expected length
+        let expected_len = params_count + load_indirections * load_chunks + load_rem + result;
+        if ctx.precompiled.input_data.len() != expected_len {
+            panic!(
+                "[{title}] ctx.precompiled.input_data.len={} != {expected_len} \
+                [{params_count}+{load_indirections}*{load_chunks}+{load_rem}+{result}] at PC:0x{:08X} STEP:{}",
+                ctx.precompiled.input_data.len(), ctx.pc, ctx.step,
+            );
+        }
+        // Read data from the precompiled context
+        for (i, d) in data.iter_mut().enumerate() {
+            *d = ctx.precompiled.input_data[i];
+        }
+        // Write the input data address to the precompiled context
+        // ctx.precompiled.input_data_address = address;
+        return;
+    }
+
+    // Write the indirections/direct_params to data
+    for (i, data) in data.iter_mut().enumerate().take(params_count) {
+        let indirection = ctx.mem.read(address + (8 * i as u64), 8);
+        if indirection & 0x7 != 0 && Some(i) != direct_load_param_idx {
+            panic!(
+                "[{title}] precompiled_check_address() found address_{i} [0x{address:08X}]=0x{indirection:08X} \
+                not aligned to 8 bytes at PC:0x{:08X} STEP:{}",
+                ctx.pc, ctx.step
+            );
+        }
+        *data = indirection;
+    }
+
+    // Write the data
+    let mut data_offset = params_count;
+    for i in 0..load_indirections {
+        let param_idx = if let Some(direct_idx) = direct_load_param_idx {
+            if i >= direct_idx {
+                i + 1
+            } else {
+                i
+            }
+        } else {
+            i
+        };
+
+        let data_offset = i * load_chunks + data_offset;
+        // if there aren't indirections, take directly from the address
+        let param_address =
+            if params_count == 0 { address + data_offset as u64 } else { data[param_idx] };
+        for j in 0..load_chunks {
+            let addr = param_address + (8 * j as u64);
+            data[data_offset + j] = ctx.mem.read(addr, 8);
+        }
+    }
+
+    // Process the remanent of the last chunk
+    if load_rem > 0 {
+        data_offset += (load_indirections - 1) * load_chunks;
+        let param_address = if params_count == 0 {
+            address + data_offset as u64
+        } else {
+            data[load_indirections - 1]
+        };
+        for j in load_chunks..load_chunks + load_rem {
+            let addr = param_address + (8 * j as u64);
+            data[data_offset + j] = ctx.mem.read(addr, 8);
+        }
+    }
+
+    if let EmulationMode::GenerateMemReads = ctx.emulation_mode {
+        ctx.precompiled.input_data.clear();
+        for (i, d) in data.iter_mut().enumerate() {
+            ctx.precompiled.input_data.push(*d);
+        }
+        ctx.precompiled.step = ctx.step;
+    }
+}
+
+#[inline(always)]
+pub fn precompiled_stats_data(
+    ctx: &InstContext,
+    stats: &mut dyn OpStats,
+    inputs: &[u32],
+    outputs: &[u32],
+    inputs_reduce_count: usize,
+) {
+    let param_addr = ctx.b;
+
+    stats.mem_align_read(param_addr, inputs.len() + outputs.len());
+    for (index, count) in inputs.iter().enumerate() {
+        if *count == 0 {
+            continue;
+        }
+        let input_addr = ctx.mem.read(param_addr + (8 * index as u64), 8);
+        stats.mem_align_read(input_addr, *count as usize);
+        if index < inputs_reduce_count {
+            stats.mem_align_write(input_addr, *count as usize);
+        }
+    }
+    let index_offset = inputs.len();
+    for (index, count) in outputs.iter().enumerate() {
+        if *count == 0 {
+            continue;
+        }
+        let output_addr = ctx.mem.read(param_addr + (8 * (index + index_offset) as u64), 8);
+        stats.mem_align_write(output_addr, *count as usize);
+    }
+}
+
+#[inline(always)]
+pub fn precompiled_stats_direct_data(
+    ctx: &InstContext,
+    stats: &mut dyn OpStats,
+    inputs: usize,
+    outputs: usize,
+) {
+    let param_addr = ctx.b;
+
+    stats.mem_align_read(param_addr, inputs);
+    stats.mem_align_write(param_addr, outputs);
+}
+
+/// Loads the operands of a precompile called with two direct pointers: `a` points to the first
+/// operand (`chunks_a` 64-bit words) and `b` to the second one (`chunks_b` words). There are no
+/// indirections: the transpiler folds `csrs port, p1` + `add x0, p2, x0` into one instruction with
+/// a = p1 and b = p2. The words of `a` come first in `data`, followed by the words of `b`.
+#[inline(always)]
+pub fn precompiled_load_ab_data(
+    ctx: &mut InstContext,
+    chunks_a: usize,
+    chunks_b: usize,
+    data: &mut [u64],
+    title: &str,
+) {
+    precompiled_load_abx_data(ctx, &[], chunks_a, chunks_b, data, title);
+}
+
+/// Same as `precompiled_load_ab_data` for a precompile that also takes static arguments (values
+/// carried by the instruction itself, e.g. the blake2b round index in `extended_arg`): `data` is
+/// `static_args` followed by the words of `a` and the words of `b`. The static arguments are part
+/// of the minimal trace so the witness receives them through the bus.
+#[inline(always)]
+pub fn precompiled_load_abx_data(
+    ctx: &mut InstContext,
+    static_args: &[u64],
+    chunks_a: usize,
+    chunks_b: usize,
+    data: &mut [u64],
+    title: &str,
+) {
+    for (name, address) in [("a", ctx.a), ("b", ctx.b)] {
+        if address & 0x7 != 0 {
+            panic!(
+                "[{title}] precompiled_load_ab_data() found address {name}=0x{address:08X} not \
+                 aligned to 8 bytes at PC:0x{:08X} STEP:{}",
+                ctx.pc, ctx.step
+            );
+        }
+    }
+    let statics = static_args.len();
+    debug_assert_eq!(data.len(), statics + chunks_a + chunks_b);
+
+    if let EmulationMode::ConsumeMemReads = ctx.emulation_mode {
+        // Check input data has the expected length
+        let expected_len = statics + chunks_a + chunks_b;
+        if ctx.precompiled.input_data.len() != expected_len {
+            panic!(
+                "[{title}] ctx.precompiled.input_data.len={} != {expected_len} \
+                [{statics}+{chunks_a}+{chunks_b}] at PC:0x{:08X} STEP:{}",
+                ctx.precompiled.input_data.len(),
+                ctx.pc,
+                ctx.step,
+            );
+        }
+        // Read data from the precompiled context
+        data.copy_from_slice(&ctx.precompiled.input_data);
+        return;
+    }
+
+    // Static arguments first, then the operands read directly from their addresses
+    data[..statics].copy_from_slice(static_args);
+    for (i, d) in data.iter_mut().skip(statics).enumerate().take(chunks_a) {
+        *d = ctx.mem.read(ctx.a + (8 * i as u64), 8);
+    }
+    for (i, d) in data.iter_mut().skip(statics + chunks_a).enumerate() {
+        *d = ctx.mem.read(ctx.b + (8 * i as u64), 8);
+    }
+
+    if let EmulationMode::GenerateMemReads = ctx.emulation_mode {
+        ctx.precompiled.input_data.clear();
+        ctx.precompiled.input_data.extend_from_slice(data);
+        ctx.precompiled.step = ctx.step;
+    }
+}
+
+/// Memory statistics of a precompile called with two direct pointers (see
+/// `precompiled_load_ab_data`): `read_a` words are read from `a`, `read_b` words from `b`, and
+/// `write_a` words are written back to `a`.
+#[inline(always)]
+pub fn precompiled_stats_ab_data(
+    ctx: &InstContext,
+    stats: &mut dyn OpStats,
+    read_a: usize,
+    read_b: usize,
+    write_a: usize,
+) {
+    stats.mem_align_read(ctx.a, read_a);
+    stats.mem_align_read(ctx.b, read_b);
+    stats.mem_align_write(ctx.a, write_a);
+}
+
+pub fn opc_add256(ctx: &mut InstContext) {
+    const WORDS: usize = 4 + 1 + 2 * 4;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_data_with_result(ctx, 4, 2, 4, 0, Some(2), &mut data, "add256");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        // ignore 3 indirections
+        // 0 - addr_a
+        // 1 - addr_b
+        // 2 - cin
+        // 3 - addr_c
+        let cin = data[2];
+        let (params, rest) = data.split_at(4); // params(4)
+        let (a, rest) = rest.split_at(4);
+        let (b, _) = rest.split_at(4);
+
+        let a: &[u64; 4] = a.try_into().expect("opc_add256: a.len != 4");
+        let b: &[u64; 4] = b.try_into().expect("opc_add256: b.len != 4");
+        let mut c = [0u64; 4];
+        let cout = zisk_precomp_helpers::add256(a, b, cin, &mut c);
+
+        let c_addr = params[3];
+        for (i, c_item) in c.iter().enumerate() {
+            ctx.mem.write(c_addr + (8 * i as u64), *c_item, 8);
+        }
+        if let EmulationMode::GenerateMemReads = ctx.emulation_mode {
+            ctx.precompiled.input_data[4 + 2 * 4] = cout;
+        }
+        ctx.c = cout;
+        ctx.flag = false;
+    } else {
+        assert!(data[4 + 2 * 4] <= 1, "opc_add256: cout > 1");
+        ctx.c = data[4 + 2 * 4];
+        ctx.flag = false;
+    }
+}
+
+/// Unimplemented.  Arith256 can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_add256(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_add256() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_add256(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_data(ctx, stats, &[4, 4, 0], &[4], 0);
+}
+
+#[inline(always)]
+pub fn opc_arith256(ctx: &mut InstContext) {
+    const WORDS: usize = 5 + 3 * 4;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_data(ctx, 5, 3, 4, 0, None, &mut data, "arith256");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        // ignore 5 indirections
+        let (_, rest) = data.split_at(5);
+        let (a, rest) = rest.split_at(4);
+        let (b, c) = rest.split_at(4);
+
+        let a: &[u64; 4] = a.try_into().expect("opc_arith256: a.len != 4");
+        let b: &[u64; 4] = b.try_into().expect("opc_arith256: b.len != 4");
+        let c: &[u64; 4] = c.try_into().expect("opc_arith256: c.len != 4");
+
+        let mut dl = [0u64; 4];
+        let mut dh = [0u64; 4];
+
+        zisk_precomp_helpers::arith256(a, b, c, &mut dl, &mut dh);
+
+        // [a,b,c,3:dl,4:dh]
+        for (i, dl_item) in dl.iter().enumerate() {
+            ctx.mem.write(data[3] + (8 * i as u64), *dl_item, 8);
+        }
+        for (i, dh_item) in dh.iter().enumerate() {
+            ctx.mem.write(data[4] + (8 * i as u64), *dh_item, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Arith256 can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_arith256(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_arith256() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_arith256(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_data(ctx, stats, &[4, 4, 4], &[4, 4], 0);
+}
+
+#[inline(always)]
+pub fn opc_arith256_mod(ctx: &mut InstContext) {
+    const WORDS: usize = 5 + 4 * 4;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_data(ctx, 5, 4, 4, 0, None, &mut data, "arith256_mod");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        // ignore 5 indirections
+        let (_, rest) = data.split_at(5);
+        let (a, rest) = rest.split_at(4);
+        let (b, rest) = rest.split_at(4);
+        let (c, module) = rest.split_at(4);
+        let mut d = [0u64; 4];
+
+        let a: &[u64; 4] = a.try_into().expect("opc_arith256_mod: a.len != 4");
+        let b: &[u64; 4] = b.try_into().expect("opc_arith256_mod: b.len != 4");
+        let c: &[u64; 4] = c.try_into().expect("opc_arith256_mod: c.len != 4");
+        let module: &[u64; 4] = module.try_into().expect("opc_arith256_mod: module.len != 4");
+
+        let mut d = [0u64; 4];
+
+        zisk_precomp_helpers::arith256_mod(a, b, c, module, &mut d);
+
+        // [a,b,c,module,4:d]
+        for (i, d) in d.iter().enumerate() {
+            ctx.mem.write(data[4] + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Arith256Mod can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_arith256_mod(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_arith256_mod() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_arith256_mod(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_data(ctx, stats, &[4, 4, 4, 4], &[4], 0);
+}
+
+#[inline(always)]
+pub fn opc_secp256k1_add(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "secp256k1_add");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (p1, p2) = data.split_at(8);
+
+        let p1: &[u64; 8] = p1.try_into().expect("opc_secp256k1_add: p1.len != 8");
+        let p2: &[u64; 8] = p2.try_into().expect("opc_secp256k1_add: p2.len != 8");
+        let mut p3 = [0u64; 8];
+
+        zisk_precomp_helpers::secp256k1_add(p1, p2, &mut p3);
+
+        // the result overwrites p1 (address a)
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Secp256k1Add can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_secp256k1_add(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_secp256k1_add() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_secp256k1_add(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_secp256k1_dbl(ctx: &mut InstContext) {
+    const WORDS: usize = 8; // one input of 8 64-bit words
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_data(ctx, 0, 1, 8, 0, None, &mut data, "secp256k1_dbl");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let p1: &[u64; 8] = &data;
+        let mut p3 = [0u64; 8];
+
+        zisk_precomp_helpers::secp256k1_dbl(p1, &mut p3);
+
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.b + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Secp256k1Dbl can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_secp256k1_dbl(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_secp256k1_dbl() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_secp256k1_dbl(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_direct_data(ctx, stats, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_secp256r1_add(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "secp256r1_add");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (p1, p2) = data.split_at(8);
+
+        let p1: &[u64; 8] = p1.try_into().expect("opc_secp256r1_add: p1.len != 8");
+        let p2: &[u64; 8] = p2.try_into().expect("opc_secp256r1_add: p2.len != 8");
+        let mut p3 = [0u64; 8];
+
+        zisk_precomp_helpers::secp256r1_add(p1, p2, &mut p3);
+
+        // the result overwrites p1 (address a)
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Secp256r1Add can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_secp256r1_add(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_secp256r1_add() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_secp256r1_add(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_secp256r1_dbl(ctx: &mut InstContext) {
+    const WORDS: usize = 8; // one input of 8 64-bit words
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_data(ctx, 0, 1, 8, 0, None, &mut data, "secp256r1_dbl");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let p1: &[u64; 8] = &data;
+        let mut p3 = [0u64; 8];
+
+        zisk_precomp_helpers::secp256r1_dbl(p1, &mut p3);
+
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.b + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Secp256r1Dbl can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_secp256r1_dbl(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_secp256r1_dbl() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_secp256r1_dbl(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_direct_data(ctx, stats, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_bn254_curve_add(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "bn254_curve_add");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (p1, p2) = data.split_at(8);
+
+        let p1: &[u64; 8] = p1.try_into().expect("opc_bn254_curve_add: p1.len != 8");
+        let p2: &[u64; 8] = p2.try_into().expect("opc_bn254_curve_add: p2.len != 8");
+        let mut p3 = [0u64; 8];
+
+        zisk_precomp_helpers::bn254_curve_add(p1, p2, &mut p3);
+
+        // the result overwrites p1 (address a)
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bn254CurveAdd can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bn254_curve_add(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bn254_curve_add() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_bn254_curve_add(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_babyjubjub_add(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "babyjubjub_add");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (p1, p2) = data.split_at(8);
+
+        let p1: &[u64; 8] = p1.try_into().expect("opc_babyjubjub_add: p1.len != 8");
+        let p2: &[u64; 8] = p2.try_into().expect("opc_babyjubjub_add: p2.len != 8");
+        let mut p3 = [0u64; 8];
+
+        zisk_precomp_helpers::babyjubjub_add(p1, p2, &mut p3);
+
+        // the result overwrites p1 (address a)
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  BabyJubJubAdd can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_babyjubjub_add(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_babyjubjub_add() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_babyjubjub_add(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_ed25519_add(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "ed25519_add");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (p1, p2) = data.split_at(8);
+
+        let p1: &[u64; 8] = p1.try_into().expect("opc_ed25519_add: p1.len != 8");
+        let p2: &[u64; 8] = p2.try_into().expect("opc_ed25519_add: p2.len != 8");
+        let mut p3 = [0u64; 8];
+
+        zisk_precomp_helpers::ed25519_add(p1, p2, &mut p3);
+
+        // the result overwrites p1 (address a)
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Ed25519Add can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_ed25519_add(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_ed25519_add() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_ed25519_add(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_bn254_curve_dbl(ctx: &mut InstContext) {
+    const WORDS: usize = 8; // one input of 8 64-bit words
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_data(ctx, 0, 1, 8, 0, None, &mut data, "bn254_curve_dbl");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let p1: &[u64; 8] = &data;
+        let mut p3 = [0u64; 8];
+
+        zisk_precomp_helpers::bn254_curve_dbl(p1, &mut p3);
+
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.b + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bn254CurveDbl can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bn254_curve_dbl(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bn254_curve_dbl() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_bn254_curve_dbl(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_direct_data(ctx, stats, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_bn254_complex_add(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "bn254_complex_add");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (f1, f2) = data.split_at(8);
+
+        let f1: &[u64; 8] = f1.try_into().expect("opc_bn254_complex_add: f1.len != 8");
+        let f2: &[u64; 8] = f2.try_into().expect("opc_bn254_complex_add: f2.len != 8");
+        let mut f3 = [0u64; 8];
+
+        zisk_precomp_helpers::bn254_complex_add(f1, f2, &mut f3);
+
+        // the result overwrites f1 (address a)
+        for (i, d) in f3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bn254ComplexAdd can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bn254_complex_add(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bn254_complex_add() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_bn254_complex_add(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_bn254_complex_sub(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "bn254_complex_sub");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (f1, f2) = data.split_at(8);
+
+        let f1: &[u64; 8] = f1.try_into().expect("opc_bn254_complex_sub: f1.len != 8");
+        let f2: &[u64; 8] = f2.try_into().expect("opc_bn254_complex_sub: f2.len != 8");
+        let mut f3 = [0u64; 8];
+
+        zisk_precomp_helpers::bn254_complex_sub(f1, f2, &mut f3);
+
+        // the result overwrites f1 (address a)
+        for (i, d) in f3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bn254ComplexSub can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bn254_complex_sub(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bn254_complex_sub() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_bn254_complex_sub(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_bn254_complex_mul(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 8;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 8, 8, &mut data, "bn254_complex_mul");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (f1, f2) = data.split_at(8);
+
+        let f1: &[u64; 8] = f1.try_into().expect("opc_bn254_complex_mul: f1.len != 8");
+        let f2: &[u64; 8] = f2.try_into().expect("opc_bn254_complex_mul: f2.len != 8");
+        let mut f3 = [0u64; 8];
+
+        zisk_precomp_helpers::bn254_complex_mul(f1, f2, &mut f3);
+
+        // the result overwrites f1 (address a)
+        for (i, d) in f3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bn254ComplexMul can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bn254_complex_mul(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bn254_complex_mul() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_bn254_complex_mul(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 8, 8, 8);
+}
+
+#[inline(always)]
+pub fn opc_arith384_mod(ctx: &mut InstContext) {
+    const WORDS: usize = 5 + 4 * 6;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_data(ctx, 5, 4, 6, 0, None, &mut data, "arith384_mod");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        // ignore 5 indirections
+        let (_, rest) = data.split_at(5);
+        let (a, rest) = rest.split_at(6);
+        let (b, rest) = rest.split_at(6);
+        let (c, module) = rest.split_at(6);
+        let mut d = [0u64; 6];
+
+        let a: &[u64; 6] = a.try_into().expect("opc_arith384_mod: a.len != 6");
+        let b: &[u64; 6] = b.try_into().expect("opc_arith384_mod: b.len != 6");
+        let c: &[u64; 6] = c.try_into().expect("opc_arith384_mod: c.len != 6");
+        let module: &[u64; 6] = module.try_into().expect("opc_arith384_mod: module.len != 6");
+
+        let mut d = [0u64; 6];
+
+        zisk_precomp_helpers::arith384_mod(a, b, c, module, &mut d);
+
+        // [a,b,c,module,4:d]
+        for (i, d) in d.iter().enumerate() {
+            ctx.mem.write(data[4] + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Arith384Mod can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_arith384_mod(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_arith384_mod() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_arith384_mod(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_data(ctx, stats, &[6, 6, 6, 6], &[6], 0);
+}
+
+#[inline(always)]
+pub fn opc_bls12_381_curve_add(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 12;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 12, 12, &mut data, "bls12_381_curve_add");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (p1, p2) = data.split_at(12);
+
+        let p1: &[u64; 12] = p1.try_into().expect("opc_bls12_381_curve_add: p1.len != 12");
+        let p2: &[u64; 12] = p2.try_into().expect("opc_bls12_381_curve_add: p2.len != 12");
+        let mut p3 = [0u64; 12];
+
+        zisk_precomp_helpers::bls12_381_curve_add(p1, p2, &mut p3);
+
+        // the result overwrites p1 (address a)
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bls12_381CurveAdd can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bls12_381_curve_add(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bls12_381_curve_add() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_bls12_381_curve_add(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 12, 12, 12);
+}
+
+#[inline(always)]
+pub fn opc_bls12_381_curve_dbl(ctx: &mut InstContext) {
+    const WORDS: usize = 12;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_data(ctx, 0, 1, 12, 0, None, &mut data, "bls12_381_curve_dbl");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let p1: &[u64; 12] = &data;
+        let mut p3 = [0u64; 12];
+
+        zisk_precomp_helpers::bls12_381_curve_dbl(p1, &mut p3);
+
+        for (i, d) in p3.iter().enumerate() {
+            ctx.mem.write(ctx.b + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bls12_381CurveDbl can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bls12_381_curve_dbl(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bls12_381_curve_dbl() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_bls12_381_curve_dbl(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_direct_data(ctx, stats, 12, 12);
+}
+
+#[inline(always)]
+pub fn opc_bls12_381_complex_add(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 12;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 12, 12, &mut data, "bls12_381_complex_add");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (f1, f2) = data.split_at(12);
+
+        let f1: &[u64; 12] = f1.try_into().expect("opc_bls12_381_complex_add: f1.len != 12");
+        let f2: &[u64; 12] = f2.try_into().expect("opc_bls12_381_complex_add: f2.len != 12");
+        let mut f3 = [0u64; 12];
+
+        zisk_precomp_helpers::bls12_381_complex_add(f1, f2, &mut f3);
+
+        // the result overwrites f1 (address a)
+        for (i, d) in f3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bls12_381ComplexAdd can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bls12_381_complex_add(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bls12_381_complex_add() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_bls12_381_complex_add(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 12, 12, 12);
+}
+
+#[inline(always)]
+pub fn opc_bls12_381_complex_sub(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 12;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 12, 12, &mut data, "bls12_381_complex_sub");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (f1, f2) = data.split_at(12);
+
+        let f1: &[u64; 12] = f1.try_into().expect("opc_bls12_381_complex_sub: f1.len != 12");
+        let f2: &[u64; 12] = f2.try_into().expect("opc_bls12_381_complex_sub: f2.len != 12");
+        let mut f3 = [0u64; 12];
+
+        zisk_precomp_helpers::bls12_381_complex_sub(f1, f2, &mut f3);
+
+        // the result overwrites f1 (address a)
+        for (i, d) in f3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bls12_381ComplexSub can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bls12_381_complex_sub(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bls12_381_complex_sub() is not implemented");
+}
+
+#[inline(always)]
+pub fn ops_bls12_381_complex_sub(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 12, 12, 12);
+}
+
+#[inline(always)]
+pub fn opc_bls12_381_complex_mul(ctx: &mut InstContext) {
+    const WORDS: usize = 2 * 12;
+    let mut data = [0u64; WORDS];
+
+    precompiled_load_ab_data(ctx, 12, 12, &mut data, "bls12_381_complex_mul");
+
+    if ctx.emulation_mode != EmulationMode::ConsumeMemReads {
+        let (f1, f2) = data.split_at(12);
+
+        let f1: &[u64; 12] = f1.try_into().expect("opc_bls12_381_complex_mul: f1.len != 12");
+        let f2: &[u64; 12] = f2.try_into().expect("opc_bls12_381_complex_mul: f2.len != 12");
+        let mut f3 = [0u64; 12];
+
+        zisk_precomp_helpers::bls12_381_complex_mul(f1, f2, &mut f3);
+
+        // the result overwrites f1 (address a)
+        for (i, d) in f3.iter().enumerate() {
+            ctx.mem.write(ctx.a + (8 * i as u64), *d, 8);
+        }
+    }
+
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+/// Unimplemented.  Bls12_381ComplexMul can only be called from the system call context via InstContext.
+/// This is provided just for completeness.
+#[inline(always)]
+pub fn op_bls12_381_complex_mul(_a: u64, _b: u64) -> (u64, bool) {
+    unimplemented!("op_bls12_381_complex_mul() is not implemented");
+}
+
+pub fn ops_bls12_381_complex_mul(ctx: &InstContext, stats: &mut dyn OpStats) {
+    precompiled_stats_ab_data(ctx, stats, 12, 12, 12);
+}
+
+impl From<ZiskRequiredOperation> for ZiskOp {
+    fn from(value: ZiskRequiredOperation) -> Self {
+        ZiskOp::try_from_code(value.opcode).unwrap()
+    }
+}
+
+/// Copies register b into c as a public output data record, where a contains the data index (and
+/// sets flag to false)
+#[inline(always)]
+pub const fn op_pubout(a: u64, b: u64) -> (u64, bool) {
+    (b, false)
+}
+
+/// InstContext-based wrapper over op_pubout()
+#[inline(always)]
+pub fn opc_pubout(ctx: &mut InstContext) {
+    (ctx.c, ctx.flag) = op_pubout(ctx.a, ctx.b);
+    //println!("public ${} = {:#018x}", ctx.a, ctx.b);
+}
+
+/// Implements fcall_param, free input data call parameter
+#[inline(always)]
+pub fn op_fcall_param(a: u64, b: u64) -> (u64, bool) {
+    unimplemented!("op_fcall_param() is not implemented");
+}
+
+/// InstContext-based wrapper over op_fcall_param()
+#[inline(always)]
+pub fn opc_fcall_param(ctx: &mut InstContext) {
+    // Set c and flag according to the spec
+    ctx.c = ctx.b;
+    ctx.flag = false;
+
+    // Do nothing when emulating in consume memory reads mode;
+    // data will be directly obtained from mem_reads
+    if ctx.emulation_mode == EmulationMode::ConsumeMemReads {
+        return;
+    }
+
+    // Get param size from a
+    let words = ctx.a;
+
+    // Get param chunk from b
+    let param = ctx.b;
+
+    // Check for consistency
+    if (ctx.fcall.parameters_size + words) as usize > FCALL_PARAMS_MAX_SIZE {
+        panic!(
+            "opc_fcall_param({0}) called with ctx.fcall.parameters_size({1}) + param({0})>{2}",
+            words, ctx.fcall.parameters_size, FCALL_PARAMS_MAX_SIZE
+        );
+    }
+
+    // Store param in context
+    if words == 1 {
+        ctx.fcall.parameters[ctx.fcall.parameters_size as usize] = param;
+        ctx.fcall.parameters_size += 1;
+    } else {
+        let addr = param;
+        for i in 0..words {
+            let value = ctx.mem.read(addr + i * 8, 8);
+            ctx.fcall.parameters[(ctx.fcall.parameters_size + i) as usize] = value;
+        }
+        ctx.fcall.parameters_size += words;
+    }
+}
+
+/// Implements fcall, free input data calls
+#[inline(always)]
+pub fn op_fcall(a: u64, b: u64) -> (u64, bool) {
+    unimplemented!("op_fcall() is not implemented");
+}
+
+/// InstContext-based wrapper over op_fcall()
+#[inline(always)]
+pub fn opc_fcall(ctx: &mut InstContext) {
+    // Set c and flag according to the spec
+    ctx.c = ctx.b;
+    ctx.flag = false;
+
+    // Do nothing when emulating in consume memory reads mode;
+    // data will be directly obtained from mem_reads
+    if ctx.emulation_mode == EmulationMode::ConsumeMemReads {
+        return;
+    }
+
+    // Get function id from a
+    let function_id = ctx.a;
+
+    let iresult = if function_id == FCALL_INPUT_READY_ID as u64 {
+        let required_address = ctx.fcall.parameters[0];
+        if required_address < INPUT_ADDR {
+            panic!(
+                "opc_fcall() FCALL_INPUT_READY_ID called with required_address {:#x} < {:#x}",
+                required_address, INPUT_ADDR
+            );
+        }
+        if required_address > INPUT_ADDR + MAX_INPUT_SIZE - 1 {
+            panic!(
+                "opc_fcall() FCALL_INPUT_READY_ID called with required_address {:#x} > {:#x}",
+                required_address,
+                INPUT_ADDR + MAX_INPUT_SIZE - 1
+            );
+        }
+
+        let required_bytes = required_address - INPUT_ADDR - 8 + 1; // + 1 because required_address is the address of the last required byte
+        if required_bytes > ctx.input_len {
+            panic!(
+                "opc_fcall() FCALL_INPUT_READY_ID called with required_address {:#x} requiring {} bytes, but only {} bytes available",
+                required_address,
+                required_bytes,
+                ctx.input_len
+            );
+        }
+        0
+    } else if function_id == FCALL_SET_KECCAKF_CACHE_INDEX_ID as u64 {
+        if ctx.fcall.parameters_size != 1 {
+            panic!(
+                "opc_fcall() FCALL_SET_KECCAKF_CACHE_INDEX_ID called with parameters_size={} != 1",
+                ctx.fcall.parameters_size
+            );
+        }
+
+        // The next keccak instruction will cache its input state under this index
+        ctx.keccakf_cache.set_pending_index(ctx.fcall.parameters[0]);
+        0
+    } else if function_id == FCALL_GET_KECCAKF_CACHE_INDEX_ID as u64 {
+        if ctx.fcall.parameters_size != KECCAKF_STATE_WORDS as u64 {
+            panic!(
+                "opc_fcall() FCALL_GET_KECCAKF_CACHE_INDEX_ID called with parameters_size={} != {}",
+                ctx.fcall.parameters_size, KECCAKF_STATE_WORDS
+            );
+        }
+
+        // Returns the index the state was cached under, or KECCAKF_CACHE_INDEX_NOT_FOUND
+        let index = ctx.keccakf_cache.get(&ctx.fcall.parameters[..KECCAKF_STATE_WORDS]);
+        ctx.fcall.result[0] = index;
+        1
+    } else if function_id == FCALL_RANDOM_SEED_ID as u64 {
+        if ctx.fcall.parameters_size != 0 {
+            panic!(
+                "opc_fcall() FCALL_RANDOM_SEED_ID called with parameters_size={} != 0",
+                ctx.fcall.parameters_size
+            );
+        }
+
+        // The seed comes with the execution; there is no safe default to fall back to
+        let Some(seed) = ctx.random_seed else {
+            panic!("opc_fcall() FCALL_RANDOM_SEED_ID called but no random seed was provided");
+        };
+        ctx.fcall.result[..RANDOM_SEED_WORDS].copy_from_slice(&seed);
+        RANDOM_SEED_WORDS as i64
+    } else {
+        fcall_proxy(function_id, &ctx.fcall.parameters, &mut ctx.fcall.result)
+    };
+
+    if iresult < 0 {
+        panic!("opc_fcall() failed calling Fcall() function_id={function_id} iresult={iresult}");
+    }
+
+    // Copy result
+    if (iresult > 0) {
+        ctx.mem.free_input = ctx.fcall.result[0];
+    } else {
+        ctx.mem.free_input = 0;
+    }
+    ctx.fcall.result_got = 1;
+    ctx.fcall.result_size = iresult as u64;
+    ctx.fcall.parameters_size = 0;
+}
+
+/// Implements fcall_get, fcall result
+#[inline(always)]
+pub fn op_fcall_get(a: u64, b: u64) -> (u64, bool) {
+    unimplemented!("op_fcall_get() is not implemented");
+}
+
+/// InstContext-based wrapper over op_fcall_get()
+#[inline(always)]
+pub fn opc_fcall_get(ctx: &mut InstContext) {
+    ctx.c = ctx.b;
+    ctx.flag = false;
+
+    // Do nothing when emulating in consume memory reads mode;
+    // data will be directly obtained from mem_reads
+    if ctx.emulation_mode == EmulationMode::ConsumeMemReads {
+        return;
+    }
+    // Check for consistency
+    if ctx.fcall.result_size == 0 {
+        panic!("opc_fcall_get() called with ctx.fcall.result_size==0");
+    }
+    if ctx.fcall.result_size as usize > FCALL_RESULT_MAX_SIZE {
+        panic!(
+            "opc_fcall_get() called with ctx.fcall.result_size=={}>{}",
+            ctx.fcall.result_size, FCALL_RESULT_MAX_SIZE
+        );
+    }
+    if ctx.fcall.result_got > ctx.fcall.result_size {
+        panic!(
+            "opc_fcall_get() called with ctx.fcall.result_got({}) >= ctx.fcall.result_size {}",
+            ctx.fcall.result_got, ctx.fcall.result_size
+        );
+    }
+
+    // Copy the data into c and advance counter
+    if ctx.fcall.result_got >= ctx.fcall.result_size {
+        ctx.mem.free_input = 0;
+    } else {
+        ctx.mem.free_input = ctx.fcall.result[ctx.fcall.result_got as usize];
+    }
+    ctx.fcall.result_got += 1;
+    ctx.flag = false;
+}
+
+/// Implements halt
+#[inline(always)]
+pub fn op_halt(a: u64, b: u64) -> (u64, bool) {
+    unimplemented!("op_halt() is not implemented");
+}
+
+/// InstContext-based wrapper over op_halt()
+#[inline(always)]
+pub fn opc_halt(ctx: &mut InstContext) {
+    ctx.error = true;
+    // Record where: the emulator advances step and pc after the operation
+    ctx.error_step = ctx.step;
+    ctx.error_pc = ctx.pc;
+    // A nonzero exit halts with a = the exit code; a trap halts with a = 0
+    ctx.error_code = ctx.a;
+    ctx.c = 0;
+    ctx.flag = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_blake2b_gap_is_provable_only_on_a_chain_read_and_in_a_byte() {
+        let gap = |g: u64| g << BLAKE2B_GAP_SHIFT;
+        assert!(blake2b_gap_is_provable(3));
+        assert!(blake2b_gap_is_provable(3 | BLAKE2B_WR_CHAIN));
+        assert!(!blake2b_gap_is_provable(3 | gap(1)));
+        assert!(!blake2b_gap_is_provable(BLAKE2B_RD_CHAIN));
+        assert!(blake2b_gap_is_provable(BLAKE2B_RD_CHAIN | gap(1)));
+        assert!(blake2b_gap_is_provable(BLAKE2B_RD_CHAIN | gap(255)));
+        assert!(!blake2b_gap_is_provable(BLAKE2B_RD_CHAIN | gap(256)));
+    }
+}

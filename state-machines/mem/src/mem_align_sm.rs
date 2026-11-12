@@ -1,28 +1,15 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 #[cfg(feature = "debug_mem_align")]
 use std::sync::Mutex;
 
-use fields::PrimeField64;
-use pil_std_lib::Std;
+use proofman_fields::PrimeField64;
 
 use crate::{MemAlignInput, MemAlignRomSM, MemOp};
-use proofman_common::{AirInstance, FromTrace, ProofmanResult};
+use proofman_common::{AirInstance, FromTrace, GenericTrace, ProofmanResult};
 use rayon::prelude::*;
-#[cfg(not(feature = "packed"))]
-use zisk_pil::{MemAlignTrace, MemAlignTraceRow};
-#[cfg(feature = "packed")]
-use zisk_pil::{MemAlignTracePacked, MemAlignTraceRowPacked};
-
-#[cfg(feature = "packed")]
-type MemAlignTraceRowType<F> = MemAlignTraceRowPacked<F>;
-#[cfg(feature = "packed")]
-type MemAlignTraceType<F> = MemAlignTracePacked<F>;
-
-#[cfg(not(feature = "packed"))]
-type MemAlignTraceRowType<F> = MemAlignTraceRow<F>;
-#[cfg(not(feature = "packed"))]
-type MemAlignTraceType<F> = MemAlignTrace<F>;
+use zisk_pil::{MemAlignTraceRowOps, ZISK_AIRGROUP_ID};
 
 const RC: usize = 2;
 const CHUNK_NUM: usize = 8;
@@ -50,17 +37,10 @@ const DEFAULT_OFFSET: u8 = 0;
 const DEFAULT_WIDTH: u8 = 8;
 
 pub struct MemAlignSM<F: PrimeField64> {
-    /// PIL2 standard library
-    std: Arc<Std<F>>,
-
     #[cfg(feature = "debug_mem_align")]
     num_computed_rows: Mutex<usize>,
 
-    /// The table ID for the Mem Align ROM State Machine
-    table_id: usize,
-
-    /// The range ID for the byte range check
-    range_id: usize,
+    _phantom: PhantomData<F>,
 }
 
 macro_rules! debug_info {
@@ -73,26 +53,18 @@ macro_rules! debug_info {
 }
 
 impl<F: PrimeField64> MemAlignSM<F> {
-    pub fn new(std: Arc<Std<F>>) -> Arc<Self> {
-        // Get the table ID
-        let table_id =
-            std.get_virtual_table_id(MemAlignRomSM::TABLE_ID).expect("Failed to get table ID");
-        let range_id =
-            std.get_range_id(0, CHUNK_BITS_MASK as i64, None).expect("Failed to get range ID");
-
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            std: std.clone(),
             #[cfg(feature = "debug_mem_align")]
             num_computed_rows: Mutex::new(0),
-            table_id,
-            range_id,
+            _phantom: PhantomData,
         })
     }
 
-    pub fn prove_mem_align_op(
+    pub fn prove_mem_align_op<R: MemAlignTraceRowOps<F>>(
         &self,
         input: &MemAlignInput,
-        trace: &mut [MemAlignTraceRowType<F>],
+        trace: &mut [R],
     ) -> usize {
         let addr = input.addr;
         let width = input.width;
@@ -137,13 +109,10 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 let value_read = input.mem_values[0];
 
                 // Get the next pc and op size
-                let (next_pc, op_size) =
+                let (next_pc, _op_size) =
                     MemAlignRomSM::calculate_next_pc_and_op_size(MemOp::OneRead, offset, width);
 
-                // Update the row multiplicity of the operation
-                MemAlignRomSM::get_rows(&self.std, self.table_id, next_pc, op_size);
-
-                let mut read_row = MemAlignTraceRowType::default();
+                let mut read_row: R = Default::default();
                 read_row.set_step(step);
                 read_row.set_addr(addr_read);
                 read_row.set_offset(DEFAULT_OFFSET);
@@ -151,34 +120,54 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 read_row.set_reset(true);
                 read_row.set_sel_up_to_down(true);
 
-                let mut value_row = MemAlignTraceRowType::default();
+                let mut value_row: R = Default::default();
                 value_row.set_step(step);
                 value_row.set_addr(addr_read);
                 value_row.set_offset(offset as u8);
                 value_row.set_width(width as u8);
                 value_row.set_pc(next_pc as u8);
-                value_row.set_sel_prove(true);
+                value_row.set_is_non_aligned_op(true);
+                value_row.set_sel_w_lt8(width < 8);
+                value_row.set_sel_w_lt4(width < 4);
+                value_row.set_sel_w_lt2(width < 2);
 
+                // Compute reg and sel arrays for read_row
+                let mut read_reg_values = [0u8; CHUNK_NUM];
+                let mut read_sel_values = [false; CHUNK_NUM];
                 for i in 0..CHUNK_NUM {
-                    read_row.set_reg(i, Self::get_byte(value_read, i, 0));
+                    read_reg_values[i] = Self::get_byte(value_read, i, 0);
                     if i >= offset && i < offset + width {
-                        read_row.set_sel(i, true);
-                    }
-
-                    value_row.set_reg(i, Self::get_byte(value, i, CHUNK_NUM - offset));
-                    if i == offset {
-                        value_row.set_sel(i, true);
+                        read_sel_values[i] = true;
                     }
                 }
+                read_row.set_all_reg(&read_reg_values);
+                read_row.set_all_sel(&read_sel_values);
 
+                // Compute reg and sel arrays for value_row
+                let mut value_reg_values = [0u8; CHUNK_NUM];
+                let mut value_sel_values = [false; CHUNK_NUM];
+                for i in 0..CHUNK_NUM {
+                    value_reg_values[i] = Self::get_byte(value, i, CHUNK_NUM - offset);
+                    if i == offset {
+                        value_sel_values[i] = true;
+                    }
+                }
+                value_row.set_all_reg(&value_reg_values);
+                value_row.set_all_sel(&value_sel_values);
+
+                // Compute value arrays for both rows
+                let mut read_value_values = [0u32; RC];
+                let mut value_value_values = [0u32; RC];
                 let mut _value_read = value_read;
                 let mut _value = value;
                 for i in 0..RC {
-                    read_row.set_value(i, (_value_read & RC_MASK) as u32);
-                    value_row.set_value(i, (_value & RC_MASK) as u32);
+                    read_value_values[i] = (_value_read & RC_MASK) as u32;
+                    value_value_values[i] = (_value & RC_MASK) as u32;
                     _value_read >>= RC_BITS;
                     _value >>= RC_BITS;
                 }
+                read_row.set_all_value(&read_value_values);
+                value_row.set_all_value(&value_value_values);
 
                 #[rustfmt::skip]
                 debug_info!(
@@ -239,11 +228,8 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 let value_read = input.mem_values[0];
 
                 // Get the next pc
-                let (next_pc, op_size) =
+                let (next_pc, _op_size) =
                     MemAlignRomSM::calculate_next_pc_and_op_size(MemOp::OneWrite, offset, width);
-
-                // Update the row multiplicity of the operation
-                MemAlignRomSM::get_rows(&self.std, self.table_id, next_pc, op_size);
 
                 // Compute the write value
                 let value_write = {
@@ -260,7 +246,7 @@ impl<F: PrimeField64> MemAlignSM<F> {
                     (value_read & !mask) | value_to_write
                 };
 
-                let mut read_row = MemAlignTraceRowType::default();
+                let mut read_row: R = Default::default();
                 read_row.set_step(step);
                 read_row.set_addr(addr_read);
                 read_row.set_offset(DEFAULT_OFFSET);
@@ -268,7 +254,7 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 read_row.set_reset(true);
                 read_row.set_sel_up_to_down(true);
 
-                let mut write_row = MemAlignTraceRowType::default();
+                let mut write_row: R = Default::default();
                 write_row.set_step(step + 1);
                 write_row.set_addr(addr_read);
                 write_row.set_offset(DEFAULT_OFFSET);
@@ -277,51 +263,73 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 write_row.set_pc(next_pc as u8);
                 write_row.set_sel_up_to_down(true);
 
-                let mut value_row = MemAlignTraceRowType::default();
+                let mut value_row: R = Default::default();
                 value_row.set_step(step);
                 value_row.set_addr(addr_read);
                 value_row.set_offset(offset as u8);
                 value_row.set_width(width as u8);
                 value_row.set_wr(true);
                 value_row.set_pc(next_pc as u8 + 1);
-                value_row.set_sel_prove(true);
+                value_row.set_is_non_aligned_op(true);
 
+                // Compute arrays for read_row
+                let mut read_reg_values = [0u8; CHUNK_NUM];
+                let mut read_sel_values = [false; CHUNK_NUM];
                 for i in 0..CHUNK_NUM {
-                    read_row.set_reg(i, Self::get_byte(value_read, i, 0));
+                    read_reg_values[i] = Self::get_byte(value_read, i, 0);
                     if i < offset || i >= offset + width {
-                        read_row.set_sel(i, true);
-                    }
-
-                    let write_reg = Self::get_byte(value_write, i, 0);
-                    write_row.set_reg(i, write_reg);
-                    if i >= offset && i < offset + width {
-                        write_row.set_sel(i, true);
-                    }
-
-                    value_row.set_reg(
-                        i,
-                        if i >= offset && i < offset + width {
-                            write_reg
-                        } else {
-                            Self::get_byte(value, i, CHUNK_NUM - offset)
-                        },
-                    );
-                    if i == offset {
-                        value_row.set_sel(i, true);
+                        read_sel_values[i] = true;
                     }
                 }
+                read_row.set_all_reg(&read_reg_values);
+                read_row.set_all_sel(&read_sel_values);
 
+                // Compute arrays for write_row
+                let mut write_reg_values = [0u8; CHUNK_NUM];
+                let mut write_sel_values = [false; CHUNK_NUM];
+                for i in 0..CHUNK_NUM {
+                    write_reg_values[i] = Self::get_byte(value_write, i, 0);
+                    if i >= offset && i < offset + width {
+                        write_sel_values[i] = true;
+                    }
+                }
+                write_row.set_all_reg(&write_reg_values);
+                write_row.set_all_sel(&write_sel_values);
+
+                // Compute arrays for value_row
+                let mut value_reg_values = [0u8; CHUNK_NUM];
+                let mut value_sel_values = [false; CHUNK_NUM];
+                for i in 0..CHUNK_NUM {
+                    value_reg_values[i] = if i >= offset && i < offset + width {
+                        write_reg_values[i]
+                    } else {
+                        Self::get_byte(value, i, CHUNK_NUM - offset)
+                    };
+                    if i == offset {
+                        value_sel_values[i] = true;
+                    }
+                }
+                value_row.set_all_reg(&value_reg_values);
+                value_row.set_all_sel(&value_sel_values);
+
+                // Compute value arrays
+                let mut read_value_values = [0u32; RC];
+                let mut write_value_values = [0u32; RC];
+                let mut value_value_values = [0u32; RC];
                 let mut _value_read = value_read;
                 let mut _value_write = value_write;
                 let mut _value = value;
                 for i in 0..RC {
-                    read_row.set_value(i, (_value_read & RC_MASK) as u32);
-                    write_row.set_value(i, (_value_write & RC_MASK) as u32);
-                    value_row.set_value(i, (_value & RC_MASK) as u32);
+                    read_value_values[i] = (_value_read & RC_MASK) as u32;
+                    write_value_values[i] = (_value_write & RC_MASK) as u32;
+                    value_value_values[i] = (_value & RC_MASK) as u32;
                     _value_read >>= RC_BITS;
                     _value_write >>= RC_BITS;
                     _value >>= RC_BITS;
                 }
+                read_row.set_all_value(&read_value_values);
+                write_row.set_all_value(&write_value_values);
+                value_row.set_all_value(&value_value_values);
 
                 #[rustfmt::skip]
                 debug_info!(
@@ -396,13 +404,10 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 let value_second_read = input.mem_values[1];
 
                 // Get the next pc
-                let (next_pc, op_size) =
+                let (next_pc, _op_size) =
                     MemAlignRomSM::calculate_next_pc_and_op_size(MemOp::TwoReads, offset, width);
 
-                // Update the row multiplicity of the operation
-                MemAlignRomSM::get_rows(&self.std, self.table_id, next_pc, op_size);
-
-                let mut first_read_row = MemAlignTraceRowType::default();
+                let mut first_read_row: R = Default::default();
                 first_read_row.set_step(step);
                 first_read_row.set_addr(addr_first_read);
                 first_read_row.set_offset(DEFAULT_OFFSET);
@@ -410,52 +415,79 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 first_read_row.set_reset(true);
                 first_read_row.set_sel_up_to_down(true);
 
-                let mut value_row = MemAlignTraceRowType::default();
+                let mut value_row: R = Default::default();
                 value_row.set_step(step);
                 value_row.set_addr(addr_first_read);
                 value_row.set_offset(offset as u8);
                 value_row.set_width(width as u8);
                 value_row.set_pc(next_pc as u8);
-                value_row.set_sel_prove(true);
+                value_row.set_is_non_aligned_op(true);
+                value_row.set_sel_w_lt8(width < 8);
+                value_row.set_sel_w_lt4(width < 4);
+                value_row.set_sel_w_lt2(width < 2);
 
-                let mut second_read_row = MemAlignTraceRowType::default();
+                let mut second_read_row: R = Default::default();
                 second_read_row.set_step(step);
                 second_read_row.set_addr(addr_second_read);
-                second_read_row.set_delta_addr(1);
                 second_read_row.set_offset(DEFAULT_OFFSET);
                 second_read_row.set_width(DEFAULT_WIDTH);
                 second_read_row.set_pc(next_pc as u8 + 1);
                 second_read_row.set_sel_down_to_up(true);
 
+                // Compute arrays for first_read_row
+                let mut first_read_reg_values = [0u8; CHUNK_NUM];
+                let mut first_read_sel_values = [false; CHUNK_NUM];
                 for i in 0..CHUNK_NUM {
-                    first_read_row.set_reg(i, Self::get_byte(value_first_read, i, 0));
+                    first_read_reg_values[i] = Self::get_byte(value_first_read, i, 0);
                     if i >= offset {
-                        first_read_row.set_sel(i, true);
-                    }
-
-                    value_row.set_reg(i, Self::get_byte(value, i, CHUNK_NUM - offset));
-
-                    if i == offset {
-                        value_row.set_sel(i, true);
-                    }
-
-                    second_read_row.set_reg(i, Self::get_byte(value_second_read, i, 0));
-                    if i < rem_bytes {
-                        second_read_row.set_sel(i, true);
+                        first_read_sel_values[i] = true;
                     }
                 }
+                first_read_row.set_all_reg(&first_read_reg_values);
+                first_read_row.set_all_sel(&first_read_sel_values);
 
+                // Compute arrays for value_row
+                let mut value_reg_values = [0u8; CHUNK_NUM];
+                let mut value_sel_values = [false; CHUNK_NUM];
+                for i in 0..CHUNK_NUM {
+                    value_reg_values[i] = Self::get_byte(value, i, CHUNK_NUM - offset);
+                    if i == offset {
+                        value_sel_values[i] = true;
+                    }
+                }
+                value_row.set_all_reg(&value_reg_values);
+                value_row.set_all_sel(&value_sel_values);
+
+                // Compute arrays for second_read_row
+                let mut second_read_reg_values = [0u8; CHUNK_NUM];
+                let mut second_read_sel_values = [false; CHUNK_NUM];
+                for i in 0..CHUNK_NUM {
+                    second_read_reg_values[i] = Self::get_byte(value_second_read, i, 0);
+                    if i < rem_bytes {
+                        second_read_sel_values[i] = true;
+                    }
+                }
+                second_read_row.set_all_reg(&second_read_reg_values);
+                second_read_row.set_all_sel(&second_read_sel_values);
+
+                // Compute value arrays
+                let mut first_read_value_values = [0u32; RC];
+                let mut value_value_values = [0u32; RC];
+                let mut second_read_value_values = [0u32; RC];
                 let mut _value_first_read = value_first_read;
                 let mut _value = value;
                 let mut _value_second_read = value_second_read;
                 for i in 0..RC {
-                    first_read_row.set_value(i, (_value_first_read & RC_MASK) as u32);
-                    value_row.set_value(i, (_value & RC_MASK) as u32);
-                    second_read_row.set_value(i, (_value_second_read & RC_MASK) as u32);
+                    first_read_value_values[i] = (_value_first_read & RC_MASK) as u32;
+                    value_value_values[i] = (_value & RC_MASK) as u32;
+                    second_read_value_values[i] = (_value_second_read & RC_MASK) as u32;
                     _value_first_read >>= RC_BITS;
                     _value >>= RC_BITS;
                     _value_second_read >>= RC_BITS;
                 }
+                first_read_row.set_all_value(&first_read_value_values);
+                value_row.set_all_value(&value_value_values);
+                second_read_row.set_all_value(&second_read_value_values);
 
                 #[rustfmt::skip]
                         debug_info!(
@@ -571,14 +603,11 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 };
 
                 // Get the next pc
-                let (next_pc, op_size) =
+                let (next_pc, _op_size) =
                     MemAlignRomSM::calculate_next_pc_and_op_size(MemOp::TwoWrites, offset, width);
 
-                // Update the row multiplicity of the operation
-                MemAlignRomSM::get_rows(&self.std, self.table_id, next_pc, op_size);
-
                 // RWVWR
-                let mut first_read_row = MemAlignTraceRowType::default();
+                let mut first_read_row: R = Default::default();
                 first_read_row.set_step(step);
                 first_read_row.set_addr(addr_first_read_write);
                 first_read_row.set_offset(DEFAULT_OFFSET);
@@ -586,7 +615,7 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 first_read_row.set_reset(true);
                 first_read_row.set_sel_up_to_down(true);
 
-                let mut first_write_row = MemAlignTraceRowType::<F>::default();
+                let mut first_write_row: R = Default::default();
                 first_write_row.set_step(step + 1);
                 first_write_row.set_addr(addr_first_read_write);
                 first_write_row.set_offset(DEFAULT_OFFSET);
@@ -595,26 +624,25 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 first_write_row.set_pc(next_pc as u8);
                 first_write_row.set_sel_up_to_down(true);
 
-                let mut value_row = MemAlignTraceRowType::default();
+                let mut value_row: R = Default::default();
                 value_row.set_step(step);
                 value_row.set_addr(addr_first_read_write);
                 value_row.set_offset(offset as u8);
                 value_row.set_width(width as u8);
                 value_row.set_wr(true);
                 value_row.set_pc(next_pc as u8 + 1);
-                value_row.set_sel_prove(true);
+                value_row.set_is_non_aligned_op(true);
 
-                let mut second_write_row = MemAlignTraceRowType::default();
+                let mut second_write_row: R = Default::default();
                 second_write_row.set_step(step + 1);
                 second_write_row.set_addr(addr_second_read_write);
-                second_write_row.set_delta_addr(1);
                 second_write_row.set_offset(DEFAULT_OFFSET);
                 second_write_row.set_width(DEFAULT_WIDTH);
                 second_write_row.set_wr(true);
                 second_write_row.set_pc(next_pc as u8 + 2);
                 second_write_row.set_sel_down_to_up(true);
 
-                let mut second_read_row = MemAlignTraceRowType::default();
+                let mut second_read_row: R = Default::default();
                 second_read_row.set_step(step);
                 second_read_row.set_addr(addr_second_read_write);
                 second_read_row.set_offset(DEFAULT_OFFSET);
@@ -623,60 +651,100 @@ impl<F: PrimeField64> MemAlignSM<F> {
                 second_read_row.set_reset(false);
                 second_read_row.set_sel_down_to_up(true);
 
+                // Compute arrays for first_read_row
+                let mut first_read_reg_values = [0u8; CHUNK_NUM];
+                let mut first_read_sel_values = [false; CHUNK_NUM];
                 for i in 0..CHUNK_NUM {
-                    first_read_row.set_reg(i, Self::get_byte(value_first_read, i, 0));
+                    first_read_reg_values[i] = Self::get_byte(value_first_read, i, 0);
                     if i < offset {
-                        first_read_row.set_sel(i, true);
-                    }
-
-                    let first_write_reg = Self::get_byte(value_first_write, i, 0);
-                    first_write_row.set_reg(i, first_write_reg);
-                    if i >= offset {
-                        first_write_row.set_sel(i, true);
-                    }
-
-                    let second_write_reg = Self::get_byte(value_second_write, i, 0);
-                    second_write_row.set_reg(i, second_write_reg);
-                    if i < rem_bytes {
-                        second_write_row.set_sel(i, true);
-                    }
-
-                    value_row.set_reg(i, {
-                        if i < rem_bytes {
-                            second_write_reg
-                        } else if i >= offset {
-                            first_write_reg
-                        } else {
-                            Self::get_byte(value, i, CHUNK_NUM - offset)
-                        }
-                    });
-                    if i == offset {
-                        value_row.set_sel(i, true);
-                    }
-
-                    second_read_row.set_reg(i, Self::get_byte(value_second_read, i, 0));
-                    if i >= rem_bytes {
-                        second_read_row.set_sel(i, true);
+                        first_read_sel_values[i] = true;
                     }
                 }
+                first_read_row.set_all_reg(&first_read_reg_values);
+                first_read_row.set_all_sel(&first_read_sel_values);
 
+                // Compute arrays for first_write_row
+                let mut first_write_reg_values = [0u8; CHUNK_NUM];
+                let mut first_write_sel_values = [false; CHUNK_NUM];
+                for i in 0..CHUNK_NUM {
+                    first_write_reg_values[i] = Self::get_byte(value_first_write, i, 0);
+                    if i >= offset {
+                        first_write_sel_values[i] = true;
+                    }
+                }
+                first_write_row.set_all_reg(&first_write_reg_values);
+                first_write_row.set_all_sel(&first_write_sel_values);
+
+                // Compute arrays for second_write_row
+                let mut second_write_reg_values = [0u8; CHUNK_NUM];
+                let mut second_write_sel_values = [false; CHUNK_NUM];
+                for i in 0..CHUNK_NUM {
+                    second_write_reg_values[i] = Self::get_byte(value_second_write, i, 0);
+                    if i < rem_bytes {
+                        second_write_sel_values[i] = true;
+                    }
+                }
+                second_write_row.set_all_reg(&second_write_reg_values);
+                second_write_row.set_all_sel(&second_write_sel_values);
+
+                // Compute arrays for value_row (depends on previous rows)
+                let mut value_reg_values = [0u8; CHUNK_NUM];
+                let mut value_sel_values = [false; CHUNK_NUM];
+                for i in 0..CHUNK_NUM {
+                    value_reg_values[i] = if i < rem_bytes {
+                        second_write_reg_values[i]
+                    } else if i >= offset {
+                        first_write_reg_values[i]
+                    } else {
+                        Self::get_byte(value, i, CHUNK_NUM - offset)
+                    };
+                    if i == offset {
+                        value_sel_values[i] = true;
+                    }
+                }
+                value_row.set_all_reg(&value_reg_values);
+                value_row.set_all_sel(&value_sel_values);
+
+                // Compute arrays for second_read_row
+                let mut second_read_reg_values = [0u8; CHUNK_NUM];
+                let mut second_read_sel_values = [false; CHUNK_NUM];
+                for i in 0..CHUNK_NUM {
+                    second_read_reg_values[i] = Self::get_byte(value_second_read, i, 0);
+                    if i >= rem_bytes {
+                        second_read_sel_values[i] = true;
+                    }
+                }
+                second_read_row.set_all_reg(&second_read_reg_values);
+                second_read_row.set_all_sel(&second_read_sel_values);
+
+                // Compute value arrays
+                let mut first_read_value_values = [0u32; RC];
+                let mut first_write_value_values = [0u32; RC];
+                let mut value_value_values = [0u32; RC];
+                let mut second_write_value_values = [0u32; RC];
+                let mut second_read_value_values = [0u32; RC];
                 let mut _value_first_read = value_first_read;
                 let mut _value_first_write = value_first_write;
                 let mut _value = value;
                 let mut _value_second_write = value_second_write;
                 let mut _value_second_read = value_second_read;
                 for i in 0..RC {
-                    first_read_row.set_value(i, (_value_first_read & RC_MASK) as u32);
-                    first_write_row.set_value(i, (_value_first_write & RC_MASK) as u32);
-                    value_row.set_value(i, (_value & RC_MASK) as u32);
-                    second_write_row.set_value(i, (_value_second_write & RC_MASK) as u32);
-                    second_read_row.set_value(i, (_value_second_read & RC_MASK) as u32);
+                    first_read_value_values[i] = (_value_first_read & RC_MASK) as u32;
+                    first_write_value_values[i] = (_value_first_write & RC_MASK) as u32;
+                    value_value_values[i] = (_value & RC_MASK) as u32;
+                    second_write_value_values[i] = (_value_second_write & RC_MASK) as u32;
+                    second_read_value_values[i] = (_value_second_read & RC_MASK) as u32;
                     _value_first_read >>= RC_BITS;
                     _value_first_write >>= RC_BITS;
                     _value >>= RC_BITS;
                     _value_second_write >>= RC_BITS;
                     _value_second_read >>= RC_BITS;
                 }
+                first_read_row.set_all_value(&first_read_value_values);
+                first_write_row.set_all_value(&first_write_value_values);
+                value_row.set_all_value(&value_value_values);
+                second_write_row.set_all_value(&second_write_value_values);
+                second_read_row.set_all_value(&second_read_value_values);
 
                 #[rustfmt::skip]
                         debug_info!(
@@ -746,14 +814,21 @@ impl<F: PrimeField64> MemAlignSM<F> {
         ((value >> (chunk * CHUNK_BITS)) & CHUNK_BITS_MASK) as u8
     }
 
-    pub fn compute_witness(
+    /// `MemAlign` and `MemAlignLarge` commit the same columns and differ only in height, so the row
+    /// type `R` serves both and the air is picked by the `NUM_ROWS` / `AIR_ID` consts of the trace
+    /// this builds.
+    pub fn compute_witness<
+        R: MemAlignTraceRowOps<F>,
+        const NUM_ROWS: usize,
+        const AIR_ID: usize,
+    >(
         &self,
         mem_ops: &[Vec<MemAlignInput>],
         used_rows: usize,
         trace_buffer: Vec<F>,
     ) -> ProofmanResult<AirInstance<F>> {
-        let mut trace = MemAlignTraceType::new_from_vec(trace_buffer)?;
-        let mut reg_range_check = vec![0u32; 1 << CHUNK_BITS];
+        let mut trace =
+            GenericTrace::<R, NUM_ROWS, ZISK_AIRGROUP_ID, AIR_ID>::new_from_vec(trace_buffer)?;
 
         let num_rows = trace.num_rows();
 
@@ -794,31 +869,12 @@ impl<F: PrimeField64> MemAlignSM<F> {
             self.prove_mem_align_op(input, trace);
         });
 
-        // Iterate over all traces to set range checks
-        trace.buffer[0..total_index].iter_mut().for_each(|row| {
-            for j in 0..CHUNK_NUM {
-                reg_range_check[row.get_reg(j) as usize] += 1;
-            }
-        });
-
-        let padding_size = num_rows - total_index;
-        let mut padding_row = MemAlignTraceRowType::default();
+        let mut padding_row: R = Default::default();
         padding_row.set_reset(true);
 
         // Store the padding rows
         trace.buffer[total_index..num_rows].par_iter_mut().for_each(|slot| *slot = padding_row);
 
-        // Compute the program multiplicity
-        self.std.inc_virtual_row(self.table_id, MemAlignRomSM::PADDING_ROW, padding_size as u64);
-
-        reg_range_check[0] += CHUNK_NUM as u32 * padding_size as u32;
-        self.update_std_range_check(reg_range_check);
-
         Ok(AirInstance::new_from_trace(FromTrace::new(&mut trace)))
-    }
-
-    fn update_std_range_check(&self, reg_range_check: Vec<u32>) {
-        // Perform the range checks
-        self.std.range_checks(self.range_id, reg_range_check);
     }
 }

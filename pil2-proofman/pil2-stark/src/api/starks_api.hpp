@@ -6,41 +6,94 @@
 extern "C" {
 #endif
 
+    // Field order must match the Rust PackedInfoFFI (repr(C)) that is cast to this.
     struct PackedInfo {
         bool is_packed;
         uint64_t num_packed_words;
         uint64_t *unpack_info;
+        // Indexed variant descriptor (nullptr / 0 when the air is not indexed).
+        uint8_t *col_source;      // per column: 0 = row stream, 1 = table stream (len nCols)
+        uint8_t *col_lane;        // per column: lane whose index selects its entry (len nCols).
+                                  // Also null for a SINGLE-lane indexed air: every path reads a
+                                  // null map as lane 0, and only lanes > 1 requires it.
+        uint64_t index_bits;      // width of ONE instruction index in the row's header
+        uint64_t words_per_entry; // u64 words per instruction-table entry
+        uint64_t lanes;           // instruction indices per row; 0/1 is the single-lane shape
 
+        // Only unpack_info is owned here; col_source/col_lane are borrowed from Rust, do not free them.
         ~PackedInfo() {
             delete[] unpack_info;
             unpack_info = nullptr;
         }
     };
     
+    // Hash family selector
+    // ========================================================================================
+    void set_hash_family(uint8_t fam);
+
     // SetupCtx
     // ========================================================================================
     uint64_t n_hints_by_name(void *p_expression_bin, char *hintName);
     void get_hint_ids_by_name(void *p_expression_bin, uint64_t *hintIds, char *hintName);
 
+    // ---- Prover-side multiplicities ------------------------------------------------------
+    // All of these are registry state: call them only from the host binary, never from a witness
+    // library, which links its own copy of this library (see ProofCtx::prover_owned_tables).
+    // Geometry only, registered once per run.
+    void register_mul_vt(uint64_t airgroupId, uint64_t airId, uint64_t numRows, uint64_t numCols,
+                         const uint64_t *tableIds, const uint64_t *accBases, uint64_t nTables);
+    // Every virtual range-check table, as (id, bias): the row a lookup addresses is value + bias.
+    void mul_register_range_tables(const uint64_t *tableIds, const int64_t *biases, uint64_t n);
+    void mul_register_table_map(uint64_t tableId, const uint64_t *kv, uint64_t n, uint64_t slots,
+                                uint64_t nKey);
+    // Table ids whose multiplicities the prover now owns, so Std stops counting them.
+    uint64_t mul_migrated_tables(uint64_t *out, uint64_t cap);
+    // Fold the prover-owned spans into `hostAcc`, which is scoped to this call and not retained.
+    void mul_fold(uint64_t airKey, uint64_t *hostAcc);
+    uint64_t mul_air_has_owned(uint64_t airKey);
+    void mul_set_device_export(uint64_t enabled);
+    uint64_t mul_air_device_owned(uint64_t airKey);
+    // MUL_SYNC_* status (multiplicity.hpp): OK, or why the counts cannot be trusted.
+    uint64_t mul_sync_commits(uint64_t expectedCommits);
+    uint64_t mul_commit_count();
+    // Allocate the accumulators (idempotent, no-op until a decoder is registered).
+    void mul_alloc(void *d_buffers_);
+    // Count one instance's lookups from a filled witness, for the paths that never commit.
+    void mul_scatter(void *pSetupCtx, void *params, uint64_t airgroupId, uint64_t airId, uint64_t auxReady);
+    uint64_t mul_air_has_jobs(void *pSetupCtx, uint64_t airgroupId, uint64_t airId);
+    uint64_t late_region_bytes(uint64_t withPeers);
+    void stream_commit_scratch_elems(void *pSetupCtx, uint64_t airgroupId, uint64_t airId,
+                                     uint64_t *side, uint64_t *cons, uint64_t *custom);
+    uint64_t mul_air_reads_aux(void *pSetupCtx, uint64_t airgroupId, uint64_t airId);
+    uint64_t mul_scatter_wants_colmajor(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t wordsPerRow,
+                                        uint64_t indexed);
+    uint64_t mul_air_plan_error(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, char *out, uint64_t cap);
+    void mul_clear_registry();
+    // A table air's proves-side lookups, evaluated from its fixed columns (stateless).
+    uint64_t mul_proves_hints(void *pSetupCtx, int64_t *cols, uint64_t *lens, uint64_t cap);
+    uint64_t mul_eval_proves_hint(void *pSetupCtx, uint64_t k, const uint64_t *constPols, uint64_t constLen,
+                                  uint64_t r0, uint64_t r1, uint64_t *bus, uint64_t *tuple, uint64_t len);
+    // Reset every mirror; called once per proof from the std's own reset point.
+    void mul_reset();
+
     // Stark Info
     // ========================================================================================
-    void *stark_info_new(char* filename, bool recursive_final, bool recursive, bool verify_constraints, bool verify, bool gpu, bool preallocate);
+    void *stark_info_new(char* filename, bool recursive_final, bool recursive, bool verify_constraints, bool verify, bool gpu);
     uint64_t get_proof_size(void *pStarkInfo);
+    uint64_t get_n_publics(void *pStarkInfo);
     uint64_t get_proof_pinned_size(void *pStarkInfo);
     uint32_t register_host_memory(void *ptr, uint64_t size);
     void unregister_host_memory(void *ptr);
-    void *malloc_host_memory(uint64_t size);
-    void free_host_memory(void *ptr);
+    void wait_trace_h2d_done(void *d_buffers, uint64_t stream_id);
     void set_memory_expressions(void *pStarkInfo, uint64_t nTmp1, uint64_t nTmp3);
     uint64_t get_map_total_n(void *pStarkInfo);
     uint64_t get_map_total_n_custom_commits_fixed(void *pStarkInfo);
-    uint64_t get_map_total_n_contributions(void *pStarkInfo);
     uint64_t get_tree_size(void *pStarkInfo);
     void stark_info_free(void *pStarkInfo);
 
     // Const Pols
     // ========================================================================================
-    void init_gpu_setup(uint64_t maxBitsExt);
+    void init_gpu_setup(uint64_t arity);
     void pack_const_pols(void *pStarkinfo, void *pConstPols, char *constFile);
     void tile_const_pols(void *pStarkInfo, void *pConstPols, char *constFile, void *pConstTree, char *constTreeFile, void *unified_buffer_gpu);
     void prepare_blocks(uint64_t* pol, uint64_t N, uint64_t nCols, void *unified_buffer_gpu);
@@ -63,7 +116,6 @@ extern "C" {
     uint64_t get_max_args(void *pExpressionsBin);
     uint64_t get_max_ops(void *pExpressionsBin);
     uint64_t get_operations_quotient(void *pExpressionsBin, void *pStarkInfo);
-    void validate_expressions_bin(void *pExpressionsBin, void *pStarkInfo);
     void expressions_bin_free(void *pExpressionsBin);
 
     // Hints
@@ -84,17 +136,17 @@ extern "C" {
     void calculate_witness_expr(void *pSetupCtx, void * stepsParams);
     
     uint64_t custom_commit_size(void *pSetup, uint64_t commitId);
-    void load_custom_commit(void *pSetup, uint64_t commitId, void *buffer, char *customCommitFile);
+    void load_custom_commit(void *pSetup, uint64_t commitId, void *buffer, char *customCommitFile, uint64_t wordsPerRow);
     void write_custom_commit(void *root,  uint64_t arity, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, void *d_buffers_, void *buffer, char *bufferFile);
 
-    uint64_t commit_witness(void *pSetupCtx, void *params, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, void *root, void *d_buffers);
+    uint64_t commit_witness(void *pSetupCtx, void *params, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, void *root, void *d_buffers, char *customCommitsFixedPath);
 
     // Constraints
     // =================================================================================
     uint64_t get_n_constraints(void *pSetupCtx);
     void get_constraints_lines_sizes(void *pSetupCtx, uint64_t *constraintsLinesSizes);
     void get_constraints_lines(void *pSetupCtx, uint8_t **constraintsLines);
-    uint64_t initialize_instance(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* params_, void *d_buffers_);
+    uint64_t initialize_instance(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* params_, void *d_buffers_, char *customCommitsFixedPath);
     void calculate_trace_instance(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, void *stepsParams, void *d_buffers, uint64_t streamId);
     void verify_constraints(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, void *stepsParams, void *constraintsInfo, void *d_buffers, uint64_t streamId);
 
@@ -111,26 +163,41 @@ extern "C" {
 
     // Gen proof && Recursive Proof
     // =================================================================================
-    uint64_t gen_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *params, void *globalChallenge, uint64_t* proofBuffer, char *proofFile, void *d_buffers, bool skipRecalculation, uint64_t streamId, char *constPolsPath,  char *constTreePath);
-    uint64_t gen_recursive_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* witness, void* aux_trace, void *pConstPols, void *pConstTree, void* pPublicInputs, uint64_t* proofBuffer, char *proof_file, bool vadcop, void *d_buffers, char *constPolsPath, char *constTreePath, char *proofType, bool force_recursive_stream);
-    void read_exec_file(uint64_t *exec_data, char *exec_file, uint64_t nCommitedPols);
-    void get_committed_pols(void *circomWitness, uint64_t* execData, void *witness, void* pPublics, uint64_t sizeWitness, uint64_t N, uint64_t nPublics, uint64_t nCols);
-    void get_committed_pols_validated(void *circomWitness, uint64_t* execData, void *witness, void* pPublics, uint64_t sizeWitness, uint64_t N, uint64_t nPublics, uint64_t nCols);
+    uint64_t gen_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void *params, void *globalChallenge, uint64_t* proofBuffer, char *proofFile, void *d_buffers, uint64_t streamId, char *constPolsPath,  char *constTreePath, char *customCommitsFixedPath, bool selfContained);
+    uint64_t gen_recursive_proof(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* witness, void* aux_trace, void *pConstPols, void *pConstTree, void* pPublicInputs, uint64_t* proofBuffer, char *proof_file, bool vadcop, void *d_buffers, char *constPolsPath, char *constTreePath, char *proofType, bool force_recursive_stream, char *recurser_id, uint64_t streamId_);
+    // Fills the interior cells the witness scatter (getWitnessTrace) leaves unmapped, from the boundary cells it
+    // placed. No-op on an exec file written without a band section. Returns bands expanded.
+    uint64_t expand_gate_bands(void *witness, uint64_t* execData, uint64_t nCols, uint64_t execWords, uint64_t N);
     void *gen_recursive_proof_final(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t instanceId, void* witness, void* aux_trace, void *pConstPols, void *pConstTree, void* pPublicInputs, char* proof_file, uint64_t proverBufferSize, void* d_buffers);
+    void free_recursivef_proof(void *zkin);
     void get_stream_proofs(void *d_buffers_);
     void get_stream_proofs_non_blocking(void *d_buffers_);
     void get_stream_id_proof(void *d_buffers_, uint64_t streamId);
-    uint32_t claim_ready_instance(void *d_buffers_, uint64_t streamId, uint64_t instanceId, uint64_t airgroupId, uint64_t airId);
-    uint32_t direct_registered_h2d_done(void *d_buffers_, uint64_t streamId);
+    // Central arbiter: reserve the best free stream for (airgroupId,airId,proofType)
+    // without blocking. Returns UINT32_MAX if none is free right now.
+    uint32_t reserve_best_stream_nonblock(void *d_buffers_, uint64_t airgroupId, uint64_t airId, char *proofType, bool recursive, bool force_recursive);
+    // Central arbiter warm fast path: reserve streamId iff it is free right now.
+    // Returns 1 on success, 0 otherwise.
+    uint32_t reserve_stream_if_free(void *d_buffers_, uint32_t streamId, uint64_t airgroupId, uint64_t airId, char *proofType, bool force_recursive);
+    // Give back a reservation made by either call above; any work already queued on it drains first.
+    void release_stream_reservation(void *d_buffers_, uint32_t streamId);
     void add_publics_aggregation(void *pProof, uint64_t offset, void *pPublics, uint64_t nPublicsAggregation);
+    void calculate_const_tree_fixed(void *pSetupCtx_, uint64_t airgroupId, uint64_t airId, char *proofType, void *d_buffers_);
     // Final proof
     // =================================================================================
 
     uint64_t get_snark_protocol_id(void* snark_prover);
-    void *init_final_snark_prover(char* zkeyFile);
+    void *init_final_snark_prover(char* zkeyFile, void* d_buffers_recursivef);
     void free_final_snark_prover(void *snark_prover);
-    void gen_final_snark_proof(void *snark_prover, void *circomWitnessFinal, uint8_t* proof, uint8_t* publicsSnark);
-    void pre_allocate_final_snark_prover(void *snark_prover, void* unified_buffer_gpu, uint64_t unified_buffer_size);
+    void gen_final_snark_proof(void *snark_prover, void *circomWitnessFinal, uint8_t* proof, uint8_t* publicsSnark, void* d_buffers_recursivef);
+    void pre_allocate_final_snark_prover(void *snark_prover, void* unified_buffer_gpu, void* d_buffers_recursivef);
+    // The recursivef's device prover buffer (its aux trace) for a final SNARK prover that proves in it
+    // after the recursivef, as pre_allocate_final_snark_prover does PLONK's without a unified buffer:
+    // grown to `bytes` if it holds fewer and is its own. Writes its bytes to *out_bytes and returns it.
+    // NULL if it is not its own (carved from proofman's unified buffer) or there are no device buffers
+    // (*out_bytes 0), and if it cannot grow, with *out_bytes the most it could hold (the device's free
+    // memory and its own).
+    void *reserve_recursivef_aux_trace(void *d_buffers_recursivef, uint64_t bytes, uint64_t *out_bytes);
     void free_json_string(char* json_str);
     void snark_proof_bytes_to_json(uint8_t* proof_bytes,uint64_t proof_size,uint8_t* public_bytes,uint64_t public_size,int protocol_id,char** proof_json_out,char** publics_json_out);
 
@@ -174,27 +241,75 @@ extern "C" {
     // GPU calls
     // =================================================================================
     void *gen_device_buffers(uint32_t node_rank, uint32_t node_size, const int32_t* numa_nodes, uint32_t arity, uint32_t max_n_bits_ext);
+    void use_packed_trace(void *d_buffers, bool packed);
+    void register_instruction_table(void *d_buffers, uint64_t airgroupId, uint64_t airId, uint64_t *table, uint64_t num_entries, uint64_t words_per_entry);
     void free_device_buffers(void *d_buffers);
     void *gen_device_buffers_recursivef(void *pSetupCtx_, uint64_t proverBufferSize, void *d_commit_buffers, char* verkey);
     void free_device_buffers_recursivef(void *d_buffers);
-    void load_device_const_pols(uint64_t airgroupId, uint64_t airId, uint64_t initial_offset, void *d_buffers, char *constFilename, uint64_t constSize, char *constTreeFilename, uint64_t constTreeSize, char* proofType, bool onlyFirstGPU);
-    uint32_t prewarm_const_tree_host_cache(char *constTreeFilename, uint64_t constTreeSize);
-    void load_device_setup(uint64_t airgroupId, uint64_t airId, char *proofType, void *pSetupCtx_, void *d_buffers_, void *verkeyRoot_,  void *packedInfo);
-    uint64_t gen_device_streams(void *d_buffers_, uint64_t n_streams, uint64_t n_recursive_streams, uint64_t maxSizeProverBuffer, uint64_t maxSizeProverBufferAggregation, uint64_t maxProofSize, uint64_t transcriptArity);
-    void alloc_device_large_buffers(void *d_buffers_, uint64_t auxTraceArea, uint64_t auxTraceRecursiveArea, uint64_t totalConstPols, uint64_t totalConstPolsAggregation);
-    void get_instances_ready(void *d_buffers, int64_t* instances_ready);
+    void upload_custom_commit_packed(uint64_t airgroupId, uint64_t airId, char *proofType, char *customFile, uint64_t wordsPerRow, void *pSetupCtx_, void *d_buffers_, bool onlyFirstGPU);
+    void reserve_custom_commit_slot(uint64_t airgroupId, uint64_t airId, char *proofType, uint64_t offset, uint64_t reservedWords, void *d_buffers_, bool onlyFirstGPU);
+    void load_device_const_pols(uint64_t airgroupId, uint64_t airId, uint64_t initial_offset, void *d_buffers, char *constFilename, uint64_t constSize, char* proofType, bool onlyFirstGPU, bool alreadyLoaded);
+    void load_device_setup(uint64_t airgroupId, uint64_t airId, char *proofType, void *pSetupCtx_, void *d_buffers_, void *verkeyRoot_,  void *packedInfo, uint64_t *execData, uint64_t execWords);
+    uint64_t gen_device_streams(void *d_buffers_, uint64_t n_streams, uint64_t n_recursive_streams, const uint64_t *auxTraceSizes, uint64_t maxSizeProverBufferAggregation, uint64_t maxProofSize, uint64_t merkleTreeArity);
+    void alloc_device_large_buffers(void *d_buffers_, uint64_t auxTraceRecursiveArea, uint64_t totalConstPols, uint64_t totalConstPolsAggregation, uint64_t unifiedBufferPadArea, uint64_t prefetchRegionArea, uint64_t phaseAAliasOffset, uint64_t lateRegionBytes, uint64_t nSlots, uint64_t slotBytes, uint64_t headroomBytes);
     void reset_device_streams(void *d_buffers_);
     uint64_t check_device_memory(uint32_t node_rank, uint32_t node_size);
     uint64_t get_num_gpus();
-    void *get_unified_buffer_gpu(void *d_buffers_, uint64_t *unified_buffer_size);
-    void alloc_fixed_pols_buffer_gpu(void *d_buffers_);
-    void free_fixed_pols_buffer_gpu(void *d_buffers_);
+    void *get_unified_buffer_gpu(void *d_buffers_);
+    uint64_t get_unified_buffer_gpu_size(void *d_buffers_);
+    void acquire_first_gpu_buffer(void *d_buffers_);
+    void release_first_gpu_buffer(void *d_buffers_);
+    uint32_t is_first_gpu_buffer_borrowed(void *d_buffers_);
+    uint32_t get_first_gpu_id(void *d_buffers_);
+    void *get_first_gpu_buffer(void *d_buffers_);
+    uint64_t get_layout_offset(void *d_buffers_, uint32_t which);
+    void restore_after_carve(void *d_buffers_);
+    void debug_clobber_unified(void *d_buffers_);
+    void invalidate_stream_contexts(void *d_buffers_);
+    uint64_t get_stream_commit_slots(void *d_buffers_);
+    uint64_t get_stream_commit_gpus(void *d_buffers_);
+    // One air's slot bytes (its commit area and its scratch behind it); 0 = not committable.
+    uint64_t stream_commit_slot_bytes(void *pSetupCtx, uint64_t airgroupId, uint64_t airId, uint64_t nBits,
+                                      uint64_t nBitsExt, uint64_t nCols, uint64_t wordsPerRow, uint64_t inputBytes,
+                                      uint64_t packed, uint64_t indexed);
+    void configure_stream_commit_slots(void *d_buffers_);
+    void configure_prefetch_zone(void *d_buffers_, uint64_t witnessBytes, uint32_t nUnits);
+    int64_t stage_witness(void *d_buffers_, uint64_t instanceId, void *trace, uint64_t total_size, bool hostSync);
+    void release_staged_witness(void *d_buffers_, uint64_t instanceId);
+    void set_pipeline_mode(void *d_buffers_, bool enable);
+    void configure_phase_b(void *d_buffers_);
+    int64_t set_phase_b(void *d_buffers_, uint32_t state);
+    void harvest_pipeline(void *d_buffers_);
+    void dump_pipeline_state(void *d_buffers_);
+    uint64_t get_mops_floor_bytes();
+    uint64_t get_post_alloc_headroom_bytes();
+    uint64_t configure_const_slot_cache(void *d_buffers_, uint64_t bigElems, uint64_t normalElems, uint32_t nLru);
+    uint64_t pin_const_slot(void *d_buffers_, int64_t key, uint64_t elems);
+    void set_basic_fixed_on_host(void *d_buffers_, bool onHost);
+    void load_host_const_pols(uint64_t airgroupId, uint64_t airId, char *proofType, int64_t key, char *constFilename, uint64_t constSize, void *d_buffers_);
+    int64_t commit_witness_streaming(void *d_buffers_, uint64_t slotIdx, uint64_t instanceId, uint64_t airgroupId, uint64_t airId, void *packed, uint64_t nBits, uint64_t nBitsExt, uint64_t nCols, uint64_t wordsPerRow, void *colWidths, void *root, void *params_);
+    void stream_commit_pause();
+    void *get_unified_buffer_gpu_for_recursivef(void *d_buffers_, void *d_buffers_recursivef_);
     void load_fixed_pols_recursivef(void *pSetupCtx_, void *pConstTree, void *d_buffers_);
     
     typedef void (*ProofDoneCallback)(uint64_t instanceId, const char* proofType);
     
     void register_proof_done_callback(ProofDoneCallback cb);
     void launch_callback(uint64_t instanceId, char *proofType);
+
+    // Backend selection
+    // =================================================================================
+    bool set_gpu_mode(bool use_gpu);
+
+    // Build const tree
+    // =================================================================================
+    int build_const_tree_c(const char *const_file, const char *stark_info_file, const char *const_tree_file, const char *ver_key_file, uint64_t *out_root);
+
+    // SNARK setup (fflonk / plonk)
+    // =================================================================================
+    int fflonk_setup_c(const char *r1cs_file, const char *ptau_file, const char *zkey_file);
+    int plonk_setup_c(const char *r1cs_file, const char *ptau_file, const char *zkey_file);
+    int plonk_circuit_stats_c(const char *r1cs_file, uint64_t *n_constraints, uint64_t *n_additions);
 
     // MPI calls
     // =================================================================================

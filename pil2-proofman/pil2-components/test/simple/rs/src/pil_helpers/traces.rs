@@ -10,15 +10,13 @@ use proofman_common::GenericTrace;
 use proofman_common::PackedInfoConst;
 pub use proofman_macros::trace_row;
 pub use proofman_macros::values;
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use std::fmt;
 
 #[allow(dead_code)]
 type FieldExtension<F> = [F; 3];
 
-pub const PILOUT_HASH: &str = "5a40690fe07cb56fa782ae5e33ad2ab84f2d2be4d3db96b03cb0e4f9891c6bb2";
-
-pub const MERKLE_TREE_ARITY: u64 = 4;
+pub const PILOUT_HASH: &str = "8527e6f774a634dde2dd63537463522088ca011a683b1d3c3a5030fe675d5c8b";
 
 //AIRGROUP CONSTANTS
 
@@ -43,10 +41,10 @@ trace_row!(SimpleLeftFixedRow<F> {
 pub type SimpleLeftFixed<F> = GenericTrace<SimpleLeftFixedRow<F>, 8, 0, 0>;
 
 trace_row!(SimpleLeftTraceRow<F> {
- a:F, b:F, c:F, d:F, e:F, f:F, g:F, h:F, k:[F; 7],
+ a:F, b:F, c:F, d:F, e:F, f:F, g:F, h:F, mul:F, k:[F; 7],
 });
-pub type SimpleLeftTrace<F> = GenericTrace<SimpleLeftTraceRow<F>, 8, 0, 0>;
 
+pub type SimpleLeftTrace<F> = GenericTrace<SimpleLeftTraceRow<F>, 8, 0, 0>;
 
 trace_row!(SimpleRightFixedRow<F> {
  __L1__: F,
@@ -56,8 +54,8 @@ pub type SimpleRightFixed<F> = GenericTrace<SimpleRightFixedRow<F>, 8, 0, 1>;
 trace_row!(SimpleRightTraceRow<F> {
  a:F, b:F, c:F, d:F, mul:F,
 });
-pub type SimpleRightTrace<F> = GenericTrace<SimpleRightTraceRow<F>, 8, 0, 1>;
 
+pub type SimpleRightTrace<F> = GenericTrace<SimpleRightTraceRow<F>, 8, 0, 1>;
 
 trace_row!(U8AirFixedRow<F> {
  RANGE: [F; 2], __L1__: F,
@@ -67,8 +65,8 @@ pub type U8AirFixed<F> = GenericTrace<U8AirFixedRow<F>, 128, 0, 2>;
 trace_row!(U8AirTraceRow<F> {
  mul:[F; 2],
 });
-pub type U8AirTrace<F> = GenericTrace<U8AirTraceRow<F>, 128, 0, 2>;
 
+pub type U8AirTrace<F> = GenericTrace<U8AirTraceRow<F>, 128, 0, 2>;
 
 trace_row!(U16AirFixedRow<F> {
  RANGE: [F; 4], __L1__: F,
@@ -78,8 +76,8 @@ pub type U16AirFixed<F> = GenericTrace<U16AirFixedRow<F>, 16384, 0, 3>;
 trace_row!(U16AirTraceRow<F> {
  mul:[F; 4],
 });
-pub type U16AirTrace<F> = GenericTrace<U16AirTraceRow<F>, 16384, 0, 3>;
 
+pub type U16AirTrace<F> = GenericTrace<U16AirTraceRow<F>, 16384, 0, 3>;
 
 trace_row!(SpecifiedRangesFixedRow<F> {
  OPID: [F; 11], VALS: [F; 11], __L1__: F,
@@ -89,8 +87,8 @@ pub type SpecifiedRangesFixed<F> = GenericTrace<SpecifiedRangesFixedRow<F>, 64, 
 trace_row!(SpecifiedRangesTraceRow<F> {
  mul:[F; 11],
 });
-pub type SpecifiedRangesTrace<F> = GenericTrace<SpecifiedRangesTraceRow<F>, 64, 0, 4>;
 
+pub type SpecifiedRangesTrace<F> = GenericTrace<SpecifiedRangesTraceRow<F>, 64, 0, 4>;
 
 values!(SimpleLeftAirGroupValues<F> {
  gsum_result: FieldExtension<F>,
@@ -113,4 +111,14 @@ values!(SpecifiedRangesAirGroupValues<F> {
 });
 
 pub const PACKED_INFO: &[(usize, usize, PackedInfoConst)] = &[
+];
+
+/// Display name for every `(airgroup_id, air_id)` pair, derived directly from the
+/// PILOUT. Lets code resolve an AIR name without a loaded setup/`GlobalInfo`.
+pub const AIR_NAMES: &[(usize, usize, &str)] = &[
+    (0, 0, "SimpleLeft"),
+    (0, 1, "SimpleRight"),
+    (0, 2, "U8Air"),
+    (0, 3, "U16Air"),
+    (0, 4, "SpecifiedRanges"),
 ];

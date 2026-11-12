@@ -470,13 +470,19 @@ basic_type
         { $$ = { type: 'string', const: true } }
 
     | PROOF_VALUE
-        { $$ = { type: 'proof' } }
+        { $$ = { type: 'proofval' } }
 
     | AIR_GROUP
         { $$ = { type: 'airgroup' } }
 
     | AIR
         { $$ = { type: 'air' } }
+
+    | AIR_VALUE
+        { $$ = { type: 'airval' } }
+
+    | AIR_GROUP_VALUE
+        { $$ = { type: 'airgroupval' } }
 
     | PUBLIC
         { $$ = { type: 'public' } }
@@ -1393,7 +1399,7 @@ expression
         { $$ = $1.insert('in', ExpressionFactory.fromObject($3, getSrcRef(this, @3))) }
 
     | expression IS return_type %prec IS
-        { $$ = $1.insert('is', ExpressionFactory.fromObject({type: 'istype', vtype: $3.type, dim: $3.dim}, getSrcRef(this, @3))); }
+        { $$ = $1.insert('is', ExpressionFactory.fromObject({type: 'string', value: $3.type /* dim: $3.dim */})); }
 
     | expression AND expression %prec AND
         { $$ = $1.insert('and', ExpressionFactory.fromObject($3, getSrcRef(this, @3))) }

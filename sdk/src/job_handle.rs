@@ -1,0 +1,590 @@
+use std::future::Future;
+use std::future::IntoFuture;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use crate::{Result, SdkError};
+use zisk_coordinator_api::dto::{
+    DomainExecutionStats, DomainJobEvent, DomainJobFailure, DomainJobKindResponse, DomainJobPhase,
+    TerminalStatus,
+};
+use zisk_coordinator_client::{InputSender, Job, WatchHandle};
+
+use crate::input_stream::ZiskStream;
+use crate::prove::JobEvent;
+use crate::setup::SetupResult;
+
+const CANCELLED: &str = "Cancelled";
+
+const PROGRESS_CONTRIBUTIONS: u8 = 25;
+const PROGRESS_PROVE: u8 = 75;
+const PROGRESS_RECURSE: u8 = 90;
+
+pub(crate) type Subscriber = (JobEvent, Arc<dyn Fn(JobEvent) + Send + Sync>);
+pub(crate) type PreProcessHook = Box<dyn FnOnce(&TerminalStatus) -> Result<()> + Send>;
+
+/// Event bus: buffers events while no subscriber is registered, then drains
+/// on the first `.on()` call.
+pub(crate) struct EventBus {
+    subscribers: Vec<Subscriber>,
+    /// Events received before any subscriber was registered.
+    pending: Vec<JobEvent>,
+}
+
+impl EventBus {
+    fn new() -> Self {
+        Self { subscribers: Vec::new(), pending: Vec::new() }
+    }
+
+    fn from_subscribers(subs: Vec<Subscriber>) -> Self {
+        Self { subscribers: subs, pending: Vec::new() }
+    }
+}
+
+pub(crate) type SubscriberList = Arc<Mutex<EventBus>>;
+
+pub(crate) fn new_subscriber_list() -> SubscriberList {
+    Arc::new(Mutex::new(EventBus::new()))
+}
+
+pub(crate) fn subscriber_list_from(subs: Vec<Subscriber>) -> SubscriberList {
+    Arc::new(Mutex::new(EventBus::from_subscribers(subs)))
+}
+
+pub(crate) fn fire_event(subscribers: &SubscriberList, event: JobEvent) {
+    let Ok(mut bus) = subscribers.lock() else { return };
+    if bus.subscribers.is_empty() {
+        bus.pending.push(event);
+        return;
+    }
+    let matching: Vec<Arc<dyn Fn(JobEvent) + Send + Sync>> = bus
+        .subscribers
+        .iter()
+        .filter(|(filter, _)| *filter == JobEvent::All || *filter == event)
+        .map(|(_, cb)| Arc::clone(cb))
+        .collect();
+    drop(bus);
+    for cb in matching {
+        cb(event.clone());
+    }
+}
+
+pub(crate) fn fire_result_event<T>(subs: &SubscriberList, result: &Result<T>) {
+    match result {
+        Ok(_) => fire_event(subs, JobEvent::Completed),
+        Err(e) => fire_event(subs, JobEvent::Failed(e.to_string())),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct JobId(pub(crate) String);
+
+impl From<String> for JobId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<JobId> for String {
+    fn from(id: JobId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for JobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Implemented by every type that can be produced from a remote job result.
+pub(crate) trait FromWaitResult: Sized + Send + 'static {
+    fn from_terminal(status: TerminalStatus, job_id: JobId) -> Result<Self>;
+}
+
+/// The pushes of a remote job's data over the inline limit, which run in the background once the
+/// job exists, so that the caller gets the job's handle at once: the first error a push meets,
+/// which also cancelled the job, and the tasks, to stop once the job is over.
+#[derive(Default)]
+pub(crate) struct InputPushes {
+    failure: Arc<OnceLock<String>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl InputPushes {
+    /// Pushes `data` through `sender` in the background. A push that fails cancels `job`, which
+    /// would otherwise wait for the rest of its data until its phase times out, and its error,
+    /// naming the data `what`, becomes the job's.
+    pub(crate) fn spawn(&mut self, sender: InputSender, data: Vec<u8>, job: Job, what: &str) {
+        let failure = Arc::clone(&self.failure);
+        let what = what.to_string();
+        self.tasks.push(tokio::runtime::Handle::current().spawn(async move {
+            let pushed = async {
+                sender.send(data).await?;
+                sender.close().await
+            }
+            .await;
+            if let Err(e) = pushed {
+                // Kept before the cancel, so that the job's end finds it.
+                let _ = failure.set(format!("pushing the job's {what} failed: {e}"));
+                let _ = job.cancel_async().await;
+            }
+        }));
+    }
+
+    /// Whether a push is still sending its data.
+    fn running(&self) -> bool {
+        self.tasks.iter().any(|task| !task.is_finished())
+    }
+
+    /// Stops the pushes still going, the job being over, and returns the error one met.
+    fn finish(self) -> Option<String> {
+        for task in &self.tasks {
+            task.abort();
+        }
+        self.failure.get().cloned()
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum JobHandleInner<T> {
+    Embedded(tokio::task::JoinHandle<Result<T>>),
+    Remote { remote_job: Job, _watch_handle: WatchHandle },
+}
+
+/// Handle to an in-flight job (embedded or remote).
+///
+/// Obtained by calling `.run()` on a request builder.
+/// Await the handle to get the result: `let proof = handle.await?`.
+#[must_use = "JobHandle does nothing unless awaited"]
+pub struct JobHandle<T> {
+    pub(crate) inner: Option<JobHandleInner<T>>,
+    pub(crate) subscribers: SubscriberList,
+    pub(crate) timeout: Option<Duration>,
+    pre_process: Option<PreProcessHook>,
+    /// Stream to finish automatically when the handle is awaited.
+    /// Stdin stream to finish automatically when the handle is awaited.
+    stream: Option<ZiskStream>,
+    /// Hints stream to finish automatically when the handle is awaited.
+    hints_stream: Option<ZiskStream>,
+    /// Data over the inline limit, pushed in the background.
+    input_pushes: Option<InputPushes>,
+}
+
+impl<T> JobHandle<T> {
+    pub(crate) fn new_embedded(
+        handle: tokio::task::JoinHandle<Result<T>>,
+        subscribers: SubscriberList,
+        timeout: Option<Duration>,
+    ) -> Self {
+        Self {
+            inner: Some(JobHandleInner::Embedded(handle)),
+            subscribers,
+            timeout,
+            pre_process: None,
+            stream: None,
+            hints_stream: None,
+            input_pushes: None,
+        }
+    }
+
+    pub(crate) fn new_remote(
+        remote_job: Job,
+        subscribers: SubscriberList,
+        timeout: Option<Duration>,
+        stream: Option<ZiskStream>,
+        hints_stream: Option<ZiskStream>,
+    ) -> Self {
+        let subs_watch = Arc::clone(&subscribers);
+        let watch_handle =
+            remote_job.spawn_watch(move |event| map_domain_event(&subs_watch, &event));
+        Self {
+            inner: Some(JobHandleInner::Remote { remote_job, _watch_handle: watch_handle }),
+            subscribers,
+            timeout,
+            pre_process: None,
+            stream,
+            hints_stream,
+            input_pushes: None,
+        }
+    }
+
+    /// Hands the handle the job's background pushes: awaiting it stops them once the job is over,
+    /// and a push's error is the job's.
+    pub(crate) fn set_input_pushes(&mut self, pushes: InputPushes) {
+        self.input_pushes = Some(pushes);
+    }
+
+    pub(crate) fn set_pre_process(
+        &mut self,
+        f: impl FnOnce(&TerminalStatus) -> Result<()> + Send + 'static,
+    ) {
+        self.pre_process = Some(Box::new(f));
+    }
+
+    /// Register a post-submission event callback.
+    ///
+    /// Use [`JobEvent::All`] to subscribe to all events.
+    ///
+    /// If events arrived before this call (e.g. between job submission and
+    /// callback registration), they are replayed immediately and the buffer
+    /// is drained.
+    pub fn on(
+        &mut self,
+        event: JobEvent,
+        cb: impl Fn(JobEvent) + Send + Sync + 'static,
+    ) -> &mut Self {
+        let cb: Arc<dyn Fn(JobEvent) + Send + Sync> = Arc::new(cb);
+        if let Ok(mut bus) = self.subscribers.lock() {
+            let pending = std::mem::take(&mut bus.pending);
+            bus.subscribers.push((event.clone(), Arc::clone(&cb)));
+            drop(bus);
+            for e in pending {
+                if event == JobEvent::All || event == e {
+                    cb(e);
+                }
+            }
+        }
+        self
+    }
+
+    /// Get the ID of the job, if available (only for remote jobs that have been submitted).
+    pub fn job_id(&self) -> Option<JobId> {
+        match &self.inner {
+            Some(JobHandleInner::Embedded(_)) => None,
+            Some(JobHandleInner::Remote { remote_job, .. }) => {
+                Some(JobId(remote_job.job_id().to_string()))
+            }
+            None => None,
+        }
+    }
+}
+
+/// Cancels a remote job while its [`JobHandle`] is awaited, which consumes the
+/// handle. Obtained from [`JobHandle::canceller`].
+#[derive(Clone)]
+pub struct JobCanceller(Job);
+
+impl JobCanceller {
+    /// Cancel the job. Returns `true` if the coordinator cancelled it, `false` if
+    /// it had already reached a terminal state.
+    pub async fn cancel(&self) -> Result<bool> {
+        self.0.cancel_async().await.map_err(SdkError::backend)
+    }
+}
+
+impl<T> JobHandle<T> {
+    /// A [`JobCanceller`] for this job, to cancel it while the handle is awaited.
+    /// `None` for an embedded job, which cannot be cancelled yet.
+    pub fn canceller(&self) -> Option<JobCanceller> {
+        match &self.inner {
+            Some(JobHandleInner::Remote { remote_job, .. }) => {
+                Some(JobCanceller(remote_job.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Cancel the in-flight job.
+    ///
+    /// - Embedded: aborts the blocking task (the thread runs to completion but the
+    ///   result is discarded; awaiting the handle will return an error).
+    /// - Remote: calls the coordinator `CancelJob` RPC and waits until the job reaches
+    ///   a terminal state. Returns `Ok(true)` if cancelled, `Ok(false)` if it had
+    ///   already reached a terminal state before the request arrived.
+    pub async fn cancel(&mut self) -> Result<bool> {
+        match &self.inner {
+            Some(JobHandleInner::Embedded(_handle)) => {
+                unimplemented!("cancelling embedded jobs is not supported yet")
+            }
+            Some(JobHandleInner::Remote { remote_job, .. }) => {
+                remote_job.cancel_async().await.map_err(SdkError::backend)
+            }
+            None => Err(SdkError::InvalidConfig(
+                "cannot cancel: JobHandle already consumed".to_string(),
+            )),
+        }
+    }
+}
+
+#[allow(private_bounds)]
+impl<T: FromWaitResult> JobHandle<T> {
+    async fn await_embedded(
+        handle: tokio::task::JoinHandle<Result<T>>,
+        timeout: Option<Duration>,
+    ) -> Result<T> {
+        let join = |h: tokio::task::JoinHandle<Result<T>>| async { h.await? };
+        match timeout {
+            Some(dur) => {
+                tokio::time::timeout(dur, join(handle)).await.map_err(|_| SdkError::Timeout(dur))?
+            }
+            None => join(handle).await,
+        }
+    }
+
+    async fn await_remote(
+        remote_job: Job,
+        timeout: Option<Duration>,
+        subscribers: SubscriberList,
+        pre_process: Option<PreProcessHook>,
+        input_pushes: Option<InputPushes>,
+    ) -> Result<T> {
+        let job_id = JobId(remote_job.job_id().to_string());
+        let terminal = remote_job.wait_async(timeout).await;
+        // A wait that ends without the job's end (its timeout, a failed wait) leaves the job running
+        // in the coordinator, which does not time it out: once its push stops, it would run on part
+        // of its input. So it is cancelled first, as a failed push cancels it.
+        if terminal.is_err() && input_pushes.as_ref().is_some_and(InputPushes::running) {
+            let _ = remote_job.cancel_async().await;
+        }
+        let push_failure = input_pushes.and_then(InputPushes::finish);
+        let terminal = terminal.map_err(SdkError::backend)?;
+
+        // Fire terminal event from the authoritative WaitJobResult response.
+        match &terminal {
+            TerminalStatus::Completed(_) => fire_event(&subscribers, JobEvent::Completed),
+            TerminalStatus::Failed(f) => {
+                fire_event(&subscribers, JobEvent::Failed(format_failure(f)));
+            }
+            TerminalStatus::Cancelled => {
+                fire_event(&subscribers, JobEvent::Failed(CANCELLED.to_string()));
+            }
+        }
+
+        // A push that failed cancelled the job: its error, not the cancellation, is the job's.
+        if let Some(failure) =
+            push_failure.filter(|_| !matches!(terminal, TerminalStatus::Completed(_)))
+        {
+            return Err(SdkError::backend(failure));
+        }
+
+        if let Some(hook) = pre_process {
+            hook(&terminal)?;
+        }
+
+        T::from_terminal(terminal, job_id)
+    }
+}
+
+impl<T: Send + 'static + FromWaitResult> IntoFuture for JobHandle<T> {
+    type Output = Result<T>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
+
+    fn into_future(mut self) -> Self::IntoFuture {
+        let inner = self.inner.take().expect("JobHandle already consumed");
+        let timeout = self.timeout;
+        let subscribers = Arc::clone(&self.subscribers);
+        let pre_process = self.pre_process.take();
+        let stream = self.stream.take();
+        let hints_stream = self.hints_stream.take();
+        let input_pushes = self.input_pushes.take();
+        Box::pin(async move {
+            let result = match inner {
+                JobHandleInner::Embedded(handle) => Self::await_embedded(handle, timeout).await,
+                JobHandleInner::Remote { remote_job, _watch_handle } => {
+                    // _watch_handle is kept alive until await_remote completes,
+                    // then dropped (aborting the watch task).
+                    Self::await_remote(remote_job, timeout, subscribers, pre_process, input_pushes)
+                        .await
+                }
+            };
+            // Automatically close streams so any flush() before the next
+            // run() blocks safely instead of sending to the completed job.
+            if let Some(s) = stream {
+                let _ = s.finish_async().await;
+            }
+            if let Some(s) = hints_stream {
+                let _ = s.finish_async().await;
+            }
+            result
+        })
+    }
+}
+
+// ── Domain event → SDK event mapping ──────────────────────────────────────────
+
+/// Map a domain event to an SDK event and fire it to subscribers.
+/// Returns `true` for terminal events (to stop the watch stream).
+fn map_domain_event(subs: &SubscriberList, event: &DomainJobEvent) -> bool {
+    match event {
+        DomainJobEvent::Queued(_) | DomainJobEvent::WaitingForInput(_) => false,
+        DomainJobEvent::Started(_) => {
+            fire_event(subs, JobEvent::Started);
+            false
+        }
+        DomainJobEvent::Progress(p) => {
+            let pct = match p.phase {
+                DomainJobPhase::Contributions => PROGRESS_CONTRIBUTIONS,
+                DomainJobPhase::Prove => PROGRESS_PROVE,
+                DomainJobPhase::Recurse => PROGRESS_RECURSE,
+            };
+            fire_event(subs, JobEvent::Progress(pct));
+            false
+        }
+        // Terminal events are fired authoritatively from the WaitJobResult response;
+        // returning true here stops the watch stream without double-firing.
+        DomainJobEvent::Completed(_) | DomainJobEvent::Cancelled(_) | DomainJobEvent::Failed(_) => {
+            true
+        }
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn format_failure(failure: &DomainJobFailure) -> String {
+    match failure {
+        DomainJobFailure::Timeout { phase, limit } => {
+            format!("Timeout (phase: {:?}, limit: {:?})", phase, limit)
+        }
+        DomainJobFailure::Input { reason } => format!("Input error: {}", reason),
+        DomainJobFailure::Execution { reason } => format!("Execution error: {}", reason),
+        DomainJobFailure::Internal { trace_id } => {
+            format!("Internal error (trace_id: {})", trace_id)
+        }
+        DomainJobFailure::Cancelled => CANCELLED.to_string(),
+    }
+}
+
+fn domain_stats_to_cost(stats: &DomainExecutionStats) -> zisk_common::StatsCostPerType {
+    zisk_common::StatsCostPerType {
+        main_cost: stats.main_cost,
+        opcode_cost: stats.opcode_cost,
+        memory_cost: stats.memory_cost,
+        precompile_cost: stats.precompile_cost,
+        tables_cost: stats.tables_cost,
+        other_cost: stats.other_cost,
+    }
+}
+
+fn domain_stats_to_executor_time(stats: &DomainExecutionStats) -> zisk_common::ZiskExecutorTime {
+    let et = &stats.executor_time;
+    zisk_common::ZiskExecutorTime {
+        total_duration: et.total_duration,
+        execution_duration: et.execution_duration,
+        count_and_plan_duration: et.count_and_plan_duration,
+        count_and_plan_mo_duration: et.count_and_plan_mo_duration,
+        asm_execution_duration: et
+            .asm
+            .as_ref()
+            .map(|a| zisk_common::AsmExecutionInfo { time: a.time, mhz: a.mhz }),
+    }
+}
+
+// ── FromWaitResult impls ──────────────────────────────────────────────────────
+
+impl FromWaitResult for SetupResult {
+    fn from_terminal(status: TerminalStatus, job_id: JobId) -> Result<Self> {
+        match status {
+            TerminalStatus::Completed(DomainJobKindResponse::Setup { .. })
+            | TerminalStatus::Completed(DomainJobKindResponse::SetupAggregationProgram {
+                ..
+            }) => Ok(SetupResult { job_id: Some(job_id) }),
+            TerminalStatus::Completed(other) => {
+                Err(SdkError::UnexpectedResponse(format!("expected setup, got {:?}", other)))
+            }
+            TerminalStatus::Failed(f) => Err(SdkError::JobFailed(format_failure(&f))),
+            TerminalStatus::Cancelled => Err(SdkError::Cancelled),
+        }
+    }
+}
+
+impl FromWaitResult for crate::prove::ProveResult {
+    fn from_terminal(status: TerminalStatus, job_id: JobId) -> Result<Self> {
+        match status {
+            TerminalStatus::Completed(DomainJobKindResponse::Prove { proof, stats }) => {
+                let proof_with_pv = zisk_common::Proof::from_bincode(&proof.data).map_err(|e| {
+                    SdkError::Serialization(format!("failed to deserialize proof: {e}"))
+                })?;
+                let output = zisk_prover_backend::ProveOutput::from_remote(
+                    proof_with_pv,
+                    stats.steps,
+                    Duration::from_nanos(stats.duration_nanos),
+                    domain_stats_to_cost(&stats),
+                );
+                Ok(crate::prove::ProveResult::new(output, Some(job_id)))
+            }
+            TerminalStatus::Completed(DomainJobKindResponse::Wrap(proof))
+            | TerminalStatus::Completed(DomainJobKindResponse::AggregateProofs(proof)) => {
+                let proof_with_pv = zisk_common::Proof::from_bincode(&proof.data).map_err(|e| {
+                    SdkError::Serialization(format!("failed to deserialize remote proof: {e}"))
+                })?;
+                let output = zisk_prover_backend::ProveOutput::from_remote(
+                    proof_with_pv,
+                    0,
+                    Duration::ZERO,
+                    zisk_common::StatsCostPerType::default(),
+                );
+                Ok(crate::prove::ProveResult::new(output, Some(job_id)))
+            }
+            TerminalStatus::Completed(other) => Err(SdkError::UnexpectedResponse(format!(
+                "unexpected job kind response for prove/wrap/aggregate: {other:?}"
+            ))),
+            TerminalStatus::Failed(f) => Err(SdkError::JobFailed(format_failure(&f))),
+            TerminalStatus::Cancelled => Err(SdkError::Cancelled),
+        }
+    }
+}
+
+impl FromWaitResult for crate::verify_constraints::VerifyConstraintsResult {
+    fn from_terminal(_status: TerminalStatus, _job_id: JobId) -> Result<Self> {
+        // RemoteClient does not implement VerifyConstraintsExtension, so this path
+        // is unreachable in practice — kept only to satisfy the IntoFuture bound.
+        Err(SdkError::UnsupportedExecutor(
+            "verify_constraints is not supported on RemoteClient".to_string(),
+        ))
+    }
+}
+
+impl FromWaitResult for crate::execute::ExecuteResult {
+    fn from_terminal(status: TerminalStatus, job_id: JobId) -> Result<Self> {
+        match status {
+            TerminalStatus::Completed(DomainJobKindResponse::Execute {
+                stats,
+                public_outputs,
+                random_seed: seed,
+            }) => {
+                let plan: Vec<(usize, usize, u64)> =
+                    stats.plan.iter().map(|p| (p.airgroup_id, p.air_id, p.count)).collect();
+                let output = zisk_prover_backend::ExecuteOutput::from_remote(
+                    stats.steps,
+                    Duration::from_nanos(stats.duration_nanos),
+                    domain_stats_to_cost(&stats),
+                    domain_stats_to_executor_time(&stats),
+                    &plan,
+                    &public_outputs,
+                    seed,
+                );
+                Ok(crate::execute::ExecuteResult::new(output, Some(job_id)))
+            }
+            TerminalStatus::Completed(other) => {
+                Err(SdkError::UnexpectedResponse(format!("expected execute, got {:?}", other)))
+            }
+            TerminalStatus::Failed(f) => Err(SdkError::JobFailed(format_failure(&f))),
+            TerminalStatus::Cancelled => Err(SdkError::Cancelled),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a push still sending its data makes an unfinished wait cancel the job.
+    #[tokio::test]
+    async fn a_push_runs_until_its_task_ends() {
+        let mut pushes = InputPushes::default();
+        assert!(!pushes.running());
+
+        let done = tokio::spawn(async {});
+        while !done.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        pushes.tasks.push(done);
+        assert!(!pushes.running());
+
+        pushes.tasks.push(tokio::spawn(std::future::pending::<()>()));
+        assert!(pushes.running());
+        assert_eq!(pushes.finish(), None);
+    }
+}

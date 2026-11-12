@@ -1,0 +1,129 @@
+#pragma test
+
+// End-to-end tests for the Tables.* comparison builtins:
+//   is_constant, is_sequence, signature, are_equals,
+//   comparative_signature, compatible_offset
+
+airtemplate TestIsConstant(int N = 2**4) {
+    col fixed C;
+    Tables.fill(7, C, 0, N);                                  // all rows = 7
+    assert_eq(Tables.is_constant(C), 1, "full column is constant");
+    assert_eq(Tables.is_constant(C, 0, N), 1, "explicit range is constant");
+
+    C[3] = 9;                                                 // break the range
+    assert_eq(Tables.is_constant(C, 0, N), 0, "not constant after change");
+    assert_eq(Tables.is_constant(C, 0, 3), 1, "prefix still constant");
+    assert_eq(Tables.is_constant(C, 4, N - 4), 1, "suffix still constant");
+}
+
+airtemplate TestIsSequence(int N = 2**4) {
+    col fixed S = [0..N-1];                                   // 0,1,2,...,N-1
+    assert_eq(Tables.is_sequence(S), 1, "inferred delta sequence");
+    assert_eq(Tables.is_sequence(S, 0, N, 1), 1, "delta 1 holds");
+    assert_eq(Tables.is_sequence(S, 0, N, 2), 0, "delta 2 does not hold");
+
+    col fixed K;
+    Tables.fill(5, K, 0, N);                                  // constant column
+    assert_eq(Tables.is_sequence(K, 0, N, 0), 1, "constant is a delta-0 sequence");
+    assert_eq(Tables.is_sequence(K), 1, "constant infers delta 0");
+}
+
+airtemplate TestSignature(int N = 2**4) {
+    col fixed A = [0..N-1];
+    col fixed B = [0..N-1];
+    col fixed D = [1..N];                                     // A shifted by +1
+    assert_eq(Tables.signature(A) == Tables.signature(B), 1, "same data -> same signature");
+    assert_eq(Tables.signature(A) == Tables.signature(D), 0, "different data -> different signature");
+}
+
+airtemplate TestAreEquals(int N = 2**4) {
+    col fixed A = [0..N-1];                                   // A[i] = i
+    col fixed B = [0..N-1];
+    col fixed D = [1..N];                                     // D[j] = j + 1
+    assert_eq(Tables.are_equals(A, 0, B, 0, N), 1, "identical columns are equal");
+    assert_eq(Tables.are_equals(A, 0, D, 0, N), 0, "shifted columns are not equal");
+    assert_eq(Tables.are_equals(A, 2, A, 2, 4), 1, "same subrange is equal");
+    // A[1+k] = 1+k and D[k] = k+1 -> matching windows at different offsets
+    assert_eq(Tables.are_equals(A, 1, D, 0, 4), 1, "matching windows at different offsets");
+
+    // default count: equal remaining sizes -> compares; different -> 0
+    assert_eq(Tables.are_equals(A, 0, B, 0), 1, "default count, whole equal columns");
+    assert_eq(Tables.are_equals(A, 1, D, 0), 0, "default count, remaining 15 vs 16 -> not equal");
+    assert_eq(Tables.are_equals(A, 8, A, 0), 0, "default count, remaining 8 vs 16 -> not equal");
+
+    // empty range is trivially equal
+    assert_eq(Tables.are_equals(A, 0, D, 0, 0), 1, "count 0 -> equal");
+}
+
+airtemplate TestCopyWidths(int N = 2**4) {
+    col fixed A = [0..N-1];
+
+    // 8-byte source -> 1-byte destination (values fit): element-by-element path
+    #pragma fixed_bytes byte
+    col fixed A1;
+    Tables.copy(A, 0, A1, 0, N);
+    assert_eq(Tables.are_equals(A, 0, A1, 0, N), 1, "8-byte -> 1-byte copy");
+    assert_eq(A1[5], 5, "copied value readback");
+
+    // 1-byte source -> 8-byte destination
+    col fixed B;
+    Tables.fill(0, B, 0, N);
+    Tables.copy(A1, 0, B, 0, N);
+    assert_eq(Tables.are_equals(A, 0, B, 0, N), 1, "1-byte -> 8-byte copy");
+
+    // values that do not fit 1 byte: destination resizes and preserves values
+    col fixed BIG = [300..300+N-1];
+    #pragma fixed_bytes byte
+    col fixed C;
+    Tables.copy(BIG, 0, C, 0, N);
+    assert_eq(Tables.are_equals(BIG, 0, C, 0, N), 1, "copy with destination resize");
+    assert_eq(C[3], 303, "resized value readback");
+
+    // same-width block copy with offsets: window copied, neighbors untouched
+    col fixed P;
+    Tables.fill(99, P, 0, N);
+    Tables.copy(B, 4, P, 8, 4);      // P[8..11] = 4..7
+    assert_eq(P[7], 99, "left neighbor untouched");
+    assert_eq(P[8], 4, "window start");
+    assert_eq(P[11], 7, "window end");
+    assert_eq(P[12], 99, "right neighbor untouched");
+}
+
+airtemplate TestCompatible(int N = 2**4) {
+    col fixed A = [0..N-1];
+    col fixed B;
+    int r = 3;
+    int delta = 100;
+    // B[i] = A[(i + r) mod N] + delta  -> B is A rotated by r and shifted by delta
+    for (int i = 0; i < N; ++i) {
+        B[i] = A[(i + r) % N] + delta;
+    }
+    assert_eq(Tables.comparative_signature(A) == Tables.comparative_signature(B), 1,
+              "comparative signature is invariant to rotation + delta");
+
+    int off = Tables.compatible_offset(A, 0, B, 0, N);
+    assert_eq(off, r, "recovered row_offset");
+    assert_eq(B[0] - A[off], delta, "recovered delta from the offset");
+
+    // A permutation that is NOT a cyclic rotation: it shares the comparative
+    // signature (permutation-invariant) but has no compatible offset.
+    col fixed P;
+    for (int i = 0; i < N; ++i) {
+        P[i] = A[i];
+    }
+    P[0] = A[1];
+    P[1] = A[0];
+    assert_eq(Tables.comparative_signature(A) == Tables.comparative_signature(P), 1,
+              "a permutation shares the comparative signature");
+    assert_eq(Tables.compatible_offset(A, 0, P, 0, N), -1,
+              "a non-rotation permutation has no compatible offset");
+}
+
+airgroup TestTableFunctions {
+    TestIsConstant();
+    TestIsSequence();
+    TestSignature();
+    TestAreEquals();
+    TestCopyWidths();
+    TestCompatible();
+}

@@ -1,0 +1,161 @@
+use super::EmbeddedClient;
+use crate::embedded::{validate_embedded_request, EmbeddedProver, HintsKind, StdinKind};
+use crate::hints::HintsSource;
+use crate::input_source::InputSource;
+use crate::job_handle::{fire_event, fire_result_event, JobHandle, SubscriberList};
+use crate::prove::ProveResult;
+use crate::{ExecutorKind, JobEvent, Result, SdkError};
+use std::sync::Arc;
+use std::time::Duration;
+use zisk_common::io::StreamSource;
+use zisk_common::{ProofKind, RandomSeed};
+use zisk_prover_backend::GuestProgram;
+
+impl EmbeddedClient {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn do_prove(
+        &self,
+        program: &GuestProgram,
+        stdin: InputSource,
+        hints: Option<HintsSource>,
+        seed: Option<RandomSeed>,
+        executor: ExecutorKind,
+        proof_kind: ProofKind,
+        timeout: Option<Duration>,
+        subs: SubscriberList,
+    ) -> Result<JobHandle<ProveResult>> {
+        let program = program.clone();
+        let subs_cloned = Arc::clone(&subs);
+        let prover = self.prover.clone();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            fire_event(&subs_cloned, JobEvent::Started);
+
+            let result =
+                Self::do_prove_inner(prover, &program, stdin, hints, seed, executor, proof_kind);
+
+            fire_result_event(&subs_cloned, &result);
+
+            result
+        });
+
+        Ok(JobHandle::new_embedded(handle, subs, timeout))
+    }
+
+    /// Run proof generation synchronously on the calling thread.
+    ///
+    /// Unlike [`do_prove`](Self::do_prove), this performs no `spawn_blocking`
+    /// and returns the result directly, so it requires no async runtime.
+    /// Registered event callbacks fire synchronously during the call.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn do_prove_sync(
+        &self,
+        program: &GuestProgram,
+        stdin: InputSource,
+        hints: Option<HintsSource>,
+        seed: Option<RandomSeed>,
+        executor: ExecutorKind,
+        proof_kind: ProofKind,
+        subs: SubscriberList,
+    ) -> Result<ProveResult> {
+        fire_event(&subs, JobEvent::Started);
+        let result = Self::do_prove_inner(
+            self.prover.clone(),
+            program,
+            stdin,
+            hints,
+            seed,
+            executor,
+            proof_kind,
+        );
+        fire_result_event(&subs, &result);
+        result
+    }
+
+    fn do_prove_inner(
+        prover: Arc<EmbeddedProver>,
+        program: &GuestProgram,
+        stdin: InputSource,
+        hints: Option<HintsSource>,
+        seed: Option<RandomSeed>,
+        executor: ExecutorKind,
+        proof_kind: ProofKind,
+    ) -> Result<ProveResult> {
+        // Sets the seed and the proof kind on every prove builder below, so neither can be missed.
+        macro_rules! configure {
+            ($builder:expr) => {{
+                let builder = $builder.random_seed(seed);
+                match proof_kind {
+                    ProofKind::VadcopFinal => builder,
+                    ProofKind::VadcopFinalMinimal => {
+                        builder.wrap_proof(ProofKind::VadcopFinalMinimal)
+                    }
+                    ProofKind::Snark => builder.wrap_proof(ProofKind::Snark),
+                }
+            }};
+        }
+        let (prover_is_asm, was_setup_with_hints) = match prover.as_ref() {
+            EmbeddedProver::Asm(p) => (true, p.was_setup_with_hints()),
+            EmbeddedProver::Emu(_) => (false, false),
+        };
+        validate_embedded_request(
+            prover_is_asm,
+            executor,
+            hints.as_ref().map(HintsKind::of),
+            StdinKind::of(&stdin),
+            was_setup_with_hints,
+        )?;
+
+        // Inputs are validated above; the dispatch only routes valid requests.
+        let result = match (prover.as_ref(), executor) {
+            (EmbeddedProver::Emu(p), ExecutorKind::Emulator) => {
+                let InputSource::Stdin(s) = stdin else { unreachable!() };
+                configure!(p.prove(program, s.into_inner())).run().map_err(SdkError::backend)?
+            }
+            (EmbeddedProver::Asm(p), ExecutorKind::Emulator) => {
+                let InputSource::Stdin(s) = stdin else { unreachable!() };
+                p.prove_emulator(program, s.into_inner(), seed, proof_kind)
+                    .map_err(SdkError::backend)?
+            }
+            (EmbeddedProver::Asm(p), ExecutorKind::Assembly) => {
+                // The streams go on the job, so they are set up while it holds the shared memory.
+                let job = p.begin_job(program).map_err(SdkError::backend)?;
+                if let Some(hints) = hints {
+                    match hints {
+                        HintsSource::Hints(h) => {
+                            job.register_hints_stream(h.into_inner()).map_err(SdkError::backend)?;
+                        }
+                        HintsSource::Stream(stream) => {
+                            stream.start()?;
+                            let uri = stream.uri().to_string();
+                            let source = StreamSource::from_uri(&uri).map_err(SdkError::backend)?;
+                            job.register_hints_stream(source).map_err(SdkError::backend)?;
+                        }
+                    }
+                    configure!(job.prove(zisk_common::io::ZiskStdin::new()))
+                        .run()
+                        .map_err(SdkError::backend)?
+                } else {
+                    match stdin {
+                        InputSource::Stream(stream) => {
+                            stream.start()?;
+                            let uri = stream.uri().to_string();
+                            let source = StreamSource::from_uri(&uri).map_err(SdkError::backend)?;
+                            job.register_inputs_stream(source).map_err(SdkError::backend)?;
+                            configure!(job.prove(zisk_common::io::ZiskStdin::new()))
+                                .run()
+                                .map_err(SdkError::backend)?
+                        }
+                        InputSource::Stdin(s) => configure!(job.prove(s.into_inner()))
+                            .run()
+                            .map_err(SdkError::backend)?,
+                    }
+                }
+            }
+            (EmbeddedProver::Emu(_), ExecutorKind::Assembly) => {
+                unreachable!("rejected by validate_embedded_request")
+            }
+        };
+        Ok(ProveResult::from(result))
+    }
+}

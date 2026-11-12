@@ -11,10 +11,10 @@ To build the `zisk-test-env` Docker image, execute the following command:
 To run the Docker container, execute the following command:
 
 ```bash
-./run-docker.sh
+./run_docker.sh
 ```
 
-This will run Docker container and open the ZisK test menu inside the container. If the container already exists, you will be asked whether you want to connect to it or recreate it.
+This will run the Docker container and open the ZisK test menu inside the container. If the container already exists, you will be asked whether you want to connect to it or recreate it.
 
 >[!CAUTION]
 >
@@ -22,53 +22,84 @@ This will run Docker container and open the ZisK test menu inside the container.
 
 > [!TIP]
 >
->The Docker container includes a `${HOME}/output` directory, which is mapped to the `./output` folder on the host.  
+>The Docker container includes a `${HOME}/output` directory, which is mapped to the `./output` folder on the host.
 >You can use this folder to copy any files you want to make available outside of the container.
 
 ## ZisK Test Menu Options
 
-1. **Edit environment variables**  
-   Opens the `.env` file with the `nano` editor, allowing you to modify environment variable values.  
+1. **Edit environment variables**
+   Opens the `.env` file with the `nano` editor, allowing you to modify environment variable values.
    These variables let you specify the repository branches to use, the setup version to generate or install, and the parameters to use when proving in distributed mode.
 
-2. **Build ZisK from source**  
-   Builds ZisK using the `zisk` and `pil2-proofman` repository sources (checking out the branches specified in the environment variables).  
+2. **Build ZisK from source**
+   Builds ZisK from the `zisk` repository source (the branch in `ZISK_BRANCH`, unless a local `ZISK_REPO_DIR` is used). pil2-proofman is consumed as the git dependency pinned in ZisK's `Cargo.toml` / `Cargo.lock` — it is no longer cloned or branch-overridden.
    After building, it installs the CLI tools and necessary files to the `$HOME/.zisk` folder and adds that folder to the `$PATH` environment variable.
 
-3. **Build setup from source**  
-   Builds the setup files (proving key) using the `pil2-proofman`, `pil2-proofman-js`, and `pil2-compiler` repository sources (checking out the branches specified in the environment variables).  
-   After building, it installs the proving key to the `$HOME/.zisk` folder and generates the constant files using the `cargo-zisk check-setup` command.
+3. **Build setup from source**
+   Builds the setup files (proving key) by delegating to `tools/setup/build-setup.sh`, which runs the `cargo-zisk` proving-key pipeline (`compile-pil` + `setup`). It no longer clones `pil2-proofman-js` / `pil2-compiler` or shells into node — `pil2-compiler` is pulled via npm at the version pinned in `pil2-proofman`'s `package.json`, and the proofman checkout is whatever `Cargo.toml` resolves to (set up by option 2). With `USE_CACHE_SETUP=1` a local artifact cache under `${HOME}/output` is reused/populated, keyed by the input hash. With `REMOTE_CACHE_SETUP=[user@]host:/path,...` (the same cache root on other workers, comma separated) a local miss is first pulled from the first of them that has it, over rsync/ssh.
+   After building, it installs the proving key (and the snark proving key, when the build produced one) to the `$HOME/.zisk` folder and generates the constant files using the `cargo-zisk-dev check-setup` command.
 
-4. **Package setup outcome**  
-   Packages the setup artifacts (`.tar.gz` and `.md5` files for proving and verifying keys) using the setup files generated in option 3.  
-   The artifacts are stored in the `${HOME}/output` directory inside the container, which is mapped to the `./output` folder on the host, making them available externally.
+4. **Build dylib files (macOS)**
+   Rebuilds the macOS witness libraries from the proving key produced by option **3. Build setup from source** (and the snark proving key, when present) and collects the resulting `*.dylib` into `build/dylib`, preserving the `provingKey/` (and `provingKeySnark/`) directory layout.
+   This option must be run on macOS — it aborts otherwise, since the dylibs are platform-specific. The collected dylibs are later merged into the packaged proving key by option **6. Upload setup**.
 
-5. **Install ZisK from binaries**
-   Test ZisK installation from binaries using the lastest official release.
+5. **Build zec guest ELF (ZEC_GUEST)**
+   Clones the `zisk-eth-client` repository (branch specified by `ZISK_ETH_CLIENT_BRANCH`) and produces the guest ELF selected by `ZEC_GUEST`: `ziskethone` (default) or `reth`. In both cases the client `Cargo.toml`'s git dependencies on ZisK are repointed to the local ZisK repository resolved from `ZISK_REPO_DIR` (or `${HOME}/workspace/zisk` if unset).
+   For `reth` it also patches `bin/guests/stateless-validator-reth/Cargo.toml` so that `ziskos` points to the local repository, builds the guest with `cargo-zisk build --release` and verifies that `target/elf/riscv64ima-zisk-zkvm-elf/release/zec-reth` was produced.
+   For `ziskethone` the ELF is the one committed at `bin/guests/stateless-validator-ziskethone/elf/zec-ziskethone.elf`. Set `REBUILD_ZISKETHONE_GUEST=1` to regenerate it from the C++ sources in the `third_party/ziskethone` submodule; that needs `cmake` and installs a RISC-V cross-toolchain on first use (~10-15 min).
+   The resulting ELF is consumed by options **9. Test Ethereum Block** and **10. Test EthProofs**, so this option must be run before either of them, with the same `ZEC_GUEST`.
 
-6. **Test sha_hasher**  
-   Creates, builds, and emulates the `sha_hasher` program, then generates and verifies the proof.  
+6. **Upload setup**
+   Packages the setup artifacts (`.tar.gz` + `.md5`) from the files generated in option **3. Build setup from source** (it requires `build/provingKey`): the proving key and verify key always, plus the circom circuits (`zisk-circuits`) and snark proving key (`zisk-provingkey-pilfflonk`) when present in `build/`. A blake3 setup, the default mode, has no suffix; a Poseidon1 one is published with `-poseidon1` after the version. When the macOS dylibs from option **4. Build dylib files (macOS)** are provided, they are merged into the proving key before packing.
+   The setup input hash is computed via `setup_build.sh --print-hash`; if the bucket already holds that hash the upload is skipped (unless forced). The artifacts are stored in the `${HOME}/output` directory inside the container, which is mapped to the `./output` folder on the host, making them available externally, and are uploaded to `gs://zisk-setup` (requires `gcloud` auth).
+
+7. **Install ZisK from binaries**
+   Installs ZisK from binaries using the latest official release via `ziskup`.
+
+8. **Test sha_hasher**
+   Creates, builds, and emulates the `sha_hasher` program, then generates and verifies the proof.
    It also performs constraints verification.
 
-7. **Test Pessimistic Proof**  
-   Tests the pessimistic proof program using files from the `zisk-testvectors` repository.  
-   First, it proves the input files specified in the `PP_INPUTS` environment variable in non-distributed mode. Then, it proves the input files specified in the `PP_INPUTS_DISTRIBUTED` environment variable in distributed mode.
+9. **Test Ethereum Block**
+   Tests Ethereum block proof generation using the ELF selected by `ZEC_GUEST` and the input files cloned by option **5. Build zec guest ELF (ZEC_GUEST)** (which must be run beforehand). The `_zec_<client>` suffix of the configured input names is retargeted to `ZEC_GUEST`, so the same `BLOCK_INPUTS_*` value serves either guest, as long as the block has an input committed for it.
+   First, it proves the input files specified in the `BLOCK_INPUTS_SINGLE` environment variable using cargo-zisk with one single process (no mpi). Second, it proves the input files specified in the `BLOCK_INPUTS_MPI` environment variable using cargo-zisk and mpi with the number of processes and threads specified in `MPI_PROCESSES` and `MPI_THREADS` environment variables.
 
-8. **Test Ethereum Block**  
-   Tests Ethereum block proof generation using files from the `zisk-testvectors` repository.  
-   First, it proves the input files specified in the `BLOCK_INPUTS` environment variable in non-distributed mode. Then, it proves the input files specified in the `BLOCK_INPUTS_DISTRIBUTED` environment variable in distributed mode.
+10. **Test EthProofs**
+    Clones the `zisk-ethproofs` repository, builds it, and deploys the `zisk-coordinator` and `zisk-worker` services. Requires the ELF and inputs produced by option **5. Build zec guest ELF (ZEC_GUEST)** (which must be run beforehand, with the same `ZEC_GUEST`).
+    Then runs the `ethproofs-client` binary against the deployed coordinator using the input files specified in `BLOCK_INPUTS_ETHPROOFS` (or `BLOCK_INPUTS_ETHPROOFS_HINTS` when `ENABLE_HINTS=1`). Hints are a `reth`-only path: `ENABLE_HINTS` is pinned to `0` when `ZEC_GUEST=ziskethone`, which emits none.
+    The distributed services are automatically uninstalled when the test finishes.
 
-9. **Install setup from public packages**  
-   Downloads and installs the proving key files from the public packages corresponding to the `SETUP_VERSION` environment variable.  
-   After installation, it generates the constant files using the `cargo-zisk check-setup` command.
+11. **Test ELF diagnostic**
+    Runs the diagnostic ELF built from the zisk repo's `test-artifacts` crate (`test-artifacts/programs/target/elf/riscv64ima-zisk-zkvm-elf/release/diagnostic`) through the full proving pipeline using `test_elf` (verify-constraints, prove, verify) with no input file.
 
-10. **Install setup from local packages**  
-   Installs the proving key files using the setup packages generated by option `4. Package setup outcome`, which must be located in the `${HOME}/output` directory.
-   After installation, it generates the constant files using the `cargo-zisk check-setup` command.
+12. **Test docs examples**
+    Builds, runs and proves the ZisK example programs under `examples/` (both the host SDK examples and the guest programs), exercising every available `{asm, gpu}` backend combination and verifying each one.
 
-11. **Shell**  
-    Opens a command line shell inside the container.  
-    When you exit the shell, you will return to the Release Kit menu.
+13. **Test quickstart**
+    Runs the quickstart sequence of the `hash` example: builds and runs the guest program, generates its setup, proves and verifies it with every backend combination (`emulator`/`asm`, with and without `--pilfflonk`), and finally proves it through the host SDK example. The whole set of combinations runs first on CPU and then again on GPU (adding `--gpu`) when a GPU build of `cargo-zisk` is installed; set `ONLY_CPU=1` to run just the CPU pass or `ONLY_GPU=1` to run just the GPU one. It expects ZisK, its dependencies and the proving keys / setups to be already installed.
 
-12. **Exit**  
-   Exits the Release Kit container and returns to the host shell.
+14. **Test memory witness (GPU)**
+   Proves the first block of `BLOCK_INPUTS_SINGLE` with the assembly emulator on the GPU in every device memory witness configuration: the device witness, an unstaged instance, split block records, and every fallback forced by its test knob (a planner fault, a rejected chunk, the retention cap exceeded, a light-form record, a step of the preparation without room for each of ram/rom/input/align, an instance the device cannot fill for each family, a scratch overflow beside the staged images, and the MemAlign region overflowed). Verifies each proof and checks that the memory airs' rows equal the CPU path's (`ZISK_MEM_GPU_FILL=0`). Needs a GPU build of `cargo-zisk` with `--features mem-witness-test` (the test knobs and the row-hash dump; the script fails without it) and the ELF and inputs of option **5**.
+
+15. **Install setup from public packages**
+    Downloads and installs the proving key files from the public packages corresponding to the `ZISK_SETUP_FILE` environment variable (falling back to the `setup_version` in `setup/Cargo.toml` when unset).
+
+16. **Install setup from local packages**
+    Installs the proving key files using the setup packages generated by option **6. Upload setup**, which must be located in the `${HOME}/output` directory.
+
+17. **Shell**
+    Opens a command line shell inside the container.
+    When you exit the shell, you will return to the ZisK Test Menu.
+
+18. **Exit**
+    Exits the Release Kit container and returns to the host shell.
+
+## Update proofman dependencies
+
+```bash
+./update-proofman-deps.sh [--list] [cargo update args...]
+```
+
+Runs `cargo update` in every workspace of the repo that depends, directly or indirectly, on a crate from `pil2-proofman` (`proofman`, `proofman-fields`, `pil2-std-lib`, ...). A crate counts as a proofman crate when its `repository` or `source` points to the `pil2-proofman` GitHub repo, so it works the same whether the dependency comes from git, a local path or crates.io. The workspace roots are located with `cargo locate-project` and their resolved graph is read with `cargo metadata --frozen`; when a `Cargo.lock` is missing or out of date the dependencies are resolved again (this rewrites that lock).
+
+With `--list` it only prints the workspaces that would be updated. Any other argument is forwarded to `cargo update`, for example `./update-proofman-deps.sh --dry-run` or `./update-proofman-deps.sh -p proofman`.

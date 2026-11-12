@@ -1,0 +1,420 @@
+//! Fixed column I/O: read and write fixed polynomial binary files.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Write};
+
+use anyhow::{bail, Context, Result};
+
+use crate::io::bin_file_writer::BinFileWriter;
+use crate::types::GOLDILOCKS_MODULUS;
+
+/// Reorder plonk fixed polynomials to match the pilout `fixed_cols` order.
+///
+/// The JS pil2-compiler writes `fixed_cols` in PIL declaration order (S[27] before C[10]).
+/// `build_fixed_pols` outputs C values first then S values (mirroring JS `plonk2pil`).
+/// Without reordering, C values would be written into S slots and vice versa in the `.const` file.
+///
+/// This function mirrors the JS `generateMultiArrayIndexes` expansion and produces
+/// `plonk_pol_values` in the order each empty `fixed_col` entry expects.
+///
+/// SymbolType::FIXED_COL == 1 in the pilout proto.
+pub fn reorder_plonk_pols_for_pilout(
+    fixed_pols: &[pil2_stark_recurser::plonk2pil::FixedPol],
+    symbols: &[pil2_pilout::pilout::Symbol],
+    air_group_id: u32,
+    air_id: u32,
+) -> Vec<Vec<u64>> {
+    // Build lookup: (name, element_index) → values
+    let pol_map: HashMap<(String, usize), &Vec<u64>> =
+        fixed_pols.iter().map(|fp| ((fp.name.clone(), fp.index), &fp.values)).collect();
+
+    // Filter to fixed cols for this air, sort by id (= pilout fixed_cols order)
+    let mut fixed_syms: Vec<&pil2_pilout::pilout::Symbol> = symbols
+        .iter()
+        .filter(|s| {
+            s.r#type == 1 // FIXED_COL
+                && s.air_group_id == Some(air_group_id)
+                && s.air_id == Some(air_id)
+        })
+        .collect();
+    fixed_syms.sort_by_key(|s| s.id);
+
+    // Expand array symbols to individual columns (matching JS generateMultiArrayIndexes)
+    // Skip scalar symbols — they have inline values in the pilout, not from plonk.
+    let mut result = Vec::new();
+    for sym in fixed_syms {
+        if sym.lengths.is_empty() {
+            // A scalar fixed col. Most are pilout-inline selectors, which carry their own values and
+            // must contribute nothing here -- `write_const_file` draws from this list only for
+            // columns whose pilout `values` are EMPTY, so an extra entry would shift every later
+            // column. A scalar declared `#pragma fixed_external` is exactly such an empty column,
+            // though, so honour a FixedPol when the packer supplied one; when it did not, this still
+            // pushes nothing and the old behaviour stands.
+            //
+            // Skipping scalars unconditionally leaves such a column reading zero down the whole
+            // trace, and does it quietly: a scalar sorts after every array slot, so the miss consumes
+            // no other column's values and everything else stays correct.
+            if let Some(vals) = pol_map.get(&(sym.name.clone(), 0)) {
+                result.push((*vals).clone());
+            }
+            continue;
+        }
+        let total: usize = sym.lengths.iter().map(|&l| l as usize).product();
+        for idx in 0..total {
+            if let Some(vals) = pol_map.get(&(sym.name.clone(), idx)) {
+                result.push((*vals).clone());
+            }
+        }
+    }
+
+    result
+}
+
+/// Metadata for a single fixed polynomial column within a binary file.
+#[derive(Debug, Clone)]
+pub struct FixedPolInfo {
+    pub lengths: Vec<u32>,
+    pub values: Vec<u64>,
+}
+
+/// Read a fixed polynomial binary file (.cnst format).
+///
+/// Returns a map from `"{airgroupName}_{airName}"` to a map of
+/// polynomial name -> vector of `FixedPolInfo` entries.
+///
+/// File layout:
+///   - 4-byte magic "cnst"
+///   - u32 LE version
+///   - u32 LE number of sections (1)
+///   - Section 1:
+///     - u32 LE section_id, u64 LE section_size
+///     - string: airgroup_name
+///     - string: air_name
+///     - u64 LE: N (number of rows)
+///     - u32 LE: nFixedPols
+///     - For each fixed pol:
+///       - string: name
+///       - u32 LE: n_lengths
+///       - u32 LE * n_lengths: lengths
+///       - u64 LE * N: values
+pub fn read_fixed_pols_bin(
+    fixed_info: &mut HashMap<String, HashMap<String, Vec<FixedPolInfo>>>,
+    bin_filename: &str,
+) -> Result<()> {
+    let file = File::open(bin_filename)?;
+    let mut reader = BufReader::new(file);
+
+    // Read header
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic)?;
+    if &magic != b"cnst" {
+        bail!("Invalid magic in fixed pols file: expected 'cnst'");
+    }
+
+    let _version = read_u32_le(&mut reader)?;
+    let _n_sections = read_u32_le(&mut reader)?;
+
+    // Read section header
+    let _section_id = read_u32_le(&mut reader)?;
+    let _section_size = read_u64_le(&mut reader)?;
+
+    // Read data
+    let airgroup_name = read_string(&mut reader)?;
+    let air_name = read_string(&mut reader)?;
+    let n = read_u64_le(&mut reader)?;
+    let n_fixed_pols = read_u32_le(&mut reader)?;
+
+    let mut pols_info: HashMap<String, Vec<FixedPolInfo>> = HashMap::new();
+
+    for _ in 0..n_fixed_pols {
+        let name = read_string(&mut reader)?;
+        let n_lengths = read_u32_le(&mut reader)?;
+        let mut lengths = Vec::with_capacity(n_lengths as usize);
+        for _ in 0..n_lengths {
+            lengths.push(read_u32_le(&mut reader)?);
+        }
+
+        let mut values = Vec::with_capacity(n as usize);
+        let mut buf = vec![0u8; n as usize * 8];
+        reader.read_exact(&mut buf)?;
+        for i in 0..n as usize {
+            let val = u64::from_le_bytes([
+                buf[i * 8],
+                buf[i * 8 + 1],
+                buf[i * 8 + 2],
+                buf[i * 8 + 3],
+                buf[i * 8 + 4],
+                buf[i * 8 + 5],
+                buf[i * 8 + 6],
+                buf[i * 8 + 7],
+            ]);
+            values.push(val);
+        }
+
+        pols_info.entry(name).or_default().push(FixedPolInfo { lengths, values });
+    }
+
+    let key = format!("{}_{}", airgroup_name, air_name);
+    fixed_info.insert(key, pols_info);
+
+    Ok(())
+}
+
+/// Write a fixed polynomial binary file (.cnst format).
+///
+/// Ports `writeFixedPolsBin` from `fixed_cols.js` (recurser-js).
+/// Uses `BinFileWriter` to produce the same sectioned binary as `@iden3/binfileutils`.
+///
+/// `fixed_info` is a list of (name, lengths, values) tuples.
+pub fn write_fixed_pols_bin(
+    bin_filename: &str,
+    airgroup_name: &str,
+    air_name: &str,
+    n: u64,
+    fixed_info: &[(String, Vec<u32>, Vec<u64>)],
+) -> Result<()> {
+    let mut writer = BinFileWriter::new(bin_filename, "cnst", 1, 1)?;
+    writer.start_write_section(1)?;
+
+    writer.write_string(airgroup_name)?;
+    writer.write_string(air_name)?;
+    writer.write_u64(n)?;
+    writer.write_u32(fixed_info.len() as u32)?;
+
+    for (name, lengths, values) in fixed_info {
+        writer.write_string(name)?;
+        writer.write_u32(lengths.len() as u32)?;
+        for &len in lengths {
+            writer.write_u32(len)?;
+        }
+        // Write all values as u64 LE bytes in one shot
+        let mut buf = vec![0u8; values.len() * 8];
+        for (i, &v) in values.iter().enumerate() {
+            buf[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        writer.write_bytes(&buf)?;
+    }
+
+    writer.end_write_section()?;
+    writer.close()?;
+    Ok(())
+}
+
+/// Write the `.const` file from the pilout and plonk fixed polynomial values.
+///
+/// Ports the JS logic: `getFixedPolsPil2(...)` followed by `fixedCols.saveToFile(...)`.
+///
+/// For each fixed column defined in the pilout `air.fixed_cols`:
+/// - If the column has **no** inline values (`values.is_empty()`), the values come from
+///   the plonk2pil output polynomials (`plonk_pol_values`), taken in order.
+/// - If the column has inline values, those values from the pilout are used directly.
+///   These are the selector polynomials computed by pil2-stark.
+///
+/// The output is a flat row-major interleaved buffer:
+///   [col0_row0, col1_row0, ..., colN_row0, col0_row1, ..., colN_rowNrows]
+/// Written as raw u64 LE values — matching `fixedCols.saveToFile()` in JS.
+pub fn write_const_file(path: &str, air: &pil2_pilout::pilout::Air, plonk_pol_values: &[Vec<u64>]) -> Result<()> {
+    // num_rows is the actual row count (not log2)
+    let n_rows = air.num_rows.unwrap_or(0) as usize;
+    // Fall back to plonk polynomial length if pilout doesn't specify rows
+    let n_rows = if n_rows > 0 {
+        n_rows
+    } else if let Some(first) = plonk_pol_values.first() {
+        first.len()
+    } else {
+        0
+    };
+    let n_constants = air.fixed_cols.len();
+
+    let mut flat_buffer = vec![0u64; n_rows * n_constants];
+    let mut plonk_idx = 0usize;
+
+    for (col_idx, fixed_col) in air.fixed_cols.iter().enumerate() {
+        if fixed_col.values.is_empty() {
+            // Values come from plonk2pil (C or S polynomial)
+            if let Some(vals) = plonk_pol_values.get(plonk_idx) {
+                for (row, &val) in vals.iter().enumerate() {
+                    if row < n_rows {
+                        flat_buffer[row * n_constants + col_idx] = val;
+                    }
+                }
+                plonk_idx += 1;
+            }
+        } else {
+            // Inline values from the pilout (selector polynomials)
+            for (row, val_bytes) in fixed_col.values.iter().enumerate() {
+                if row >= n_rows {
+                    break;
+                }
+                flat_buffer[row * n_constants + col_idx] =
+                    bytes_to_u64_be(val_bytes).with_context(|| format!("fixed column {col_idx}, row {row}"))?;
+            }
+        }
+    }
+
+    write_fixed_cols_raw(path, &flat_buffer)
+}
+
+/// Write a flat fixed-column buffer to a raw binary file (row-major u64 LE).
+///
+/// Equivalent to `fixedCols.saveToFile()` in JS.
+/// Format: n_cols * N u64 LE values, interleaved row by row.
+pub fn write_fixed_cols_raw(path: &str, buffer: &[u64]) -> Result<()> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    for &val in buffer {
+        writer.write_all(&val.to_le_bytes())?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+// ------ Internal helpers ------
+
+fn read_u32_le(reader: &mut impl Read) -> io::Result<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+fn read_u64_le(reader: &mut impl Read) -> io::Result<u64> {
+    let mut buf = [0u8; 8];
+    reader.read_exact(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
+}
+
+fn read_string(reader: &mut impl Read) -> io::Result<String> {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        reader.read_exact(&mut byte)?;
+        if byte[0] == 0 {
+            break;
+        }
+        buf.push(byte[0]);
+    }
+    String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// A fixed value of the pilout as the canonical Goldilocks element the `.const` file stores.
+///
+/// Pilout stores fixed col values big-endian (JS bint2buf uses writeBigUInt64BE), of any length.
+/// A value that is not below p is an error: it is neither truncated nor reduced.
+fn bytes_to_u64_be(bytes: &[u8]) -> Result<u64> {
+    let significant = &bytes[bytes.iter().take_while(|&&b| b == 0).count()..];
+    if significant.len() <= 8 {
+        let value = significant.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+        if value < GOLDILOCKS_MODULUS {
+            return Ok(value);
+        }
+    }
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    bail!("the fixed value 0x{hex} is not a Goldilocks element (below p = {GOLDILOCKS_MODULUS})")
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pil2_pilout::pilout::Symbol;
+
+    fn fixed_sym(name: &str, id: u32, lengths: &[u32]) -> Symbol {
+        Symbol {
+            name: name.to_string(),
+            air_group_id: Some(0),
+            air_id: Some(0),
+            r#type: 1, // FIXED_COL
+            id,
+            lengths: lengths.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn pol(name: &str, index: usize, marker: u64) -> pil2_stark_recurser::plonk2pil::FixedPol {
+        pil2_stark_recurser::plonk2pil::FixedPol { name: name.to_string(), index, values: vec![marker] }
+    }
+
+    /// `write_const_file` walks the air's fixed cols and draws the next entry from this list for
+    /// every column whose pilout values are EMPTY. So the list must hold one entry per such column,
+    /// in symbol-id order -- an entry too few and each later column reads its neighbour's values.
+    ///
+    /// Skipping every scalar assumes a scalar always carries inline values, which
+    /// `#pragma fixed_external` breaks: such a column has an empty pilout slot and needs its values
+    /// from here. Missing one leaves that column reading zero down the whole trace, and quietly -- a
+    /// scalar sorts after every array slot, so no other column's values shift.
+    #[test]
+    fn a_scalar_external_fixed_col_gets_its_values() {
+        let symbols = vec![fixed_sym("A.C", 0, &[2]), fixed_sym("A.FLAGS", 1, &[])];
+        let pols = vec![pol("A.C", 0, 10), pol("A.C", 1, 11), pol("A.FLAGS", 0, 99)];
+
+        let out = reorder_plonk_pols_for_pilout(&pols, &symbols, 0, 0);
+
+        assert_eq!(out.len(), 3, "the scalar's slot has to be filled or later columns shift");
+        assert_eq!(out[0][0], 10);
+        assert_eq!(out[1][0], 11);
+        assert_eq!(out[2][0], 99, "FLAGS read as its own values, not a neighbour's");
+    }
+
+    /// The other half of the same rule: an inline scalar has no FixedPol, contributes nothing, and
+    /// must not consume a slot -- pushing a placeholder for it would shift every later column.
+    #[test]
+    fn an_inline_scalar_contributes_nothing() {
+        let symbols = vec![fixed_sym("A.SEL", 0, &[]), fixed_sym("A.C", 1, &[2]), fixed_sym("A.CLK", 2, &[])];
+        let pols = vec![pol("A.C", 0, 10), pol("A.C", 1, 11)];
+
+        let out = reorder_plonk_pols_for_pilout(&pols, &symbols, 0, 0);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0][0], 10);
+        assert_eq!(out[1][0], 11);
+    }
+
+    fn air_with_fixed(values: Vec<Vec<u8>>) -> pil2_pilout::pilout::Air {
+        pil2_pilout::pilout::Air {
+            num_rows: Some(values.len() as u32),
+            fixed_cols: vec![pil2_pilout::pilout::FixedCol { values }],
+            ..Default::default()
+        }
+    }
+
+    /// The pilout's fixed values, of any length, as the u64 they were before the checked narrowing:
+    /// what pil2com writes (up to 8 bytes, leading zeros stripped or not) is unchanged.
+    #[test]
+    fn a_fixed_value_below_p_is_written_as_is() {
+        let p_minus_one = (GOLDILOCKS_MODULUS - 1).to_be_bytes().to_vec();
+        let values = vec![vec![], vec![0x01, 0x00], vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2a], p_minus_one];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("air.const");
+        write_const_file(path.to_str().unwrap(), &air_with_fixed(values), &[]).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let written: Vec<u64> = bytes.chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        assert_eq!(written, vec![0, 256, 42, GOLDILOCKS_MODULUS - 1]);
+    }
+
+    /// A fixed value that is not a Goldilocks element is refused, not truncated: the old reader
+    /// kept the first 8 of its bytes.
+    #[test]
+    fn a_fixed_value_that_is_not_below_p_is_refused() {
+        let wide = vec![0x01, 0, 0, 0, 0, 0, 0, 0, 0x05]; // 2^64 + 5
+        for (value, hex) in [
+            (GOLDILOCKS_MODULUS.to_be_bytes().to_vec(), "ffffffff00000001"),
+            (u64::MAX.to_be_bytes().to_vec(), "ffffffffffffffff"),
+            (wide, "010000000000000005"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("air.const");
+            let err = write_const_file(path.to_str().unwrap(), &air_with_fixed(vec![vec![7], value]), &[]).unwrap_err();
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "fixed column 0, row 1: the fixed value 0x{hex} is not a Goldilocks element (below p = \
+                     {GOLDILOCKS_MODULUS})"
+                )
+            );
+            assert!(!path.exists(), "nothing is written on a refusal");
+        }
+    }
+}

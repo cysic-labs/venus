@@ -1,9 +1,10 @@
 use super::ArithEqMemInputConfig;
 use crate::executors::Secp256k1;
-use precompiles_common::MemProcessor;
+use zisk_precomp_common::MemProcessor;
 
 pub const SECP256K1_DBL_MEM_CONFIG: ArithEqMemInputConfig = ArithEqMemInputConfig {
     indirect_params: 0,
+    direct_ab: false,
     rewrite_params: true,
     read_params: 1,
     write_params: 1,

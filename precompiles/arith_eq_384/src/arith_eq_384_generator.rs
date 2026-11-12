@@ -1,7 +1,7 @@
 use path_clean::PathClean;
 use std::path::Path;
 
-use precomp_arith_eq::generator::{Equation, EquationConfig};
+use zisk_precomp_arith_eq::generator::{Equation, EquationConfig};
 
 mod arith_eq_384_constants;
 use arith_eq_384_constants::{
@@ -26,9 +26,8 @@ fn main() {
 
     // ARITH_384_MOD
 
-    // The chunks of q1*y2 from 2^384 upwards do not fit in the cycle; they must be zero.
-    let arith384_mod_config = EquationConfig { force_extra_clocks_zero: true, ..config.clone() };
-    let mut eq = Equation::new(&arith384_mod_config);
+    let arith_384_mod_config = EquationConfig { force_extra_clocks_zero: true, ..config };
+    let mut eq = Equation::new(&arith_384_mod_config);
     eq.parse(
         "x1*y1+x2-x3-q0*y2-q1*y2*p2_384",
         &[("p2_384", "0x1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")],

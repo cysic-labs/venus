@@ -1,0 +1,80 @@
+#ifndef EXPRESSIONS_GPU_HPP
+#define EXPRESSIONS_GPU_HPP
+#include "expressions_ctx.hpp"
+#include "cuda_utils.cuh"
+#include "cuda_utils.hpp"
+#include "gpu_timer.cuh"
+#include "goldilocks_trace_layout.cuh"
+#include <omp.h>
+
+struct DeviceArguments
+{
+    uint64_t N;
+    uint64_t NExtended;
+    uint64_t nBlocks;
+    uint32_t nStages;
+    uint32_t nCustomCommits;
+    uint32_t bufferCommitSize;
+    
+    uint64_t zi_offset;
+
+    uint64_t *mapOffsets;  //rick: passar a uint32_t
+    uint64_t *mapOffsetsExtended;
+    uint64_t *nextStrides;
+    uint64_t *nextStridesExtended;
+    uint64_t *mapOffsetsCustomFixed;
+    uint64_t *mapOffsetsCustomFixedExtended;
+    uint64_t *mapSectionsN;
+    uint64_t *mapSectionsNCustomFixed;
+
+    // Expressions bin
+    uint8_t *ops;
+    uint16_t *args;
+    Goldilocks::Element *numbers;
+
+    uint8_t *opsConstraints;
+    uint16_t *argsConstraints;
+    Goldilocks::Element *numbersConstraints;
+};
+
+__global__  void computeExpressions_(StepsParams *h_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams, bool constraints);
+__global__  void computeExpression_(StepsParams *h_params, DeviceArguments *d_deviceArgs, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams);
+
+class ExpressionsGPU : public ExpressionsCtx
+{
+public:
+    uint32_t nRowsPack;
+    uint32_t nBlocks;
+    uint64_t bufferCommitSize;
+   
+    DeviceArguments *d_deviceArgs;
+    DeviceArguments h_deviceArgs;
+
+    void *expsLib = nullptr;
+    void *qLaunchFn = nullptr;
+    void *qLaunchStepFn = nullptr;
+    uint64_t qMinScratch = 0;
+    // The row step (log2) the last Q evaluation used. Kept here rather than only returned because a
+    // replayed CUDA graph skips the host code that returns it; the choice is fixed per air.
+    uint32_t qStepLgUsed = 0;
+    // Set once tryLaunchExpsQ's first-call sentinel has proven this air's Q kernel runs.
+    bool qLaunchVerified = false;
+    // Generic expression kernels (exps_generic_* in expressions_codegen.cuh). Null when the library
+    // has none, or when the memory map does not prove the expression scratch dead in stage 2;
+    // the interpreter evaluates them then.
+    void *exprCoveredFn = nullptr;
+    void *exprLaunchFn = nullptr;
+    void *exprPairLaunchFn = nullptr;
+    // The expression scratch those kernels may write: [expsScratchOff, +expsScratchElems) in
+    // elements of aux_trace, i.e. tmp1 up to the end of the buffer, the region Q uses too.
+    uint64_t expsScratchOff = 0;
+    uint64_t expsScratchElems = 0;
+
+    ExpressionsGPU(SetupCtx &setupCtx, uint32_t nRowsPack = 128, uint32_t nBlocks = 4096);
+    ~ExpressionsGPU();
+
+    void calculateExpressions_gpu(StepsParams *d_params, Dest dest, uint64_t domainSize, bool domainExtended, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams, Goldilocks::Element *pinned_exps_params, Goldilocks::Element *pinned_exps_args, uint64_t& countId, TimerGPU &timer, cudaStream_t stream, bool constraints = false);
+    // Returns the log2 row step q was evaluated at (0 = every extended row); computeQ must match it.
+    uint32_t calculateExpressionsQ_gpu(StepsParams *d_params, Dest dest, uint64_t domainSize, bool domainExtended, ExpsArguments *d_expsArgs, DestParamsGPU *d_destParams, Goldilocks::Element *pinned_exps_params, Goldilocks::Element *pinned_exps_args, uint64_t& countId, TimerGPU &timer, cudaStream_t stream, uint32_t qStepLg = 0);
+};
+#endif

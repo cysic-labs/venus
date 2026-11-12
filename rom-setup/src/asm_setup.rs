@@ -4,9 +4,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use zisk_common::{ElfBinaryFromFile, ElfBinaryLike};
-use zisk_core::{is_elf_file, AsmGenerationMethod, Riscv2zisk};
+use zisk_common::ZiskPaths;
+use zisk_core::{is_elf_file, AsmGenerationMethod};
+use zisk_transpiler_common::ZiskTranspiler;
 
+use crate::get_elf_data_hash;
 use crate::get_elf_data_hash_from_path;
 
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
@@ -29,156 +31,172 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn resolve_emulator_asm() -> Result<PathBuf> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+/// Where the `emulator-asm` toolchain used to build ASM binaries comes from.
+#[derive(Clone, Copy, Debug)]
+pub enum EmulatorAsmSource {
+    /// The `emulator-asm` sources found in the current cargo workspace (built
+    /// on demand). Preferred during local development.
+    Workspace,
+    /// The pre-built `emulator-asm` installed by `ziskup`.
+    Installed,
+}
 
+/// Locate the `emulator-asm` toolchain, returning its path and which source it
+/// came from.
+///
+/// Uses the installed copy when `ZISK_USE_INSTALLED` is set; otherwise prefers
+/// the workspace sources (when cargo and both `emulator-asm` and `ziskclib` are
+/// present) and falls back to the installed copy. Errors if neither exists.
+pub fn resolve_emulator_asm() -> Result<(PathBuf, EmulatorAsmSource)> {
+    if std::env::var_os("ZISK_USE_INSTALLED").is_some_and(|v| !v.is_empty()) {
+        let installed_asm_path = ZiskPaths::global().emulator_asm.clone();
+        tracing::debug!(
+            "ZISK_USE_INSTALLED set, using installed emulator-asm at: {}",
+            installed_asm_path.display()
+        );
+        if !installed_asm_path.exists() {
+            anyhow::bail!("emulator-asm directory not found at: {}", installed_asm_path.display());
+        }
+        return Ok((installed_asm_path, EmulatorAsmSource::Installed));
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root =
         if manifest_dir.exists() { find_workspace_root(&manifest_dir) } else { None };
 
     let cargo_available = Command::new("cargo")
         .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false);
 
-    // Check if we can build from workspace (need both cargo and workspace with ziskclib)
-    let can_build_from_workspace = cargo_available
-        && if let Some(ref root) = workspace_root {
-            let candidate = root.join("emulator-asm");
-            let ziskclib_path = root.join("ziskclib");
-            candidate.exists() && ziskclib_path.exists()
-        } else {
-            false
-        };
+    let workspace_choice = workspace_root.as_ref().and_then(|root| {
+        let candidate = root.join("emulator-asm");
+        let ziskclib = root.join("ziskclib");
+        (cargo_available && candidate.exists() && ziskclib.exists()).then_some(candidate)
+    });
 
-    let installed_path = crate::get_default_zisk_path();
-    let installed_asm_path = installed_path.join("zisk/emulator-asm");
-
-    let emulator_asm_path = if can_build_from_workspace {
-        let candidate = workspace_root.unwrap().join("emulator-asm");
-        tracing::debug!("Using emulator-asm from workspace: {}", candidate.display());
-        candidate
+    let (emulator_asm_path, source) = if let Some(path) = workspace_choice {
+        tracing::debug!("Using emulator-asm from workspace: {}", path.display());
+        (path, EmulatorAsmSource::Workspace)
     } else {
-        if !cargo_available {
-            tracing::debug!(
-                "Cargo not available, using installed path: {}",
-                installed_asm_path.display()
-            );
+        let installed_asm_path = ZiskPaths::global().emulator_asm.clone();
+        let reason = if !cargo_available {
+            "cargo not available"
         } else if workspace_root.is_none() {
-            tracing::debug!(
-                "No workspace found, using installed path: {}",
-                installed_asm_path.display()
-            );
+            "no workspace found"
         } else {
-            tracing::debug!(
-                "Workspace missing ziskclib source, using installed path: {}",
-                installed_asm_path.display()
-            );
-        }
-
-        installed_asm_path.clone()
+            "workspace missing emulator-asm or ziskclib source"
+        };
+        tracing::debug!(
+            "Using installed emulator-asm at {} ({reason})",
+            installed_asm_path.display()
+        );
+        (installed_asm_path, EmulatorAsmSource::Installed)
     };
-
-    tracing::info!("Looking for emulator-asm at: {}", emulator_asm_path.display());
 
     if !emulator_asm_path.exists() {
         anyhow::bail!("emulator-asm directory not found at: {}", emulator_asm_path.display());
     }
 
-    let emulator_parent =
-        emulator_asm_path.parent().context("Failed to get parent directory of emulator-asm")?;
-    let ziskclib_path = emulator_parent.join("ziskclib");
+    Ok((emulator_asm_path, source))
+}
 
-    let target_lib_path = if emulator_asm_path == installed_asm_path {
-        // For installed path, look in .zisk/bin/
-        installed_path.join("bin").join("libziskclib.a")
-    } else {
-        // For workspace builds, look in target/release/
-        emulator_parent.join("target/release/libziskclib.a")
+/// Ensure `libziskclib.a` is available for linking the ASM emulator.
+///
+/// For a [`Workspace`](EmulatorAsmSource::Workspace) source this builds
+/// `ziskclib` (and `lib-c` on Linux) via cargo; for an
+/// [`Installed`](EmulatorAsmSource::Installed) source it verifies the pre-built
+/// library is present. Errors if the library is missing after this runs.
+pub fn ensure_ziskclib(emu_dir: &Path, source: EmulatorAsmSource) -> Result<()> {
+    let emulator_parent =
+        emu_dir.parent().context("Failed to get parent directory of emulator-asm")?;
+
+    let target_lib_path = match source {
+        EmulatorAsmSource::Installed => ZiskPaths::global().libziskclib.clone(),
+        EmulatorAsmSource::Workspace => emulator_parent.join("target/release/libziskclib.a"),
     };
 
-    tracing::info!("Looking for ziskclib at: {}", target_lib_path.display());
+    tracing::debug!("Looking for ziskclib at: {}", target_lib_path.display());
 
-    // Only try to build if cargo is available and ziskclib source exists
-    if cargo_available && ziskclib_path.exists() {
-        tracing::debug!("Found ziskclib at: {}", ziskclib_path.display());
-        tracing::debug!("Building ziskclib...");
+    match source {
+        EmulatorAsmSource::Workspace => {
+            tracing::debug!("Building ziskclib...");
 
-        let output = Command::new("cargo")
-            .args(["build", "--release", "-p", "ziskclib"])
-            .current_dir(emulator_parent)
-            .output()
-            .context("Failed to execute cargo build for ziskclib")?;
+            // ziskclib is cross-platform; lib-c's C build only runs on Linux
+            // (its build.rs early-returns elsewhere), so only build it — and only
+            // require its libziskc.a artifact — when targeting Linux.
+            let mut args = vec!["build", "--release", "-p", "ziskclib"];
+            if cfg!(target_os = "linux") {
+                args.extend(["-p", "zisk-lib-c"]);
+            }
+            let output = Command::new("cargo")
+                .args(&args)
+                .current_dir(emulator_parent)
+                .output()
+                .context("Failed to execute cargo build for ziskclib")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            anyhow::bail!("Failed to build ziskclib:\nstdout: {}\nstderr: {}", stdout, stderr);
-        }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                anyhow::bail!("Failed to build ziskclib:\nstdout: {}\nstderr: {}", stdout, stderr);
+            }
 
-        if !target_lib_path.exists() {
-            anyhow::bail!(
-                "ziskclib build succeeded but library not found at: {}",
-                target_lib_path.display()
-            );
-        }
-
-        tracing::debug!("ziskclib built successfully at: {}", target_lib_path.display());
-    } else {
-        if !target_lib_path.exists() {
-            if emulator_asm_path == installed_path {
+            if !target_lib_path.exists() {
                 anyhow::bail!(
-                    "Pre-built libziskclib.a not found at: {}\nPlease ensure zisk is properly installed",
-                    target_lib_path.display()
-                );
-            } else if cargo_available {
-                anyhow::bail!(
-                    "libziskclib.a not found at: {}\nziskclib directory not found at: {}\nCannot build or locate ziskclib library",
-                    target_lib_path.display(),
-                    ziskclib_path.display()
-                );
-            } else {
-                anyhow::bail!(
-                    "libziskclib.a not found at: {}\nCargo not available for building from source\nConsider using the installed version instead",
+                    "ziskclib build succeeded but library not found at: {}",
                     target_lib_path.display()
                 );
             }
+
+            // lib-c's build.rs publishes libziskc.a to target/zisk-libs/ (Linux only;
+            // the emulator-asm Makefile links it via -L../target/zisk-libs). The
+            // `-p lib-c` build above re-runs that script after a `cargo clean`, so
+            // verify the artifact is present.
+            #[cfg(target_os = "linux")]
+            {
+                let ziskc_lib_path = emulator_parent.join("target/zisk-libs/libziskc.a");
+                if !ziskc_lib_path.exists() {
+                    anyhow::bail!(
+                        "lib-c build succeeded but libziskc.a not found at: {}",
+                        ziskc_lib_path.display()
+                    );
+                }
+            }
+
+            tracing::debug!("ziskclib built successfully at: {}", target_lib_path.display());
         }
-        tracing::debug!("Using existing ziskclib at: {}", target_lib_path.display());
+        EmulatorAsmSource::Installed => {
+            if !target_lib_path.exists() {
+                anyhow::bail!(
+                    "Pre-built libziskclib.a not found at: {}\nPlease ensure zisk is properly installed via ziskup",
+                    target_lib_path.display()
+                );
+            }
+            tracing::debug!("Using existing ziskclib at: {}", target_lib_path.display());
+        }
     }
 
-    Ok(emulator_asm_path)
+    Ok(())
 }
 
-/// Whether `c` can be part of a file name handed to `make` without being interpreted by `make`,
-/// which expands `$` references in variable values, or by the shell that runs its recipes.
-fn is_make_safe_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
-}
-
-/// Returns `path` as a string that `make` and its recipe shell take literally.
-fn make_safe_path(path: &Path) -> Result<&str> {
-    path.to_str()
-        .filter(|path| path.chars().all(|c| c == '/' || is_make_safe_char(c)))
-        .with_context(|| {
-            format!("Path {} contains characters that make would interpret", path.display())
-        })
-}
-
-/// Paths of the assembly emulator binaries of an ELF in `output_path`, for the minimal trace, the
-/// ROM histogram and the memory operations, in this order. They are built with `make`, so every
-/// character of the ELF name that `make` could interpret is replaced by `_`.
-pub fn assembly_file_paths(
-    output_path: &Path,
-    elf_name: &str,
-    elf_hash: &str,
-    hints: bool,
-) -> [PathBuf; 3] {
-    let name: String =
-        elf_name.chars().map(|c| if is_make_safe_char(c) { c } else { '_' }).collect();
-    let hints = if hints { "-hints" } else { "" };
-    ["mt", "rh", "mo"]
-        .map(|trace| output_path.join(format!("{name}{hints}-{elf_hash}-{trace}.bin")))
+/// Base filename for a program's ASM artifacts.
+///
+/// Content-addressed by the ELF hash and the hints mode — the same ELF always maps to the same
+/// artifacts regardless of the program name, so a given hash is generated once. The
+/// name says nothing about which `emulator-asm` sources built the binary, so a
+/// change to those sources needs the cache cleared.
+///
+/// The single definition of the base name. The `-mt`/`-rh`/`-mo` suffixes are added
+/// where the files are generated and resolved.
+fn asm_file_base(hash: &str, hints: bool) -> String {
+    if hints {
+        format!("{hash}-hints")
+    } else {
+        hash.to_string()
+    }
 }
 
 /// Get the paths to all assembly binary files for a given ELF and output path
@@ -188,14 +206,24 @@ pub fn get_assembly_file_paths(
     hints: bool,
 ) -> Result<Vec<PathBuf>> {
     let elf_hash = get_elf_data_hash_from_path(elf)?;
+    Ok(get_assembly_file_paths_from_id(&elf_hash, output_path, hints).to_vec())
+}
 
-    let stem = elf
-        .file_stem()
-        .context("Failed to extract file stem from ELF path")?
-        .to_str()
-        .context("Failed to convert ELF file stem to string")?;
-
-    Ok(assembly_file_paths(output_path, stem, &elf_hash, hints).to_vec())
+/// Variant of [`get_assembly_file_paths`] that takes the ELF hash directly
+/// (caller already computed it). Returns `[mt, rh, moh, mol]`: the memory-ops emulator with
+/// values and steps (`moh`) and its light form (`mol`), named apart from a plain `-mo` build's.
+pub fn get_assembly_file_paths_from_id(
+    elf_hash: &str,
+    output_path: &Path,
+    hints: bool,
+) -> [PathBuf; 4] {
+    let base = asm_file_base(elf_hash, hints);
+    [
+        output_path.join(format!("{base}-mt.bin")),
+        output_path.join(format!("{base}-rh.bin")),
+        output_path.join(format!("{base}-moh.bin")),
+        output_path.join(format!("{base}-mol.bin")),
+    ]
 }
 
 /// Check if all assembly binary files exist for a given ELF and output path
@@ -204,72 +232,73 @@ pub fn assembly_files_exist(elf: &Path, output_path: &Path, hints: bool) -> Resu
     Ok(files.iter().all(|f| f.exists()))
 }
 
+/// Generate the ASM binaries for the ELF at `_elf`, resolving the output
+/// directory from `_output_dir` (defaulting to the ZisK cache).
+///
+/// A no-op on macOS, which does not support ASM generation. For the in-memory
+/// variant that takes ELF bytes and an explicit output path, see
+/// [`generate_assembly`].
 pub fn gen_assembly(
-    elf: &Path,
-    output_dir: &Option<PathBuf>,
-    hints: bool,
-    verbose: bool,
-) -> Result<(), anyhow::Error> {
-    gen_assembly_from_elf(&ElfBinaryFromFile::new(elf, hints)?, output_dir, verbose)
-}
-
-/// Generates the assembly setup from an already loaded ELF, so that it is derived from the same
-/// bytes as the rest of the ROM setup.
-pub fn gen_assembly_from_elf(
-    _elf: &impl ElfBinaryLike,
+    _elf: &Path,
     _output_dir: &Option<PathBuf>,
+    _hints: bool,
     _verbose: bool,
 ) -> Result<(), anyhow::Error> {
     // Assembly setup is not needed on macOS due to the lack of support for assembly generation.
     #[cfg(not(target_os = "macos"))]
     {
         let output_path = crate::get_output_path(_output_dir)?;
+        let elf_data =
+            std::fs::read(_elf).with_context(|| format!("Error reading ELF file: {_elf:?}"))?;
         tracing::info!("Computing assembly setup");
-        generate_assembly(
-            _elf.elf(),
-            _elf.name(),
-            output_path.as_path(),
-            _elf.with_hints(),
-            _verbose,
-        )?;
+        generate_assembly(&elf_data, output_path.as_path(), _hints, _verbose)?;
         tracing::info!("Assembly setup generated at {}", output_path.display());
     }
     Ok(())
 }
 
+/// Generate the four ASM binaries — minimal traces (`-mt`), ROM histogram (`-rh`), memory ops
+/// (`-moh`) and light memory ops (`-mol`) — for `elf` into `output_path`.
+///
+/// Resolves and prepares the `emulator-asm` toolchain, transpiles the ELF to
+/// assembly for each trace target, and builds each binary via `make`. `hints`
+/// selects the hints-enabled artifact variant; `verbose` forwards build output.
 pub fn generate_assembly(
     elf: &[u8],
-    elf_name: &str,
     output_path: &Path,
     hints: bool,
     verbose: bool,
 ) -> Result<(), anyhow::Error> {
-    let elf_hash = blake3::hash(elf).to_hex().to_string();
+    let elf_hash = get_elf_data_hash(elf);
 
     if !is_elf_file(elf).context("Error reading ROM file")? {
         anyhow::bail!("ROM file is not a valid ELF file");
     }
 
-    let [bin_mt_file, bin_rh_file, bin_mo_file] =
-        assembly_file_paths(output_path, elf_name, &elf_hash, hints);
+    let base = asm_file_base(&elf_hash, hints);
 
-    // The file names are make-safe by construction, but the output directory is chosen by the user
-    make_safe_path(output_path)?;
+    let bin_mt_file = output_path.join(format!("{base}-mt.bin"));
+    let bin_rh_file = output_path.join(format!("{base}-rh.bin"));
+    let bin_mo_file = output_path.join(format!("{base}-moh.bin"));
+    let bin_mol_file = output_path.join(format!("{base}-mol.bin"));
 
-    let emulator_asm_path = resolve_emulator_asm()?;
+    let (emulator_asm_path, asm_source) = resolve_emulator_asm()?;
+    ensure_ziskclib(&emulator_asm_path, asm_source)?;
 
     let emulator_asm_path =
         emulator_asm_path.to_str().context("Failed to convert emulator-asm path to string")?;
 
-    for (file, gen_method, trace_target) in [
-        (bin_mt_file, AsmGenerationMethod::AsmMinimalTraces, "MT"),
-        (bin_rh_file, AsmGenerationMethod::AsmRomHistogram, "RH"),
-        (bin_mo_file, AsmGenerationMethod::AsmMemOp, "MO"),
+    for (file, gen_method, trace_target, light) in [
+        (bin_mt_file, AsmGenerationMethod::AsmMinimalTraces, "MT", false),
+        (bin_rh_file, AsmGenerationMethod::AsmRomHistogram, "RH", false),
+        (bin_mo_file, AsmGenerationMethod::AsmMemOp, "MO", false),
+        (bin_mol_file, AsmGenerationMethod::AsmMemOpLight, "MO", true),
     ] {
         let asm_file = file.with_extension("asm");
         // Convert the ELF file to Zisk format and generates an assembly file
-        let rv2zk = Riscv2zisk::new(elf);
-        let asm_file_str = make_safe_path(&asm_file)?;
+        let rv2zk = ZiskTranspiler::new(elf);
+        let asm_file_str =
+            asm_file.to_str().context("Failed to convert asm_file path to string")?;
         rv2zk
             .runfile(asm_file_str.to_string(), gen_method, false, false, hints)
             .map_err(|e| anyhow::anyhow!("Error converting ELF to assembly: {}", e))?;
@@ -287,12 +316,13 @@ pub fn generate_assembly(
             anyhow::bail!("'make clean' failed with exit code: {:?}", status.code());
         }
 
-        let out_file_str = make_safe_path(&file)?;
+        let out_file_str = file.to_str().context("Failed to convert output file path to string")?;
 
         let status = Command::new("make")
             .arg(format!("EMU_PATH={}", asm_file_str))
             .arg(format!("OUT_PATH={}", out_file_str))
             .arg(format!("TRACE_TARGET={trace_target}"))
+            .arg(format!("MOPS_LIGHT={}", if light { 1 } else { 0 }))
             .current_dir(emulator_asm_path)
             .stdout(if verbose { Stdio::inherit() } else { Stdio::null() })
             .stderr(if verbose { Stdio::inherit() } else { Stdio::null() })

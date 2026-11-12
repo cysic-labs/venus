@@ -1,0 +1,23 @@
+[package]
+name = "zisk-cluster-api"
+description = "gRPC API layer for the ZisK distributed proving network"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+documentation = { workspace = true }
+categories = { workspace = true }
+publish = false
+
+[dependencies]
+zisk-cluster-common = { workspace = true }
+
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }

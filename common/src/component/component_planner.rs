@@ -80,6 +80,7 @@ impl CollectSkipper {
         rows
     }
 
+    /// Determines whether the current instruction should be skipped, and if so, applies the skipping logic.
     #[inline(always)]
     pub fn should_skip_query(&mut self, apply: bool) -> bool {
         if !self.skipping {
@@ -266,9 +267,13 @@ impl CollectCounter {
     pub fn remaining_to_collect(&self) -> u32 {
         self.collect_count.saturating_sub(self.collected)
     }
+
+    /// Returns the total number of elements that have been collected so far.
     pub fn count(&self) -> u32 {
         self.collect_count
     }
+
+    /// Returns the total number of elements that should be skipped at the beginning of the collection process.
     pub fn skip(&self) -> u32 {
         self.initial_skip
     }
@@ -306,8 +311,14 @@ pub struct Plan {
     pub check_point: CheckPoint,
 
     /// Additional metadata associated with the plan.
-    pub meta: Option<Box<dyn Any>>,
+    ///
+    /// Bounded to `Send + Sync` so that `Plan` (and everything that embeds it, e.g.
+    /// [`InstanceCtx`](crate::InstanceCtx)) auto-derives `Send`/`Sync` instead of
+    /// relying on a hand-written `unsafe impl` whose invariant the type system could
+    /// not enforce.
+    pub meta: Option<Box<dyn Any + Send + Sync>>,
 
+    /// The global instance ID associated with this plan.
     pub global_id: Option<usize>,
 }
 
@@ -320,7 +331,6 @@ impl Plan {
     /// * `segment_id` - The segment ID (if any).
     /// * `instance_type` - The type of instance.
     /// * `check_point` - The checkpoint type.
-    /// * `collect_info` - Optional input collection information.
     /// * `meta` - Optional additional metadata.
     ///
     /// # Returns
@@ -331,18 +341,19 @@ impl Plan {
         segment_id: Option<SegmentId>,
         instance_type: InstanceType,
         check_point: CheckPoint,
-        meta: Option<Box<dyn Any>>,
+        meta: Option<Box<dyn Any + Send + Sync>>,
     ) -> Self {
         Plan { airgroup_id, air_id, segment_id, instance_type, check_point, meta, global_id: None }
     }
 
+    /// Sets the global instance ID for the plan.
+    ///
+    /// # Arguments
+    /// * `global_id` - The global instance ID to be set.
     pub fn set_global_id(&mut self, global_id: usize) {
         self.global_id = Some(global_id);
     }
 }
-
-unsafe impl Send for Plan {}
-unsafe impl Sync for Plan {}
 
 /// The `Planner` trait defines the interface for creating execution plans.
 ///

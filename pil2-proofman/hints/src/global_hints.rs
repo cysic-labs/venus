@@ -1,8 +1,5 @@
-use fields::{PrimeField64, CubicExtensionField};
-use crate::{
-    checked_hint_field_value_count, HintCol, HintFieldInfoC, HintFieldInfo, HintFieldOutput, HintFieldValue,
-    HintFieldValues, HintFieldValuesVec,
-};
+use proofman_fields::{PrimeField64, CubicExtensionField};
+use crate::{HintCol, HintFieldInfoC, HintFieldInfo, HintFieldOutput, HintFieldValue, HintFieldValues, HintFieldValuesVec};
 use proofman_starks_lib_c::{
     get_hint_field_global_constraints_values_c, get_hint_field_global_constraints_sizes_c,
     get_hint_field_global_constraints_c, set_hint_field_global_constraints_c,
@@ -12,6 +9,32 @@ use std::ffi::c_void;
 use std::collections::HashMap;
 
 use proofman_common::{skip_prover_instance, ProofCtx, SetupCtx, ProofmanResult, ProofmanError};
+
+/// Packed (1 limb for stage 1, else 3) -> expanded (3 limbs per entry).
+pub fn expand_airgroup_values<F: PrimeField64>(
+    sctx: &SetupCtx<F>,
+    airgroup_id: usize,
+    air_id: usize,
+    packed: &[F],
+) -> ProofmanResult<Vec<F>> {
+    if packed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let setup = sctx.get_setup(airgroup_id, air_id)?;
+    let map = setup.stark_info.airgroupvalues_map.as_deref().unwrap_or(&[]);
+    let mut expanded = Vec::with_capacity(map.len() * 3);
+    let mut pos = 0;
+    for entry in map {
+        if entry.stage == 1 {
+            expanded.extend_from_slice(&[packed[pos], F::ZERO, F::ZERO]);
+            pos += 1;
+        } else {
+            expanded.extend_from_slice(&packed[pos..pos + 3]);
+            pos += 3;
+        }
+    }
+    Ok(expanded)
+}
 
 pub fn aggregate_airgroupvals<F: PrimeField64>(
     pctx: &ProofCtx<F>,
@@ -31,25 +54,9 @@ pub fn aggregate_airgroupvals<F: PrimeField64>(
     }
 
     let my_instances = pctx.dctx_get_process_instances();
-    if airgroup_values.len() < my_instances.len() {
-        return Err(ProofmanError::InvalidHints(format!(
-            "airgroup values outer length too short: expected at least {}, got {}",
-            my_instances.len(),
-            airgroup_values.len()
-        )));
-    }
 
     for (my_instance_idx, instance_id) in my_instances.iter().enumerate() {
         let (airgroup_id, _) = pctx.dctx_get_instance_info(*instance_id)?;
-        let expected_instance_len = pctx.global_info.agg_types[airgroup_id].len() * FIELD_EXTENSION;
-        if !airgroup_values[my_instance_idx].is_empty()
-            && airgroup_values[my_instance_idx].len() < expected_instance_len
-        {
-            return Err(ProofmanError::InvalidHints(format!(
-                "airgroup values for local instance {my_instance_idx} are too short: expected at least {expected_instance_len}, got {}",
-                airgroup_values[my_instance_idx].len()
-            )));
-        }
         for (idx, agg_type) in pctx.global_info.agg_types[airgroup_id].iter().enumerate() {
             let mut acc = CubicExtensionField {
                 value: [
@@ -103,13 +110,9 @@ fn get_global_hint_f<F: PrimeField64>(
     hint_field_name: &str,
     print_expression: bool,
 ) -> ProofmanResult<Vec<HintFieldInfo<F>>> {
-    let n_hints_values = checked_hint_field_value_count(get_hint_field_global_constraints_values_c(
-        sctx.get_global_bin(),
-        hint_id,
-        hint_field_name,
-    ))?;
+    let n_hints_values = get_hint_field_global_constraints_values_c(sctx.get_global_bin(), hint_id, hint_field_name);
 
-    let mut hint_field_values = vec![HintFieldInfo::default(); n_hints_values];
+    let mut hint_field_values = vec![HintFieldInfo::default(); n_hints_values as usize];
 
     let mut hint_field_values_c = HintFieldInfoC::from_hint_field_info_vec(&mut hint_field_values);
     let mut hint_field_values_c_ptr = hint_field_values_c.as_mut_ptr() as *mut c_void;
@@ -126,7 +129,7 @@ fn get_global_hint_f<F: PrimeField64>(
     HintFieldInfoC::sync_to_hint_field_info(&mut hint_field_values, &hint_field_values_c);
 
     for hint_field_value in hint_field_values.iter_mut() {
-        hint_field_value.init_buffers()?;
+        hint_field_value.init_buffers();
     }
 
     hint_field_values_c = HintFieldInfoC::from_hint_field_info_vec(&mut hint_field_values);
@@ -142,8 +145,12 @@ fn get_global_hint_f<F: PrimeField64>(
             if !skip_prover_instance(pctx, *instance_id)?.0 {
                 let (airgroup_id, air_id) = pctx.dctx_get_instance_info(*instance_id)?;
                 let air_instance_id = pctx.dctx_find_air_instance_id(*instance_id)?;
-                airgroup_values_air_instances[my_instance_idx] =
-                    pctx.get_air_instance_airgroup_values(airgroup_id, air_id, air_instance_id)?;
+                airgroup_values_air_instances[my_instance_idx] = expand_airgroup_values(
+                    sctx,
+                    airgroup_id,
+                    air_id,
+                    &pctx.get_air_instance_airgroup_values(airgroup_id, air_id, air_instance_id)?,
+                )?;
             }
         }
         let mut airgroupvals = aggregate_airgroupvals(pctx, &airgroup_values_air_instances)?;

@@ -1,0 +1,434 @@
+// TODO: The long path can be speed up by using Montgomery multiplication but knowing that divisions are "free"
+// For ref: https://www.microsoft.com/en-us/research/wp-content/uploads/1996/01/j37acmon.pdf
+
+#[cfg(zisk_guest)]
+use crate::alloc_extern::vec;
+#[cfg(zisk_guest)]
+use crate::alloc_extern::vec::Vec;
+
+use crate::zisklib::fcall_bin_decomp;
+
+use super::super::utils::slice_from_ffi;
+
+use super::{
+    mul_and_reduce_long, mulmod_short, rem_long_init, rem_short_init, square_and_reduce_long,
+    LongScratch, U256,
+};
+
+/// Modular exponentiation of three large numbers
+///
+/// It assumes that modulus > 0 and len(base),len(exp),len(modulus) > 0
+pub fn modexp(
+    base: &[U256],
+    exp: &[u64],
+    modulus: &[U256],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> Vec<U256> {
+    let len_b = base.len();
+    let len_e = exp.len();
+    let len_m = modulus.len();
+    #[cfg(debug_assertions)]
+    {
+        assert_ne!(len_b, 0, "Base must have at least one limb");
+        assert_ne!(len_e, 0, "Exponent must have at least one limb");
+        assert_ne!(len_m, 0, "Modulus must have at least one limb");
+
+        if len_b > 1 {
+            assert!(!base[len_b - 1].is_zero(), "Base must not have leading zeros");
+        }
+        if len_e > 1 {
+            assert_ne!(exp.last().unwrap(), &0, "Exponent must not have leading zeros");
+        }
+        if len_m > 1 {
+            assert!(!modulus[len_m - 1].is_zero(), "Modulus must not have leading zeros");
+        } else {
+            assert!(!modulus[0].is_zero(), "Modulus must not be zero");
+        }
+    }
+
+    // If modulus == 0, return zeros
+    if len_m == 1 && modulus[0].is_zero() {
+        return vec![U256::ZERO];
+    }
+
+    // If modulus == 1, then base^exp (mod 1) is always 0
+    if len_m == 1 && modulus[0].is_one() {
+        return vec![U256::ZERO];
+    }
+
+    // If exp == 0, then base^0 (mod modulus) is 1
+    if len_e == 1 && exp[0] == 0 {
+        return vec![U256::ONE];
+    }
+
+    if len_b == 1 {
+        // If base == 0, then 0^exp (mod modulus) is 0
+        if base[0].is_zero() {
+            return vec![U256::ZERO];
+        }
+
+        // If base == 1, then 1^exp (mod modulus) is 1
+        if base[0].is_one() {
+            return vec![U256::ONE];
+        }
+    }
+
+    // We can assume from now on that base,modulus > 1 and exp > 0
+    if len_m == 1 {
+        modexp_short(
+            base,
+            exp,
+            &modulus[0],
+            #[cfg(feature = "hints")]
+            hints,
+        )
+    } else {
+        modexp_long(
+            base,
+            exp,
+            modulus,
+            #[cfg(feature = "hints")]
+            hints,
+        )
+    }
+}
+
+/// Short modexp when modulus fits in a single U256
+fn modexp_short(
+    base: &[U256],
+    exp: &[u64],
+    modulus: &U256,
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> Vec<U256> {
+    let len_e = exp.len();
+
+    // Compute base = base (mod modulus)
+    let base = rem_short_init(
+        base,
+        modulus,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    // Hint exponent bits
+    let (len, bits) = fcall_bin_decomp(
+        exp,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    // The leading bit must be 1 for a non-zero exponent
+    assert!(len > 0 && bits[0] == 1, "Exponent must be non-zero");
+    assert!(len <= 64 * len_e, "Exponent bit length out of range");
+    assert!(bits.len() == len, "Bit decomposition length mismatch");
+
+    // Recompose the exponent from the (untrusted) bit hint and bind it to exp
+    let mut rec_exp = vec![0u64; len_e];
+    for (bit_idx, &bit) in bits.iter().enumerate() {
+        if bit == 1 {
+            let bits_pos = len - 1 - bit_idx;
+            rec_exp[bits_pos / 64] |= 1u64 << (bits_pos % 64);
+        }
+    }
+    assert_eq!(rec_exp[..], *exp, "Exponent decomposition mismatch");
+
+    // Initialize out = base
+    let mut out = base;
+    for &bit in bits.iter().skip(1) {
+        if out.is_zero() {
+            // Exit with out = 0 if the result is already zero,
+            // since it will remain zero regardless of the remaining bits
+            break;
+        }
+
+        // Compute out = out² (mod modulus)
+        out = mulmod_short(
+            &out,
+            &out,
+            modulus,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+
+        if bit == 1 {
+            // Compute out = (out * base) (mod modulus)
+            out = mulmod_short(
+                &out,
+                &base,
+                modulus,
+                #[cfg(feature = "hints")]
+                hints,
+            );
+        }
+    }
+
+    vec![out]
+}
+
+/// Long modexp when modulus requires multiple U256 limbs
+fn modexp_long(
+    base: &[U256],
+    exp: &[u64],
+    modulus: &[U256],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> Vec<U256> {
+    let len_e = exp.len();
+    let len_m = modulus.len();
+
+    // Compute base = base (mod modulus)
+    let base = rem_long_init(
+        base,
+        modulus,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    // Hint exponent bits
+    let (len, bits) = fcall_bin_decomp(
+        exp,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    // The leading bit must be 1 for a non-zero exponent
+    assert!(len > 0 && bits[0] == 1, "Exponent must be non-zero");
+    assert!(len <= 64 * len_e, "Exponent bit length out of range");
+    assert!(bits.len() == len, "Bit decomposition length mismatch");
+
+    // Recompose the exponent from the (untrusted) bit hint and bind it to exp
+    let mut rec_exp = vec![0u64; len_e];
+    for (bit_idx, &bit) in bits.iter().enumerate() {
+        if bit == 1 {
+            let bits_pos = len - 1 - bit_idx;
+            rec_exp[bits_pos / 64] |= 1u64 << (bits_pos % 64);
+        }
+    }
+    assert_eq!(rec_exp[..], *exp, "Exponent decomposition mismatch");
+
+    // Scratch space
+    let mut scratch = LongScratch::new(len_m);
+
+    // The guest heap is a bump allocator that never frees, so the loop must not allocate:
+    // each step writes its result into `next`, which then swaps places with `out`
+    let mut out = vec![U256::ZERO; len_m];
+    let mut next = vec![U256::ZERO; len_m];
+
+    // Initialize out = base
+    let mut out_len = base.len();
+    out[..out_len].copy_from_slice(&base);
+    for &bit in bits.iter().skip(1) {
+        if out_len == 1 && out[0].is_zero() {
+            // Exit with out = 0 if the result is already zero,
+            // since it will remain zero regardless of the remaining bits
+            break;
+        }
+
+        // Compute out = out² (mod modulus)
+        out_len = square_and_reduce_long(
+            &out[..out_len],
+            modulus,
+            &mut scratch,
+            &mut next,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+        core::mem::swap(&mut out, &mut next);
+
+        if bit == 1 {
+            // Compute out = (out * base) (mod modulus)
+            out_len = mul_and_reduce_long(
+                &out[..out_len],
+                &base,
+                modulus,
+                &mut scratch,
+                &mut next,
+                #[cfg(feature = "hints")]
+                hints,
+            );
+            core::mem::swap(&mut out, &mut next);
+        }
+    }
+
+    out.truncate(out_len);
+    out
+}
+
+// ==================== C FFI Functions ====================
+
+/// Compute modular exponentiation from big-endian byte arrays
+///
+/// ### Safety
+///
+/// The caller must ensure that:
+/// - `base_ptr` points to an array of `base_len` bytes (big-endian)
+/// - `exp_ptr` points to an array of `exp_len` bytes (big-endian)
+/// - `modulus_ptr` points to an array of `modulus_len` bytes (big-endian)
+/// - `result_ptr` points to an array of at least `modulus_len` bytes
+///
+/// Returns the number of bytes written to `result_ptr` (always equals `modulus_len`, zero-padded)
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+#[inline]
+pub(crate) unsafe fn modexp_bytes_c(
+    base_ptr: *const u8,
+    base_len: usize,
+    exp_ptr: *const u8,
+    exp_len: usize,
+    modulus_ptr: *const u8,
+    modulus_len: usize,
+    result_ptr: *mut u8,
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> usize {
+    // An empty modulus leaves nothing to write, so `result_ptr` need not be valid.
+    if modulus_len == 0 {
+        return 0;
+    }
+
+    let base_bytes = slice_from_ffi(base_ptr, base_len);
+    let exp_bytes = slice_from_ffi(exp_ptr, exp_len);
+    let modulus_bytes = slice_from_ffi(modulus_ptr, modulus_len);
+
+    // Convert from big-endian bytes to little-endian u64/U256 arrays
+    let base_u256 = bytes_be_to_u256_le(base_bytes);
+    let exp_u64 = bytes_be_to_u64_le(exp_bytes);
+    let modulus_u256 = bytes_be_to_u256_le(modulus_bytes);
+
+    let result_u256 = modexp(
+        &base_u256,
+        &exp_u64,
+        &modulus_u256,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    // Convert result back to big-endian bytes with proper length
+    let result = core::slice::from_raw_parts_mut(result_ptr, modulus_len);
+    u256_le_to_bytes_be(&result_u256, result);
+
+    modulus_len
+}
+
+/// Modular exponentiation over little-endian u64 arrays.
+///
+/// # Safety
+/// - `base_ptr` points to `base_len` u64s (little-endian), `base_len` non-zero
+/// - `exp_ptr` points to `exp_len` u64s (little-endian), `exp_len` non-zero
+/// - `modulus_ptr` points to `modulus_len` u64s (little-endian)
+/// - `result_ptr` points to a writable region of at least `modulus_len` u64s
+///
+/// Writes exactly `modulus_len` u64s, zero-filled above the significant words of the
+/// result, and returns that count; `modulus_len == 0` writes nothing and returns zero.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "hints"), no_mangle)]
+#[cfg_attr(feature = "hints", export_name = "hints_modexp_u64_c")]
+pub unsafe extern "C" fn modexp_u64_c(
+    base_ptr: *const u64,
+    base_len: usize,
+    exp_ptr: *const u64,
+    exp_len: usize,
+    modulus_ptr: *const u64,
+    modulus_len: usize,
+    result_ptr: *mut u64,
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> usize {
+    // No modulus means nothing to compute and nothing to write, so `result_ptr`
+    // need not be valid and must not be dereferenced.
+    if modulus_len == 0 {
+        return 0;
+    }
+
+    let base_flat = slice_from_ffi(base_ptr, base_len);
+    let exp = slice_from_ffi(exp_ptr, exp_len);
+    let modulus_flat = slice_from_ffi(modulus_ptr, modulus_len);
+
+    // Pad the operands up to whole U256 limbs for the arithmetic. These are local
+    // buffers: the caller's lengths keep their meaning, so the rounding cannot leak
+    // into the size of the output region below.
+    let mut base_padded = vec![0u64; base_len.next_multiple_of(4)];
+    let mut modulus_padded = vec![0u64; modulus_len.next_multiple_of(4)];
+
+    base_padded[..base_len].copy_from_slice(base_flat);
+    modulus_padded[..modulus_len].copy_from_slice(modulus_flat);
+
+    let base = U256::flat_to_slice(&base_padded);
+    let modulus = U256::flat_to_slice(&modulus_padded);
+
+    let result_u256 = modexp(
+        base,
+        exp,
+        modulus,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+    let result_slice = U256::slice_to_flat(&result_u256);
+
+    // Write exactly the `modulus_len` u64s the caller declared. `result_slice` is
+    // padded up to whole U256 limbs and so may be longer, but the result is smaller
+    // than the modulus, so every word from index `modulus_len` on is zero and
+    // dropping them is lossless. It may also be shorter, since `modexp` returns a
+    // single limb for its early exits, so the high words are zero-filled.
+    let result = core::slice::from_raw_parts_mut(result_ptr, modulus_len);
+    let written = result_slice.len().min(modulus_len);
+    result[..written].copy_from_slice(&result_slice[..written]);
+    result[written..].fill(0);
+
+    modulus_len
+}
+
+/// Convert big-endian bytes to little-endian u64 array
+#[allow(dead_code)]
+fn bytes_be_to_u64_le(bytes: &[u8]) -> Vec<u64> {
+    if bytes.is_empty() {
+        return vec![0];
+    }
+
+    // Skip leading zeros but keep at least one limb
+    let first_nonzero = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len() - 1);
+    let bytes = &bytes[first_nonzero..];
+
+    if bytes.is_empty() {
+        return vec![0];
+    }
+
+    // Process bytes into u64 limbs
+    let num_limbs = bytes.len().div_ceil(8);
+    let mut result = vec![0u64; num_limbs];
+    for (i, &byte) in bytes.iter().rev().enumerate() {
+        let limb_idx = i / 8;
+        let byte_idx = i % 8;
+        result[limb_idx] |= (byte as u64) << (byte_idx * 8);
+    }
+
+    result
+}
+
+/// Convert big-endian bytes to little-endian U256 array
+#[allow(dead_code)]
+fn bytes_be_to_u256_le(bytes: &[u8]) -> Vec<U256> {
+    let u64_le = bytes_be_to_u64_le(bytes);
+
+    // Pad to multiple of 4 u64s
+    let padded_len = u64_le.len().next_multiple_of(4);
+    let mut padded = vec![0u64; padded_len];
+    padded[..u64_le.len()].copy_from_slice(&u64_le);
+
+    U256::flat_to_slice(&padded).to_vec()
+}
+
+/// Convert little-endian U256 array to big-endian bytes
+#[allow(dead_code)]
+fn u256_le_to_bytes_be(limbs: &[U256], output: &mut [u8]) {
+    let flat = U256::slice_to_flat(limbs);
+    let out_len = output.len();
+    output.fill(0);
+
+    for (i, &limb) in flat.iter().enumerate() {
+        for j in 0..8 {
+            let byte_val = ((limb >> (j * 8)) & 0xFF) as u8;
+            let pos_from_end = i * 8 + j;
+            if pos_from_end < out_len {
+                output[out_len - 1 - pos_from_end] = byte_val;
+            }
+        }
+    }
+}

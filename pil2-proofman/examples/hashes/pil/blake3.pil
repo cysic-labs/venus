@@ -1,0 +1,90 @@
+require "std_constants.pil"
+require "std_lookup.pil"
+
+require "circuits/common.pil"
+require "circuits/blake3.pil"
+
+// Precompile in charge of performing the BLAKE3 permutation
+// For reference: https://www.ietf.org/archive/id/draft-aumasson-blake3-00.html or https://github.com/BLAKE3-team/BLAKE3
+//
+// The permutation itself lives in circuits/blake3.pil, shared with the recursion airs. This air
+// is the standalone shape: the whole trace is BLAKE3, so every lane's selector is 1.
+
+airtemplate Blake3(const int N = 2**20, const int LANES = 1) {
+    const int CLOCKS_PER_G = 1;
+    const int NUM_G_PER_ROUND = 8;
+    const int NUM_ROUNDS = 7;
+    const int CLOCKS_PER_ROUND = CLOCKS_PER_G * NUM_G_PER_ROUND;
+    // air-scoped: clock_set/clock_map in circuits/common.pil reach for air.CLK and air.CLOCKS.
+    const int air.CLOCKS = CLOCKS_PER_ROUND * NUM_ROUNDS;
+
+    // Calculate usable capacity
+    const int NUM_NON_USABLE_ROWS = N % CLOCKS;
+    const int NUM_OPS = (N - NUM_NON_USABLE_ROWS) / CLOCKS;
+    if (NUM_OPS < 1) {
+        error(`N must be at least ${CLOCKS} to fit the Blake3 arithmetization, but received N=${N}`);
+    }
+
+    if (LANES < 1) {
+        error(`LANES must be at least 1, but received LANES=${LANES}`);
+    }
+
+    // Each row carries LANES independent G evaluations, so one CLOCKS-row cycle
+    // completes LANES Blake3 permutations instead of one.
+    const int NUM_BLAKE3 = NUM_OPS * LANES;
+    println(`The total number of Blake3's with N = 2^${log2(N)} and LANES = ${LANES} is ${NUM_BLAKE3}`);
+
+    // Argument identifiers
+    const int RANGE_CHECKER_ID = 250;
+    const int BLAKE3_MSG_ID = 500;
+    const int BLAKE3_TABLE_ID = 1000;
+
+    // Base clock: 1 at first cycle row, 0 elsewhere within each cycle
+    if (NUM_NON_USABLE_ROWS == 0) {
+        col fixed air.CLK_0 = [[1, 0:(CLOCKS-1)]:NUM_OPS];
+    } else {
+        col fixed air.CLK_0 = [[1, 0:(CLOCKS-1)]:NUM_OPS, 0...];
+    }
+
+    // Clock selectors for each row in the cycle
+    const expr air.CLK[CLOCKS];
+    for (int i = 0; i < CLOCKS; i++) {
+        air.CLK[i] = (i)'CLK_0;
+    }
+
+    col fixed BLOCK_ID;
+    #pragma transpile
+    for (int i = 0; i < N; i++) {
+        BLOCK_ID[i] = i / CLOCKS;
+    }
+
+    // BIND_BOUNDARY = 0: the whole trace is BLAKE3 and there are no boundary cells to tie down, so
+    // none of the boundary arguments below is read. They are still passed because PIL2 rejects an
+    // uninitialised `const expr` array argument -- but unlike the out-parameters this replaced,
+    // nothing reads them, so a zero here cannot become a constraint.
+    const expr noA[18];
+    const expr noDInv[LANES];
+    const expr noVbPpTHi[LANES][3];
+    const expr noOutBytes[LANES][4];
+    const expr noCvBytes[LANES][4];
+    const expr noClk[CLOCKS];
+    for (int i = 0; i < 18; i++) { noA[i] = 0; }
+    for (int i = 0; i < CLOCKS; i++) { noClk[i] = 0; }
+    for (int l = 0; l < LANES; l++) {
+        noDInv[l] = 0;
+        for (int j = 0; j < 3; j++) { noVbPpTHi[l][j] = 0; }
+        for (int i = 0; i < 4; i++) {
+            noOutBytes[l][i] = 0;
+            noCvBytes[l][i] = 0;
+        }
+    }
+
+    // VC_AT_IV = 0: this air runs the permutation over an ARBITRARY initial state, so st[8..12] is
+    // not the IV and vc has to be a committed column.
+    blake3Lanes(LANES, BLOCK_ID, 1, BLAKE3_TABLE_ID, RANGE_CHECKER_ID, BLAKE3_MSG_ID,
+                0, 0, noA, noDInv, noVbPpTHi, noOutBytes, noCvBytes,
+                0, 0, 0, 0, 0, noClk, CLOCKS);
+
+    // After the lanes: mul_table and mul_range are the trace's last two columns.
+    blake3Tables(N, BLAKE3_TABLE_ID, RANGE_CHECKER_ID);
+}

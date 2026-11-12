@@ -197,6 +197,10 @@ private function init_proof_containers_sum(const int name, const int surname, co
             int proves = 0;
             int assumes = 0;
 
+            // Argument that owns this opid, set by its first consumer.
+            // -1 means no consumer has claimed it yet.
+            int owner_name = -1;
+
             // Track AIR names for diagram
             string proves_airs[ARRAY_SIZE];
             string assumes_airs[ARRAY_SIZE];
@@ -235,6 +239,30 @@ private function initial_checks_sum(const int name, const int surname, const int
             const string surname = get_piop_surname(surname);
             const int expected_exprs = proof.std.gsum.`id${opids[i]}`.expressions;
             error(`The number of expressions of ${name} ${surname} #${opids[i]} must be ${expected_exprs} but was ${exprs_num}`);
+        }
+
+        // Overlap check: range checks allocate their opids internally, hidden from the user.
+        // If a user-chosen opid (e.g. for a lookup or permutation) collides with one of those
+        // hidden opids, their channels silently merge, which is unsound. Other arguments
+        // (lookups, permutations, ...) are free to share an opid with each other, so the check
+        // only fires when a range check sits on one side of the conflict and a different
+        // argument on the other.
+        //
+        // Only consumers claim ownership: proves merely feed the channel
+        // and may legitimately be emitted under a generic name.
+        // Direct/Default updates are wildcards that inject terms into an existing channel,
+        // so they neither claim nor conflict with ownership. Isolated PIOPs opt out.
+        if ((type == SUM_TYPE_ASSUMES || type == SUM_TYPE_FREE) &&
+            name != PIOP_NAME_DIRECT && name != PIOP_NAME_DEFAULT &&
+            surname != PIOP_SURNAME_ISOLATED) {
+            const int owner = proof.std.gsum.`id${opids[i]}`.owner_name;
+            if (owner == -1) {
+                proof.std.gsum.`id${opids[i]}`.owner_name = name;
+            } else if (owner != name && (owner == PIOP_NAME_RANGE_CHECK || name == PIOP_NAME_RANGE_CHECK)) {
+                const string owner_str = get_piop_name(owner);
+                const string name_str = get_piop_name(name);
+                error(`opid #${opids[i]} on the sum bus is shared by a range check and a different argument ('${owner_str}' and '${name_str}'). Range checks allocate their opids internally; assign a distinct opid to avoid the collision.`);
+            }
         }
 
         // The same opid can appear in different airs, so we keep track of the number of proves and assumes
@@ -358,16 +386,18 @@ private function piop_gsum_air() {
     }
 
     // The first num_non_reduced terms are not reduced
+    // Fractions are folded one at a time, n/d + s/f = (n*f + s*d) / (d*f): the same polynomials as
+    // the expanded sum of cross products, in 3 extension multiplications per term instead of ~k.
     expr direct_num = 0;
     expr direct_den = 1;
     for (int i = 0; i < num_non_reduced; i++) {
-        direct_den *= (gsum_e[i] + std_gamma);
-
-        expr _tmp = gsum_s[i];
-        for (int j = 0; j < num_non_reduced; j++) {
-            if (j != i) _tmp *= (gsum_e[j] + std_gamma);
+        if (i == 0) {
+            direct_num = gsum_s[i];
+            direct_den = gsum_e[i] + std_gamma;
+        } else {
+            direct_num = direct_num * (gsum_e[i] + std_gamma) + gsum_s[i] * direct_den;
+            direct_den *= (gsum_e[i] + std_gamma);
         }
-        direct_num += _tmp;
     }
 
     // The rest of the terms are grouped in clusters of appropriate size
@@ -468,28 +498,16 @@ private function piop_gsum_air() {
         // ---------- + ------ + ------ = -------------------------------------------------------------------
         // direct_den     f1      f2                          direct_den * f1 * f2
 
-        // First, multiply existing direct_num/direct_den by all new denominators
-        const expr original_den = direct_den;
+        // Folded in one term at a time, as the non-reduced terms above
         for (int i = 0; i < direct_terms_count; i++) {
             const int idx = term_idx[direct_terms[i]];
-            direct_num *= (gsum_e[idx] + std_gamma);
-            direct_den *= (gsum_e[idx] + std_gamma);
-        }
-
-        // Now add each new term's contribution
-        for (int i = 0; i < direct_terms_count; i++) {
-            const int idx = term_idx[direct_terms[i]];
-            expr _tmp = gsum_s[idx];
-            // Multiply by all previous denominators (from non_reduced terms)
-            _tmp *= original_den;
-            // Multiply by all other direct terms' denominators
-            for (int j = 0; j < direct_terms_count; j++) {
-                if (j != i) {
-                    const int other_idx = term_idx[direct_terms[j]];
-                    _tmp *= (gsum_e[other_idx] + std_gamma);
-                }
+            if (num_non_reduced == 0 && i == 0) {
+                direct_num = gsum_s[idx];
+                direct_den = gsum_e[idx] + std_gamma;
+            } else {
+                direct_num = direct_num * (gsum_e[idx] + std_gamma) + gsum_s[idx] * direct_den;
+                direct_den *= (gsum_e[idx] + std_gamma);
             }
-            direct_num += _tmp;
         }
 
         // Collect remaining terms that need intermediates
@@ -569,21 +587,14 @@ private function piop_gsum_air() {
             } else {
                 // Multiple terms - create clustered intermediate
                 col witness stage(2) im_cluster;
-                expr prods = 1;
-                expr sums = 0;
-
-                for (int j = 0; j < cluster_count; j++) {
+                // Folded as the direct fraction is: sums / prods = sum_j s_j / (e_j + gamma)
+                const int idx0 = remaining_terms[cluster[0]];
+                expr prods = gsum_e[idx0] + std_gamma;
+                expr sums = gsum_s[idx0];
+                for (int j = 1; j < cluster_count; j++) {
                     const int idx = remaining_terms[cluster[j]];
+                    sums = sums * (gsum_e[idx] + std_gamma) + gsum_s[idx] * prods;
                     prods *= (gsum_e[idx] + std_gamma);
-
-                    expr _partial = gsum_s[idx];
-                    for (int k = 0; k < cluster_count; k++) {
-                        if (k != j) {
-                            const int other_idx = remaining_terms[cluster[k]];
-                            _partial *= (gsum_e[other_idx] + std_gamma);
-                        }
-                    }
-                    sums += _partial;
                 }
 
                 @im_col{reference: im_cluster, numerator: sums, denominator: prods};

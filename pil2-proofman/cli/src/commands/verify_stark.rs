@@ -1,11 +1,11 @@
 // extern crate env_logger;
 use clap::Parser;
-use proofman_verifier::{verify_vadcop_final_compressed, verify_vadcop_final};
-use proofman_common::initialize_logger;
-use std::fs::File;
-use std::io::Read;
+use proofman_verifier::VadcopFinalProof;
+use proofman_common::{hash_family, initialize_logger, StarkInfo};
+use proofman_fields::{Goldilocks, PrimeField64};
+use proofman::{expand_compressed_proof, verify_proof};
 use colored::Colorize;
-use proofman_util::{timer_start_info, timer_stop_and_log_info, VadcopFinalProof};
+use proofman_util::{timer_start_info, timer_stop_and_log_info};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -31,16 +31,61 @@ impl VerifyStark {
 
         let proof = VadcopFinalProof::load(&self.proof)?;
 
-        let mut verkey_file = File::open(&self.verkey)?;
-        let mut vk = Vec::new();
-        verkey_file.read_to_end(&mut vk)?;
+        // The verifier is read from the proving key rather than compiled in: the
+        // aggregator binds the application's publics into q_verify, so a verifier
+        // generated for one application rejects proofs another's correct prover
+        // produced. The setup artifacts sit next to the verkey, as
+        // <base>.starkinfo.json / <base>.verifier.bin / <base>.verkey.json.
+        let base = self
+            .verkey
+            .strip_suffix(".verkey.bin")
+            .or_else(|| self.verkey.strip_suffix(".verkey.json"))
+            .ok_or_else(|| {
+                format!(
+                    "--verkey must be a <name>.verkey.bin or <name>.verkey.json from a provingKey, got {}",
+                    self.verkey
+                )
+            })?
+            .to_string();
+
+        // The C++ Merkle/transcript code reads the hash family from a process-global that only
+        // `GlobalInfo::load` sets, and this command never loads a proving key -- leaving it unset
+        // makes `get_hash_family` throw out of the FFI before a single proof is verified. The
+        // family the prover used travels with the proof; a wrong one here only costs a failed
+        // verification, never a false accept, because it changes the transcript and the roots.
+        if !hash_family::is_known_family(&proof.hash) {
+            return Err(
+                format!("proof declares hash family {:?}; known: {:?}", proof.hash, hash_family::FAMILIES).into()
+            );
+        }
+        proofman_starks_lib_c::set_hash_family_c(&proof.hash);
+
+        // The C++ verifier reads the flat proof.
+        let stark_info: Option<StarkInfo> = match proof.compressed {
+            true => Some(serde_json::from_str(&std::fs::read_to_string(base.clone() + ".starkinfo.json")?)?),
+            false => None,
+        };
+        let expanded;
+        let body: &[u64] = match &stark_info {
+            Some(stark_info) if stark_info.multiproof => {
+                let verkey: Vec<u64> = serde_json::from_str(&std::fs::read_to_string(base.clone() + ".verkey.json")?)?;
+                expanded = expand_compressed_proof(&proof.proof_with_publics(), stark_info, &verkey, &proof.hash)?;
+                &expanded[1 + proof.public_values.len()..]
+            }
+            _ => &proof.proof,
+        };
 
         timer_start_info!(VERIFY_STARK);
-        let valid = if proof.compressed {
-            verify_vadcop_final_compressed(&proof, &vk)
-        } else {
-            verify_vadcop_final(&proof, &vk)
-        };
+        let publics: Vec<Goldilocks> = proof.public_values.iter().map(|&x| Goldilocks::from_u64(x)).collect();
+        let valid = verify_proof::<Goldilocks>(
+            body,
+            base.clone() + ".starkinfo.json",
+            base.clone() + ".verifier.bin",
+            base + ".verkey.json",
+            Some(publics),
+            None,
+            None,
+        );
         timer_stop_and_log_info!(VERIFY_STARK);
 
         if !valid {
@@ -48,12 +93,6 @@ impl VerifyStark {
             Err("Stark proof was not verified".into())
         } else {
             tracing::info!("    {}", "\u{2713} Stark proof was verified".bright_green().bold());
-            let publics = proof
-                .get_public_bytes()
-                .chunks_exact(8)
-                .map(|public| u64::from_le_bytes(public.try_into().unwrap()))
-                .collect::<Vec<_>>();
-            tracing::info!("    publics: {publics:?}");
             Ok(())
         }
     }

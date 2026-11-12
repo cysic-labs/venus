@@ -1,0 +1,704 @@
+//! Type Conversions for Distributed Proving System gRPC API
+//!
+//! This module provides bidirectional type conversions between the domain types used in the
+//! distributed proving system (`distributed-common`) and the generated gRPC protobuf types.
+//!
+//! ## Purpose
+//!
+//! The gRPC protobuf compiler generates Rust types that don't always match our internal domain
+//! model. All conversions implement the `From` and/or `Into` traits for idiomatic Rust usage.
+
+use crate::{
+    contribution_params::InputSource, coordinator_message::Payload, execute_task_request,
+    execute_task_response, AggParams, AggregationProgramSpec, Challenges,
+    ComputeCapacity as GrpcComputeCapacity, ContributionParams, CoordinatorMessage, CostPerType,
+    ExecuteTaskRequest, ExecuteTaskResponse, Heartbeat, HeartbeatAck, InputStreamData,
+    JobCancelled, NormalizeCircuit, ProgramVk, ProofList, ProofStark, ProveParams,
+    ReconnectionAction, ReconnectionDirective, RunAggregateProofs, SetupAggregationProgram,
+    SetupProgram, Shutdown, SnarkProtocol as GrpcSnarkProtocol, StreamData, StreamPayload,
+    StreamType, TaskType, WorkerError, WorkerExit, WorkerReconnectRequest, WorkerRegisterRequest,
+    WorkerRegisterResponse, WorkerTelemetry,
+};
+use zisk_cluster_common::*;
+
+impl From<StatsCostPerType> for CostPerType {
+    fn from(cost: StatsCostPerType) -> Self {
+        CostPerType {
+            main: cost.main_cost,
+            opcode: cost.opcode_cost,
+            memory: cost.memory_cost,
+            precompile: cost.precompile_cost,
+            tables: cost.tables_cost,
+            other: cost.other_cost,
+        }
+    }
+}
+
+impl From<CostPerType> for StatsCostPerType {
+    fn from(cost: CostPerType) -> Self {
+        StatsCostPerType {
+            main_cost: cost.main,
+            opcode_cost: cost.opcode,
+            memory_cost: cost.memory,
+            precompile_cost: cost.precompile,
+            tables_cost: cost.tables,
+            other_cost: cost.other,
+        }
+    }
+}
+
+impl From<ComputeCapacity> for GrpcComputeCapacity {
+    fn from(capacity: ComputeCapacity) -> Self {
+        GrpcComputeCapacity { compute_units: capacity.compute_units }
+    }
+}
+
+impl From<GrpcComputeCapacity> for ComputeCapacity {
+    fn from(grpc_capacity: GrpcComputeCapacity) -> Self {
+        ComputeCapacity::from(grpc_capacity.compute_units)
+    }
+}
+
+impl From<AggProofData> for ProofStark {
+    fn from(row_data: AggProofData) -> Self {
+        ProofStark {
+            airgroup_id: row_data.airgroup_id,
+            values: row_data.values,
+            worker_indexes: row_data.worker_indexes,
+        }
+    }
+}
+
+impl From<ProofStark> for AggProofData {
+    fn from(grpc_row_data: ProofStark) -> Self {
+        AggProofData {
+            airgroup_id: grpc_row_data.airgroup_id,
+            values: grpc_row_data.values,
+            worker_indexes: grpc_row_data.worker_indexes,
+        }
+    }
+}
+
+impl From<Option<SnarkProtocol>> for GrpcSnarkProtocol {
+    fn from(protocol: Option<SnarkProtocol>) -> Self {
+        match protocol {
+            None => GrpcSnarkProtocol::None,
+            Some(SnarkProtocol::Plonk) => GrpcSnarkProtocol::Plonk,
+            Some(SnarkProtocol::Pilfflonk) => GrpcSnarkProtocol::Pilfflonk,
+        }
+    }
+}
+
+/// The SNARK protocol a worker reports. A value this build does not know, of a newer worker, is
+/// a protocol the coordinator cannot ask for: as no SNARK proving key.
+fn snark_protocol_from_proto(value: i32) -> Option<SnarkProtocol> {
+    match GrpcSnarkProtocol::try_from(value) {
+        Ok(GrpcSnarkProtocol::Plonk) => Some(SnarkProtocol::Plonk),
+        Ok(GrpcSnarkProtocol::Pilfflonk) => Some(SnarkProtocol::Pilfflonk),
+        Ok(GrpcSnarkProtocol::None) | Err(_) => None,
+    }
+}
+
+impl From<WorkerRegisterRequest> for WorkerRegisterRequestDto {
+    fn from(req: WorkerRegisterRequest) -> Self {
+        WorkerRegisterRequestDto {
+            worker_id: req.worker_id.into(),
+            compute_capacity: ComputeCapacity::from(req.compute_capacity.unwrap()),
+            aggregation_arity: req.aggregation_arity,
+            snark_protocol: snark_protocol_from_proto(req.snark_protocol),
+            previous_exit: req.previous_exit.map(Into::into),
+        }
+    }
+}
+
+impl From<WorkerExit> for WorkerExitDto {
+    fn from(exit: WorkerExit) -> Self {
+        WorkerExitDto {
+            reason: exit.reason,
+            location: exit.location,
+            at_unix_seconds: exit.at_unix_seconds,
+            rank: exit.rank,
+        }
+    }
+}
+
+impl From<WorkerReconnectRequest> for WorkerReconnectRequestDto {
+    fn from(req: WorkerReconnectRequest) -> Self {
+        WorkerReconnectRequestDto {
+            worker_id: req.worker_id.into(),
+            compute_capacity: ComputeCapacity::from(req.compute_capacity.unwrap()),
+            last_known_job_id: req.last_known_job_id.map(JobId::from),
+            aggregation_arity: req.aggregation_arity,
+            snark_protocol: snark_protocol_from_proto(req.snark_protocol),
+        }
+    }
+}
+
+impl From<CoordinatorMessageDto> for CoordinatorMessage {
+    fn from(dto: CoordinatorMessageDto) -> Self {
+        match dto {
+            CoordinatorMessageDto::Heartbeat(hb) => {
+                CoordinatorMessage { payload: Some(Payload::Heartbeat(hb.into())) }
+            }
+            CoordinatorMessageDto::Shutdown(shutdown) => {
+                CoordinatorMessage { payload: Some(Payload::Shutdown(shutdown.into())) }
+            }
+            CoordinatorMessageDto::WorkerRegisterResponse(resp) => {
+                CoordinatorMessage { payload: Some(Payload::RegisterResponse(resp.into())) }
+            }
+            CoordinatorMessageDto::ExecuteTaskRequest(req) => {
+                CoordinatorMessage { payload: Some(Payload::ExecuteTask(req.into())) }
+            }
+            CoordinatorMessageDto::JobCancelled(cancel) => {
+                CoordinatorMessage { payload: Some(Payload::JobCancelled(cancel.into())) }
+            }
+            CoordinatorMessageDto::StreamData(data) => {
+                CoordinatorMessage { payload: Some(Payload::StreamData(data.into())) }
+            }
+            CoordinatorMessageDto::SetupProgram(dto) => CoordinatorMessage {
+                payload: Some(Payload::SetupProgram(SetupProgram {
+                    job_id: dto.job_id,
+                    elf_bytes: dto.elf_bytes,
+                    hash_id: dto.hash_id,
+                    program_name: dto.program_name,
+                    with_hints: dto.with_hints,
+                    emulator_only: dto.emulator_only,
+                })),
+            },
+            CoordinatorMessageDto::InputStreamData(dto) => {
+                CoordinatorMessage { payload: Some(Payload::InputStreamData(dto.into())) }
+            }
+            CoordinatorMessageDto::SetupAggregationProgram(dto) => {
+                CoordinatorMessage { payload: Some(Payload::SetupAggregationProgram(dto.into())) }
+            }
+            CoordinatorMessageDto::RunAggregateProofs(dto) => {
+                CoordinatorMessage { payload: Some(Payload::RunAggregateProofs(dto.into())) }
+            }
+        }
+    }
+}
+
+impl From<AggregationProgramSpecDto> for AggregationProgramSpec {
+    fn from(dto: AggregationProgramSpecDto) -> Self {
+        AggregationProgramSpec {
+            normalize: dto.normalize.map(|n| NormalizeCircuit { body: n.body }),
+            aggregate_publics_body: dto.aggregate_publics_body,
+            n_free: dto.n_free,
+            n_publics_agg: dto.n_publics_agg,
+            program_vks: dto
+                .program_vks
+                .into_iter()
+                .map(|vk| ProgramVk { limbs: vk.to_vec() })
+                .collect(),
+        }
+    }
+}
+
+impl From<AggregationProgramSpec> for AggregationProgramSpecDto {
+    fn from(spec: AggregationProgramSpec) -> Self {
+        AggregationProgramSpecDto {
+            normalize: spec.normalize.map(|n| NormalizeCircuitDto { body: n.body }),
+            aggregate_publics_body: spec.aggregate_publics_body,
+            n_free: spec.n_free,
+            n_publics_agg: spec.n_publics_agg,
+            program_vks: spec.program_vks.into_iter().map(program_vk_from_proto).collect(),
+        }
+    }
+}
+
+/// A `ProgramVk` off the wire must carry exactly 4 limbs; pad/truncate
+/// defensively so a malformed spec can't panic. A wrong length changes the
+/// derived `recurser_id`, which the worker's id check rejects.
+fn program_vk_from_proto(vk: ProgramVk) -> [String; 4] {
+    let mut limbs = vk.limbs;
+    limbs.resize(4, String::from("0"));
+    [limbs[0].clone(), limbs[1].clone(), limbs[2].clone(), limbs[3].clone()]
+}
+
+impl From<SetupAggregationProgramDto> for SetupAggregationProgram {
+    fn from(dto: SetupAggregationProgramDto) -> Self {
+        SetupAggregationProgram {
+            job_id: dto.job_id,
+            recurser_id: dto.recurser_id,
+            spec: Some(dto.spec.into()),
+        }
+    }
+}
+
+impl From<RunAggregateProofsDto> for RunAggregateProofs {
+    fn from(dto: RunAggregateProofsDto) -> Self {
+        RunAggregateProofs {
+            job_id: dto.job_id,
+            recurser_id: dto.recurser_id,
+            proof_a: dto.proof_a,
+            proof_b: dto.proof_b,
+            free_inputs_a: dto.free_inputs_a,
+            free_inputs_b: dto.free_inputs_b,
+            root_c_recurser_agg: dto.root_c_recurser_agg.map(|l| l.to_vec()).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<InputStreamDataDto> for InputStreamData {
+    fn from(dto: InputStreamDataDto) -> Self {
+        InputStreamData { job_id: dto.job_id.as_string(), payload: dto.payload }
+    }
+}
+
+impl From<HeartbeatDto> for Heartbeat {
+    fn from(dto: HeartbeatDto) -> Self {
+        Heartbeat {
+            timestamp: Some(prost_types::Timestamp {
+                seconds: dto.timestamp.timestamp(),
+                nanos: dto.timestamp.timestamp_subsec_nanos() as i32,
+            }),
+        }
+    }
+}
+
+impl From<ShutdownDto> for Shutdown {
+    fn from(dto: ShutdownDto) -> Self {
+        Shutdown { reason: dto.reason, grace_period_seconds: dto.grace_period_seconds }
+    }
+}
+
+impl From<WorkerRegisterResponseDto> for WorkerRegisterResponse {
+    fn from(dto: WorkerRegisterResponseDto) -> Self {
+        WorkerRegisterResponse {
+            worker_id: dto.worker_id.as_string(),
+            accepted: dto.accepted,
+            message: dto.message,
+            registered_at: Some(prost_types::Timestamp {
+                seconds: dto.registered_at.timestamp(),
+                nanos: dto.registered_at.timestamp_subsec_nanos() as i32,
+            }),
+            directive: None,
+            setup_program: None,
+        }
+    }
+}
+
+impl From<SetupProgramDto> for SetupProgram {
+    fn from(dto: SetupProgramDto) -> Self {
+        SetupProgram {
+            job_id: dto.job_id,
+            elf_bytes: dto.elf_bytes,
+            hash_id: dto.hash_id,
+            program_name: dto.program_name,
+            with_hints: dto.with_hints,
+            emulator_only: dto.emulator_only,
+        }
+    }
+}
+
+impl From<ReconnectionDirectiveDto> for ReconnectionDirective {
+    fn from(dto: ReconnectionDirectiveDto) -> Self {
+        match dto {
+            ReconnectionDirectiveDto::Idle => {
+                ReconnectionDirective { action: ReconnectionAction::Idle as i32 }
+            }
+            ReconnectionDirectiveDto::CancelStaleJob => {
+                ReconnectionDirective { action: ReconnectionAction::CancelStaleJob as i32 }
+            }
+            ReconnectionDirectiveDto::KeepComputing => {
+                ReconnectionDirective { action: ReconnectionAction::KeepComputing as i32 }
+            }
+        }
+    }
+}
+
+impl From<JobCancelledDto> for JobCancelled {
+    fn from(dto: JobCancelledDto) -> Self {
+        JobCancelled { job_id: dto.job_id.as_string(), reason: dto.reason }
+    }
+}
+
+impl From<ExecuteTaskRequestDto> for ExecuteTaskRequest {
+    fn from(dto: ExecuteTaskRequestDto) -> Self {
+        let (params, task_type) = match dto.params {
+            ExecuteTaskRequestTypeDto::ContributionParams(cp) => (
+                execute_task_request::Params::ContributionParams(cp.into()),
+                TaskType::PartialContribution,
+            ),
+            ExecuteTaskRequestTypeDto::ProveParams(pp) => {
+                (execute_task_request::Params::ProveParams(pp.into()), TaskType::Prove)
+            }
+            ExecuteTaskRequestTypeDto::AggParams(ap) => {
+                (execute_task_request::Params::AggParams(ap.into()), TaskType::Aggregate)
+            }
+            ExecuteTaskRequestTypeDto::ExecutionParams(ep) => {
+                (execute_task_request::Params::ExecutionParams(ep.into()), TaskType::Execution)
+            }
+            ExecuteTaskRequestTypeDto::WrapParams(wp) => (
+                execute_task_request::Params::WrapParams(crate::WrapParams {
+                    proof_data: wp.proof_data,
+                    proof_dest: wp.proof_dest,
+                }),
+                TaskType::Wrap,
+            ),
+        };
+
+        ExecuteTaskRequest {
+            worker_id: dto.worker_id.into(),
+            job_id: dto.job_id.into(),
+            task_type: task_type as i32,
+            params: Some(params),
+            // Deprecated on both sides; the coordinator leaves it empty.
+            #[allow(deprecated)]
+            metadata: dto.metadata.unwrap_or_default().into_iter().collect(),
+        }
+    }
+}
+
+impl From<ContributionParamsDto> for ContributionParams {
+    fn from(dto: ContributionParamsDto) -> Self {
+        let input_source = match dto.input_source {
+            InputSourceDto::InputPath(inputs_path) => Some(InputSource::InputPath(inputs_path)),
+            InputSourceDto::InputData(data) => Some(InputSource::InputData(data)),
+            InputSourceDto::InputNull => None,
+        };
+
+        let (hints_path, hints_stream, hints_data) = match dto.hints_source {
+            HintsSourceDto::HintsPath(hints_path) => (Some(hints_path), false, None),
+            HintsSourceDto::HintsData(data) => (None, false, Some(data)),
+            HintsSourceDto::HintsStream(hints_path) => (Some(hints_path), true, None),
+            HintsSourceDto::HintsNull => (None, false, None),
+        };
+
+        ContributionParams {
+            data_id: dto.data_id.as_string(),
+            hash_id: dto.hash_id,
+            input_source,
+            hints_path,
+            hints_stream,
+            hints_data,
+            rank_id: dto.rank_id,
+            total_workers: dto.total_workers,
+            worker_allocation: dto.worker_allocation,
+            job_compute_units: dto.job_compute_units.compute_units,
+            random_seed: dto.random_seed.as_bytes().to_vec(),
+        }
+    }
+}
+
+impl From<ProveParamsDto> for ProveParams {
+    fn from(dto: ProveParamsDto) -> Self {
+        let challenges: Vec<Challenges> = dto.challenges.into_iter().map(|c| c.into()).collect();
+
+        ProveParams { challenges }
+    }
+}
+
+impl From<ChallengesDto> for Challenges {
+    fn from(dto: ChallengesDto) -> Self {
+        Challenges {
+            worker_index: dto.worker_index,
+            airgroup_id: dto.airgroup_id,
+            challenge: dto.challenge,
+        }
+    }
+}
+
+impl From<AggParamsDto> for AggParams {
+    fn from(dto: AggParamsDto) -> Self {
+        let agg_proofs: Vec<ProofStark> =
+            dto.agg_proofs.into_iter().map(|proof| proof.into()).collect();
+
+        AggParams {
+            agg_proofs: Some(ProofList { proofs: agg_proofs }),
+            last_proof: dto.last_proof,
+            final_proof: dto.final_proof,
+            proof_type: i32::from(dto.proof_type),
+            keep_resident: dto.keep_resident,
+            reset_state: dto.reset_state,
+        }
+    }
+}
+
+fn proof_list_to_dto(proof_list: ProofList) -> Vec<ProofStarkDto> {
+    proof_list
+        .proofs
+        .into_iter()
+        .map(|p| ProofStarkDto {
+            worker_indexes: p.worker_indexes,
+            airgroup_id: p.airgroup_id,
+            values: p.values,
+        })
+        .collect()
+}
+
+impl From<ProofStarkDto> for ProofStark {
+    fn from(dto: ProofStarkDto) -> Self {
+        ProofStark {
+            worker_indexes: dto.worker_indexes,
+            airgroup_id: dto.airgroup_id,
+            values: dto.values,
+        }
+    }
+}
+
+impl From<ExecuteTaskResponse> for ExecuteTaskResponseDto {
+    fn from(response: ExecuteTaskResponse) -> Self {
+        let result_data = match response.result_data {
+            Some(execute_task_response::ResultData::Challenges(challenges_list)) => {
+                let challenges: Vec<ChallengesDto> = challenges_list
+                    .challenges
+                    .into_iter()
+                    .map(|c| ChallengesDto {
+                        worker_index: c.worker_index,
+                        airgroup_id: c.airgroup_id,
+                        challenge: c.challenge,
+                    })
+                    .collect();
+                let witness_info = challenges_list.witness_info.unwrap();
+                let witness_info = WitnessInfoDto {
+                    witness_time: witness_info.witness_time,
+                    publics: witness_info.publics,
+                    proof_values: witness_info.proof_values,
+                    summary_info: witness_info.summary_info,
+                    total_instances: witness_info.total_instances,
+                };
+                let exec_time = challenges_list.zisk_execution_time.unwrap();
+                let zisk_executor_time = ZiskExecutorTimeDto {
+                    task_received_time: exec_time.task_received_time,
+                    total_duration: exec_time.total_duration,
+                    execution_duration: exec_time.execution_duration,
+                    count_and_plan_duration: exec_time.count_and_plan_duration,
+                    count_and_plan_mo_duration: exec_time.count_and_plan_mo_duration,
+                    asm_execution_duration: exec_time.asm_execution_duration.map(|asm_info| {
+                        AsmExecutionInfoDto { time: asm_info.time, mhz: asm_info.mhz }
+                    }),
+                };
+
+                Some(ExecuteTaskResponseResultDataDto::Challenges(ContributionsResultDataDto {
+                    witness_info,
+                    challenges,
+                    zisk_executor_time,
+                    cost_per_type: challenges_list
+                        .cost_per_type
+                        .map(Into::into)
+                        .unwrap_or_default(),
+                }))
+            }
+            Some(execute_task_response::ResultData::Execution(exec_data)) => {
+                let zisk_execution_time = exec_data.zisk_execution_time.unwrap();
+                let publics = exec_data.witness_info.map(|wi| wi.publics).unwrap_or_default();
+
+                Some(ExecuteTaskResponseResultDataDto::Execution(ExecutionResultDataDto {
+                    instances: exec_data.instances,
+                    executed_steps: exec_data.executed_steps,
+                    publics,
+                    zisk_executor_time: ZiskExecutorTimeDto {
+                        task_received_time: zisk_execution_time.task_received_time,
+                        total_duration: zisk_execution_time.total_duration,
+                        execution_duration: zisk_execution_time.execution_duration,
+                        count_and_plan_duration: zisk_execution_time.count_and_plan_duration,
+                        count_and_plan_mo_duration: zisk_execution_time.count_and_plan_mo_duration,
+                        asm_execution_duration: zisk_execution_time.asm_execution_duration.map(
+                            |asm_info| AsmExecutionInfoDto {
+                                time: asm_info.time,
+                                mhz: asm_info.mhz,
+                            },
+                        ),
+                    },
+                    cost_per_type: exec_data.cost_per_type.map(Into::into).unwrap_or_default(),
+                    plan: exec_data
+                        .plan
+                        .into_iter()
+                        .map(|p| AirInstanceCount {
+                            airgroup_id: p.airgroup_id as usize,
+                            air_id: p.air_id as usize,
+                            count: p.count,
+                        })
+                        .collect(),
+                }))
+            }
+            Some(execute_task_response::ResultData::Proofs(proof_list)) => {
+                Some(ExecuteTaskResponseResultDataDto::Proofs(proof_list_to_dto(proof_list)))
+            }
+            Some(execute_task_response::ResultData::PartialAggProofs(proof_list)) => Some(
+                ExecuteTaskResponseResultDataDto::PartialAggProofs(proof_list_to_dto(proof_list)),
+            ),
+            Some(execute_task_response::ResultData::FinalProof(final_proof)) => {
+                Some(ExecuteTaskResponseResultDataDto::FinalProof(FinalProofDto {
+                    proof_data: final_proof.proof_data,
+                    executed_steps: final_proof.executed_steps,
+                    instances: final_proof.instances,
+                }))
+            }
+            Some(execute_task_response::ResultData::WrapResult(wrap_result)) => {
+                Some(ExecuteTaskResponseResultDataDto::WrapResult(WrapResultDto {
+                    proof_data: wrap_result.proof_data,
+                }))
+            }
+            None => None,
+        };
+
+        ExecuteTaskResponseDto {
+            job_id: JobId::from(response.job_id),
+            worker_id: WorkerId::from(response.worker_id),
+            success: response.success,
+            error_message: if response.error_message.is_empty() {
+                None
+            } else {
+                Some(response.error_message)
+            },
+            result_data,
+            worker_in_recovery: response.worker_in_recovery,
+        }
+    }
+}
+
+impl From<HeartbeatAck> for HeartbeatAckDto {
+    fn from(message: HeartbeatAck) -> Self {
+        HeartbeatAckDto {
+            worker_id: WorkerId::from(message.worker_id),
+            telemetry: message.telemetry.map(Into::into),
+        }
+    }
+}
+
+impl From<WorkerTelemetry> for WorkerTelemetryDto {
+    fn from(t: WorkerTelemetry) -> Self {
+        WorkerTelemetryDto {
+            uptime_seconds: t.uptime_seconds,
+            start_to_registration_seconds: t.start_to_registration_seconds,
+            start_to_ready_seconds: t.start_to_ready_seconds,
+            processes: t
+                .processes
+                .into_iter()
+                .map(|p| ProcessMemoryDto {
+                    role: p.role,
+                    rss_bytes: p.rss_bytes,
+                    anon_bytes: p.anon_bytes,
+                    file_bytes: p.file_bytes,
+                    shmem_bytes: p.shmem_bytes,
+                })
+                .collect(),
+            shared_memory: t
+                .shared_memory
+                .into_iter()
+                .map(|m| SharedMemoryDto {
+                    kind: m.kind,
+                    owner_alive: m.owner_alive,
+                    bytes: m.bytes,
+                    segments: m.segments,
+                })
+                .collect(),
+            cgroup: t.cgroup.map(|c| CgroupUsageDto {
+                memory_current_bytes: c.memory_current_bytes,
+                memory_peak_bytes: c.memory_peak_bytes,
+                anon_bytes: c.anon_bytes,
+                file_bytes: c.file_bytes,
+                shmem_bytes: c.shmem_bytes,
+                cpu_seconds: c.cpu_seconds,
+            }),
+        }
+    }
+}
+
+impl From<StreamMessageKind> for StreamType {
+    fn from(dto: StreamMessageKind) -> StreamType {
+        match dto {
+            StreamMessageKind::Start => StreamType::Start,
+            StreamMessageKind::Data => StreamType::Data,
+            StreamMessageKind::End => StreamType::End,
+        }
+    }
+}
+
+impl From<StreamType> for StreamMessageKind {
+    fn from(stream_type: StreamType) -> StreamMessageKind {
+        match stream_type {
+            StreamType::Start => StreamMessageKind::Start,
+            StreamType::Data => StreamMessageKind::Data,
+            StreamType::End => StreamMessageKind::End,
+        }
+    }
+}
+
+impl From<StreamDataDto> for StreamData {
+    fn from(dto: StreamDataDto) -> Self {
+        StreamData {
+            job_id: dto.job_id.as_string(),
+            stream_type: StreamType::from(dto.stream_type) as i32,
+            payload: dto.stream_payload.map(Into::into),
+        }
+    }
+}
+
+impl From<StreamData> for StreamDataDto {
+    fn from(data: StreamData) -> Self {
+        StreamDataDto {
+            job_id: JobId::from(data.job_id),
+            stream_type: StreamType::try_from(data.stream_type)
+                .map(StreamMessageKind::from)
+                .unwrap_or(StreamMessageKind::Data),
+            stream_payload: data.payload.map(Into::into),
+        }
+    }
+}
+
+impl From<StreamPayloadDto> for StreamPayload {
+    fn from(dto: StreamPayloadDto) -> Self {
+        StreamPayload { sequence_number: dto.sequence_number, payload: dto.payload }
+    }
+}
+
+impl From<StreamPayload> for StreamPayloadDto {
+    fn from(payload: StreamPayload) -> Self {
+        StreamPayloadDto { sequence_number: payload.sequence_number, payload: payload.payload }
+    }
+}
+
+impl From<WorkerError> for WorkerErrorDto {
+    fn from(error: WorkerError) -> Self {
+        WorkerErrorDto {
+            worker_id: WorkerId::from(error.worker_id),
+            job_id: JobId::from(error.job_id),
+            error_message: error.error_message,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROTOCOLS: [Option<SnarkProtocol>; 3] =
+        [None, Some(SnarkProtocol::Plonk), Some(SnarkProtocol::Pilfflonk)];
+
+    fn register(snark_protocol: i32) -> WorkerRegisterRequest {
+        WorkerRegisterRequest {
+            worker_id: "w0".to_string(),
+            compute_capacity: Some(GrpcComputeCapacity { compute_units: 1 }),
+            aggregation_arity: 2,
+            previous_exit: None,
+            snark_protocol,
+        }
+    }
+
+    fn reconnect(snark_protocol: i32) -> WorkerReconnectRequest {
+        WorkerReconnectRequest {
+            worker_id: "w0".to_string(),
+            compute_capacity: Some(GrpcComputeCapacity { compute_units: 1 }),
+            last_known_job_id: None,
+            aggregation_arity: 2,
+            snark_protocol,
+        }
+    }
+
+    #[test]
+    fn a_worker_snark_protocol_round_trips() {
+        for protocol in PROTOCOLS {
+            let wire = i32::from(GrpcSnarkProtocol::from(protocol));
+            assert_eq!(WorkerRegisterRequestDto::from(register(wire)).snark_protocol, protocol);
+            assert_eq!(WorkerReconnectRequestDto::from(reconnect(wire)).snark_protocol, protocol);
+        }
+    }
+
+    #[test]
+    fn an_unknown_snark_protocol_is_none() {
+        assert_eq!(WorkerRegisterRequestDto::from(register(99)).snark_protocol, None);
+    }
+}

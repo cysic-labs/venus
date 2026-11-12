@@ -1,6 +1,10 @@
 use std::ptr;
-use fields::PrimeField64;
+use std::sync::{Arc, Mutex};
+use proofman_fields::PrimeField64;
 use proofman_util::create_buffer_fast;
+
+/// reaching into pctx.air_instances.
+pub type ReclaimSlot<F> = Arc<Mutex<Option<Vec<F>>>>;
 
 use crate::{
     trace::{Trace, Values},
@@ -26,6 +30,8 @@ pub struct StepsParams {
     pub p_const_pols: *mut u8,
     pub p_const_tree: *mut u8,
     pub custom_commits_fixed: *mut u8,
+    /// Ops staged in `trace` for a GPU-witness air (`trace` holds kernel inputs); 0 otherwise.
+    pub witness_ops: u64,
 }
 
 impl From<&StepsParams> for *mut u8 {
@@ -49,6 +55,7 @@ impl Default for StepsParams {
             p_const_pols: ptr::null_mut(),
             p_const_tree: ptr::null_mut(),
             custom_commits_fixed: ptr::null_mut(),
+            witness_ops: 0,
         }
     }
 }
@@ -69,6 +76,7 @@ pub struct TraceInfo<F> {
     airgroup_values: Option<Vec<F>>,
     shared_buffer: bool,
     is_packed: bool,
+    reclaim_slot: Option<ReclaimSlot<F>>,
 }
 
 impl<F> TraceInfo<F> {
@@ -92,7 +100,13 @@ impl<F> TraceInfo<F> {
             airgroup_values: None,
             shared_buffer,
             is_packed,
+            reclaim_slot: None,
         }
+    }
+
+    pub fn with_reclaim_slot(mut self, slot: ReclaimSlot<F>) -> Self {
+        self.reclaim_slot = Some(slot);
+        self
     }
 
     pub fn is_packed(mut self, is_packed: bool) -> Self {
@@ -154,16 +168,21 @@ pub struct AirInstance<F> {
     pub num_rows: usize,
     pub n_cols_trace: usize,
     pub trace: Vec<F>,
-    pub aux_trace: Vec<F>,
+    pub aux_trace: Arc<Vec<F>>,
     pub custom_commits_fixed: Vec<F>,
     pub airgroup_values: Vec<F>,
     pub airvalues: Vec<F>,
     pub challenges: Vec<F>,
     pub evals: Vec<F>,
-    pub fixed: Vec<F>,
+    pub fixed: Arc<Vec<F>>,
     pub shared_buffer: bool,
     pub is_packed: bool,
     pub stream_id: u64,
+    pub reclaim_slot: Option<ReclaimSlot<F>>,
+    /// Names the resident trace, so a stale reclaim candidate cannot free its replacement.
+    pub trace_generation: u64,
+    /// Ops staged in `trace` for a GPU-witness air (`trace` holds kernel inputs); 0 otherwise.
+    pub gpu_witness_ops: u64,
 }
 
 impl<F: PrimeField64> AirInstance<F> {
@@ -182,16 +201,19 @@ impl<F: PrimeField64> AirInstance<F> {
             num_rows,
             n_cols_trace: trace_info.n_cols,
             trace: trace_info.trace,
-            aux_trace: Vec::new(),
+            aux_trace: Arc::new(Vec::new()),
             custom_commits_fixed: Vec::new(),
             airgroup_values,
             airvalues,
             evals: Vec::new(),
             challenges: Vec::new(),
             shared_buffer: trace_info.shared_buffer,
-            fixed: Vec::new(),
+            fixed: Arc::new(Vec::new()),
             is_packed: trace_info.is_packed,
             stream_id: 0,
+            reclaim_slot: trace_info.reclaim_slot,
+            trace_generation: 0,
+            gpu_witness_ops: 0,
         }
     }
 
@@ -219,6 +241,10 @@ impl<F: PrimeField64> AirInstance<F> {
 
         if let Some(air_values) = traces.air_values.as_mut() {
             trace_info = trace_info.with_air_values(air_values.get_buffer());
+        }
+
+        if let Some(airgroup_values) = traces.airgroup_values.as_mut() {
+            trace_info = trace_info.with_airgroup_values(airgroup_values.get_buffer());
         }
 
         AirInstance::new(trace_info)
@@ -290,16 +316,15 @@ impl<F: PrimeField64> AirInstance<F> {
         self.challenges = vec![F::ZERO; size];
     }
 
-    pub fn init_aux_trace(&mut self, size: usize) {
-        // SAFETY: the prover fills the auxiliary trace before reading it.
-        self.aux_trace = unsafe { create_buffer_fast(size) };
+    pub fn init_aux_trace(&mut self, buf: Arc<Vec<F>>) {
+        self.aux_trace = buf;
     }
 
     pub fn init_airvalues(&mut self, size: usize) {
         self.airvalues = vec![F::ZERO; size];
     }
 
-    pub fn init_fixed(&mut self, fixed: Vec<F>) {
+    pub fn init_fixed(&mut self, fixed: Arc<Vec<F>>) {
         self.fixed = fixed;
     }
 
@@ -308,8 +333,7 @@ impl<F: PrimeField64> AirInstance<F> {
     }
 
     pub fn init_custom_commit_fixed_trace(&mut self, size: usize) {
-        // SAFETY: the custom-commit fixed columns are loaded into this buffer before use.
-        self.custom_commits_fixed = unsafe { create_buffer_fast(size) };
+        self.custom_commits_fixed = create_buffer_fast(size);
     }
 
     pub fn get_aux_trace_ptr(&self) -> *mut u8 {
@@ -328,11 +352,25 @@ impl<F: PrimeField64> AirInstance<F> {
     }
 
     pub fn clear_traces(&mut self) -> (bool, Vec<F>) {
+        if let Some(slot) = self.reclaim_slot.take() {
+            if !self.trace.is_empty() {
+                if let Ok(mut guard) = slot.lock() {
+                    if guard.is_none() {
+                        *guard = Some(std::mem::take(&mut self.trace));
+                    }
+                }
+            }
+            self.custom_commits_fixed = Vec::new();
+            self.aux_trace = Arc::new(Vec::new());
+            self.fixed = Arc::new(Vec::new());
+            return (false, Vec::new());
+        }
         let trace = std::mem::take(&mut self.trace);
         let shared_buffer = self.shared_buffer && !trace.is_empty();
+        let trace = if shared_buffer { trace } else { Vec::new() };
         self.custom_commits_fixed = Vec::new();
-        self.aux_trace = Vec::new();
-        self.fixed = Vec::new();
+        self.aux_trace = Arc::new(Vec::new());
+        self.fixed = Arc::new(Vec::new());
         (shared_buffer, trace)
     }
 

@@ -1,115 +1,110 @@
-use anyhow::{bail, ensure, Context, Result};
-use serde::Serialize;
-use std::path::Path;
-use zisk_sdk::{
-    get_default_proving_key, include_elf, ElfBinary, ProofOpts, ProverClient, ZiskProof,
-    ZiskPublics, ZiskStdin,
-};
+use serde::{Deserialize, Serialize};
+use std::error::Error;
+use zisk_sdk::{EmbeddedOpts, ProfilingMode, ProverClient, ZiskStdin};
+use zisk_test_artifacts::{ELF_AGG_VERIFY, ELF_FIB_MOD};
 
-#[path = "../../protocol.rs"]
-mod protocol;
-
-pub const ELF: ElfBinary = include_elf!("guest");
-pub const ELF2: ElfBinary = include_elf!("guest-agg");
-
-fn key_array(bytes: &[u8], label: &str) -> Result<[u8; protocol::VK_BYTES]> {
-    bytes
-        .try_into()
-        .with_context(|| format!("{label} must contain exactly {} bytes", protocol::VK_BYTES))
+#[derive(Serialize, Deserialize)]
+struct GuestPublics {
+    n: u32,
+    module: u32,
+    b: u32,
 }
 
-/// Load the final setup key for `proof` from the local proving key, never from the proof itself.
-fn final_setup_vk(proof: &ZiskProof, proving_key: &Path) -> Result<[u8; protocol::VK_BYTES]> {
-    let compressed = match proof {
-        ZiskProof::VadcopFinal(_) => false,
-        ZiskProof::VadcopFinalCompressed(_) => true,
-        _ => bail!("aggregation accepts only VADCoP final proofs"),
-    };
-    let vk = proofman::get_vadcop_final_proof_vkey(proving_key, compressed)?;
-    key_array(&vk, "final setup verification key")
-}
-
-fn ensure_publics(actual: &ZiskPublics, expected: &impl Serialize, label: &str) -> Result<()> {
-    ensure!(
-        actual.public_bytes() == ZiskPublics::write(expected)?.public_bytes(),
-        "{label} public outputs do not match expectations"
-    );
-    Ok(())
-}
-
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn Error>> {
     println!("Starting ZisK Prover Client...\n");
 
-    // Prove with the same proving key the trusted final setup keys are loaded from.
-    let proving_key = get_default_proving_key();
-    let client = ProverClient::builder().proving_key_path(proving_key.clone()).build()?;
+    let n: u32 = 2000;
+    let module: u32 = 233;
+    let stdin = ZiskStdin::new();
+    stdin.write(&n);
+    stdin.write(&module);
 
-    println!("Setting up inner program...");
-    let (pk, vkey) = client.setup(&ELF)?;
+    let embedded_opts = EmbeddedOpts::default().minimal_memory();
+    let builder = ProverClient::embedded().with_embedded_opts(embedded_opts);
+    #[cfg(feature = "gpu")]
+    let builder = builder.gpu();
+    let client = builder.build()?;
 
-    println!("Setting up aggregation program...");
-    let (pk2, vkey2) = client.setup(&ELF2)?;
+    println!("Setting up first program (fib_mod)...");
+    client.setup(&ELF_FIB_MOD).run_sync()?;
 
-    let n1 = 1000u32;
-    let stdin1 = ZiskStdin::new();
-    stdin1.write(&n1);
-    let expected_publics1 = protocol::compute_inner_publics(n1);
+    println!("Setting up second program (agg_verify)...");
+    client.setup(&ELF_AGG_VERIFY).run_sync()?;
 
-    // Execute the program using the `ProverClient.execute` method, without generating a proof.
-    println!("Executing inner program...");
-    let execution = client.execute(&pk, stdin1.clone())?;
-    ensure_publics(execution.get_publics(), &expected_publics1, "execution")?;
+    println!("Executing first program...");
+    let result = client.execute(&ELF_FIB_MOD, &stdin).run_sync()?;
+
     println!(
-        "Program executed successfully: {} cycles in {:.2?}",
-        execution.get_execution_steps(),
-        execution.get_duration()
+        "Program executed successfully: {} cycles in {} ms",
+        result.get_execution_steps(),
+        result.get_execution_time()
     );
 
-    println!("Generating first inner proof...");
-    let proof_opts = ProofOpts::default().minimal_memory();
-    let result1 = client.prove(&pk, stdin1).with_proof_options(proof_opts).run()?;
-    ensure_publics(result1.get_publics(), &expected_publics1, "first proof")?;
+    let publics: GuestPublics = result.get_public_values()?;
 
-    let n2 = 2000u32;
+    let expected_b = {
+        let mut a: u32 = 0;
+        let mut b: u32 = 1;
+        for _ in 0..n {
+            let c = (a + b) % module;
+            a = b;
+            b = c;
+        }
+        b
+    };
+
+    assert_eq!(publics.n, n, "expected n={}, got {}", n, publics.n);
+    assert_eq!(publics.module, module, "expected module={}, got {}", module, publics.module);
+    assert_eq!(publics.b, expected_b, "expected b={}, got {}", expected_b, publics.b);
+    println!("Publics OK: n={}, module={}, b={}", publics.n, publics.module, publics.b);
+
+    println!("Generating first proof for fib_mod...");
+    let vadcop_result1 = client.prove(&ELF_FIB_MOD, stdin).run_sync()?;
+
     let stdin2 = ZiskStdin::new();
-    stdin2.write(&n2);
-    let expected_publics2 = protocol::compute_inner_publics(n2);
+    stdin2.write(&n);
+    stdin2.write(&module);
 
-    println!("Generating second inner proof...");
-    let proof_opts = ProofOpts::default().minimal_memory();
-    let result2 = client.prove(&pk, stdin2).with_proof_options(proof_opts).run()?;
-    ensure_publics(result2.get_publics(), &expected_publics2, "second proof")?;
+    println!("Generating second proof for fib_mod...");
+    let vadcop_result2 = client.prove(&ELF_FIB_MOD, stdin2).run_sync()?;
 
-    let proof1 = client.prepare_send_proof(result1.get_proof(), result1.get_publics(), &vkey)?;
-    let proof2 = client.prepare_send_proof(result2.get_proof(), result2.get_publics(), &vkey)?;
+    let proof1_bytes = vadcop_result1.get_proof_bytes()?;
+    let proof2_bytes = vadcop_result2.get_proof_bytes()?;
 
-    let program_vk = key_array(&vkey.vk, "program verification key")?;
-    let authorization = protocol::AggregationAuthorization {
-        final_setup_vks: [
-            final_setup_vk(result1.get_proof(), &proving_key)?,
-            final_setup_vk(result2.get_proof(), &proving_key)?,
-        ],
-        program_vks: [program_vk; protocol::INNER_PROOF_COUNT],
-    };
+    // A real guest hardcodes both keys; this demo feeds them in. The setup key is the
+    // release constant for the proof's family and stage, picked from the crate, never
+    // the copy the proof carries. The program vk is fib_mod's ROM root.
+    // The guest pins that release key, so a proof from a local or dev setup fails it: say
+    // so here rather than as a failed aggregation.
+    vadcop_result1.get_proof().verify().map_err(|e| {
+        format!(
+            "the guest verifies under the release key, which this proof does not verify \
+             under ({e}); this example needs a release setup"
+        )
+    })?;
+    let saved = zisk_verifier::decode_saved(&proof1_bytes)?;
+    let expected_setup_vk: Vec<u8> =
+        zisk_verifier::vadcop_vk(&saved.proof.hash, saved.proof.compressed)
+            .ok_or("zisk-verifier publishes no key for this proof's family and stage")?
+            .iter()
+            .flat_map(|limb| limb.to_le_bytes())
+            .collect();
+    let expected_program_vk: Vec<u8> =
+        vadcop_result1.get_program_vk().vk.iter().flat_map(|limb| limb.to_le_bytes()).collect();
 
-    // Write the authorization and the proofs to be verified by the guest
     let stdin_aggregation = ZiskStdin::new();
-    stdin_aggregation.write(&authorization);
-    stdin_aggregation.write_proof(&proof1);
-    stdin_aggregation.write_proof(&proof2);
+    // Written in the guest's read order.
+    stdin_aggregation.write_slice(&expected_setup_vk);
+    stdin_aggregation.write_slice(&expected_program_vk);
+    stdin_aggregation.write_slice(&proof1_bytes);
+    stdin_aggregation.write_slice(&proof2_bytes);
 
-    let proof_opts = ProofOpts::default().minimal_memory();
-    let result_aggregation =
-        client.prove(&pk2, stdin_aggregation).with_proof_options(proof_opts).run()?;
+    println!("Running ZisK Emulator on aggregation program for profiling...");
+    zisk_sdk::run(&ELF_AGG_VERIFY, stdin_aggregation.clone(), Some(ProfilingMode::Complete))?;
 
-    client.verify(result_aggregation.get_proof(), result_aggregation.get_publics(), &vkey2)?;
+    let result_aggregation = client.prove(&ELF_AGG_VERIFY, stdin_aggregation).run_sync()?;
 
-    // The authorization was a guest input, so it is trusted only through its committed copy.
-    let expected_statement = protocol::AggregationStatement {
-        authorization,
-        inner_publics: [expected_publics1, expected_publics2],
-    };
-    ensure_publics(result_aggregation.get_publics(), &expected_statement, "aggregation")?;
+    result_aggregation.verify()?;
 
     Ok(())
 }

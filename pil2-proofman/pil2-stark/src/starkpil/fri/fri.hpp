@@ -5,7 +5,6 @@
 #include <cassert>
 #include <vector>
 #include "ntt_goldilocks.hpp"
-#include "merklehash_goldilocks.hpp"
 #include "merkleTreeGL.hpp"
 #include "merkleTreeBN128.hpp"
 
@@ -32,15 +31,15 @@ private:
 template <typename ElementType>
 void FRI<ElementType>::fold(uint64_t step, Goldilocks::Element* pol, Goldilocks::Element *challenge, uint64_t nBitsExt, uint64_t prevBits, uint64_t currentBits) {
 
-    uint64_t polBits = step == 0 ? nBitsExt : prevBits;
+    // Folds f_{step−1}, on 2^prevBits points, into f_step on 2^currentBits points. f_0 is
+    // committed as is, so there is no step 0.
+    assert(step > 0);
+    uint64_t polBits = prevBits;
 
     Goldilocks::Element polShiftInv = Goldilocks::inv(Goldilocks::shift());
-    
-    if(step > 0) {
-        for (uint64_t j = 0; j < nBitsExt - prevBits; j++)
-        {
-            polShiftInv = polShiftInv * polShiftInv;
-        }
+    for (uint64_t j = 0; j < nBitsExt - prevBits; j++)
+    {
+        polShiftInv = polShiftInv * polShiftInv;
     }
 
     uint64_t pol2N = 1 << currentBits;
@@ -78,23 +77,20 @@ void FRI<ElementType>::fold(uint64_t step, Goldilocks::Element* pol, Goldilocks:
         for (u_int64_t j = 0; j < ncor; ++j) sinv_ = sinv_ * wi;
         for (uint64_t g = init; g < end; g++)
         {
-            if (step != 0)
+            Goldilocks::Element ppar[nX * FIELD_EXTENSION];
+            Goldilocks::Element ppar_c[nX * FIELD_EXTENSION];
+
+            #pragma omp parallel for
+            for (uint64_t i = 0; i < nX; i++)
             {
-                Goldilocks::Element ppar[nX * FIELD_EXTENSION];
-                Goldilocks::Element ppar_c[nX * FIELD_EXTENSION];
-
-                #pragma omp parallel for
-                for (uint64_t i = 0; i < nX; i++)
-                {
-                    std::memcpy(&ppar[i * FIELD_EXTENSION], &pol[((i * pol2N) + g) * FIELD_EXTENSION], FIELD_EXTENSION * sizeof(Goldilocks::Element));
-                }
-                NTT_Goldilocks ntt(nX, 1);
-
-                ntt.INTT(ppar_c, ppar, nX, FIELD_EXTENSION);
-                polMulAxi(ppar_c, nX, sinv_); // Multiplies coefs by 1, shiftInv, shiftInv^2, shiftInv^3, ......
-                evalPol(pol, g, nX, ppar_c, challenge);
-                sinv_ = sinv_ * wi;
+                std::memcpy(&ppar[i * FIELD_EXTENSION], &pol[((i * pol2N) + g) * FIELD_EXTENSION], FIELD_EXTENSION * sizeof(Goldilocks::Element));
             }
+            NTT_Goldilocks ntt(nX, 1);
+
+            ntt.INTT(ppar_c, ppar, nX, FIELD_EXTENSION);
+            polMulAxi(ppar_c, nX, sinv_); // Multiplies coefs by 1, shiftInv, shiftInv^2, shiftInv^3, ......
+            evalPol(pol, g, nX, ppar_c, challenge);
+            sinv_ = sinv_ * wi;
         }
     }
 }
@@ -150,6 +146,7 @@ template <typename ElementType>
 vector<MerkleProof<ElementType>> FRI<ElementType>::queryPol(MerkleTreeType *trees[], uint64_t nTrees, uint64_t idx, ElementType* buff)
 {
     vector<MerkleProof<ElementType>> vMkProof;
+    vMkProof.reserve(nTrees);
     for (uint i = 0; i < nTrees; i++)
     {
         trees[i]->getGroupProof(&buff[0], idx);

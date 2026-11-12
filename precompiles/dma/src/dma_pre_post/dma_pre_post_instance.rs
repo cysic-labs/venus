@@ -7,14 +7,14 @@
 #[cfg(feature = "save_dma_inputs")]
 use crate::DmaPrePostInput;
 use crate::{DmaCheckPoint, DmaPrePostCollector, DmaPrePostModule};
-use fields::PrimeField64;
-use proofman_common::{AirInstance, ProofCtx, ProofmanResult, SetupCtx};
+use proofman_common::{ProofCtx, SetupCtx};
+use proofman_fields::PrimeField64;
 use std::sync::Arc;
 
 use zisk_common::{
     BusDevice, CheckPoint, ChunkId, Instance, InstanceCtx, InstanceType, PayloadType, StatsType,
 };
-use zisk_pil::{DmaPrePostMemCpyTrace, DmaPrePostTrace};
+use zisk_pil::DmaPrePostTrace;
 
 /// The `DmaPrePostInstance` struct represents an instance for the DmaPrePost State Machine.
 ///
@@ -44,9 +44,9 @@ impl<F: PrimeField64> DmaPrePostInstance<F> {
     }
 
     pub fn build_dma_collector(&self, chunk_id: ChunkId) -> DmaPrePostCollector {
-        debug_assert!(
-            [DmaPrePostTrace::<F>::AIR_ID, DmaPrePostMemCpyTrace::<F>::AIR_ID]
-                .contains(&self.ictx.plan.air_id),
+        debug_assert_eq!(
+            self.ictx.plan.air_id,
+            DmaPrePostTrace::<()>::AIR_ID,
             "DmaPrePostInstance: Unsupported air_id: {:?}",
             self.ictx.plan.air_id
         );
@@ -75,7 +75,8 @@ impl<F: PrimeField64> Instance<F> for DmaPrePostInstance<F> {
         _sctx: &SetupCtx<F>,
         collectors: Vec<(usize, Box<dyn BusDevice<PayloadType>>)>,
         trace_buffer: Vec<F>,
-    ) -> ProofmanResult<Option<AirInstance<F>>> {
+        packed: bool,
+    ) -> zisk_common::WitnessResult<F> {
         #[cfg(feature = "save_dma_collectors")]
         let (debug, inputs): (Vec<_>, Vec<_>) = collectors
             .into_iter()
@@ -108,7 +109,7 @@ impl<F: PrimeField64> Instance<F> for DmaPrePostInstance<F> {
             &format!("{}_inputs_{air_instance_id:04}.txt", self.module.get_name()),
         )?;
 
-        Ok(Some(self.module.compute_witness(&inputs, trace_buffer)?))
+        Ok(Some(self.module.compute_witness(&inputs, trace_buffer, packed)?))
     }
 
     /// Retrieves the checkpoint associated with this instance.
@@ -134,7 +135,7 @@ impl<F: PrimeField64> Instance<F> for DmaPrePostInstance<F> {
     fn build_inputs_collector(&self, chunk_id: ChunkId) -> Option<Box<dyn BusDevice<PayloadType>>> {
         assert_eq!(
             self.ictx.plan.air_id,
-            DmaPrePostTrace::<F>::AIR_ID,
+            DmaPrePostTrace::<()>::AIR_ID,
             "DmaPrePostInstance: Unsupported air_id: {:?}",
             self.ictx.plan.air_id
         );

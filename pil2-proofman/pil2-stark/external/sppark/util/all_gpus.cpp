@@ -1,4 +1,13 @@
+// Copyright Supranational LLC
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Modified 2026 by Roger Taule: added sppark_set_visible_devices() to scope the
+// GPU registry to a caller-provided device allow-list (multi-process/MPI use).
+
 #include "gpu_t.cuh"
+#include <algorithm>
+#include <vector>
 
 #if defined(__NVCC__)
 # define PROP_MAJOR_MIN 7   // Volta and forward
@@ -8,6 +17,20 @@
 # error "unknown platform"
 #endif
 
+// Allow-list of CUDA ordinals this process may touch; empty => all devices.
+static std::vector<int>& sppark_visible_ordinals()
+{
+    static std::vector<int> ords;
+    return ords;
+}
+
+extern "C" void sppark_set_visible_devices(const int* ordinals, int n)
+{
+    auto& v = sppark_visible_ordinals();
+    if (ordinals == nullptr || n <= 0) { v.clear(); return; }
+    v.assign(ordinals, ordinals + n);
+}
+
 class gpus_t {
     std::vector<const gpu_t*> gpus;
 public:
@@ -16,7 +39,16 @@ public:
         int n;
         if (cudaGetDeviceCount(&n) != cudaSuccess)
             return;
+
+        int caller = 0;
+        (void)cudaGetDevice(&caller);
+
+        const auto& allow = sppark_visible_ordinals();
         for (int id = 0; id < n; id++) {
+            if (!allow.empty() &&
+                std::find(allow.begin(), allow.end(), id) == allow.end())
+                continue;
+
             cudaDeviceProp prop;
             if (cudaGetDeviceProperties(&prop, id) == cudaSuccess &&
                 prop.major >= PROP_MAJOR_MIN && prop.cooperativeLaunch) {
@@ -24,7 +56,7 @@ public:
                 gpus.push_back(new gpu_t(gpus.size(), id, prop));
             }
         }
-        (void)cudaSetDevice(0);
+        (void)cudaSetDevice(caller);
     }
     ~gpus_t()
     {   for (auto* ptr: gpus) delete ptr;   }
@@ -48,6 +80,12 @@ const gpu_t& select_gpu(int id)
            if (gpu->cid() == cuda_id) return *gpu;
         id = 0;
     }
+    // Match by CUDA ordinal: under a scoped registry, logical index != ordinal.
+    for (auto* gpu: gpus)
+        if (gpu->cid() == id) { gpu->select(); return *gpu; }
+    // Fall back to logical index (sppark-internal callers).
+    if (id < 0 || (size_t)id >= gpus.size())
+        CUDA_OK(cudaErrorInvalidDevice);
     auto* gpu = gpus[id];
     gpu->select();
     return *gpu;

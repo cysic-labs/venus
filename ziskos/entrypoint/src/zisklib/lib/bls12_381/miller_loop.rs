@@ -1,5 +1,8 @@
 //! Miller loop for BLS12-381
 
+#[cfg(zisk_guest)]
+use crate::alloc_extern::vec::Vec;
+
 use crate::zisklib::{
     eq, fcall_bls12_381_twist_add_line_coeffs, fcall_bls12_381_twist_dbl_line_coeffs, is_zero,
 };
@@ -14,7 +17,170 @@ use super::{
     },
 };
 
-/// Computes the Miller loop for the BN254 curve for a batch of non-zero points `p_i` in G1 and non-zero points `q_i` in G2
+/// Computes the Miller loop of a non-zero point `p` in G1 and a non-zero point `q` in G2
+///
+/// # Soundness
+/// Both points must be on the corresponding subgroups, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+pub fn miller_loop_bls12_381(
+    p: &[u64; 12],
+    q: &[u64; 24],
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) -> [u64; 72] {
+    // Before the loop starts, compute xp' = (-xp/yp)·1/(1+u) and yp' = (1/yp)·1/(1+u)
+    let mut xp: [u64; 6] = p[0..6].try_into().unwrap();
+    let mut yp: [u64; 6] = p[6..12].try_into().unwrap();
+    yp = inv_fp_bls12_381(
+        &yp,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+    xp = neg_fp_bls12_381(
+        &xp,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+    xp = mul_fp_bls12_381(
+        &xp,
+        &yp,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    let xp_prime: [u64; 12] = scalar_mul_fp2_bls12_381(
+        &EXT_U_INV,
+        &xp,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+    let yp_prime: [u64; 12] = scalar_mul_fp2_bls12_381(
+        &EXT_U_INV,
+        &yp,
+        #[cfg(feature = "hints")]
+        hints,
+    );
+
+    // Initialize the Miller loop with r = q and f = 1
+    let mut r: [u64; 24] = q[0..24].try_into().unwrap();
+    let mut f = {
+        let mut one = [0u64; 72];
+        one[0] = 1;
+        one
+    };
+    for &bit in X_ABS_BIN_BE.iter().skip(1) {
+        // Hint the coefficients (𝜆,𝜇) of the line l_{twist(r),twist(r)}
+        let (lambda, mu) = fcall_bls12_381_twist_dbl_line_coeffs(
+            &r,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+
+        // Check that the line is correct
+        assert!(
+            is_tangent_twist_bls12_381(
+                &r,
+                &lambda,
+                &mu,
+                #[cfg(feature = "hints")]
+                hints,
+            ),
+            "Line is not tangent to the curve at r"
+        );
+
+        // Compute f = f² · line_{twist(r),twist(r)}(p)
+        f = square_fp12_bls12_381(
+            &f,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+        let l = line_eval_twist_bls12_381(
+            &lambda,
+            &mu,
+            &xp_prime,
+            &yp_prime,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+        f = sparse_mul_fp12_bls12_381(
+            &f,
+            &l,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+
+        // Double r
+        r = dbl_twist_with_hints_bls12_381(
+            &r,
+            &lambda,
+            &mu,
+            #[cfg(feature = "hints")]
+            hints,
+        );
+
+        if bit == 1 {
+            // Hint the coefficients (𝜆,𝜇) of the line l_{twist(r),twist(q)}
+            let (lambda, mu) = fcall_bls12_381_twist_add_line_coeffs(
+                &r,
+                q,
+                #[cfg(feature = "hints")]
+                hints,
+            );
+
+            // Check that the line is correct
+            assert!(
+                is_line_twist_bls12_381(
+                    &r,
+                    q,
+                    &lambda,
+                    &mu,
+                    #[cfg(feature = "hints")]
+                    hints,
+                ),
+                "Line does not pass through r and q"
+            );
+
+            // Compute f = f · line_{twist(r),twist(q)}
+            let l = line_eval_twist_bls12_381(
+                &lambda,
+                &mu,
+                &xp_prime,
+                &yp_prime,
+                #[cfg(feature = "hints")]
+                hints,
+            );
+            f = sparse_mul_fp12_bls12_381(
+                &f,
+                &l,
+                #[cfg(feature = "hints")]
+                hints,
+            );
+
+            // Add r and q
+            r = add_twist_with_hints_bls12_381(
+                &r,
+                q,
+                &lambda,
+                &mu,
+                #[cfg(feature = "hints")]
+                hints,
+            );
+        }
+    }
+
+    // Finally, compute f̅
+    conjugate_fp12_bls12_381(
+        &f,
+        #[cfg(feature = "hints")]
+        hints,
+    )
+}
+
+/// Computes the Miller loop for the BLS12-381 curve for a batch of non-zero points `p_i` in G1
+/// and non-zero points `q_i` in G2
+///
+/// # Soundness
+/// All points must be on the corresponding subgroups, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
 pub fn miller_loop_batch_bls12_381(
     g1_points: &[[u64; 12]],
     g2_points: &[[u64; 24]],
@@ -83,13 +249,16 @@ pub fn miller_loop_batch_bls12_381(
             );
 
             // Check that the line is correct
-            assert!(is_tangent_twist_bls12_381(
-                r,
-                &lambda,
-                &mu,
-                #[cfg(feature = "hints")]
-                hints,
-            ));
+            assert!(
+                is_tangent_twist_bls12_381(
+                    r,
+                    &lambda,
+                    &mu,
+                    #[cfg(feature = "hints")]
+                    hints,
+                ),
+                "Line is not tangent to the curve at r"
+            );
 
             let xp_prime = &xp_primes[i];
             let yp_prime = &yp_primes[i];
@@ -129,14 +298,17 @@ pub fn miller_loop_batch_bls12_381(
                 );
 
                 // Check that the line is correct
-                assert!(is_line_twist_bls12_381(
-                    r,
-                    q,
-                    &lambda,
-                    &mu,
-                    #[cfg(feature = "hints")]
-                    hints,
-                ));
+                assert!(
+                    is_line_twist_bls12_381(
+                        r,
+                        q,
+                        &lambda,
+                        &mu,
+                        #[cfg(feature = "hints")]
+                        hints,
+                    ),
+                    "Line does not pass through r and q"
+                );
 
                 // Compute f = f · line_{twist(r),twist(q')}
                 let l = line_eval_twist_bls12_381(
@@ -194,7 +366,7 @@ fn is_line_twist_bls12_381(
     mu: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> bool {
-    // The chord (𝜆,𝜇) is uniquely determined only when the two points have distinct x
+    // Chord (λ,μ) is uniquely determined only when the two points have distinct x
     if eq(&q1[0..12], &q2[0..12]) {
         return false;
     }
@@ -225,7 +397,7 @@ fn is_tangent_twist_bls12_381(
     let x: &[u64; 12] = q[0..12].try_into().unwrap();
     let y: &[u64; 12] = q[12..24].try_into().unwrap();
 
-    // The tangent (𝜆,𝜇) is uniquely determined only when y != 0
+    // Tangent (λ,μ) is uniquely determined only when y != 0 (rejects (0,0)/2-torsion)
     if is_zero(y) {
         return false;
     }
@@ -434,4 +606,35 @@ fn dbl_twist_with_hints_bls12_381(
     result[0..12].copy_from_slice(&x3);
     result[12..24].copy_from_slice(&y3);
     result
+}
+
+// ==================== C FFI Functions ====================
+
+/// Miller loop for a single (G1, G2) pair over BLS12-381.
+///
+/// # Safety
+/// - `p_ptr` must point to a valid `[u64; 12]` array (G1 affine point x ‖ y, little-endian limbs)
+/// - `q_ptr` must point to a valid `[u64; 24]` array (G2 affine point x ‖ y in Fp2, little-endian limbs)
+/// - `result_ptr` must point to a writable `[u64; 72]` array (Fp12 element)
+///
+/// # Soundness
+/// Both points must be on the corresponding subgroups, non-identity, and have **canonical** coordinates
+/// (`x, y < p`).
+#[cfg_attr(not(feature = "hints"), no_mangle)]
+#[cfg_attr(feature = "hints", export_name = "hints_miller_loop_bls12_381_c")]
+pub unsafe extern "C" fn miller_loop_bls12_381_c(
+    p_ptr: *const u64,
+    q_ptr: *const u64,
+    result_ptr: *mut u64,
+    #[cfg(feature = "hints")] hints: &mut Vec<u64>,
+) {
+    let p = &*(p_ptr as *const [u64; 12]);
+    let q = &*(q_ptr as *const [u64; 24]);
+    let result = &mut *(result_ptr as *mut [u64; 72]);
+    *result = miller_loop_bls12_381(
+        p,
+        q,
+        #[cfg(feature = "hints")]
+        hints,
+    );
 }

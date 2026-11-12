@@ -1,0 +1,236 @@
+use std::os::raw::c_void;
+
+#[repr(C, align(8))]
+#[derive(Copy, Clone, Debug)]
+pub struct MemOp {
+    pub addr: u32,
+    pub flags: u32,
+    /// Written value for non-block writes; step field for block records.
+    pub payload: u64,
+}
+const _: () = assert!(core::mem::size_of::<MemOp>() == 16);
+
+/// Paged cumulative-offset table. WIRE/FFI-significant: field order &
+/// types must match `cpp/instance_meta.hpp::PagedOffsets` and the
+/// per-field serialisation in `cpp/instance_meta_loader.hpp` exactly.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct PagedOffsets {
+    pub page_starts: *const u32,
+    pub page_single_value: *const u32,
+    pub pages_dense: *const u32,
+    pub num_pages: u32,
+    pub present_count: u32,
+    pub addr_range_slots: u32,
+}
+// Catches an accidental add/remove of a field vs. the C++ POD (which
+// carries the matching `static_assert(sizeof(PagedOffsets) == 40)`).
+const _: () = assert!(core::mem::size_of::<PagedOffsets>() == 40);
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct InstanceMeta {
+    pub inst_id: u32,
+    pub kind: u32,
+    pub first_addr: u32,
+    pub last_addr: u32,
+    pub count_per_chunk: *const u32,
+    pub n_chunks: u32,
+    pub offsets: PagedOffsets,
+    pub first_addr_chunk: u32,
+    pub first_addr_skip: u32,
+    pub last_addr_chunk: u32,
+    pub last_addr_include: u32,
+}
+
+pub enum CountAndPlanHandle {}
+
+// The result structs live with the plain data in mem_witness_types.rs.
+pub use crate::mem_witness_types::{MemFillPrepared, MemFillResult};
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct AlignPlanDesc {
+    pub air_kind: u32,
+    pub air_id: u32,
+    pub segment: u32,
+    pub n_rows: u32,
+    pub entry_from: u32,
+    pub entry_n: u32,
+}
+const _: () = assert!(core::mem::size_of::<AlignPlanDesc>() == 24);
+
+/// Mirrors `AlignChunkEntry`: a chunk's per-kind windows (full_5, full_3, full_2, read_byte,
+/// write_byte) of one instance.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct AlignChunkEntry {
+    pub chunk: u32,
+    pub skip: [u32; 5],
+    pub count: [u32; 5],
+}
+const _: () = assert!(core::mem::size_of::<AlignChunkEntry>() == 44);
+
+/// A row image the preparation staged on the device (mirrors `StagedRows` in count_and_plan.cuh).
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct StagedRows {
+    pub ptr: *const u64,
+    pub words: u64,
+    pub family: u32,
+    pub air_id: u32,
+    pub segment: u32,
+    pub n_rows: u32,
+    pub res: MemFillResult,
+}
+impl Default for StagedRows {
+    fn default() -> Self {
+        Self {
+            ptr: std::ptr::null(),
+            words: 0,
+            family: 0,
+            air_id: 0,
+            segment: 0,
+            n_rows: 0,
+            res: MemFillResult::default(),
+        }
+    }
+}
+const _: () = assert!(std::mem::size_of::<StagedRows>() == 80);
+
+/// Per-chunk mem-align counters produced by the GPU kernel. Same five u32
+/// fields the CPU planner's `MemAlignCounters` uses (without `chunk_id` —
+/// the index in the returned slice IS the chunk_id).
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug)]
+pub struct GpuMemAlignCounter {
+    pub full_5: u32,
+    pub full_3: u32,
+    pub full_2: u32,
+    pub read_byte: u32,
+    pub write_byte: u32,
+}
+
+extern "C" {
+    pub fn count_and_plan_create() -> *mut CountAndPlanHandle;
+    pub fn count_and_plan_destroy(h: *mut CountAndPlanHandle);
+    pub fn count_and_plan_setup(
+        h: *mut CountAndPlanHandle,
+        d_buf: *mut c_void,
+        bytes: usize,
+        n_workers: u32,
+        worker_id: u32,
+        gpu_id: i32,
+        instance_rows: *const u32,
+        retain_rows: bool,
+    ) -> bool;
+    /// `words`: the chunk's memory-ops stream, `n_words` tagged 8-byte words.
+    pub fn count_and_plan_add_chunk(
+        h: *mut CountAndPlanHandle,
+        words: *const u64,
+        n_words: u32,
+    ) -> bool;
+    pub fn count_and_plan_run(
+        h: *mut CountAndPlanHandle,
+        metas_out: *mut *mut InstanceMeta,
+        n_metas: *mut u32,
+    ) -> bool;
+    pub fn count_and_plan_reset(h: *mut CountAndPlanHandle);
+    pub fn count_and_plan_set_chunk_size_bits(h: *mut CountAndPlanHandle, bits: u32);
+    pub fn count_and_plan_set_mem_layout(
+        h: *mut CountAndPlanHandle,
+        col_widths: *const u32,
+        n_cols: u32,
+        words_per_row: u32,
+        lanes_x_row: u32,
+    ) -> bool;
+    pub fn count_and_plan_retains_rows(h: *mut CountAndPlanHandle) -> bool;
+    pub fn count_and_plan_ram_retention_ok(h: *mut CountAndPlanHandle) -> bool;
+    pub fn count_and_plan_set_rom_layout(
+        h: *mut CountAndPlanHandle,
+        col_widths: *const u32,
+        n_cols: u32,
+        words_per_row: u32,
+        lanes_x_row: u32,
+    ) -> bool;
+    pub fn count_and_plan_set_input_layout(
+        h: *mut CountAndPlanHandle,
+        col_widths: *const u32,
+        n_cols: u32,
+        words_per_row: u32,
+        lanes_x_row: u32,
+    ) -> bool;
+    pub fn count_and_plan_set_align_layout(
+        h: *mut CountAndPlanHandle,
+        air_kind: u32,
+        col_widths: *const u32,
+        n_cols: u32,
+        words_per_row: u32,
+    ) -> bool;
+    /// The block's preparation: every instance resolved, the owned ones (`ram`, `rom`, `input`
+    /// segment ids and the MemAlign `plans`) staged as row images on the device while they fit.
+    pub fn count_and_plan_prepare_fills(
+        h: *mut CountAndPlanHandle,
+        image: *const u8,
+        image_bytes: usize,
+        plans: *const AlignPlanDesc,
+        n_plans: u32,
+        entries: *const AlignChunkEntry,
+        n_entries: u32,
+        ram: *const u32,
+        n_ram: u32,
+        rom: *const u32,
+        n_rom: u32,
+        input: *const u32,
+        n_input: u32,
+        prepared: *mut MemFillPrepared,
+    ) -> bool;
+    /// Marks the arena released and waits for the copies still reading the staged images.
+    pub fn count_and_plan_quiesce(h: *mut CountAndPlanHandle);
+    /// 1 staged (`out` filled), 0 the preparation ended without it, -1 timeout. Safe to call while
+    /// the preparation runs on another thread.
+    pub fn count_and_plan_staged_wait(
+        h: *mut CountAndPlanHandle,
+        family: u32,
+        air_id: u32,
+        segment: u32,
+        timeout_ms: u32,
+        out: *mut StagedRows,
+    ) -> i32;
+    /// Copies a staged image (`words` words) to host memory on its own stream.
+    pub fn count_and_plan_copy_staged(
+        h: *mut CountAndPlanHandle,
+        family: u32,
+        air_id: u32,
+        segment: u32,
+        dst: *mut u64,
+        words: u64,
+    ) -> bool;
+    /// Builds one instance's rows into host memory after the preparation (the registry lock);
+    /// refused once the arena is released.
+    pub fn count_and_plan_fill_host(
+        h: *mut CountAndPlanHandle,
+        family: u32,
+        air_id: u32,
+        segment: u32,
+        n_rows: u32,
+        out_rows: *mut u64,
+        res: *mut MemFillResult,
+    ) -> bool;
+    pub fn count_and_plan_max_used_bytes(h: *mut CountAndPlanHandle) -> usize;
+    pub fn count_and_plan_register_input_pinned(
+        h: *mut CountAndPlanHandle,
+        ptr: *mut c_void,
+        bytes: usize,
+    ) -> bool;
+    pub fn count_and_plan_unregister_input_pinned(h: *mut CountAndPlanHandle, ptr: *mut c_void);
+    pub fn count_and_plan_get_align_counters(
+        h: *mut CountAndPlanHandle,
+        n_chunks: *mut u32,
+    ) -> *const GpuMemAlignCounter;
+    pub fn count_and_plan_save_metas(
+        metas: *const InstanceMeta,
+        n: u32,
+        path: *const std::os::raw::c_char,
+    ) -> bool;
+}

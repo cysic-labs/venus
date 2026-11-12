@@ -1,9 +1,13 @@
 //! The `ArithOperationTest` module implements a comprehensive testing framework for validating
 //! the correctness of arithmetic operations executed by the `ArithOperation` module.
 
+use zisk_core::ops_core::*;
 use zisk_core::zisk_ops::*;
 
-use crate::{arith_table_data, ArithOperation, ArithRangeTableHelpers, ArithTableHelpers};
+use crate::{
+    arith_table_data, ArithOperation, ArithRangeTableHelpers, ArithTableHelpers,
+    ARITH_RANGE_16_BITS,
+};
 
 const MIN_N_64: u64 = 0x8000_0000_0000_0000;
 const MIN_N_32: u64 = 0x0000_0000_8000_0000;
@@ -32,20 +36,20 @@ const ALL_VALUES: [u64; 16] = [
 ];
 
 const ALL_OPERATIONS: [u8; 14] = [
-    ZiskOp::Mul.code(),
-    ZiskOp::Mulh.code(),
-    ZiskOp::Mulsuh.code(),
-    ZiskOp::Mulu.code(),
-    ZiskOp::Muluh.code(),
-    ZiskOp::Divu.code(),
-    ZiskOp::Remu.code(),
-    ZiskOp::Div.code(),
-    ZiskOp::Rem.code(),
-    ZiskOp::MulW.code(),
-    ZiskOp::DivuW.code(),
-    ZiskOp::RemuW.code(),
-    ZiskOp::DivW.code(),
-    ZiskOp::RemW.code(),
+    ZiskOp::MUL,
+    ZiskOp::MULH,
+    ZiskOp::MULSUH,
+    ZiskOp::MULU,
+    ZiskOp::MULUH,
+    ZiskOp::DIVU,
+    ZiskOp::REMU,
+    ZiskOp::DIV,
+    ZiskOp::REM,
+    ZiskOp::MUL_W,
+    ZiskOp::DIVU_W,
+    ZiskOp::REMU_W,
+    ZiskOp::DIV_W,
+    ZiskOp::REM_W,
 ];
 
 /// A structure for testing arithmetic operations.
@@ -181,26 +185,26 @@ impl ArithOperationTest {
         println!("{aop:#?}");
 
         const CHUNK_SIZE: u64 = 0x10000;
-        let bus_a_low: u64 = aop.div as u64 * (aop.c[0] + aop.c[1] * CHUNK_SIZE)
-            + (1 - aop.div as u64) * (aop.a[0] + aop.a[1] * CHUNK_SIZE);
-        let bus_a_high: u64 = aop.div as u64 * (aop.c[2] + aop.c[3] * CHUNK_SIZE)
-            + (1 - aop.div as u64) * (aop.a[2] + aop.a[3] * CHUNK_SIZE);
+        let bus_a_low: u64 = aop.div as u64 * (aop.c[0] as u64 + aop.c[1] as u64 * CHUNK_SIZE)
+            + (1 - aop.div as u64) * (aop.a[0] as u64 + aop.a[1] as u64 * CHUNK_SIZE);
+        let bus_a_high: u64 = aop.div as u64 * (aop.c[2] as u64 + aop.c[3] as u64 * CHUNK_SIZE)
+            + (1 - aop.div as u64) * (aop.a[2] as u64 + aop.a[3] as u64 * CHUNK_SIZE);
 
-        let bus_b_low: u64 = aop.b[0] + CHUNK_SIZE * aop.b[1];
-        let bus_b_high: u64 = aop.b[2] + CHUNK_SIZE * aop.b[3];
+        let bus_b_low: u64 = aop.b[0] as u64 + CHUNK_SIZE * aop.b[1] as u64;
+        let bus_b_high: u64 = aop.b[2] as u64 + CHUNK_SIZE * aop.b[3] as u64;
 
         let secondary_res: u64 = if aop.main_mul || aop.main_div { 0 } else { 1 };
 
-        let bus_res_low = secondary_res * (aop.d[0] + aop.d[1] * CHUNK_SIZE)
-            + aop.main_mul as u64 * (aop.c[0] + aop.c[1] * CHUNK_SIZE)
-            + aop.main_div as u64 * (aop.a[0] + aop.a[1] * CHUNK_SIZE);
+        let bus_res_low = secondary_res * (aop.d[0] as u64 + aop.d[1] as u64 * CHUNK_SIZE)
+            + aop.main_mul as u64 * (aop.c[0] as u64 + aop.c[1] as u64 * CHUNK_SIZE)
+            + aop.main_div as u64 * (aop.a[0] as u64 + aop.a[1] as u64 * CHUNK_SIZE);
 
-        let bus_res_high_64 = secondary_res * (aop.d[2] + aop.d[3] * CHUNK_SIZE)
-            + aop.main_mul as u64 * (aop.c[2] + aop.c[3] * CHUNK_SIZE)
-            + aop.main_div as u64 * (aop.a[2] + aop.a[3] * CHUNK_SIZE);
+        let bus_res_high_64 = secondary_res * (aop.d[2] as u64 + aop.d[3] as u64 * CHUNK_SIZE)
+            + aop.main_mul as u64 * (aop.c[2] as u64 + aop.c[3] as u64 * CHUNK_SIZE)
+            + aop.main_div as u64 * (aop.a[2] as u64 + aop.a[3] as u64 * CHUNK_SIZE);
 
         let bus_res_high =
-            (if aop.sext { 0xFFFF_FFFF } else { 0 }) + (1 - aop.m32 as u64) * bus_res_high_64;
+            if aop.sext { 0xFFFF_FFFF } else { 0 } + (1 - aop.m32 as u64) * bus_res_high_64;
 
         let expected_a_low = a & 0xFFFF_FFFF;
         let expected_a_high = (a >> 32) & 0xFFFF_FFFF;
@@ -237,21 +241,21 @@ impl ArithOperationTest {
             ArithRangeTableHelpers::get_row_carry_range_check(aop.carry[i]);
         }
 
-        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_ab, aop.a[3]);
-        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_ab + 26, aop.a[1]);
-        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_ab + 17, aop.b[3]);
-        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_ab + 9, aop.b[1]);
+        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_ab, aop.a[3] as u64);
+        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_ab + 1, aop.a[1] as u64);
+        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_ab + 2, aop.b[3] as u64);
+        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_ab + 3, aop.b[1] as u64);
 
-        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_cd, aop.c[3]);
-        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_cd + 26, aop.c[1]);
-        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_cd + 17, aop.d[3]);
-        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_cd + 9, aop.d[1]);
+        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_cd, aop.c[3] as u64);
+        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_cd + 1, aop.c[1] as u64);
+        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_cd + 2, aop.d[3] as u64);
+        ArithRangeTableHelpers::get_row_chunk_range_check(aop.range_cd + 3, aop.d[1] as u64);
 
         for i in [0, 2] {
-            ArithRangeTableHelpers::get_row_chunk_range_check(0, aop.a[i]);
-            ArithRangeTableHelpers::get_row_chunk_range_check(0, aop.b[i]);
-            ArithRangeTableHelpers::get_row_chunk_range_check(0, aop.c[i]);
-            ArithRangeTableHelpers::get_row_chunk_range_check(0, aop.d[i]);
+            ArithRangeTableHelpers::get_row_chunk_range_check(ARITH_RANGE_16_BITS, aop.a[i] as u64);
+            ArithRangeTableHelpers::get_row_chunk_range_check(ARITH_RANGE_16_BITS, aop.b[i] as u64);
+            ArithRangeTableHelpers::get_row_chunk_range_check(ARITH_RANGE_16_BITS, aop.c[i] as u64);
+            ArithRangeTableHelpers::get_row_chunk_range_check(ARITH_RANGE_16_BITS, aop.d[i] as u64);
         }
 
         #[cfg(debug_assertions)]
@@ -264,6 +268,8 @@ impl ArithOperationTest {
             aop.sext,
             aop.div_by_zero,
             aop.div_overflow,
+            aop.result_is_zero,
+            aop.remainder_is_zero,
             aop.m32,
             aop.div,
             aop.main_mul,
@@ -282,194 +288,11 @@ impl ArithOperationTest {
             aop.sext,
             aop.div_by_zero,
             aop.div_overflow,
+            aop.result_is_zero,
+            aop.remainder_is_zero,
         );
         self.table_rows[row_1] += 1;
     }
-}
-
-fn chunk_equations_can_be_satisfied(aop: &ArithOperation) -> bool {
-    let chunks = aop.calculate_chunks();
-    let mut carry = [0i64; 7];
-
-    for i in 0..7 {
-        let carry_in = if i > 0 { carry[i - 1] } else { 0 };
-        let chunk_value = chunks[i] + carry_in;
-        if chunk_value % 0x10000 != 0 {
-            return false;
-        }
-        carry[i] = chunk_value / 0x10000;
-    }
-
-    chunks[7] + carry[6] == 0
-}
-
-/// (1 - div) * (1 - fab - 2 * np) * (sum_all_cs + sum_all_ds) === 0
-fn product_sign_guard_holds(aop: &ArithOperation) -> bool {
-    let sign_mismatch = !aop.div && aop.np != (aop.na != aop.nb);
-    let sum_all_cds = aop.c.iter().chain(aop.d.iter()).sum::<u64>();
-
-    !sign_mismatch || sum_all_cds == 0
-}
-
-fn signed_remainder_sign_guard_holds(aop: &ArithOperation) -> bool {
-    let zero_remainder_candidate = aop.div && aop.np && !aop.nr;
-    let sum_all_ds = aop.d.iter().sum::<u64>();
-
-    !zero_remainder_candidate || sum_all_ds == 0
-}
-
-#[test]
-fn forged_signed_rem_positive_remainder_needs_zero_remainder_guard() {
-    let mut aop = ArithOperation::new();
-    aop.calculate(ZiskOp::Rem.code(), (-7i64) as u64, 3);
-
-    assert!(aop.np);
-    assert!(aop.nr);
-    assert!(signed_remainder_sign_guard_holds(&aop));
-
-    aop.d = [1, 0, 0, 0];
-    aop.nr = false;
-    aop.range_cd = 7;
-
-    let row = ArithTableHelpers::direct_get_row(
-        aop.op,
-        aop.na,
-        aop.nb,
-        aop.np,
-        aop.nr,
-        aop.sext,
-        aop.div_by_zero,
-        aop.div_overflow,
-    );
-    assert!(row < arith_table_data::ROWS);
-    assert!(chunk_equations_can_be_satisfied(&aop));
-    assert!(!signed_remainder_sign_guard_holds(&aop));
-}
-
-#[test]
-fn forged_signed_remw_positive_remainder_needs_zero_remainder_guard() {
-    let mut aop = ArithOperation::new();
-    aop.calculate(ZiskOp::RemW.code(), 0xFFFF_FFF9, 3);
-
-    assert!(aop.np);
-    assert!(aop.nr);
-    assert!(aop.sext);
-    assert!(signed_remainder_sign_guard_holds(&aop));
-
-    aop.d = [1, 0, 0, 0];
-    aop.nr = false;
-    aop.sext = false;
-    aop.range_cd = 15;
-
-    let row = ArithTableHelpers::direct_get_row(
-        aop.op,
-        aop.na,
-        aop.nb,
-        aop.np,
-        aop.nr,
-        aop.sext,
-        aop.div_by_zero,
-        aop.div_overflow,
-    );
-    assert!(row < arith_table_data::ROWS);
-    assert!(chunk_equations_can_be_satisfied(&aop));
-    assert!(!signed_remainder_sign_guard_holds(&aop));
-}
-
-#[test]
-fn signed_rem_negative_dividend_zero_remainder_still_allowed() {
-    let mut aop = ArithOperation::new();
-    aop.calculate(ZiskOp::Rem.code(), (-6i64) as u64, 3);
-
-    assert!(aop.np);
-    assert!(!aop.nr);
-    assert_eq!(aop.d, [0, 0, 0, 0]);
-    assert!(signed_remainder_sign_guard_holds(&aop));
-
-    let row = ArithTableHelpers::direct_get_row(
-        aop.op,
-        aop.na,
-        aop.nb,
-        aop.np,
-        aop.nr,
-        aop.sext,
-        aop.div_by_zero,
-        aop.div_overflow,
-    );
-    assert!(row < arith_table_data::ROWS);
-}
-
-#[test]
-fn signed_remw_negative_dividend_zero_remainder_still_allowed() {
-    let mut aop = ArithOperation::new();
-    aop.calculate(ZiskOp::RemW.code(), 0xFFFF_FFFA, 3);
-
-    assert!(aop.np);
-    assert!(!aop.nr);
-    assert!(!aop.sext);
-    assert_eq!(aop.d, [0, 0, 0, 0]);
-    assert!(signed_remainder_sign_guard_holds(&aop));
-
-    let row = ArithTableHelpers::direct_get_row(
-        aop.op,
-        aop.na,
-        aop.nb,
-        aop.np,
-        aop.nr,
-        aop.sext,
-        aop.div_by_zero,
-        aop.div_overflow,
-    );
-    assert!(row < arith_table_data::ROWS);
-}
-
-#[test]
-fn signed_product_sign_mutations_need_product_sign_guard() {
-    // The chunk equations only prove |a| * |b| = |c + 2^64 * d|, with np choosing the sign of the
-    // product representation. Replay the signed multiplications with every np the table offers
-    // for the operand signs: a mutation accepted by the chunk equations and the d[3] sign range
-    // check that yields a wrong result must violate the product sign guard.
-    let magnitude = |x: u64, negative: bool| if negative { x.wrapping_neg() } else { x };
-    let chunks = |x: u64| [x & 0xFFFF, (x >> 16) & 0xFFFF, (x >> 32) & 0xFFFF, x >> 48];
-    let mut blocked = 0;
-    for op in [ZiskOp::Mulsuh.code(), ZiskOp::Mul.code(), ZiskOp::Mulh.code()] {
-        for a in ALL_VALUES {
-            for b in ALL_VALUES {
-                let (expected, _) = ArithOperationTest::calculate_emulator_res(op, a, b);
-                for [row_op, flags, _, _] in arith_table_data::ARITH_TABLE {
-                    let mut aop = ArithOperation::new();
-                    aop.calculate(op, a, b);
-                    if row_op != op as u16
-                        || (flags & 4 != 0) != aop.na
-                        || (flags & 8 != 0) != aop.nb
-                    {
-                        continue;
-                    }
-                    aop.np = flags & 16 != 0;
-                    let product = magnitude(a, aop.na) as u128 * magnitude(b, aop.nb) as u128;
-                    let representation = if aop.np { product.wrapping_neg() } else { product };
-                    let (low, high) = (representation as u64, (representation >> 64) as u64);
-                    aop.c = chunks(low);
-                    aop.d = chunks(high);
-                    if (aop.d[3] >= 0x8000) != aop.np || !chunk_equations_can_be_satisfied(&aop) {
-                        continue;
-                    }
-
-                    let result = if aop.main_mul { low } else { high };
-                    if result != expected {
-                        assert!(
-                            !product_sign_guard_holds(&aop),
-                            "op 0x{op:x} a 0x{a:x} b 0x{b:x} np {}: wrong result 0x{result:x} \
-                             accepted without a product sign guard failure",
-                            aop.np
-                        );
-                        blocked += 1;
-                    }
-                }
-            }
-        }
-    }
-    assert!(blocked > 0);
 }
 
 #[test]

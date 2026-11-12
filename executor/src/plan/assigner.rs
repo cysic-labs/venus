@@ -1,0 +1,219 @@
+//! Instance assignment (global-id allocation) for the ZiskExecutor.
+
+use crate::error::{ExecutorResult, RwLockExt};
+use proofman_common::WitnessPriority;
+use std::sync::RwLock;
+use zisk_common::{InstanceType, Plan};
+use zisk_pil::{ROM_AIR_IDS, VIRTUAL_TABLE_ZISK_0_AIR_IDS, ZISK_AIRGROUP_ID};
+
+use crate::ports::{GlobalId, InstanceInfo, ProofRegistry};
+use crate::AirClassifier;
+
+/// Instance assigner for the ZiskExecutor. Responsible for assigning global IDs to
+/// planned instances and registering them with the proof context.
+pub struct InstanceAssigner;
+
+impl InstanceAssigner {
+    /// Assigns the ROM instance to the proof context.
+    ///
+    /// # Arguments
+    /// * `registry` - Proof-context assignment surface.
+    ///
+    /// # Returns
+    /// Returns the assigned [`GlobalId`].
+    ///
+    /// # Errors
+    /// Returns an error if the registry rejects the assignment.
+    pub fn assign_rom_instance(registry: &dyn ProofRegistry) -> ExecutorResult<GlobalId> {
+        // Assigned first, and that is load-bearing: the rank is picked by least-loaded
+        // partition, so being the first instance registered is what puts ROM on the first
+        // process — the only one that runs the ROM-histogram assembly. Computed last all the
+        // same: the `Last` band buys the histogram runner every other instance's compute time.
+        let rom_gid = registry.add_instance_assign(InstanceInfo::with_priority(
+            ZISK_AIRGROUP_ID,
+            ROM_AIR_IDS[0],
+            WitnessPriority::Last,
+        ))?;
+
+        // The virtual table rides along on the ROM instance's process; `assign_table_to`
+        // ignores the priority, so the default is fine here.
+        registry.assign_table_to(
+            InstanceInfo::new(ZISK_AIRGROUP_ID, VIRTUAL_TABLE_ZISK_0_AIR_IDS[0]),
+            rom_gid,
+        )?;
+
+        Ok(rom_gid)
+    }
+
+    /// Assigns main instances to the proof context.
+    ///
+    /// # Arguments
+    /// * `registry` - Proof-context assignment surface.
+    /// * `global_ids` - Lock for storing assigned global IDs.
+    /// * `plans` - Plans to assign.
+    ///
+    /// # Returns
+    /// Vector of (global_id, plan) pairs for instance creation.
+    ///
+    /// # Errors
+    /// Returns an error if any registry assignment fails or if
+    /// `global_ids` is poisoned.
+    pub fn assign_main_instances(
+        registry: &dyn ProofRegistry,
+        global_ids: &RwLock<Vec<usize>>,
+        plans: Vec<Plan>,
+    ) -> ExecutorResult<Vec<(usize, Plan)>> {
+        let mut assignments = Vec::with_capacity(plans.len());
+
+        for mut plan in plans {
+            let gid =
+                registry.add_instance_assign(InstanceInfo::new(plan.airgroup_id, plan.air_id))?;
+            plan.set_global_id(gid.0);
+            global_ids.write_or_poison("global_ids")?.push(gid.0);
+            assignments.push((gid.0, plan));
+        }
+
+        Ok(assignments)
+    }
+
+    /// Assigns secondary instances to the proof context.
+    ///
+    /// # Arguments
+    /// * `registry` - Proof-context assignment surface.
+    /// * `global_ids` - Lock for storing assigned global IDs.
+    /// * `plans` - Plans to assign (will be mutated with global IDs).
+    ///
+    /// # Errors
+    /// Returns an error if any registry assignment fails or if
+    /// `global_ids` is poisoned.
+    /// `place_on_registration`: the secondaries are registered in two rounds (the minimal-trace
+    /// side first, the memory side when the memory-ops runner joins) and the first round's
+    /// witnesses start before the second is known, which the batch balancer at the end of the
+    /// execution would be too late for; otherwise the balancer places them, as one round did.
+    pub fn assign_secn_instances(
+        registry: &dyn ProofRegistry,
+        global_ids: &RwLock<Vec<usize>>,
+        plans: &mut [Plan],
+        place_on_registration: bool,
+    ) -> ExecutorResult<()> {
+        for plan in plans.iter_mut() {
+            // Secondaries are announced only once their collectors have run, so they are the
+            // ones already waiting on a slot when they reach the channel.
+            let info =
+                InstanceInfo::with_priority(plan.airgroup_id, plan.air_id, WitnessPriority::First);
+
+            // ROM instances need special first-partition assignment look up the global id
+            // stamped by `assign_rom_instance` earlier in the phase.
+            let gid = if AirClassifier::is_rom(plan.airgroup_id, plan.air_id) {
+                registry.find_instance_id(InstanceInfo::new(ZISK_AIRGROUP_ID, ROM_AIR_IDS[0]))?
+            } else if AirClassifier::is_rank_assigned_precompile(plan.airgroup_id, plan.air_id) {
+                registry.add_instance_assign(info)?
+            } else {
+                match plan.instance_type {
+                    InstanceType::Instance if place_on_registration => {
+                        registry.add_instance_assign(info)?
+                    }
+                    InstanceType::Instance => registry.add_instance(info)?,
+                    // Tables are not witness-dispatched; the band is irrelevant to them.
+                    InstanceType::Table => {
+                        registry.add_table(InstanceInfo::new(plan.airgroup_id, plan.air_id))?
+                    }
+                }
+            };
+
+            global_ids.write_or_poison("global_ids")?.push(gid.0);
+            plan.set_global_id(gid.0);
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ports::fakes::{AddKind, FakeProofRegistry};
+
+    #[test]
+    fn assign_rom_instance_uses_add_instance_assign_with_rom_air_id() {
+        let registry = FakeProofRegistry::new();
+
+        let gid = InstanceAssigner::assign_rom_instance(&registry).expect("ok");
+
+        // Two registrations: the ROM instance itself, then the virtual table
+        // pinned to the same gid so the table rides along with the ROM rank.
+        let calls = registry.additions.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].kind, AddKind::InstanceAssign);
+        assert_eq!(
+            calls[0].info,
+            InstanceInfo::with_priority(ZISK_AIRGROUP_ID, ROM_AIR_IDS[0], WitnessPriority::Last)
+        );
+        assert_eq!(calls[0].gid, gid);
+        assert_eq!(calls[1].kind, AddKind::Table);
+        assert_eq!(
+            calls[1].info,
+            InstanceInfo::new(ZISK_AIRGROUP_ID, VIRTUAL_TABLE_ZISK_0_AIR_IDS[0])
+        );
+        assert_eq!(calls[1].gid, gid);
+    }
+
+    #[test]
+    fn assign_main_instances_records_one_add_instance_assign_per_plan() {
+        let registry = FakeProofRegistry::new();
+        let global_ids = RwLock::new(Vec::<usize>::new());
+
+        // Two synthetic plans pointing at arbitrary (group, air) tuples.
+        // Set instance_type to Instance — the field is unused on the
+        // main-assign path but must satisfy `Plan::new`.
+        let plans = vec![
+            Plan::new(7, 100, None, InstanceType::Instance, zisk_common::CheckPoint::None, None),
+            Plan::new(7, 101, None, InstanceType::Instance, zisk_common::CheckPoint::None, None),
+        ];
+
+        let assignments =
+            InstanceAssigner::assign_main_instances(&registry, &global_ids, plans).expect("ok");
+
+        assert_eq!(assignments.len(), 2);
+        let calls = registry.additions.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.kind == AddKind::InstanceAssign));
+        assert_eq!(calls[0].info, InstanceInfo::new(7, 100));
+        assert_eq!(calls[1].info, InstanceInfo::new(7, 101));
+
+        // global_ids slot must receive both assignments in order.
+        let gids = global_ids.read().unwrap();
+        assert_eq!(gids.len(), 2);
+        assert_eq!(gids[0], calls[0].gid.0);
+        assert_eq!(gids[1], calls[1].gid.0);
+
+        // Each plan must carry its assigned global_id.
+        assert_eq!(assignments[0].1.global_id, Some(calls[0].gid.0));
+        assert_eq!(assignments[1].1.global_id, Some(calls[1].gid.0));
+    }
+
+    #[test]
+    fn assign_secn_instances_routes_by_instance_type() {
+        let registry = FakeProofRegistry::new();
+        let global_ids = RwLock::new(Vec::<usize>::new());
+
+        // Plain Instance → add_instance (batch placement) or add_instance_assign (placed on
+        // registration), Table → add_table.
+        let mut plans = [
+            Plan::new(7, 200, None, InstanceType::Instance, zisk_common::CheckPoint::None, None),
+            Plan::new(7, 201, None, InstanceType::Table, zisk_common::CheckPoint::None, None),
+            Plan::new(7, 202, None, InstanceType::Instance, zisk_common::CheckPoint::None, None),
+        ];
+
+        InstanceAssigner::assign_secn_instances(&registry, &global_ids, &mut plans[..2], false)
+            .expect("ok");
+        InstanceAssigner::assign_secn_instances(&registry, &global_ids, &mut plans[2..], true)
+            .expect("ok");
+
+        let calls = registry.additions.borrow();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[2].kind, AddKind::InstanceAssign);
+        assert_eq!(calls[0].kind, AddKind::Instance);
+        assert_eq!(calls[1].kind, AddKind::Table);
+    }
+}

@@ -543,6 +543,10 @@ class Expression extends ExpressionItem {
             return this.applyOperation(operation, values);
 
         }
+        if (operation === 'is') {
+            return this.applyOperationIs(values);
+
+        }
         return ExpressionItems.NonRuntimeEvaluableItem.get();
     }
     /**
@@ -570,7 +574,9 @@ class Expression extends ExpressionItem {
         if (operation === 'if') {
             return this.applyOperationIf(_values);
         }
-
+        if (operation === 'is') {
+            return this.applyOperationIs(_values);
+        }
         const operationInfo = ExpressionOperationsInfo.get(operation);
 
         if (operationInfo === false) {
@@ -669,6 +675,25 @@ class Expression extends ExpressionItem {
         const cond = values[0].asBool();
         return values[cond ? 1 : 2].eval();
     }
+    applyOperationIs(values) {
+        if (values.length !== 2) {
+            throw new Error(`Invalid number of arguments on operation is, received ${values.length} values but was expected 2`);
+        }
+        switch (values[1].value) {
+            case 'int': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.IntValue ? 1n: 0n);
+            case 'string': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.StringValue ? 1n: 0n);
+            case 'fixed': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.FixedCol ? 1n: 0n);
+            case 'witness': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.WitnessCol ? 1n: 0n);
+            case 'custom': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.CustomCol ? 1n: 0n);
+            case 'expr': return new ExpressionItems.IntValue(values[0] instanceof Expression || values[0] instanceof ExpressionItems.ExpressionReference ? 1n: 0n);
+            case 'airval': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.AirValue ? 1n: 0n);
+            case 'proofval': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.ProofValue ? 1n: 0n);
+            case 'public': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.Public ? 1n: 0n);
+            case 'challenge': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.Challenge ? 1n: 0n);
+            case 'airgroupval': return new ExpressionItems.IntValue(values[0] instanceof ExpressionItems.AirGroupValue ? 1n: 0n);
+        }
+        throw new Error(`Invalid type ${values[1].value} on operation is`);
+    }
     castingItemMethod(type) {
         if (type === 'StringValue' || type === 'IntValue') {
             type = type.slice(0, -5);
@@ -746,7 +771,6 @@ class Expression extends ExpressionItem {
         }
         const res = typeof value.asIntDefault === 'function' ? value.asIntDefault(false) : false;
         if (res === false) {
-            console.log(value);
             throw new Error(this.toString() + " cannot evaluated as a integer");
         }
         return res;

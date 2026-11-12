@@ -5,10 +5,10 @@ use std::{collections::HashMap, path::PathBuf};
 use colored::Colorize;
 use crate::commands::field::Field;
 
-use fields::Goldilocks;
+use proofman_fields::Goldilocks;
 
 use proofman::ProofMan;
-use proofman_common::ParamsGPU;
+use proofman_common::ProofmanOptions;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -53,6 +53,9 @@ pub struct StatsCmd {
 
     #[clap(short = 'm', long, default_value_t = false)]
     pub minimal_memory: bool,
+
+    #[clap(long, default_value_t = false)]
+    pub packed: bool,
 }
 
 impl StatsCmd {
@@ -66,22 +69,19 @@ impl StatsCmd {
             Some(Some(debug_value)) => json_to_debug_instances_map(self.proving_key.clone(), debug_value.clone())?,
         };
 
-        let mut gpu_params = ParamsGPU::default();
+        let mut options = ProofmanOptions::default();
         if let Some(number_threads_witness) = self.number_threads_witness {
-            gpu_params.with_number_threads_pools_witness(number_threads_witness);
+            options.with_number_threads_pools_witness(number_threads_witness);
         }
         if let Some(max_witness_stored) = self.max_witness_stored {
-            gpu_params.with_max_witness_stored(max_witness_stored);
+            options.with_max_witness_stored(max_witness_stored);
+        }
+        if self.packed {
+            options.packed();
         }
 
-        let proofman = ProofMan::<Goldilocks>::new(
-            self.proving_key.clone(),
-            true,
-            false,
-            gpu_params,
-            self.verbose.into(),
-            HashMap::new(),
-        )?;
+        options.verify_constraints();
+        options.verbose_mode(self.verbose.into());
 
         let mut custom_commits_map: HashMap<String, PathBuf> = HashMap::new();
         for commit in &self.custom_commits {
@@ -91,6 +91,11 @@ impl StatsCmd {
                 eprintln!("Invalid commit format: {commit:?}");
             }
         }
+        // Before the constructor: the const buffer reserves each custom commit's real
+        // packed width only when sizing knows the file.
+        options.custom_commits_fixed(custom_commits_map.clone());
+
+        let proofman = ProofMan::<Goldilocks>::new(self.proving_key.clone(), options)?;
         proofman.register_custom_commits(custom_commits_map)?;
 
         match self.field {
@@ -99,7 +104,7 @@ impl StatsCmd {
                 self.public_inputs.clone(),
                 &debug_info,
                 self.verbose.into(),
-                ProofOptions::new(false, false, false, false, false, self.minimal_memory, false, None),
+                ProofOptions::new(false, false, false, false, false, self.minimal_memory),
             )?,
         };
 

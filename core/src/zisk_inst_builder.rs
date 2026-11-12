@@ -4,8 +4,8 @@
 
 use crate::{
     zisk_ops::{InvalidNameError, OpType, ZiskOp},
-    ZiskInst, REGS_IN_MAIN_FROM, REGS_IN_MAIN_TO, REG_FIRST, SRC_C, SRC_IMM, SRC_IND, SRC_MEM,
-    SRC_REG, STORE_IND, STORE_MEM, STORE_NONE, STORE_REG,
+    ZiskInst, ZiskRom, REGS_IN_MAIN_FROM, REGS_IN_MAIN_TO, REG_FIRST, SRC_C, SRC_IMM, SRC_IND,
+    SRC_MEM, SRC_REG, SRC_STEP, STORE_IND, STORE_MEM, STORE_NONE, STORE_REG,
 };
 
 // #[cfg(feature = "sp")]
@@ -22,13 +22,37 @@ impl ZiskInstBuilder {
     /// Constructor setting the initial pc address
     #[inline(always)]
     pub fn new(paddr: u64) -> ZiskInstBuilder {
+        assert!(
+            paddr & 0x1 == 0,
+            "ZiskInstBuilder::new() used on internal instruction 0x{paddr:x}"
+        );
         let mut zib = ZiskInstBuilder::default();
         zib.i.paddr = paddr;
+        zib
+    }
+    /// Constructor setting the initial pc address
+    #[inline(always)]
+    pub fn new_internal(paddr: u64, external_ref_addr: u64) -> ZiskInstBuilder {
+        let mut zib = ZiskInstBuilder::default();
+        assert!(
+            paddr & 0x1 == 1,
+            "ZiskInstBuilder::new_internal() used on non-internal instruction 0x{paddr:x}"
+        );
+        assert!(
+            external_ref_addr & 0x1 == 0,
+            "ZiskInstBuilder::new_internal() external_ref_addr is internal address 0x{external_ref_addr:x}"
+        );
+        zib.i.paddr = paddr;
+        zib.i.external_ref_addr = Some(external_ref_addr);
         zib
     }
     /// Constructor setting the initial pc address and original RISC-V instruction
     #[inline(always)]
     pub fn new_from_riscv(paddr: u64, riscv_inst: String) -> ZiskInstBuilder {
+        assert!(
+            paddr & 0x1 == 0,
+            "ZiskInstBuilder::new_from_riscv() used on internal instruction 0x{paddr:x}",
+        );
         let mut zib = ZiskInstBuilder::default();
         zib.i.paddr = paddr;
         zib.i.riscv_inst = Some(riscv_inst);
@@ -42,9 +66,9 @@ impl ZiskInstBuilder {
             "mem" => SRC_MEM,
             "imm" => SRC_IMM,
             "lastc" => SRC_C,
+            "step" => SRC_STEP,
             // #[cfg(feature = "sp")]
             // "sp" => SRC_SP,
-            // "step" => SRC_STEP,
             _ => panic!("ZiskInstBuilder::a_src() called with invalid src={src}"),
         }
     }
@@ -244,8 +268,61 @@ impl ZiskInstBuilder {
         self.i.verbose = s.to_owned();
     }
 
+    /// Links this instruction to the next internal instruction, when existing
+    pub fn set_next_internal_address(&mut self, addr: u64) {
+        self.i.next_internal_inst = Some(addr);
+    }
+
     /// Called when the instruction has been built
-    pub fn build(&mut self) {
+    pub fn build(&mut self, rom: &mut ZiskRom) {
+        // Set the instruction index to the current value of the ZiskRom build counter
+        self.i.index = rom.build_counter;
+        rom.build_counter += 1;
+
+        // Insert the instruction in the rom instructions map, using the instruction pc as key
+        // We can use std::mem::take() to move the instruction out of the builder, and replace it
+        // with a default one, to avoid cloning it since we won't use it any more
+        let paddr = self.i.paddr;
+        let zib = std::mem::take(self);
+        rom.insts.insert(paddr, zib);
+
         //print!("ZiskInstBuilder::build() i=[ {} ]\n", self.i.to_string());
+    }
+    pub fn set_meta_rs1(&mut self, rs1: u8) {
+        self.i.meta_rs1 = Some(rs1);
+    }
+    pub fn set_meta_rd(&mut self, rd: u8) {
+        self.i.meta_rd = Some(rd);
+    }
+    pub fn set_meta_rs1_rd(&mut self, rs1: u8, rd: u8) {
+        self.i.meta_rs1 = Some(rs1);
+        self.i.meta_rd = Some(rd);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `slli.uw` is proven by the binary extension assuming its operands reach the bus already
+    /// zero-extended to 32 bits, which is what the m32 flag does (see `main.pil` and
+    /// `OperationBusData::from_instruction`). m32 is derived from the operation name, so this
+    /// pins the assumption: renaming the operation would silently drop the zero extension.
+    #[test]
+    fn sll_u_w_sets_m32() {
+        let mut zib = ZiskInstBuilder::new(0);
+        zib.op("sll_u_w").unwrap();
+        assert!(zib.i.m32, "sll_u_w must set m32 so that a reaches the bus zero-extended");
+    }
+
+    /// The shift-and-adds, in contrast, take a full 64-bit b operand (rs2), so they must not mask
+    /// anything on the bus.
+    #[test]
+    fn sh_add_does_not_set_m32() {
+        for op in ["sh1add", "sh2add", "sh3add"] {
+            let mut zib = ZiskInstBuilder::new(0);
+            zib.op(op).unwrap();
+            assert!(!zib.i.m32, "{op} must not set m32");
+        }
     }
 }

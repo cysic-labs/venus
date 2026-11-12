@@ -1,156 +1,54 @@
 use borsh::{BorshSerialize, BorshDeserialize};
-use bytemuck::cast_slice;
-use libloading::{Library, Symbol};
-use fields::PrimeField64;
-use std::ffi::CString;
+use proofman_fields::PrimeField64;
 use std::fmt;
 use proofman_starks_lib_c::*;
 use std::path::Path;
 use std::fs::File;
 use std::io::Write;
-use std::collections::HashMap;
-use std::marker::PhantomData;
-use std::mem;
-use std::sync::atomic::Ordering;
-use std::sync::{Mutex, OnceLock};
 
 use proofman_common::{
-    CurveType, MpiCtx, Proof, ProofCtx, ProofType, ProofmanResult, ProofmanError, Setup, SetupsVadcop,
-    GetSizeWitnessFunc,
+    CurveType, MpiCtx, MemoryHandlerRecursive, Proof, ProofCtx, ProofType, ProofmanResult, ProofmanError, Setup,
+    SetupsVadcop,
 };
+use proofman_common::exec_format::{EXEC_FORMAT_VERSION, EXEC_HEADER_WORDS, EXEC_MAGIC};
+use proofman_common::final_witness::FinalWitnessLibrary;
 
-use std::os::raw::{c_void, c_char};
+use std::os::raw::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use proofman_util::{
-    create_buffer_fast, timer_start_debug, timer_start_info, timer_stop_and_log_debug, timer_stop_and_log_info,
+    timer_start_info, timer_stop_and_log_info, timer_start_debug, timer_stop_and_log_debug,
+    timer_stop_and_log_debug_net, create_buffer_fast,
 };
 
 use crate::{add_publics_circom, add_publics_aggregation};
 
-pub type GetWitnessFunc =
-    unsafe extern "C" fn(zkin: *mut u64, circom_circuit: *mut c_void, witness: *mut c_void, n_mutexes: u64) -> i64;
+pub use proofman_common::final_witness::GetWitnessFinalFunc;
 
-pub type GetWitnessFinalFunc =
-    unsafe extern "C" fn(zkin: *mut c_void, dat_file: *const c_char, witness: *mut c_void, n_mutexes: u64) -> i64;
+/// Joins a background FFI thread on drop, so an early `?` or panic can't detach a thread still
+/// writing shared device state (the const-tree buffer) and let the next proof race it.
+pub struct JoinOnDrop(Option<std::thread::JoinHandle<()>>);
 
-pub const N_RECURSIVE_PROOFS_PER_AGGREGATION: usize = 3;
-/// The final SNARK witness holds 32-byte BN128 field elements.
-const FINAL_SNARK_FIELD_BYTES: u64 = 32;
-const MAX_FINAL_SNARK_WITNESS_BYTES: u64 = 1 << 30;
-
-/// Checks that the buffers handed to the recursive prover hold what the setup makes it read and
-/// write: the witness and trace columns, the output proof after `initial_idx`, and the CPU prover
-/// buffers.
-fn validate_recursive_proof_inputs<F: PrimeField64>(
-    setup: &Setup<F>,
-    witness: &Proof<F>,
-    new_proof: &Proof<F>,
-    initial_idx: usize,
-    prover_buffer: &[F],
-    const_pols: &[F],
-    const_tree: &[F],
-) -> ProofmanResult<()> {
-    let too_short = |buffer: &str, expected: usize, got: usize| {
-        ProofmanError::InvalidSetup(format!(
-            "recursive {buffer} too short for {:?} [{}:{}]: expected at least {expected}, got {got}",
-            witness.proof_type, witness.airgroup_id, witness.air_id
-        ))
-    };
-
-    if witness.n_cols as u64 != setup.n_cols {
-        return Err(ProofmanError::InvalidSetup(format!(
-            "recursive witness column count mismatch for {:?} [{}:{}]: expected {}, got {}",
-            witness.proof_type, witness.airgroup_id, witness.air_id, setup.n_cols, witness.n_cols
-        )));
+impl JoinOnDrop {
+    pub fn new(handle: std::thread::JoinHandle<()>) -> Self {
+        Self(Some(handle))
     }
 
-    let witness_len = recursive_witness_size(setup)? as usize;
-    if witness.circom_witness.len() < witness_len {
-        return Err(too_short("witness", witness_len, witness.circom_witness.len()));
-    }
-
-    let proof_len = initial_idx + setup.proof_size as usize;
-    if new_proof.proof.len() < proof_len {
-        return Err(too_short("output proof", proof_len, new_proof.proof.len()));
-    }
-
-    if prover_buffer.len() < setup.prover_buffer_size as usize {
-        return Err(too_short("prover buffer", setup.prover_buffer_size as usize, prover_buffer.len()));
-    }
-    if cfg!(not(feature = "gpu")) {
-        if const_pols.len() < setup.const_pols_size {
-            return Err(too_short("const pols buffer", setup.const_pols_size, const_pols.len()));
-        }
-        if const_tree.len() < setup.const_tree_size {
-            return Err(too_short("const tree buffer", setup.const_tree_size, const_tree.len()));
-        }
-    }
-
-    Ok(())
-}
-
-/// Number of field elements of a recursive circuit witness: the circom signals followed by the
-/// additions listed in the exec file.
-fn recursive_witness_size<F: PrimeField64>(setup: &Setup<F>) -> ProofmanResult<u64> {
-    let size_witness = setup
-        .size_witness
-        .read()
-        .unwrap()
-        .ok_or_else(|| ProofmanError::InvalidSetup("recursive size_witness is not initialized".to_string()))?;
-    let n_adds = setup
-        .exec_data
-        .read()
-        .unwrap()
-        .as_ref()
-        .and_then(|exec_data| exec_data.first().copied())
-        .ok_or_else(|| ProofmanError::InvalidSetup("recursive exec data is not initialized".to_string()))?;
-    size_witness
-        .checked_add(n_adds)
-        .ok_or_else(|| ProofmanError::InvalidSetup("recursive witness size overflows".to_string()))
-}
-
-static RECURSIVE_TRACE_PINNED_POOL: OnceLock<Mutex<RecursiveTracePinnedPool>> = OnceLock::new();
-
-#[derive(Default)]
-struct RecursiveTracePinnedPool {
-    buffers: HashMap<usize, Vec<usize>>,
-    retained: usize,
-}
-
-struct PinnedTraceBuffer<F> {
-    ptr: usize,
-    bytes: usize,
-    _marker: PhantomData<F>,
-}
-
-enum RecursiveTraceStorage<F> {
-    Pinned(PinnedTraceBuffer<F>),
-    Vec(Vec<F>),
-}
-
-impl<F> RecursiveTraceStorage<F> {
-    fn new(len: usize) -> Self {
-        // SAFETY: recursive trace generation writes the whole trace before it is read.
-        take_pinned_recursive_trace(len).map_or_else(|| Self::Vec(unsafe { create_buffer_fast(len) }), Self::Pinned)
-    }
-
-    fn as_mut_ptr(&mut self) -> *mut F {
-        match self {
-            Self::Pinned(buffer) => buffer.as_mut_ptr(),
-            Self::Vec(buffer) => buffer.as_mut_ptr(),
+    /// Join now and return the thread's result; consumes the guard so `Drop` will not re-join.
+    pub fn join_now(mut self) -> std::thread::Result<()> {
+        match self.0.take() {
+            Some(handle) => handle.join(),
+            None => Ok(()),
         }
     }
 }
 
-impl<F> PinnedTraceBuffer<F> {
-    fn as_mut_ptr(&mut self) -> *mut F {
-        self.ptr as *mut F
-    }
-}
-
-impl<F> Drop for PinnedTraceBuffer<F> {
+impl Drop for JoinOnDrop {
     fn drop(&mut self) {
-        return_pinned_recursive_trace(self.ptr, self.bytes);
+        if let Some(handle) = self.0.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -191,11 +89,212 @@ impl fmt::Debug for AggProofs {
     }
 }
 
+/// A batched recursive1's `zkin`, in circom's input order: publics, each slot's proof, the null flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchedZkin {
+    pub total: usize,
+    /// Offset of each slot's proof; the publics sit at 0.
+    pub slot_body: Vec<usize>,
+    /// `None` for compressor slots: their circuitType is the flag.
+    pub is_null: Option<usize>,
+    pub body_len: usize,
+}
+
+pub fn batched_zkin(k: usize, proof_len: usize, publics_circom_size: usize, basic_slots: bool) -> BatchedZkin {
+    let mut at = publics_circom_size;
+    let slot_body = (0..k)
+        .map(|_| {
+            let start = at;
+            at += proof_len;
+            start
+        })
+        .collect();
+    let is_null = basic_slots.then_some(at);
+    if is_null.is_some() {
+        at += k;
+    }
+    BatchedZkin { total: at, slot_body, is_null, body_len: proof_len }
+}
+
+/// Witness for a batched recursive1: up to `k` proofs of one air; empty slots are zeros plus their flag.
+pub fn gen_witness_recursive_batch<F: PrimeField64>(
+    pctx: &ProofCtx<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
+    setups: &SetupsVadcop<F>,
+    proofs: &[&Proof<F>],
+) -> ProofmanResult<Proof<F>> {
+    let first = proofs.first().ok_or_else(|| ProofmanError::ProofmanError("Empty recursive1 batch".into()))?;
+    let (airgroup_id, air_id) = (first.airgroup_id, first.air_id);
+    let k = pctx.global_info.get_air_r1_batch_size(airgroup_id, air_id);
+    if k < 2 {
+        return Err(ProofmanError::ProofmanError(format!(
+            "Air [{airgroup_id}:{air_id}] is not batched (r1BatchSize {k}); use gen_witness_recursive"
+        )));
+    }
+    if proofs.len() > k {
+        return Err(ProofmanError::ProofmanError(format!(
+            "Recursive1 batch for air [{airgroup_id}:{air_id}] holds {k} slots, got {} proofs",
+            proofs.len()
+        )));
+    }
+    // One compile-time verkey: every slot must be this air.
+    if let Some((i, p)) = proofs.iter().enumerate().find(|(_, p)| (p.airgroup_id, p.air_id) != (airgroup_id, air_id)) {
+        return Err(ProofmanError::ProofmanError(format!(
+            "Recursive1 batch mixes airs: slot 0 is [{airgroup_id}:{air_id}], slot {i} is [{}:{}]",
+            p.airgroup_id, p.air_id
+        )));
+    }
+    let has_compressor = pctx.global_info.get_air_has_compressor(airgroup_id, air_id);
+    let want = if has_compressor { ProofType::Compressor } else { ProofType::Basic };
+    if let Some((i, p)) = proofs.iter().enumerate().find(|(_, p)| p.proof_type != want) {
+        return Err(ProofmanError::InvalidProof(format!(
+            "Recursive1 batch for air [{airgroup_id}:{air_id}] expects {want:?} proofs, slot {i} is {:?}",
+            p.proof_type
+        )));
+    }
+    let proof_len = first.proof.len();
+    if let Some((i, p)) = proofs.iter().enumerate().find(|(_, p)| p.proof.len() != proof_len) {
+        return Err(ProofmanError::ProofmanError(format!(
+            "Inconsistent proof sizes in recursive1 batch: slot 0 is {proof_len}, slot {i} is {}",
+            p.proof.len()
+        )));
+    }
+
+    timer_start_debug!(
+        GENERATE_RECURSIVE1_WITNESS,
+        "GENERATING_RECURSIVE1_WITNESS_{} [{}:{}]",
+        first.global_idx.unwrap_or(0),
+        airgroup_id,
+        air_id
+    );
+    let setup = setups.sctx_recursive1.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
+    let recursive2_setup = setups.sctx_recursive2.as_ref().unwrap().get_setup(airgroup_id, 0)?;
+
+    let publics_circom_size =
+        pctx.global_info.n_publics + pctx.global_info.n_proof_values.iter().sum::<usize>() * 3 + 3 + 4;
+    let layout = batched_zkin(k, proof_len, publics_circom_size, !has_compressor);
+
+    let mut zkin: Vec<u64> = vec![0; layout.total];
+    for (slot, p) in proofs.iter().enumerate() {
+        let at = layout.slot_body[slot];
+        zkin[at..at + proof_len].copy_from_slice(&p.proof);
+    }
+    if let Some(at) = layout.is_null {
+        for slot in proofs.len()..k {
+            zkin[at + slot] = 1;
+        }
+    }
+    add_publics_circom(&mut zkin, 0, pctx, Some(&recursive2_setup.verkey));
+
+    tracing::info!(
+        "Batched recursive1 [{}:{}]: {} of {} slots filled (instances {:?})",
+        airgroup_id,
+        air_id,
+        proofs.len(),
+        k,
+        proofs.iter().map(|p| p.global_idx).collect::<Vec<_>>()
+    );
+    let (trace, publics) = generate_witness::<F>(
+        setup,
+        memory_handler_recursive_witness,
+        first.global_idx.unwrap_or(0),
+        &zkin,
+        recursion_trace_stride(setup_exec_slice(setup), setup.n_cols, pctx.gpu),
+        memory_handler_recursive_witness.witness_threads(),
+    )?;
+    timer_stop_and_log_debug_net!(
+        GENERATE_RECURSIVE1_WITNESS,
+        proofman_common::take_buffer_wait(trace.as_ptr() as *const u8),
+        "GENERATING_RECURSIVE1_WITNESS_{} [{}:{}]",
+        first.global_idx.unwrap_or(0),
+        airgroup_id,
+        air_id
+    );
+    Ok(Proof::new_witness(
+        ProofType::Recursive1,
+        airgroup_id,
+        air_id,
+        first.global_idx,
+        trace,
+        publics,
+        setup.n_cols as usize,
+    ))
+}
+
+/// Recursive1 circuits per airgroup: `ceil(n / k)` per air.
+pub fn recursive1_counts_per_airgroup(expected: &[Vec<usize>], batch: &[Vec<usize>]) -> Vec<usize> {
+    expected
+        .iter()
+        .enumerate()
+        .map(|(ag, airs)| {
+            airs.iter()
+                .enumerate()
+                .map(|(air, &n)| n.div_ceil(batch.get(ag).and_then(|b| b.get(air)).copied().unwrap_or(1).max(1)))
+                .sum()
+        })
+        .collect()
+}
+
+/// Full, or holding the air's last planned input.
+fn should_flush(in_slot: usize, k: usize, seen: usize, planned: usize) -> bool {
+    in_slot >= k || seen >= planned
+}
+
+/// Collects one air's proofs until its batch is full or its last planned proof arrives. The plan
+/// is exact: tables skip before it is read, and every planned instance is armed in the proof ledger.
+pub struct Recursive1Batcher<F: PrimeField64> {
+    /// `[airgroup][air]`: proofs waiting for slot-mates.
+    slots: Vec<Vec<Mutex<Vec<Proof<F>>>>>,
+    /// `[airgroup][air]`: inputs this air has fed so far.
+    seen: Vec<Vec<AtomicUsize>>,
+    /// `[airgroup][air]`: inputs this process proves for the air.
+    planned: Vec<Vec<usize>>,
+}
+
+impl<F: PrimeField64> Recursive1Batcher<F> {
+    pub fn new(planned: Vec<Vec<usize>>) -> Self {
+        Self {
+            slots: planned.iter().map(|airs| airs.iter().map(|_| Mutex::new(Vec::new())).collect()).collect(),
+            seen: planned.iter().map(|airs| airs.iter().map(|_| AtomicUsize::new(0)).collect()).collect(),
+            planned,
+        }
+    }
+
+    /// Returns the witness once the batch is complete, `None` while it is still filling.
+    pub fn offer(
+        &self,
+        pctx: &ProofCtx<F>,
+        memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
+        setups: &SetupsVadcop<F>,
+        proof: Proof<F>,
+    ) -> ProofmanResult<Option<Proof<F>>> {
+        let (airgroup_id, air_id) = (proof.airgroup_id, proof.air_id);
+        let k = pctx.global_info.get_air_r1_batch_size(airgroup_id, air_id);
+        if k < 2 {
+            return gen_witness_recursive(pctx, memory_handler_recursive_witness, setups, &proof).map(Some);
+        }
+
+        let chunk = {
+            let mut slot = self.slots[airgroup_id][air_id].lock().unwrap();
+            slot.push(proof);
+            let seen = self.seen[airgroup_id][air_id].fetch_add(1, Ordering::AcqRel) + 1;
+            if !should_flush(slot.len(), k, seen, self.planned[airgroup_id][air_id]) {
+                return Ok(None);
+            }
+            // Taken under the lock, so two streams cannot flush the same proofs.
+            std::mem::take(&mut *slot)
+        };
+
+        let refs: Vec<&Proof<F>> = chunk.iter().collect();
+        gen_witness_recursive_batch(pctx, memory_handler_recursive_witness, setups, &refs).map(Some)
+    }
+}
+
 pub fn gen_witness_recursive<F: PrimeField64>(
     pctx: &ProofCtx<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
     setups: &SetupsVadcop<F>,
     proof: &Proof<F>,
-    output_dir_path: &Path,
 ) -> ProofmanResult<Proof<F>> {
     let (airgroup_id, air_id) = (proof.airgroup_id, proof.air_id);
 
@@ -223,9 +322,17 @@ pub fn gen_witness_recursive<F: PrimeField64>(
         let mut updated_proof: Vec<u64> = vec![0; proof.proof.len() + publics_circom_size];
         updated_proof[publics_circom_size..].copy_from_slice(&proof.proof);
         add_publics_circom(&mut updated_proof, 0, pctx, None);
-        let circom_witness = generate_witness::<F>(setup, proof.global_idx.unwrap(), &updated_proof, output_dir_path)?;
-        timer_stop_and_log_debug!(
+        let (trace, publics) = generate_witness::<F>(
+            setup,
+            memory_handler_recursive_witness,
+            proof.global_idx.unwrap(),
+            &updated_proof,
+            recursion_trace_stride(setup_exec_slice(setup), setup.n_cols, pctx.gpu),
+            memory_handler_recursive_witness.witness_threads(),
+        )?;
+        timer_stop_and_log_debug_net!(
             GENERATE_COMPRESSOR_WITNESS,
+            proofman_common::take_buffer_wait(trace.as_ptr() as *const u8),
             "GENERATING_COMPRESSOR_WITNESS_{} [{}:{}]",
             proof.global_idx.unwrap(),
             proof.airgroup_id,
@@ -236,7 +343,8 @@ pub fn gen_witness_recursive<F: PrimeField64>(
             airgroup_id,
             air_id,
             proof.global_idx,
-            circom_witness,
+            trace,
+            publics,
             setup.n_cols as usize,
         ))
     } else {
@@ -247,6 +355,13 @@ pub fn gen_witness_recursive<F: PrimeField64>(
             proof.airgroup_id,
             proof.air_id
         );
+        // The batched circuit reads another layout; this one would produce a wrong witness.
+        let batch = pctx.global_info.get_air_r1_batch_size(airgroup_id, air_id);
+        if batch > 1 {
+            return Err(ProofmanError::ProofmanError(format!(
+                "Air [{airgroup_id}:{air_id}] has r1BatchSize {batch}; use gen_witness_recursive_batch"
+            )));
+        }
         let setup = setups.sctx_recursive1.as_ref().unwrap().get_setup(airgroup_id, air_id)?;
 
         let publics_circom_size =
@@ -268,9 +383,17 @@ pub fn gen_witness_recursive<F: PrimeField64>(
             add_publics_circom(&mut updated_proof, 0, pctx, Some(&recursive2_setup.verkey));
         }
 
-        let circom_witness = generate_witness::<F>(setup, proof.global_idx.unwrap(), &updated_proof, output_dir_path)?;
-        timer_stop_and_log_debug!(
+        let (trace, publics) = generate_witness::<F>(
+            setup,
+            memory_handler_recursive_witness,
+            proof.global_idx.unwrap(),
+            &updated_proof,
+            recursion_trace_stride(setup_exec_slice(setup), setup.n_cols, pctx.gpu),
+            memory_handler_recursive_witness.witness_threads(),
+        )?;
+        timer_stop_and_log_debug_net!(
             GENERATE_RECURSIVE1_WITNESS,
+            proofman_common::take_buffer_wait(trace.as_ptr() as *const u8),
             "GENERATING_RECURSIVE1_WITNESS_{} [{}:{}]",
             proof.global_idx.unwrap(),
             proof.airgroup_id,
@@ -281,7 +404,8 @@ pub fn gen_witness_recursive<F: PrimeField64>(
             airgroup_id,
             air_id,
             proof.global_idx,
-            circom_witness,
+            trace,
+            publics,
             setup.n_cols as usize,
         ))
     }
@@ -289,28 +413,29 @@ pub fn gen_witness_recursive<F: PrimeField64>(
 
 pub fn gen_witness_aggregation<F: PrimeField64>(
     pctx: &ProofCtx<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
     setups: &SetupsVadcop<F>,
-    proof1: &Proof<F>,
-    proof2: &Proof<F>,
-    proof3: &Proof<F>,
-    output_dir_path: &Path,
+    proofs: &[&Proof<F>],
 ) -> ProofmanResult<Proof<F>> {
     timer_start_debug!(GENERATE_WITNESS_AGGREGATION);
-    let proof_len = proof1.proof.len();
-    if proof_len != proof2.proof.len() || proof_len != proof3.proof.len() {
+    let arity = pctx.global_info.aggregation_arity;
+    if proofs.len() != arity {
+        return Err(ProofmanError::ProofmanError(format!("Aggregation expects {arity} proofs, got {}", proofs.len())));
+    }
+
+    let proof_len = proofs[0].proof.len();
+    if let Some((i, p)) = proofs.iter().enumerate().find(|(_, p)| p.proof.len() != proof_len) {
         return Err(ProofmanError::ProofmanError(format!(
-            "Inconsistent proof sizes: proof1 size {}, proof2 size {}, proof3 size {}",
-            proof1.proof.len(),
-            proof2.proof.len(),
-            proof3.proof.len()
+            "Inconsistent proof sizes: proof 0 size {proof_len}, proof {i} size {}",
+            p.proof.len()
         )));
     }
 
-    let airgroup_id = proof1.airgroup_id;
-    if airgroup_id != proof2.airgroup_id || airgroup_id != proof3.airgroup_id {
+    let airgroup_id = proofs[0].airgroup_id;
+    if let Some((i, p)) = proofs.iter().enumerate().find(|(_, p)| p.airgroup_id != airgroup_id) {
         return Err(ProofmanError::ProofmanError(format!(
-            "Inconsistent airgroup_ids: proof1 airgroup_id {}, proof2 airgroup_id {}, proof3 airgroup_id {}",
-            proof1.airgroup_id, proof2.airgroup_id, proof3.airgroup_id
+            "Inconsistent airgroup_ids: proof 0 airgroup_id {airgroup_id}, proof {i} airgroup_id {}",
+            p.airgroup_id
         )));
     }
 
@@ -319,25 +444,36 @@ pub fn gen_witness_aggregation<F: PrimeField64>(
 
     let setup_recursive2 = setups.sctx_recursive2.as_ref().unwrap().get_setup(airgroup_id, 0)?;
 
-    let updated_proof_size = N_RECURSIVE_PROOFS_PER_AGGREGATION * proof_len + publics_circom_size;
+    let updated_proof_size = arity * proof_len + publics_circom_size;
 
     let mut updated_proof_recursive2: Vec<u64> = vec![0; updated_proof_size];
-
-    updated_proof_recursive2[publics_circom_size..(publics_circom_size + proof_len)].copy_from_slice(&proof1.proof);
-    updated_proof_recursive2[publics_circom_size + proof_len..publics_circom_size + 2 * proof_len]
-        .copy_from_slice(&proof2.proof);
-    updated_proof_recursive2[publics_circom_size + 2 * proof_len..].copy_from_slice(&proof3.proof);
+    for (i, p) in proofs.iter().enumerate() {
+        let start = publics_circom_size + i * proof_len;
+        updated_proof_recursive2[start..start + proof_len].copy_from_slice(&p.proof);
+    }
 
     add_publics_circom(&mut updated_proof_recursive2, 0, pctx, Some(&setup_recursive2.verkey));
-    let circom_witness = generate_witness::<F>(setup_recursive2, 0, &updated_proof_recursive2, output_dir_path)?;
+    let (trace, publics) = generate_witness::<F>(
+        setup_recursive2,
+        memory_handler_recursive_witness,
+        0,
+        &updated_proof_recursive2,
+        recursion_trace_stride(setup_exec_slice(setup_recursive2), setup_recursive2.n_cols, pctx.gpu),
+        memory_handler_recursive_witness.agg_witness_threads(),
+    )?;
 
-    timer_stop_and_log_debug!(GENERATE_WITNESS_AGGREGATION);
+    timer_stop_and_log_debug_net!(
+        GENERATE_WITNESS_AGGREGATION,
+        proofman_common::take_buffer_wait(trace.as_ptr() as *const u8),
+        "GENERATE_WITNESS_AGGREGATION"
+    );
     Ok(Proof::new_witness(
         ProofType::Recursive2,
         airgroup_id,
         0,
         None,
-        circom_witness,
+        trace,
+        publics,
         setup_recursive2.n_cols as usize,
     ))
 }
@@ -355,41 +491,20 @@ pub fn n_publics_aggregation<F: PrimeField64>(pctx: &ProofCtx<F>, airgroup_id: u
     publics_aggregation
 }
 
-/// The accumulated challenge a recursive2 proof carries among its aggregation publics, after the
-/// circuit type, the proof count and the aggregation types of its airgroup.
-pub fn get_accumulated_challenge_slice<'a, F: PrimeField64>(
-    pctx: &ProofCtx<F>,
-    airgroup_id: usize,
-    proof: &'a [u64],
-) -> ProofmanResult<&'a [u64]> {
-    let agg_types = pctx
-        .global_info
-        .agg_types
-        .get(airgroup_id)
-        .ok_or_else(|| ProofmanError::InvalidProof(format!("Invalid aggregation airgroup id {airgroup_id}")))?;
-    let len = if pctx.global_info.curve != CurveType::None {
-        10
+pub fn get_accumulated_challenge<F: PrimeField64>(pctx: &ProofCtx<F>, airgroup_id: usize, proof: &[u64]) -> Vec<u64> {
+    // Layout: [circuitType, nProofs, aggTypes(L), airgroupvalues(3L), stage1Hash...].
+    let offset = 2 + 4 * pctx.global_info.agg_types[airgroup_id].len();
+    if pctx.global_info.curve != CurveType::None {
+        proof[offset..offset + 10].to_vec()
     } else {
-        pctx.global_info.lattice_size.ok_or_else(|| {
-            ProofmanError::InvalidSetup("global info latticeSize is required for curve None aggregation".into())
-        })?
-    };
-    let start = 2 + 4 * agg_types.len();
-    proof.get(start..start + len).ok_or_else(|| {
-        ProofmanError::InvalidProof(format!(
-            "Proof of {} words is too short for its accumulated challenge at {start}..{}",
-            proof.len(),
-            start + len
-        ))
-    })
+        proof[offset..offset + pctx.global_info.lattice_size.unwrap()].to_vec()
+    }
 }
 
-pub fn get_accumulated_challenge<F: PrimeField64>(
-    pctx: &ProofCtx<F>,
-    airgroup_id: usize,
-    proof: &[u64],
-) -> ProofmanResult<Vec<u64>> {
-    Ok(get_accumulated_challenge_slice(pctx, airgroup_id, proof)?.to_vec())
+/// The layers the chain ends with, one proof of one air at (0, 0) whose proof carries its publics:
+/// the vadcop_final, and the compressed final or (blake3) the recursivef after it.
+fn is_final_layer(proof_type: &ProofType) -> bool {
+    matches!(proof_type, ProofType::VadcopFinal | ProofType::VadcopFinalCompressed | ProofType::RecursiveF)
 }
 
 pub fn gen_recursive_proof_size<F: PrimeField64>(
@@ -405,30 +520,42 @@ pub fn gen_recursive_proof_size<F: PrimeField64>(
 
     let publics_aggregation = n_publics_aggregation(pctx, airgroup_id);
 
-    if witness.proof_type != ProofType::VadcopFinal && witness.proof_type != ProofType::VadcopFinalCompressed {
+    if !is_final_layer(&witness.proof_type) {
         new_proof_size += publics_aggregation as u64;
     } else {
         new_proof_size += 1 + setup.stark_info.n_publics;
     }
 
-    // SAFETY: the prover writes the proof into this buffer before it is read.
-    let new_proof = unsafe { create_buffer_fast(new_proof_size as usize) };
-    Ok(Proof::new(witness.proof_type.clone(), witness.airgroup_id, witness.air_id, witness.global_idx, new_proof))
+    let new_proof = create_buffer_fast(new_proof_size as usize);
+    Ok(Proof::new(witness.proof_type, witness.airgroup_id, witness.air_id, witness.global_idx, new_proof))
 }
 
+/// Writes a vadcop-final proof's public section `[n_publics | publics(n_publics)]`. `publics` are
+/// the circuit's OUTPUT publics (flag `is_vadcop_final_proof` at index 0), not the input publics.
+fn write_vadcop_final_publics<F: PrimeField64>(proof: &mut Proof<F>, n_publics: u64, publics: &[F]) {
+    proof.proof[0] = n_publics;
+    for (i, p) in publics.iter().take(n_publics as usize).enumerate() {
+        proof.proof[1 + i] = p.as_canonical_u64();
+    }
+}
+
+/// # Safety
+/// `new_proof` must fit this proof type and stay allocated, and untouched, until the GPU's write
+/// (which lands after return) is synchronized.
 #[allow(clippy::too_many_arguments)]
-pub fn generate_recursive_proof<F: PrimeField64>(
+pub unsafe fn generate_recursive_proof<F: PrimeField64>(
     pctx: &ProofCtx<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
     setups: &SetupsVadcop<F>,
-    witness: &Proof<F>,
-    new_proof: &mut Proof<F>,
+    witness: &mut Proof<F>,
+    new_proof: *mut u64,
     prover_buffer: &[F],
-    output_dir_path: &Path,
     const_tree: &[F],
     const_pols: &[F],
-    save_proofs: bool,
     force_recursive_stream: bool,
-) -> ProofmanResult<u64> {
+    reserved_stream: u64,
+    calculate_fixed_tree_handle: Option<JoinOnDrop>,
+) -> ProofmanResult<(u64, Vec<F>)> {
     timer_start_debug!(
         GEN_RECURSIVE_PROOF,
         "GEN_RECURSIVE_PROOF_{:?} [{}:{}]",
@@ -437,86 +564,61 @@ pub fn generate_recursive_proof<F: PrimeField64>(
         witness.air_id
     );
 
-    let (airgroup_id, air_id, instance_id, output_file_path, vadcop) =
-        if witness.proof_type == ProofType::VadcopFinal || witness.proof_type == ProofType::VadcopFinalCompressed {
-            let output_file_path_ = output_dir_path.join(format!("proofs/{:?}.json", witness.proof_type));
-            (0, 0, 0, output_file_path_, false)
-        } else {
-            let (airgroup_id_, air_id_) = (witness.airgroup_id, witness.air_id);
-            let air_instance_name = &pctx.global_info.airs[airgroup_id_][air_id_].name;
-            let output_file_path_ = if witness.proof_type == ProofType::Recursive2 {
-                output_dir_path.join(format!("proofs/{:?}_{}.json", witness.proof_type, air_instance_name))
-            } else {
-                output_dir_path.join(format!(
-                    "proofs/{:?}_{}_{}.json",
-                    witness.proof_type,
-                    air_instance_name,
-                    witness.global_idx.unwrap()
-                ))
-            };
-            (airgroup_id_, air_id_, witness.global_idx.unwrap(), output_file_path_, true)
-        };
-
-    let proof_file = match save_proofs {
-        true => output_file_path.to_string_lossy().into_owned(),
-        false => String::from(""),
+    let (airgroup_id, air_id, instance_id, vadcop) = if is_final_layer(&witness.proof_type) {
+        (0, 0, 0, false)
+    } else {
+        (witness.airgroup_id, witness.air_id, witness.global_idx.unwrap(), true)
     };
 
     let setup = setups.get_setup(airgroup_id, air_id, &witness.proof_type)?;
 
-    let publics_aggregation = n_publics_aggregation(pctx, airgroup_id);
-
-    let initial_idx =
-        if witness.proof_type == ProofType::VadcopFinal || witness.proof_type == ProofType::VadcopFinalCompressed {
-            1 + setup.stark_info.n_publics as usize
-        } else {
-            publics_aggregation
-        };
-
-    validate_recursive_proof_inputs(setup, witness, new_proof, initial_idx, prover_buffer, const_pols, const_tree)?;
-
-    let trace_len = setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize;
-    let mut trace = RecursiveTraceStorage::<F>::new(trace_len);
-
     let p_setup: *mut c_void = (&setup.p_setup).into();
 
-    let mut publics = vec![F::ZERO; setup.stark_info.n_publics as usize];
+    // The trace already left the pool at witness-gen time (solve+scatter is fused), so adopt it into
+    // a release-on-drop lease: it returns to its pool on every exit path (`?`, downstream error,
+    // panic) instead of leaking when the proof is dropped on cancel.
+    let mut trace = memory_handler_recursive_witness.adopt_trace(std::mem::take(&mut witness.trace));
+    let publics = std::mem::take(&mut witness.publics);
 
-    let exec_data_ptr = setup.exec_data.read().unwrap().as_ref().map(|v| v.as_ptr() as *mut u64).unwrap();
-
-    // Exec data validated at load time is gathered without per-index checks.
-    let get_committed_pols = if setup.exec_data_validated.load(Ordering::Acquire) {
-        get_committed_pols_validated_c
-    } else {
-        get_committed_pols_c
-    };
-
-    get_committed_pols(
-        witness.circom_witness.as_ptr() as *mut u8,
-        exec_data_ptr,
-        trace.as_mut_ptr() as *mut u8,
-        publics.as_mut_ptr() as *mut u8,
-        setup.size_witness.read().unwrap().unwrap(),
-        1 << (setup.stark_info.stark_struct.n_bits),
-        setup.stark_info.n_publics,
-        witness.n_cols as u64,
-    );
-
-    if witness.proof_type != ProofType::VadcopFinal && witness.proof_type != ProofType::VadcopFinalCompressed {
-        add_publics_aggregation_c(
-            new_proof.proof.as_mut_ptr() as *mut u8,
-            0,
-            publics.as_ptr() as *mut u8,
-            publics_aggregation as u64,
+    // The hash gates map only their boundary; the rest is rebuilt from it. On GPU that happens
+    // device-side inside gen_recursive_proof_c, right after the trace copy, so only the host path
+    // needs it here. `generate_witness` filled the trace at recursion_trace_stride width, which is
+    // the full width whenever this branch runs.
+    if !pctx.gpu {
+        let exec = setup.exec_data.as_ref().expect("exec_data missing on setup");
+        expand_gate_bands_c(
+            trace.as_mut_ptr() as *mut u8,
+            exec.as_ptr() as *mut u64,
+            witness.n_cols as u64,
+            exec.len() as u64,
+            1 << setup.stark_info.stark_struct.n_bits,
         );
     }
 
-    let (const_pols_ptr, const_tree_ptr) = if cfg!(feature = "gpu") {
+    let publics_aggregation = n_publics_aggregation(pctx, airgroup_id);
+
+    let initial_idx =
+        if is_final_layer(&witness.proof_type) { 1 + setup.stark_info.n_publics as usize } else { publics_aggregation };
+
+    if !is_final_layer(&witness.proof_type) {
+        add_publics_aggregation_c(new_proof as *mut u8, 0, publics.as_ptr() as *mut u8, publics_aggregation as u64);
+    }
+    // For the final layers (is_final_layer) the caller writes the public section from the `publics`
+    // returned below — the circuit's OUTPUT publics (flag at index 0), NOT `pctx.get_publics()`, which
+    // holds only the flag-free INPUT publics and is one element too short.
+
+    let (const_pols_ptr, const_tree_ptr) = if pctx.gpu {
         (std::ptr::null_mut(), std::ptr::null_mut())
     } else {
         (const_pols.as_ptr() as *mut u8, const_tree.as_ptr() as *mut u8)
     };
 
+    if let Some(handle) = calculate_fixed_tree_handle {
+        handle.join_now().map_err(|_| ProofmanError::ProofmanError("Failed to calculate fixed tree".into()))?;
+    }
+
+    // `reserved_stream`: scheduler-reserved stream, or `u64::MAX` to select internally
+    // (one-off launches — outer aggregation, vadcop_final, recursers).
     let stream_id = gen_recursive_proof_c(
         p_setup,
         trace.as_mut_ptr() as *mut u8,
@@ -524,8 +626,8 @@ pub fn generate_recursive_proof<F: PrimeField64>(
         const_pols_ptr,
         const_tree_ptr,
         publics.as_ptr() as *mut u8,
-        new_proof.proof[initial_idx..].as_mut_ptr(),
-        &proof_file,
+        new_proof.wrapping_add(initial_idx),
+        "",
         airgroup_id as u64,
         air_id as u64,
         instance_id as u64,
@@ -533,9 +635,23 @@ pub fn generate_recursive_proof<F: PrimeField64>(
         pctx.get_device_buffers_ptr(),
         &setup.const_pols_path,
         &setup.const_pols_tree_path,
-        witness.proof_type.clone().into(),
+        witness.proof_type.into(),
         force_recursive_stream,
+        "",
+        reserved_stream, // scheduler-reserved stream, or u64::MAX for one-off internal selection
     );
+    if stream_id == u64::MAX {
+        return Err(ProofmanError::ProofmanError(format!(
+            "no GPU stream can hold the {:?} proof [{airgroup_id}:{air_id}]",
+            witness.proof_type
+        )));
+    }
+
+    // Trace H2D is async: gate reuse on the stream's commit event so a concurrent take() can't
+    // overwrite `trace` mid-copy. Must finish before the lease drops at scope exit and pools the trace.
+    if pctx.gpu {
+        wait_trace_h2d_done_c(pctx.get_device_buffers_ptr(), stream_id);
+    }
 
     timer_stop_and_log_debug!(
         GEN_RECURSIVE_PROOF,
@@ -544,74 +660,20 @@ pub fn generate_recursive_proof<F: PrimeField64>(
         witness.airgroup_id,
         witness.air_id
     );
-    Ok(stream_id)
-}
-
-fn pinned_recursive_trace_pool_enabled() -> bool {
-    std::env::var("VENUS_RECURSIVE_TRACE_PINNED_POOL").map(|value| !value.is_empty() && value != "0").unwrap_or(false)
-}
-
-fn pinned_recursive_trace_pool_limit() -> usize {
-    std::env::var("VENUS_RECURSIVE_TRACE_PINNED_POOL_LIMIT")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(32)
-}
-
-fn take_pinned_recursive_trace<F>(len: usize) -> Option<PinnedTraceBuffer<F>> {
-    if !pinned_recursive_trace_pool_enabled() {
-        return None;
-    }
-
-    let bytes = len.checked_mul(mem::size_of::<F>())?;
-    let pool = RECURSIVE_TRACE_PINNED_POOL.get_or_init(|| Mutex::new(RecursiveTracePinnedPool::default()));
-    if let Ok(mut guard) = pool.lock() {
-        if let Some(ptr) = guard.buffers.get_mut(&bytes).and_then(|buffers| buffers.pop()) {
-            guard.retained = guard.retained.saturating_sub(1);
-            return Some(PinnedTraceBuffer { ptr, bytes, _marker: PhantomData });
-        }
-    }
-
-    let ptr = malloc_host_memory_c(bytes as u64) as usize;
-    if ptr == 0 {
-        None
-    } else {
-        Some(PinnedTraceBuffer { ptr, bytes, _marker: PhantomData })
-    }
-}
-
-fn return_pinned_recursive_trace(ptr: usize, bytes: usize) {
-    if ptr == 0 {
-        return;
-    }
-
-    if pinned_recursive_trace_pool_enabled() {
-        let pool = RECURSIVE_TRACE_PINNED_POOL.get_or_init(|| Mutex::new(RecursiveTracePinnedPool::default()));
-        if let Ok(mut guard) = pool.lock() {
-            if guard.retained < pinned_recursive_trace_pool_limit() {
-                guard.buffers.entry(bytes).or_default().push(ptr);
-                guard.retained += 1;
-                return;
-            }
-        }
-    }
-
-    free_host_memory_c(ptr as *mut c_void);
+    Ok((stream_id, publics))
 }
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn aggregate_worker_proofs<F: PrimeField64>(
     pctx: &ProofCtx<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
     mpi_ctx: &MpiCtx,
     setups: &SetupsVadcop<F>,
     mut proofs: Vec<Vec<Proof<F>>>,
     prover_buffer: &[F],
     const_pols: &[F],
     const_tree: &[F],
-    output_dir_path: &Path,
-    save_proofs: bool,
     agg_proofs: &mut Vec<AggProofs>,
 ) -> ProofmanResult<()> {
     let n_processes = mpi_ctx.n_processes as usize;
@@ -653,71 +715,79 @@ pub fn aggregate_worker_proofs<F: PrimeField64>(
         }
     }
 
+    let arity = pctx.global_info.aggregation_arity;
+
     // agregation loop
     loop {
         mpi_ctx.barrier();
-        mpi_ctx.distribute_recursive2_proofs(&alives, &mut airgroup_proofs);
+        mpi_ctx.distribute_recursive2_proofs(&alives, &mut airgroup_proofs, arity);
         let mut pending_agregations = false;
         for airgroup in 0..n_airgroups {
             //create a vector of sice indices length
             let mut alive = alives[airgroup];
             if alive > 1 {
-                let n_agg_proofs = alive / N_RECURSIVE_PROOFS_PER_AGGREGATION;
-                let n_remaining_proofs = alive % N_RECURSIVE_PROOFS_PER_AGGREGATION;
-                for i in 0..alive.div_ceil(N_RECURSIVE_PROOFS_PER_AGGREGATION) {
-                    let j = i * N_RECURSIVE_PROOFS_PER_AGGREGATION;
+                let n_agg_proofs = alive / arity;
+                let n_remaining_proofs = alive % arity;
+                for i in 0..alive.div_ceil(arity) {
+                    let j = i * arity;
                     if airgroup_proofs[airgroup][j].is_none() {
                         continue;
                     }
-                    if (j + N_RECURSIVE_PROOFS_PER_AGGREGATION - 1 < alive)
-                        || alive <= N_RECURSIVE_PROOFS_PER_AGGREGATION
-                    {
+                    if (j + arity - 1 < alive) || alive <= arity {
+                        // A chunk needs at least two real proofs; the remaining
+                        // slots are null-padded. At arity 2 padding never happens.
                         if airgroup_proofs[airgroup][j + 1].is_none() {
                             return Err(ProofmanError::ProofmanError("Recursive2 proof is missing".into()));
                         }
 
-                        let proof1 = Proof::new(
-                            ProofType::Recursive2,
-                            airgroup,
-                            0,
-                            None,
-                            airgroup_proofs[airgroup][j].take().unwrap(),
-                        );
+                        let chunk: Vec<Proof<F>> = (0..arity)
+                            .map(|k| {
+                                let slot = j + k;
+                                let data = if slot < alive {
+                                    airgroup_proofs[airgroup][slot]
+                                        .take()
+                                        .expect("chunk slot within alive must hold a proof")
+                                } else {
+                                    null_proofs[airgroup].clone()
+                                };
+                                Proof::new(ProofType::Recursive2, airgroup, 0, None, data)
+                            })
+                            .collect();
+                        let chunk_refs: Vec<&Proof<F>> = chunk.iter().collect();
 
-                        let proof2 = Proof::new(
-                            ProofType::Recursive2,
-                            airgroup,
-                            0,
-                            None,
-                            airgroup_proofs[airgroup][j + 1].take().unwrap(),
-                        );
+                        let mut witness_proof =
+                            gen_witness_aggregation::<F>(pctx, memory_handler_recursive_witness, setups, &chunk_refs)?;
+                        witness_proof.global_idx = Some(rank);
 
-                        let proof_3 = if j + N_RECURSIVE_PROOFS_PER_AGGREGATION - 1 < alive {
-                            airgroup_proofs[airgroup][j + N_RECURSIVE_PROOFS_PER_AGGREGATION - 1].take().unwrap()
-                        } else {
-                            null_proofs[airgroup].clone()
+                        let mut recursive2_proof = match gen_recursive_proof_size::<F>(pctx, setups, &witness_proof) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                // generate_recursive_proof (which pools the trace) isn't reached;
+                                // return it here instead of leaking.
+                                drop(
+                                    memory_handler_recursive_witness
+                                        .adopt_trace(std::mem::take(&mut witness_proof.trace)),
+                                );
+                                return Err(e);
+                            }
                         };
 
-                        let proof3 = Proof::new(ProofType::Recursive2, airgroup, 0, None, proof_3);
-
-                        let mut circom_witness =
-                            gen_witness_aggregation::<F>(pctx, setups, &proof1, &proof2, &proof3, output_dir_path)?;
-                        circom_witness.global_idx = Some(rank);
-
-                        let mut recursive2_proof = gen_recursive_proof_size::<F>(pctx, setups, &circom_witness)?;
-
-                        let stream_id = generate_recursive_proof::<F>(
-                            pctx,
-                            setups,
-                            &circom_witness,
-                            &mut recursive2_proof,
-                            prover_buffer,
-                            output_dir_path,
-                            const_tree,
-                            const_pols,
-                            save_proofs,
-                            false,
-                        )?;
+                        // SAFETY: get_stream_id_proof_c below waits for the write.
+                        let (stream_id, _) = unsafe {
+                            generate_recursive_proof::<F>(
+                                pctx,
+                                memory_handler_recursive_witness,
+                                setups,
+                                &mut witness_proof,
+                                recursive2_proof.proof.as_mut_ptr(),
+                                prover_buffer,
+                                const_tree,
+                                const_pols,
+                                false,
+                                u64::MAX, // one-off launch: reserve stream internally
+                                None,
+                            )
+                        }?;
 
                         get_stream_id_proof_c(pctx.get_device_buffers_ptr(), stream_id);
 
@@ -734,13 +804,12 @@ pub fn aggregate_worker_proofs<F: PrimeField64>(
 
                 //compact elements
                 for i in 0..n_agg_proofs {
-                    airgroup_proofs[airgroup][i] =
-                        airgroup_proofs[airgroup][i * N_RECURSIVE_PROOFS_PER_AGGREGATION].take();
+                    airgroup_proofs[airgroup][i] = airgroup_proofs[airgroup][i * arity].take();
                 }
 
                 for i in 0..n_remaining_proofs {
                     airgroup_proofs[airgroup][n_agg_proofs + i] =
-                        airgroup_proofs[airgroup][N_RECURSIVE_PROOFS_PER_AGGREGATION * n_agg_proofs + i].take();
+                        airgroup_proofs[airgroup][arity * n_agg_proofs + i].take();
                 }
                 alives[airgroup] = alive;
                 if alive > 1 {
@@ -768,14 +837,18 @@ pub fn aggregate_worker_proofs<F: PrimeField64>(
 #[allow(clippy::too_many_arguments)]
 pub fn generate_vadcop_final_proof<F: PrimeField64>(
     pctx: &ProofCtx<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
     setups: &SetupsVadcop<F>,
     agg_proofs: &[AggProofs],
     prover_buffer: &[F],
-    output_dir_path: &Path,
     const_pols: &[F],
     const_tree: &[F],
-    save_proof: bool,
 ) -> ProofmanResult<Proof<F>> {
+    // Phase B: the aliased recursive streams overlay the basic stream's buffer, which
+    // VadcopFinal needs back. No-op when phase B is not configured.
+    if pctx.gpu {
+        let _ = set_phase_b_c(pctx.get_device_buffers_ptr(), 2);
+    }
     timer_start_info!(GENERATE_VADCOP_FINAL_PROOF);
     let publics_circom_size =
         pctx.global_info.n_publics + pctx.global_info.n_proof_values.iter().sum::<usize>() * 3 + 3;
@@ -784,16 +857,34 @@ pub fn generate_vadcop_final_proof<F: PrimeField64>(
 
     let mut updated_proof_size = publics_circom_size;
 
+    let setup = setups.setup_vadcop_final.as_ref().unwrap();
+    let p_setup: *mut c_void = (&setup.p_setup).into();
+
+    let p_setup_addr = p_setup as usize;
+    let device_buffers_addr = pctx.get_device_buffers_ptr() as usize;
+    let setup_type = setup.setup_type;
+
+    // JoinOnDrop so an early `?` below joins this const-tree thread instead of detaching it.
+    let calculate_fixed_tree_handle = JoinOnDrop::new(std::thread::spawn(move || {
+        calculate_const_tree_fixed_c(
+            p_setup_addr as *mut c_void,
+            0,
+            0,
+            setup_type.into(),
+            device_buffers_addr as *mut c_void,
+        );
+    }));
+
     for airgroup_id in 0..n_airgroups {
         let setup = setups.get_setup(airgroup_id, 0, &ProofType::Recursive2)?;
         let publics_aggregation = n_publics_aggregation(pctx, airgroup_id);
         updated_proof_size += setup.proof_size as usize + publics_aggregation;
     }
 
-    let mut updated_proof = vec![0; publics_circom_size];
-    updated_proof.reserve_exact(updated_proof_size - publics_circom_size);
+    let mut updated_proof = vec![0; updated_proof_size];
     add_publics_circom(&mut updated_proof, 0, pctx, None);
 
+    let mut offset = publics_circom_size;
     for airgroup_id in 0..n_airgroups {
         let setup = setups.get_setup(airgroup_id, 0, &ProofType::Recursive2)?;
         let publics_aggregation = n_publics_aggregation(pctx, airgroup_id);
@@ -807,41 +898,214 @@ pub fn generate_vadcop_final_proof<F: PrimeField64>(
                     ap.proof.len()
                 )));
             }
-            updated_proof.extend_from_slice(&ap.proof);
+            updated_proof[offset..offset + proof_size].copy_from_slice(&ap.proof);
         } else {
-            updated_proof.resize(updated_proof.len() + proof_size, 0);
+            let null_proof = vec![0; proof_size];
+            updated_proof[offset..offset + proof_size].copy_from_slice(&null_proof);
         }
+        offset += proof_size;
     }
 
-    let setup = setups.setup_vadcop_final.as_ref().unwrap();
-
-    let circom_witness_vadcop_final = generate_witness::<F>(setup, 0, &updated_proof, output_dir_path)?;
-    let witness_final_proof =
-        Proof::new_witness(ProofType::VadcopFinal, 0, 0, None, circom_witness_vadcop_final, setup.n_cols as usize);
-
-    let mut final_proof = gen_recursive_proof_size::<F>(pctx, setups, &witness_final_proof)?;
-    let stream_id = generate_recursive_proof::<F>(
-        pctx,
-        setups,
-        &witness_final_proof,
-        &mut final_proof,
-        prover_buffer,
-        output_dir_path,
-        const_tree,
-        const_pols,
-        save_proof,
-        false,
+    timer_start_debug!(GENERATE_VADCOP_FINAL_PROOF_WITNESS);
+    let (trace_vadcop_final, publics_vadcop_final) = generate_witness::<F>(
+        setup,
+        memory_handler_recursive_witness,
+        0,
+        &updated_proof,
+        recursion_trace_stride(setup_exec_slice(setup), setup.n_cols, pctx.gpu),
+        memory_handler_recursive_witness.witness_threads(),
     )?;
+    timer_stop_and_log_debug!(GENERATE_VADCOP_FINAL_PROOF_WITNESS);
+    let mut witness_final_proof = Proof::new_witness(
+        ProofType::VadcopFinal,
+        0,
+        0,
+        None,
+        trace_vadcop_final,
+        publics_vadcop_final,
+        setup.n_cols as usize,
+    );
+
+    let mut final_proof = match gen_recursive_proof_size::<F>(pctx, setups, &witness_final_proof) {
+        Ok(p) => p,
+        Err(e) => {
+            // generate_recursive_proof (which pools the witness) isn't reached; return it here instead of leaking.
+            drop(memory_handler_recursive_witness.adopt_trace(std::mem::take(&mut witness_final_proof.trace)));
+            return Err(e);
+        }
+    };
+    // SAFETY: get_stream_id_proof_c below waits for the write.
+    let (stream_id, publics) = unsafe {
+        generate_recursive_proof::<F>(
+            pctx,
+            memory_handler_recursive_witness,
+            setups,
+            &mut witness_final_proof,
+            final_proof.proof.as_mut_ptr(),
+            prover_buffer,
+            const_tree,
+            const_pols,
+            false,
+            u64::MAX, // one-off launch: reserve stream internally
+            Some(calculate_fixed_tree_handle),
+        )
+    }?;
     get_stream_id_proof_c(pctx.get_device_buffers_ptr(), stream_id);
 
-    // Set publics for vadcop final proof
-    let publics = pctx.get_publics();
-    final_proof.proof[0] = setup.stark_info.n_publics;
-    for p in 0..setup.stark_info.n_publics as usize {
-        final_proof.proof[1 + p] = publics[p].as_canonical_u64();
-    }
+    // Write the public section from the circuit's OUTPUT publics returned by generate_recursive_proof
+    // (flag at index 0), NOT `pctx.get_publics()`, which holds only the flag-free input publics.
+    write_vadcop_final_publics(&mut final_proof, setup.stark_info.n_publics, &publics);
 
     timer_stop_and_log_info!(GENERATE_VADCOP_FINAL_PROOF);
+
+    Ok(final_proof)
+}
+
+/// The recursivef of a blake3 key (setup-recursivef), after its vadcop_final: a Goldilocks STARK
+/// proved as the compressed final is, on the run's own buffers. Its circuit takes the vadcop_final's
+/// root as an input, which it makes a public, then the vadcop_final proof's publics and proof, the
+/// zkin the poseidon families' BN128 recursivef takes too (`generate_recursivef_proof`): `verkey`, or
+/// the vadcop_final's own, as the root.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_recursivef_gl_proof<F: PrimeField64>(
+    pctx: &ProofCtx<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
+    setups: &SetupsVadcop<F>,
+    vadcop_final_proof: &[u64],
+    prover_buffer: &[F],
+    const_pols: &[F],
+    const_tree: &[F],
+    verkey: Option<&[u64]>,
+) -> ProofmanResult<Proof<F>> {
+    let setup = setups.setup_recursivef.as_ref().ok_or_else(|| {
+        ProofmanError::InvalidConfiguration(
+            "this run did not load a recursivef: its key's hash has none, or the key has not set it up (setup-recursivef)"
+                .to_string(),
+        )
+    })?;
+    let setup_vadcop_final = setups.setup_vadcop_final.as_ref().ok_or_else(|| {
+        ProofmanError::InvalidConfiguration(
+            "this run did not load the vadcop_final the recursivef verifies".to_string(),
+        )
+    })?;
+    let root = match verkey {
+        Some(verkey) if verkey.len() == 4 => verkey.to_vec(),
+        Some(verkey) => {
+            return Err(ProofmanError::InvalidParameters(format!("a verkey is 4 words, and this one {}", verkey.len())))
+        }
+        None => setup_vadcop_final.get_vk(),
+    };
+    let body_words = (setup_vadcop_final.stark_info.n_publics + setup_vadcop_final.proof_size) as usize;
+    let zkin = recursivef_gl_zkin(&root, vadcop_final_proof, body_words)?;
+    timer_start_info!(GENERATE_RECURSIVEF_PROOF);
+    let proof = generate_final_layer_proof(
+        pctx,
+        memory_handler_recursive_witness,
+        setups,
+        setup,
+        ProofType::RecursiveF,
+        &zkin,
+        prover_buffer,
+        const_pols,
+        const_tree,
+    )?;
+    timer_stop_and_log_info!(GENERATE_RECURSIVEF_PROOF);
+    Ok(proof)
+}
+
+/// The zkin of a blake3 key's recursivef: the root `root`, then the vadcop_final proof
+/// `vadcop_final_proof` (`proof_with_publics`) without its count of publics, which must be
+/// `body_words` words, the vadcop_final's publics and proof: the recursivef's witness reads as many.
+fn recursivef_gl_zkin(root: &[u64], vadcop_final_proof: &[u64], body_words: usize) -> ProofmanResult<Vec<u64>> {
+    let body = vadcop_final_proof.get(1..).unwrap_or_default();
+    if body.len() != body_words {
+        return Err(ProofmanError::InvalidProof(format!(
+            "the recursivef verifies a vadcop_final proof of {body_words} words (its publics and proof), and this one \
+             has {}",
+            body.len()
+        )));
+    }
+    let mut zkin = Vec::with_capacity(root.len() + body.len());
+    zkin.extend_from_slice(root);
+    zkin.extend_from_slice(body);
+    Ok(zkin)
+}
+
+/// A one-off proof of a layer after the vadcop_final (the compressed final, a blake3 key's
+/// recursivef): `setup`'s, of type `proof_type`, of the zkin `zkin`, on the run's own buffers.
+#[allow(clippy::too_many_arguments)]
+fn generate_final_layer_proof<F: PrimeField64>(
+    pctx: &ProofCtx<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
+    setups: &SetupsVadcop<F>,
+    setup: &Setup<F>,
+    proof_type: ProofType,
+    zkin: &[u64],
+    prover_buffer: &[F],
+    const_pols: &[F],
+    const_tree: &[F],
+) -> ProofmanResult<Proof<F>> {
+    if pctx.gpu {
+        let _ = set_phase_b_c(pctx.get_device_buffers_ptr(), 2);
+    }
+    let p_setup: *mut c_void = (&setup.p_setup).into();
+
+    let p_setup_addr = p_setup as usize;
+    let device_buffers_addr = pctx.get_device_buffers_ptr() as usize;
+    let setup_type = setup.setup_type;
+
+    // JoinOnDrop so an early `?` below joins this const-tree thread instead of detaching it.
+    let calculate_fixed_tree_handle = JoinOnDrop::new(std::thread::spawn(move || {
+        calculate_const_tree_fixed_c(
+            p_setup_addr as *mut c_void,
+            0,
+            0,
+            setup_type.into(),
+            device_buffers_addr as *mut c_void,
+        );
+    }));
+
+    timer_start_debug!(GENERATE_FINAL_LAYER_WITNESS);
+    let (trace, publics) = generate_witness::<F>(
+        setup,
+        memory_handler_recursive_witness,
+        0,
+        zkin,
+        recursion_trace_stride(setup_exec_slice(setup), setup.n_cols, pctx.gpu),
+        memory_handler_recursive_witness.witness_threads(),
+    )?;
+    timer_stop_and_log_debug!(GENERATE_FINAL_LAYER_WITNESS);
+    let mut witness_final_proof = Proof::new_witness(proof_type, 0, 0, None, trace, publics, setup.n_cols as usize);
+
+    let mut final_proof = match gen_recursive_proof_size::<F>(pctx, setups, &witness_final_proof) {
+        Ok(p) => p,
+        Err(e) => {
+            // generate_recursive_proof (which pools the witness) isn't reached; return it here instead of leaking.
+            drop(memory_handler_recursive_witness.adopt_trace(std::mem::take(&mut witness_final_proof.trace)));
+            return Err(e);
+        }
+    };
+    // SAFETY: get_stream_id_proof_c below waits for the write.
+    let (stream_id, publics) = unsafe {
+        generate_recursive_proof::<F>(
+            pctx,
+            memory_handler_recursive_witness,
+            setups,
+            &mut witness_final_proof,
+            final_proof.proof.as_mut_ptr(),
+            prover_buffer,
+            const_tree,
+            const_pols,
+            false,
+            u64::MAX, // one-off launch: reserve stream internally
+            Some(calculate_fixed_tree_handle),
+        )
+    }?;
+    get_stream_id_proof_c(pctx.get_device_buffers_ptr(), stream_id);
+
+    // Write the proof's public section from the circuit's OUTPUT publics
+    // returned by `generate_recursive_proof`, not from `pctx.get_publics()`.
+    write_vadcop_final_publics(&mut final_proof, setup.stark_info.n_publics, &publics);
 
     Ok(final_proof)
 }
@@ -849,73 +1113,57 @@ pub fn generate_vadcop_final_proof<F: PrimeField64>(
 #[allow(clippy::too_many_arguments)]
 pub fn generate_vadcop_final_compressed_proof<F: PrimeField64>(
     pctx: &ProofCtx<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
     setups: &SetupsVadcop<F>,
     vadcop_final_proof: &[u64],
     prover_buffer: &[F],
-    output_dir_path: &Path,
     const_pols: &[F],
     const_tree: &[F],
-    save_proof: bool,
 ) -> ProofmanResult<Proof<F>> {
+    let setup = setups.setup_vadcop_final_compressed.as_ref().ok_or_else(|| {
+        ProofmanError::InvalidConfiguration(
+            "Proving key was built without the vadcop_final_compressed stage; no compressed final setup to prove with"
+                .to_string(),
+        )
+    })?;
     timer_start_info!(GENERATE_VADCOP_FINAL_COMPRESSED_PROOF);
-    let setup = setups.setup_vadcop_final_compressed.as_ref().unwrap();
-
-    let circom_witness_vadcop_final_compressed =
-        generate_witness::<F>(setup, 0, &vadcop_final_proof[1..], output_dir_path)?;
-    let witness_final_proof = Proof::new_witness(
-        ProofType::VadcopFinalCompressed,
-        0,
-        0,
-        None,
-        circom_witness_vadcop_final_compressed,
-        setup.n_cols as usize,
-    );
-
-    let mut final_proof = gen_recursive_proof_size::<F>(pctx, setups, &witness_final_proof)?;
-    let stream_id = generate_recursive_proof::<F>(
+    let proof = generate_final_layer_proof(
         pctx,
+        memory_handler_recursive_witness,
         setups,
-        &witness_final_proof,
-        &mut final_proof,
+        setup,
+        ProofType::VadcopFinalCompressed,
+        &vadcop_final_proof[1..],
         prover_buffer,
-        output_dir_path,
-        const_tree,
         const_pols,
-        save_proof,
-        false,
+        const_tree,
     )?;
-    get_stream_id_proof_c(pctx.get_device_buffers_ptr(), stream_id);
-
-    // Set publics for vadcop final proof
-    let publics = pctx.get_publics();
-    final_proof.proof[0] = setup.stark_info.n_publics;
-    for p in 0..setup.stark_info.n_publics as usize {
-        final_proof.proof[1 + p] = publics[p].as_canonical_u64();
-    }
-
     timer_stop_and_log_info!(GENERATE_VADCOP_FINAL_COMPRESSED_PROOF);
-
-    Ok(final_proof)
+    Ok(proof)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn generate_recursivef_proof<F: PrimeField64>(
     setup: &Setup<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
     vadcop_proof: &[u64],
     prover_buffer: &[F],
+    const_pols: &[F],
+    const_tree: &[F],
     vadcop_final_verkey: &[u64],
-    output_dir_path: &Path,
     prover_buffer_size: usize,
     d_buffers_recursivef: *mut c_void,
-) -> ProofmanResult<*mut c_void> {
+) -> ProofmanResult<RecursivefProof> {
     timer_start_info!(GENERATE_RECURSIVEF);
     let p_setup: *mut c_void = (&setup.p_setup).into();
 
     // Cast pointers to usize to make them Send-safe for threading
     let p_setup_addr = p_setup as usize;
-    let const_tree_ptr_addr = setup.get_const_tree_ptr() as usize;
+    let const_tree_ptr_addr = const_tree.as_ptr() as usize;
     let d_buffers_addr = d_buffers_recursivef as usize;
 
-    let load_fixed_pols_handle = std::thread::spawn(move || {
+    // JoinOnDrop so an early `?` below joins this loader instead of detaching it.
+    let load_fixed_pols_handle = JoinOnDrop::new(std::thread::spawn(move || {
         timer_start_debug!(LOAD_FIXED_POLS_RECURSIVEF);
         load_fixed_pols_recursivef_c(
             p_setup_addr as *mut c_void,
@@ -923,42 +1171,7 @@ pub fn generate_recursivef_proof<F: PrimeField64>(
             d_buffers_addr as *mut c_void,
         );
         timer_stop_and_log_debug!(LOAD_FIXED_POLS_RECURSIVEF);
-    });
-
-    let p_prove = prove_recursivef(
-        setup,
-        vadcop_proof,
-        prover_buffer,
-        vadcop_final_verkey,
-        output_dir_path,
-        prover_buffer_size,
-        d_buffers_recursivef,
-    );
-
-    // The copy writes into d_buffers_recursivef, so it must finish on every path before the caller may free them.
-    if let Err(e) = load_fixed_pols_handle.join() {
-        tracing::warn!("Fixed pols loading thread panicked: {:?}", e);
-    }
-
-    timer_stop_and_log_info!(GENERATE_RECURSIVEF);
-
-    p_prove
-}
-
-fn prove_recursivef<F: PrimeField64>(
-    setup: &Setup<F>,
-    vadcop_proof: &[u64],
-    prover_buffer: &[F],
-    vadcop_final_verkey: &[u64],
-    output_dir_path: &Path,
-    prover_buffer_size: usize,
-    d_buffers_recursivef: *mut c_void,
-) -> ProofmanResult<*mut c_void> {
-    let p_setup: *mut c_void = (&setup.p_setup).into();
-
-    // SAFETY: the committed polynomials are written into the whole trace before it is read.
-    let mut trace: Vec<F> =
-        unsafe { create_buffer_fast(setup.n_cols as usize * (1 << (setup.stark_info.stark_struct.n_bits)) as usize) };
+    }));
 
     let proof = &vadcop_proof[1..];
     let mut updated_proof: Vec<u64> = vec![0; proof.len() + 4];
@@ -968,35 +1181,33 @@ fn prove_recursivef<F: PrimeField64>(
     updated_proof[4..].copy_from_slice(proof);
 
     timer_start_debug!(GENERATE_RECURSIVEF_WITNESS);
-    let circom_witness = generate_witness::<F>(setup, 0, &updated_proof, output_dir_path)?;
+    // Fused: getWitnessTrace produces the committed-pol trace + publics directly.
+    let (trace, publics) = generate_witness::<F>(
+        setup,
+        memory_handler_recursive_witness,
+        0,
+        &updated_proof,
+        // Full width, NOT the compact stride: RecursiveF has no device gate-band expander, so
+        // `expand_gate_bands_c` runs host-side over the whole trace.
+        setup.n_cols,
+        memory_handler_recursive_witness.witness_threads(),
+    )?;
     timer_stop_and_log_debug!(GENERATE_RECURSIVEF_WITNESS);
+    // Release-on-drop lease: returns to the pool on every exit path (see generate_recursive_proof).
+    let mut trace = memory_handler_recursive_witness.adopt_trace(trace);
 
-    let mut publics = vec![F::ZERO; setup.stark_info.n_publics as usize];
-
-    let exec_data_ptr = setup.exec_data.read().unwrap().as_ref().map(|v| v.as_ptr() as *mut u64).unwrap();
-
-    // Exec data validated at load time is gathered without per-index checks.
-    let get_committed_pols = if setup.exec_data_validated.load(Ordering::Acquire) {
-        get_committed_pols_validated_c
-    } else {
-        get_committed_pols_c
-    };
-
-    get_committed_pols(
-        circom_witness.as_ptr() as *mut u8,
-        exec_data_ptr,
-        trace.as_mut_ptr() as *mut u8,
-        publics.as_mut_ptr() as *mut u8,
-        setup.size_witness.read().unwrap().unwrap(),
-        1 << (setup.stark_info.stark_struct.n_bits),
-        setup.stark_info.n_publics,
-        setup.stark_info.map_sections_n["cm1"],
-    );
-
-    // Create output directory if it doesn't exist
-    std::fs::create_dir_all(output_dir_path)?;
-    let recursivef_json_path = output_dir_path.join("recursivef.json");
-    let recursivef_json_str = recursivef_json_path.to_string_lossy().into_owned();
+    // Host-side unconditionally: gen_recursive_proof_final_c has no device expander, and
+    // RecursiveF is a bn128 circuit whose exec carries no bands, so this is a no-op there.
+    {
+        let exec = setup.exec_data.as_ref().expect("exec_data missing on RecursiveF setup");
+        expand_gate_bands_c(
+            trace.as_mut_ptr() as *mut u8,
+            exec.as_ptr() as *mut u64,
+            setup.stark_info.map_sections_n["cm1"],
+            exec.len() as u64,
+            1 << setup.stark_info.stark_struct.n_bits,
+        );
+    }
 
     timer_start_debug!(GENERATE_RECURSIVEF_PROOF);
     // prove
@@ -1004,19 +1215,180 @@ fn prove_recursivef<F: PrimeField64>(
         p_setup,
         trace.as_mut_ptr() as *mut u8,
         prover_buffer.as_ptr() as *mut u8,
-        setup.get_const_ptr(),
-        setup.get_const_tree_ptr(),
-        publics.as_mut_ptr() as *mut u8,
-        &recursivef_json_str,
+        const_pols.as_ptr() as *mut u8,
+        const_tree.as_ptr() as *mut u8,
+        publics.as_ptr() as *mut u8,
+        "",
         0,
         0,
         0,
         prover_buffer_size as u64,
         d_buffers_recursivef as *mut u8,
     );
+    // `trace` (a lease) is pooled on drop at scope exit; the proof waited on the copy event, so it's safe.
     timer_stop_and_log_debug!(GENERATE_RECURSIVEF_PROOF);
 
-    Ok(p_prove)
+    // Join the background thread (should be done by now since proof waited for copy event)
+    if let Err(e) = load_fixed_pols_handle.join_now() {
+        tracing::warn!("Fixed pols loading thread panicked: {:?}", e);
+    }
+
+    timer_stop_and_log_info!(GENERATE_RECURSIVEF);
+
+    Ok(RecursivefProof(p_prove))
+}
+
+pub struct RecursivefProof(*mut c_void);
+
+impl RecursivefProof {
+    pub fn as_ptr(&self) -> *mut c_void {
+        self.0
+    }
+}
+
+impl Drop for RecursivefProof {
+    fn drop(&mut self) {
+        free_recursivef_proof_c(self.0);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn generate_recurser_aggregator_proof<F: PrimeField64>(
+    setup: &Setup<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
+    proof_a: &[u64],
+    proof_b: &[u64],
+    free_inputs_a: &[u64],
+    free_inputs_b: &[u64],
+    root_c_recurser_agg: &[u64; 4],
+    prover_buffer: &[F],
+    const_pols: &[F],
+    const_tree: &[F],
+    d_buffers: *mut c_void,
+    recurser_id: &str,
+) -> ProofmanResult<Vec<u64>> {
+    // Phase B: a cluster worker never runs VadcopFinal, so its last job can leave the two halves
+    // open, and the recurser fits neither. Hand the basic stream back, as the final layers do.
+    if setup.gpu {
+        let _ = set_phase_b_c(d_buffers, 2);
+    }
+    timer_start_info!(GENERATE_RECURSER_AGGREGATOR);
+    let p_setup: *mut c_void = (&setup.p_setup).into();
+
+    let p_setup_addr = p_setup as usize;
+    let device_buffers_addr = d_buffers as usize;
+    let setup_type = setup.setup_type;
+    // JoinOnDrop so an early `?` below joins this const-tree thread instead of detaching it.
+    let calc_handle = JoinOnDrop::new(std::thread::spawn(move || {
+        calculate_const_tree_fixed_c(
+            p_setup_addr as *mut c_void,
+            0,
+            0,
+            setup_type.into(),
+            device_buffers_addr as *mut c_void,
+        );
+    }));
+
+    let mut zkin: Vec<u64> =
+        Vec::with_capacity(proof_a.len() + proof_b.len() + free_inputs_a.len() + free_inputs_b.len() + 4);
+    zkin.extend_from_slice(proof_a);
+    zkin.extend_from_slice(proof_b);
+    zkin.extend_from_slice(free_inputs_a);
+    zkin.extend_from_slice(free_inputs_b);
+    zkin.extend_from_slice(root_c_recurser_agg);
+
+    timer_start_debug!(GENERATE_RECURSER_AGGREGATOR_WITNESS);
+    // Fused: getWitnessTrace yields trace + publics directly. `trace` is pooled — the
+    // release below is mandatory.
+    let (mut trace, publics) = match generate_witness::<F>(
+        setup,
+        memory_handler_recursive_witness,
+        0,
+        &zkin,
+        // Compact on GPU: the device reads mapCols out of this same exec header and widens.
+        recursion_trace_stride(setup_exec_slice(setup), setup.n_cols, setup.gpu),
+        memory_handler_recursive_witness.witness_threads(),
+    ) {
+        Ok(witness) => witness,
+        Err(e) => {
+            timer_stop_and_log_info!(GENERATE_RECURSER_AGGREGATOR);
+            return Err(e);
+        }
+    };
+    timer_stop_and_log_debug!(GENERATE_RECURSER_AGGREGATOR_WITNESS);
+
+    let n_publics = setup.stark_info.n_publics;
+    // See generate_recursive_proof: device-side on GPU, host-side otherwise.
+    if !setup.gpu {
+        let exec = setup
+            .exec_data
+            .as_ref()
+            .ok_or_else(|| ProofmanError::InvalidSetup("recurser setup has no exec_data".into()))?;
+        expand_gate_bands_c(
+            trace.as_mut_ptr() as *mut u8,
+            exec.as_ptr() as *mut u64,
+            setup.n_cols,
+            exec.len() as u64,
+            1 << setup.stark_info.stark_struct.n_bits,
+        );
+    }
+
+    let mut final_proof: Vec<u64> = vec![0; (1 + n_publics + setup.proof_size) as usize];
+    final_proof[0] = n_publics;
+    for (i, p) in publics.iter().enumerate() {
+        final_proof[1 + i] = p.as_canonical_u64();
+    }
+    let stark_offset = (1 + n_publics) as usize;
+
+    let (const_pols_ptr, const_tree_ptr) = if setup.gpu {
+        (std::ptr::null_mut::<u8>(), std::ptr::null_mut::<u8>())
+    } else {
+        (const_pols.as_ptr() as *mut u8, const_tree.as_ptr() as *mut u8)
+    };
+
+    if let Err(e) = calc_handle.join_now() {
+        tracing::warn!("Recurser const tree calculation thread panicked: {:?}", e);
+    }
+
+    timer_start_debug!(GENERATE_RECURSER_AGGREGATOR_PROOF);
+    let stream_id = gen_recursive_proof_c(
+        p_setup,
+        trace.as_mut_ptr() as *mut u8,
+        prover_buffer.as_ptr() as *mut u8,
+        const_pols_ptr,
+        const_tree_ptr,
+        publics.as_ptr() as *mut u8,
+        final_proof[stark_offset..].as_mut_ptr(),
+        "",
+        0,
+        0,
+        0,
+        true,
+        d_buffers,
+        &setup.const_pols_path,
+        &setup.const_pols_tree_path,
+        setup.setup_type.into(),
+        false,
+        recurser_id, // disambiguates recurser setups sharing (0,0,"recursive2")
+        u64::MAX,    // one-off launch: reserve stream internally
+    );
+    if stream_id == u64::MAX {
+        memory_handler_recursive_witness.release_buffer_trace(trace)?;
+        timer_stop_and_log_info!(GENERATE_RECURSER_AGGREGATOR);
+        return Err(ProofmanError::ProofmanError(format!("no GPU stream can hold recurser '{recurser_id}'")));
+    }
+
+    // Trace H2D is async: gate reuse on the commit event, as `generate_recursive_proof` does.
+    if setup.gpu {
+        wait_trace_h2d_done_c(d_buffers, stream_id);
+    }
+    memory_handler_recursive_witness.release_buffer_trace(trace)?;
+
+    get_stream_id_proof_c(d_buffers, stream_id);
+    timer_stop_and_log_debug!(GENERATE_RECURSER_AGGREGATOR_PROOF);
+
+    timer_stop_and_log_info!(GENERATE_RECURSER_AGGREGATOR);
+    Ok(final_proof)
 }
 
 pub fn generate_snark_proof(
@@ -1024,11 +1396,15 @@ pub fn generate_snark_proof(
     setup_path: &Path,
     proof: *mut c_void,
     prealloc_handle: std::thread::JoinHandle<()>,
+    d_buffers_recursivef: *mut c_void,
 ) -> ProofmanResult<(Vec<u8>, Vec<u8>)> {
-    let witness = generate_witness_final_snark(proof, setup_path)?;
-
-    // Wait for GPU pre-allocation
-    prealloc_handle.join().unwrap();
+    // Wait for GPU pre-allocation on every way out of the witness, an error or a panic included: it
+    // uses the prover and the recursivef's device buffers, which the caller frees or reuses once
+    // this returns.
+    let prealloc_handle = JoinOnDrop::new(prealloc_handle);
+    let witness = generate_witness_final_snark(proof, setup_path);
+    prealloc_handle.join_now().unwrap();
+    let witness = witness?;
 
     timer_start_info!(CALCULATE_FINAL_PROOF);
 
@@ -1039,112 +1415,227 @@ pub fn generate_snark_proof(
     let snark_proof_ptr = snark_proof.as_mut_ptr();
 
     tracing::trace!("··· Generating final snark proof");
-    gen_final_snark_proof_c(snark_prover, witness.as_ptr() as *mut u8, snark_proof_ptr, snark_publics_ptr);
+    gen_final_snark_proof_c(
+        snark_prover,
+        witness.as_ptr() as *mut u8,
+        snark_proof_ptr,
+        snark_publics_ptr,
+        d_buffers_recursivef,
+    );
     timer_stop_and_log_info!(CALCULATE_FINAL_PROOF);
     tracing::trace!("··· Final Snark Proof generated.");
 
     Ok((snark_proof, snark_publics))
 }
 
+// `proof` must be the recursivef proof, a nlohmann::json (`FinalWitnessLibrary::witness`). The
+// signature is the one this function always had: the pointer used to reach `getWitness` through a
+// symbol of the library, which clippy does not follow.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn generate_witness_final_snark(proof: *mut c_void, setup_path: &Path) -> ProofmanResult<Vec<u8>> {
-    let lib_extension = if cfg!(target_os = "macos") { ".dylib" } else { ".so" };
-    let rust_lib_filename = setup_path.display().to_string() + lib_extension;
-    let rust_lib_path = Path::new(rust_lib_filename.as_str());
+    let (library, dat) = FinalWitnessLibrary::paths(setup_path);
+    let library = FinalWitnessLibrary::load(&library, &dat)?;
 
-    if !rust_lib_path.exists() {
-        return Err(ProofmanError::InvalidSetup(format!(
-            "Rust lib dynamic library not found at path: {rust_lib_path:?}"
-        )));
+    timer_start_info!(CALCULATE_FINAL_WITNESS);
+    // SAFETY: `proof` is the recursivef proof, the nlohmann::json `gen_recursive_proof_final_c` returns.
+    let witness = unsafe { library.witness(proof) }?;
+    timer_stop_and_log_info!(CALCULATE_FINAL_WITNESS);
+
+    Ok(witness)
+}
+
+/// Exec header for [`recursion_trace_stride`]. Empty when a setup carries no exec file, which
+/// makes the stride fall back to the full width.
+fn setup_exec_slice<F: PrimeField64>(setup: &Setup<F>) -> &[u64] {
+    setup.exec_data.as_deref().map_or(&[][..], |e| e.as_slice())
+}
+
+/// Row stride to fill the recursion trace with: the exec map's width when the device widens it, the
+/// air's own width otherwise.
+///
+/// `getWitnessTrace` takes this as the row stride, so handing it the map's width makes it write a
+/// compact `N x map_cols` buffer with no gaps. The columns it then skips belong to a gate-band
+/// expander, which rebuilds them on device -- so on the GPU path they need never cross PCIe.
+///
+/// The CPU path keeps the air's width: `expand_gate_bands_c` rebuilds the interiors in place and
+/// needs the real layout to do it.
+///
+/// Every caller that can reach `gen_recursive_proof_c`'s GPU implementation must go through this,
+/// because that side decides the same question from the same exec header. Filling wide while it reads
+/// compact hands it `map_cols` columns' worth of an `n_cols`-wide row, and the proof then fails its
+/// evaluations check with nothing pointing at the cause.
+pub fn recursion_trace_stride(exec: &[u64], n_cols: u64, gpu: bool) -> u64 {
+    // The header is `exec_format`'s version 2, [magic|version, n_adds, map_rows, map_cols], which
+    // `exec_layout` in pil2-stark/src/starkpil/recursion_trace/exec_layout.hpp also reads. No other
+    // version reaches here: `load_exec_file` refuses them, BN128's version 3 by name. One that did
+    // would get the full width, as a buffer without a header does.
+    if !gpu {
+        return n_cols;
     }
-    let library: Library = unsafe { Library::new(rust_lib_path)? };
-
-    let dat_filename = setup_path.display().to_string() + ".dat";
-    let dat_filename_str = CString::new(dat_filename.as_str()).unwrap();
-    let dat_filename_ptr = dat_filename_str.as_ptr() as *mut std::os::raw::c_char;
-
-    unsafe {
-        timer_start_info!(CALCULATE_FINAL_WITNESS);
-
-        let get_size_witness: Symbol<GetSizeWitnessFunc> = library.get(b"getSizeWitness\0")?;
-        let size_witness = get_size_witness();
-
-        let witness_bytes = size_witness
-            .checked_mul(FINAL_SNARK_FIELD_BYTES)
-            .filter(|&bytes| bytes <= MAX_FINAL_SNARK_WITNESS_BYTES)
-            .ok_or_else(|| {
-                ProofmanError::InvalidSetup(format!("final snark witness of {size_witness} elements is too large"))
-            })?;
-        let mut witness: Vec<u8> = vec![0; witness_bytes as usize];
-        let witness_ptr = witness.as_mut_ptr();
-
-        let get_witness_final: Symbol<GetWitnessFinalFunc> = library.get(b"getWitness\0")?;
-        let nmutex = rayon::current_num_threads();
-        let res = get_witness_final(proof, dat_filename_ptr, witness_ptr as *mut c_void, nmutex as u64);
-        if res != 0 {
-            return Err(ProofmanError::InvalidProof("Error generating final witness from rust".into()));
-        }
-        timer_stop_and_log_info!(CALCULATE_FINAL_WITNESS);
-
-        Ok(witness)
+    let Some(header) = exec.get(..EXEC_HEADER_WORDS) else { return n_cols };
+    if header[0] != EXEC_MAGIC | EXEC_FORMAT_VERSION {
+        return n_cols;
+    }
+    let map_cols = header[3];
+    if map_cols > 0 && map_cols < n_cols {
+        map_cols
+    } else {
+        n_cols
     }
 }
 
-fn generate_witness<F: PrimeField64>(
-    setup: &Setup<F>,
-    instance_id: usize,
-    zkin: &[u64],
-    output_dir_path: &Path,
-) -> ProofmanResult<Vec<F>> {
-    let witness_size = recursive_witness_size(setup)?;
-
-    if let Some(runtime) = setup.native_runtime.read().unwrap().as_ref() {
-        return match runtime.generate_witness::<F>(zkin, witness_size) {
-            Ok(witness) => Ok(witness),
-            Err(e) => {
-                let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-                let debug_file_path = output_dir_path.join(format!(
-                    "proof_{instance_id}_ag{}_air{}_t{:?}_native_{}.bin",
-                    setup.airgroup_id, setup.air_id, setup.setup_type, ts
-                ));
-                let mut file = File::create(&debug_file_path)?;
-                let proof_data = cast_slice(zkin);
-                file.write_all(proof_data)?;
-                file.flush()?;
-
-                Err(ProofmanError::InvalidProof(format!(
-                    "Error generating native witness for instance id {} [{}:{}] of type {:?}: {}",
-                    instance_id, setup.airgroup_id, setup.air_id, setup.setup_type, e
-                )))
-            }
-        };
+/// Writes the zkin under the name `prove-air --proof` parses, when `PIL2_DUMP_ZKIN` names this
+/// proof type (or `all`). Errors are logged, never returned: this is a diagnostic.
+fn dump_zkin_if_requested<F: PrimeField64>(setup: &Setup<F>, instance_id: usize, zkin: &[u64]) {
+    let Ok(want) = std::env::var("PIL2_DUMP_ZKIN") else {
+        return;
+    };
+    // The canonical spelling, so the dump round-trips through `ProofType::from_str`.
+    let proof_type: &str = setup.setup_type.into();
+    if !want.eq_ignore_ascii_case("all") && !want.eq_ignore_ascii_case(proof_type) {
+        return;
     }
 
-    let mut witness: Vec<F> = vec![F::ZERO; witness_size as usize];
+    let dir = std::env::var_os("TMPDIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    // The instance is in the name because an air with several instances would otherwise have all
+    // but the first capture dropped, and which one won would depend on scheduling.
+    let path = dir.join(format!("zkin_ag{}_air{}_i{instance_id}_t{proof_type}.bin", setup.airgroup_id, setup.air_id));
+    // create_new: the parallel prover would otherwise race on the same name. A leftover file from an
+    // earlier run wins, so say so rather than looking like the capture happened.
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => {
+            let bytes: Vec<u8> = zkin.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let mut file = std::io::BufWriter::new(file);
+            if let Err(e) = file.write_all(&bytes) {
+                tracing::warn!("zkin capture to {} failed: {e}", path.display());
+            } else {
+                tracing::info!("Captured zkin ({} words) to {}", zkin.len(), path.display());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            tracing::warn!("zkin capture skipped: {} already exists", path.display());
+        }
+        Err(e) => tracing::warn!("zkin capture to {} failed: {e}", path.display()),
+    }
+}
 
-    let circom_circuit_guard = setup.circom_circuit.read().unwrap();
-    let circom_circuit_ptr = match *circom_circuit_guard {
+/// `stride` is the width `getWitnessTrace` fills, and MUST equal the width the pool was sized at
+/// (`recursion_staging_cols`): narrower sizing than fill overruns the buffer. On GPU that is the
+/// exec map's width, so the zero columns never cross PCIe and `widenCompactWitnessGPU` widens
+/// device-side; on CPU, and for the paths whose gate bands expand host-side, it is the full width.
+fn generate_witness<F: PrimeField64>(
+    setup: &Setup<F>,
+    memory_handler_recursive_witness: &MemoryHandlerRecursive<F>,
+    instance_id: usize,
+    zkin: &[u64],
+    stride: u64,
+    witness_threads: usize,
+) -> ProofmanResult<(Vec<F>, Vec<F>)> {
+    let state = setup.circom_state.read().unwrap();
+    let circom_circuit_ptr = match state.circuit {
         Some(ptr) => ptr,
         None => return Err(ProofmanError::InvalidSetup("circom_circuit is not initialized".into())),
     };
 
-    let res = unsafe {
-        let library_guard = setup.circom_library.read().unwrap();
-        let library =
-            library_guard.as_ref().ok_or(ProofmanError::InvalidSetup("Circom library not loaded".to_string()))?;
-        let get_witness: Symbol<GetWitnessFunc> = library.get(b"getWitness\0")?;
-        get_witness(zkin.as_ptr() as *mut u64, circom_circuit_ptr, witness.as_mut_ptr() as *mut c_void, 1)
+    let get_witness_trace_fn = state
+        .get_witness_trace_fn
+        .ok_or(ProofmanError::InvalidSetup("getWitnessTrace function not loaded".to_string()))?;
+
+    let exec_data_ptr = setup.exec_data.as_ref().expect("exec_data missing on setup").as_ptr() as *mut u64;
+    let n_rows: u64 = 1 << setup.stark_info.stark_struct.n_bits;
+    let n_committed_pols = stride;
+
+    // Capture the zkin feeding this recursion witness, to build test-recursive fixtures from a real
+    // run. `PIL2_DUMP_ZKIN=recursive2` (or `all`) writes the first proof of each kind. Diagnostic
+    // only: a dump that cannot be written must never fail the proof.
+    dump_zkin_if_requested(setup, instance_id, zkin);
+
+    // Internal circom solve threads for this witness. Stream-aware (set from
+    // cores/n_streams in proofman) to avoid oversubscription when many recursive
+    // witnesses run concurrently.
+    let nmutex = witness_threads;
+
+    // Taken before the signalValues buffer, so no pooled buffer is held across a fallible step:
+    // `Pool::reset` reports one lost to an early `?` return as leaked. Held until
+    // `generate_recursive_proof` finishes its H2D copy — queued and proving work share this pool.
+    timer_start_debug!(POOL_WAIT_WITNESS, "POOL_WAIT_WITNESS_{:?}", setup.setup_type);
+    let mut trace: Vec<F> = memory_handler_recursive_witness.take_buffer_trace();
+    timer_stop_and_log_debug!(POOL_WAIT_WITNESS, "POOL_WAIT_WITNESS_{:?}", setup.setup_type);
+
+    // `getWitnessTrace` scatters `n_committed_pols * n_rows` elements with no bound of its own, so
+    // a short buffer is overrun silently, into whatever the allocator put next.
+    //
+    // `max_compact_trace_size` covers only the recursion airs known at construction, so a recurser
+    // (registered later) never fits and allocates its own — unpinned, hence the warning, but rare.
+    // `SignalValuesPool::take` falls back the same way.
+    let needed = (n_committed_pols * n_rows) as usize;
+    if trace.len() < needed {
+        tracing::warn!(
+            "{:?} [{}:{}] needs a {needed}-element trace but the pool hands out {}; \
+             allocating an unpooled one (see SetupsVadcop::max_compact_trace_size)",
+            setup.setup_type,
+            setup.airgroup_id,
+            setup.air_id,
+            trace.len(),
+        );
+        if let Err(e) = memory_handler_recursive_witness.release_buffer_trace(trace) {
+            tracing::warn!("Failed to return trace buffer to pool: {e}");
+        }
+        trace = vec![F::ZERO; needed];
+    }
+
+    // Pooled signalValues buffer (reused across proofs, no zeroing — write-before-read).
+    let total_signal_no = setup.total_signal_no.unwrap_or(0) as usize;
+    let mut signal_values = memory_handler_recursive_witness.take_buffer_signal_values(total_signal_no);
+    // Empty => no pool configured: pass null so Circom_CalcWit self-allocates.
+    let signal_values_ptr =
+        if signal_values.is_empty() { std::ptr::null_mut() } else { signal_values.as_mut_ptr() as *mut c_void };
+
+    // Released before the caller can read the ledger, so carry its wait onto the trace. An empty one
+    // never blocked, and its pointer is the shared alignment sentinel, not a buffer to key on.
+    if !signal_values.is_empty() {
+        let signal_values_wait = proofman_common::take_buffer_wait(signal_values.as_ptr() as *const u8);
+        proofman_common::charge_buffer_wait(trace.as_ptr() as *const u8, signal_values_wait);
+    }
+
+    let mut publics = vec![F::ZERO; setup.stark_info.n_publics as usize];
+
+    timer_start_debug!(CIRCOM_WITNESS, "CIRCOM_WITNESS_{:?}", setup.setup_type);
+    let res: i64 = unsafe {
+        get_witness_trace_fn(
+            zkin.as_ptr() as *mut u64,
+            circom_circuit_ptr,
+            exec_data_ptr,
+            trace.as_mut_ptr() as *mut c_void,
+            publics.as_mut_ptr() as *mut c_void,
+            n_rows,
+            publics.len() as u64,
+            n_committed_pols,
+            nmutex as u64,
+            signal_values_ptr,
+        )
     };
+    timer_stop_and_log_debug!(CIRCOM_WITNESS, "CIRCOM_WITNESS_{:?}", setup.setup_type);
+    memory_handler_recursive_witness.release_buffer_signal_values(signal_values);
+    drop(state);
 
     if res != 0 {
+        let released = memory_handler_recursive_witness.release_buffer_trace(trace);
+        if let Err(e) = released {
+            tracing::warn!("Failed to return trace buffer to pool: {e}");
+        }
+
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        let debug_file_path = output_dir_path.join(format!(
+        let debug_file_path = std::path::Path::new("/tmp").join(format!(
             "proof_{instance_id}_ag{}_air{}_t{:?}_{}.bin",
             setup.airgroup_id, setup.air_id, setup.setup_type, ts
         ));
         let mut file = File::create(&debug_file_path)?;
-        let proof_data = cast_slice(zkin);
-        file.write_all(proof_data)?;
+        for word in zkin {
+            file.write_all(&word.to_le_bytes())?;
+        }
         file.flush()?;
+        tracing::warn!("Debug proof data written to: {}", debug_file_path.display());
 
         return Err(ProofmanError::InvalidProof(format!(
             "Error generating witness for instance id {} [{}:{}] of type {:?}",
@@ -1152,7 +1643,7 @@ fn generate_witness<F: PrimeField64>(
         )));
     }
 
-    Ok(witness)
+    Ok((trace, publics))
 }
 
 pub fn get_recursive_buffer_sizes<F: PrimeField64>(
@@ -1181,11 +1672,20 @@ pub fn get_recursive_buffer_sizes<F: PrimeField64>(
 
     max_prover_size = max_prover_size
         .max(setups.setup_vadcop_final.as_ref().unwrap().prover_buffer_size)
-        .max(setups.setup_vadcop_final_compressed.as_ref().unwrap().prover_buffer_size);
+        // Absent when the key was built without the compressed final stage, which contributes
+        // nothing to the buffer it never fills.
+        .max(setups.setup_vadcop_final_compressed.as_ref().map_or(0, |s| s.prover_buffer_size))
+        .max(setups.setup_recursivef.as_ref().map_or(0, |s| s.prover_buffer_size));
 
     Ok(max_prover_size as usize)
 }
 
+/// Aggregation proofs needed to reduce `n` proofs to one, and whether the last chunk needs a
+/// null proof to fill it.
+///
+/// A short chunk needs `arity - rem` nulls, which is 0 or 1 only while `arity <= 3` — hence the
+/// bool. Raising `VALID_AGGREGATION_ARITIES` past 3 means making this a count and updating the
+/// `push(null_proof)` sites in proofman.rs.
 #[derive(Debug)]
 pub struct Recursive2Proofs {
     pub n_proofs: usize,
@@ -1198,12 +1698,12 @@ impl Recursive2Proofs {
     }
 }
 
-pub fn total_recursive_proofs(mut n: usize) -> Recursive2Proofs {
+pub fn total_recursive_proofs(mut n: usize, arity: usize) -> Recursive2Proofs {
     let mut total = 0;
-    let mut rem = n % N_RECURSIVE_PROOFS_PER_AGGREGATION;
+    let mut rem = n % arity;
     while n > 1 {
-        let next = n / N_RECURSIVE_PROOFS_PER_AGGREGATION;
-        rem = n % N_RECURSIVE_PROOFS_PER_AGGREGATION;
+        let next = n / arity;
+        rem = n % arity;
         total += next;
         if next != 0 {
             n = next + rem;
@@ -1212,9 +1712,264 @@ pub fn total_recursive_proofs(mut n: usize) -> Recursive2Proofs {
         }
     }
 
-    if rem == 2 {
+    // A remainder of 2 or more needs one more aggregation, null-padded up to the arity.
+    // At arity 2 the remainder is never >= 2, so this never fires.
+    if rem >= 2 {
         Recursive2Proofs::new(total + 1, true)
     } else {
         Recursive2Proofs::new(total, false)
+    }
+}
+
+#[cfg(test)]
+mod batcher_tests {
+    use super::{recursive1_counts_per_airgroup, should_flush};
+
+    /// Batch sizes for `n` planned offers at batch size `k`.
+    fn sizes(n: usize, k: usize) -> Vec<usize> {
+        let (mut out, mut in_slot) = (Vec::new(), 0usize);
+        for seen in 1..=n {
+            in_slot += 1;
+            if should_flush(in_slot, k, seen, n) {
+                out.push(in_slot);
+                in_slot = 0;
+            }
+        }
+        assert_eq!(in_slot, 0, "the batcher left {in_slot} proofs unflushed");
+        out
+    }
+
+    /// What the tree depends on: the batcher emits exactly the promised count.
+    #[test]
+    fn the_batcher_emits_exactly_the_promised_count() {
+        for k in 1..=6 {
+            for n in 0..40 {
+                let s = sizes(n, k);
+                assert_eq!(s.iter().sum::<usize>(), n, "k={k} n={n}: proofs lost or duplicated");
+                assert_eq!(s.len(), recursive1_counts_per_airgroup(&[vec![n]], &[vec![k]])[0], "k={k} n={n}");
+                assert!(s.iter().all(|&x| x <= k), "k={k} n={n}: a batch overflowed its slots");
+                assert!(s.iter().rev().skip(1).all(|&x| x == k), "k={k} n={n}: only the tail may be short");
+            }
+        }
+    }
+
+    #[test]
+    fn counts_sum_over_the_airs_of_an_airgroup() {
+        // airgroup 0: 10 instances at k=5 and 7 at k=2 -> 2 + 4; airgroup 1: 3 at k=1 -> 3.
+        let counts = recursive1_counts_per_airgroup(&[vec![10, 7], vec![3]], &[vec![5, 2], vec![1]]);
+        assert_eq!(counts, vec![6, 3]);
+    }
+
+    /// A missing or zero batch size reads as unbatched rather than dividing by zero.
+    #[test]
+    fn empty_airs_and_absent_batch_sizes() {
+        assert_eq!(recursive1_counts_per_airgroup(&[vec![0, 4]], &[vec![5, 0]]), vec![4]);
+        assert_eq!(recursive1_counts_per_airgroup(&[vec![4]], &[]), vec![4]);
+    }
+}
+
+#[cfg(test)]
+mod batched_zkin_tests {
+    use super::batched_zkin;
+
+    /// No gap a signal would read as zero, no overlap where one slot writes over another.
+    fn assert_tiles(k: usize, proof_len: usize, publics: usize, basic: bool) {
+        let l = batched_zkin(k, proof_len, publics, basic);
+        assert_eq!(l.is_null.is_some(), basic, "basic slots, and only they, carry a flag");
+        let mut seen = vec![0u8; l.total];
+        let mut mark = |start: usize, len: usize, what: &str| {
+            assert!(start + len <= l.total, "{what} runs past the buffer at {} of {}", start + len, l.total);
+            for (i, s) in seen.iter_mut().enumerate().skip(start).take(len) {
+                assert_eq!(*s, 0, "{what} overlaps at {i}");
+                *s = 1;
+            }
+        };
+        mark(0, publics, "publics");
+        for (slot, &at) in l.slot_body.iter().enumerate() {
+            mark(at, l.body_len, &format!("slot {slot}"));
+        }
+        if let Some(at) = l.is_null {
+            mark(at, k, "isNull");
+        }
+        let holes = seen.iter().filter(|&&b| b == 0).count();
+        assert_eq!(holes, 0, "the layout leaves {holes} words unwritten");
+    }
+
+    /// Publics first, then each slot's proof verbatim: the unbatched shape, once per slot.
+    #[test]
+    fn publics_then_a_slot_per_proof() {
+        let l = batched_zkin(3, 100, 12, true);
+        assert_eq!(l.body_len, 100);
+        assert_eq!(l.slot_body, vec![12, 112, 212]);
+        assert_eq!(l.is_null, Some(312));
+        assert_eq!(l.total, 315);
+    }
+
+    /// Its aggregation values head its own proof, and the flag they carry replaces the separate one.
+    #[test]
+    fn compressor_slots_need_no_flag_of_their_own() {
+        let l = batched_zkin(2, 100, 12, false);
+        assert_eq!(l.slot_body, vec![12, 112]);
+        assert_eq!(l.is_null, None);
+        assert_eq!(l.total, 212);
+    }
+
+    #[test]
+    fn the_regions_tile_the_buffer() {
+        for k in 1..=5 {
+            for basic in [true, false] {
+                assert_tiles(k, 100, 12, basic);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod arity_tests {
+    use super::*;
+
+    /// Model of the aggregation loop in `aggregate_recursive2_proofs`: repeatedly
+    /// chunk `alive` proofs by `arity`, aggregating full chunks and any final short
+    /// chunk, until one proof remains.
+    fn simulate(n: usize, arity: usize) -> usize {
+        if n == 0 {
+            return 0;
+        }
+        let (mut alive, mut done) = (n, 0);
+        while alive > 1 {
+            let full = alive / arity;
+            let rem = alive % arity;
+            for i in 0..alive.div_ceil(arity) {
+                let j = i * arity;
+                if (j + arity - 1 < alive) || alive <= arity {
+                    assert!(j + 1 < alive, "a chunk must hold at least 2 real proofs");
+                    done += 1;
+                }
+            }
+            alive = if full > 0 { full + rem } else { 1 };
+        }
+        done
+    }
+
+    #[test]
+    fn the_formula_matches_the_loop_for_every_supported_arity() {
+        // 4 is included as a pure-arithmetic check that the formula is not
+        // accidentally 3-shaped. It is not a usable setup.
+        for arity in [2usize, 3, 4] {
+            for n in 0..200 {
+                assert_eq!(total_recursive_proofs(n, arity).n_proofs, simulate(n, arity), "arity={arity} n={n}");
+            }
+        }
+    }
+
+    #[test]
+    fn arity_three_counts_are_unchanged() {
+        // Values pinned from the pre-change implementation.
+        for (n, expected) in [(0usize, 0usize), (1, 0), (2, 1), (3, 1), (4, 2), (5, 2), (10, 5), (100, 50)] {
+            assert_eq!(total_recursive_proofs(n, 3).n_proofs, expected, "n={n}");
+        }
+    }
+
+    #[test]
+    fn arity_two_is_a_binary_tree() {
+        for n in 1..100 {
+            assert_eq!(total_recursive_proofs(n, 2).n_proofs, n - 1, "n={n}");
+        }
+    }
+
+    /// The drain sizes its wait with `total_recursive_proofs(n, arity)`; `n` must
+    /// count proofs, not the workers they cover, or it waits forever for folds a
+    /// peer already performed.
+    #[test]
+    fn a_drain_is_sized_by_proofs_not_by_the_workers_they_cover() {
+        // Own leaf plus a peer proof folding {A, B}: two proofs, three workers.
+        assert_eq!(total_recursive_proofs(2, 2).n_proofs, 1, "two proofs fold once");
+        assert_eq!(total_recursive_proofs(3, 2).n_proofs, 2, "one fold too many: the hang");
+    }
+
+    /// Distributing moves folds between workers without creating or destroying any.
+    #[test]
+    fn distributing_the_tree_preserves_the_total_fold_count() {
+        for arity in [2usize, 3] {
+            for n_leaves in 1..40 {
+                let (mut sets, mut folds) = (n_leaves, 0usize);
+                while sets > 1 {
+                    let group = arity.min(sets);
+                    sets = sets - group + 1;
+                    folds += 1;
+                }
+                assert_eq!(
+                    folds,
+                    total_recursive_proofs(n_leaves, arity).n_proofs,
+                    "arity={arity} n_leaves={n_leaves}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod stride_tests {
+    use super::recursion_trace_stride;
+    use proofman_common::exec_format::{EXEC_FORMAT_VERSION, EXEC_FORMAT_VERSION_WIDE, EXEC_MAGIC};
+
+    /// A version 2 header narrows the GPU fill to its map's width. Any other is not read for one,
+    /// BN128's version 3 included, and the fill keeps the air's width.
+    #[test]
+    fn only_a_version_2_header_narrows_the_gpu_fill() {
+        // magic|version, n_adds, map_rows, map_cols, and version 3's coefficient width and n_vars.
+        let exec = |version| [EXEC_MAGIC | version, 0, 4, 3, 4, 16];
+        assert_eq!(recursion_trace_stride(&exec(EXEC_FORMAT_VERSION), 8, true), 3);
+        assert_eq!(recursion_trace_stride(&exec(EXEC_FORMAT_VERSION), 8, false), 8, "the CPU keeps the air's width");
+        assert_eq!(recursion_trace_stride(&exec(EXEC_FORMAT_VERSION_WIDE), 8, true), 8);
+        assert_eq!(recursion_trace_stride(&[], 8, true), 8, "no exec file");
+    }
+}
+
+#[cfg(test)]
+mod recursivef_gl_zkin_tests {
+    use super::recursivef_gl_zkin;
+
+    /// The zkin is the root, then the proof's publics and proof, of exactly the vadcop_final's words:
+    /// a proof of more or fewer, or none, is refused.
+    #[test]
+    fn a_vadcop_final_proof_of_other_than_its_words_is_refused() {
+        let root = [1, 2, 3, 4];
+        // Two publics, 10 and 11, and a proof of 3 words; then one word too many.
+        let proof = [2, 10, 11, 20, 21, 22, 23];
+        assert_eq!(recursivef_gl_zkin(&root, &proof[..6], 5).unwrap(), [1, 2, 3, 4, 10, 11, 20, 21, 22]);
+        for (proof, words) in [(&proof[..5], 4), (&proof[..], 6), (&proof[..1], 0), (&[][..], 0)] {
+            let refused = recursivef_gl_zkin(&root, proof, 5).expect_err("refused");
+            assert!(
+                refused.to_string().contains(&format!("of 5 words (its publics and proof), and this one has {words}")),
+                "{refused}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod snark_proof_tests {
+    use super::generate_snark_proof;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// A final witness that cannot be computed (here, no witness library) is reported once the
+    /// GPU pre-allocation thread is done, not while it still writes the prover.
+    #[test]
+    fn the_preallocation_is_joined_when_the_final_witness_fails() {
+        let preallocated = Arc::new(AtomicBool::new(false));
+        let prealloc_handle = {
+            let preallocated = preallocated.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                preallocated.store(true, Ordering::SeqCst);
+            })
+        };
+        let missing = Path::new("/nonexistent/provingKeySnark/final/final");
+        let null = std::ptr::null_mut();
+        assert!(generate_snark_proof(null, missing, null, prealloc_handle, null).is_err());
+        assert!(preallocated.load(Ordering::SeqCst), "returned before the pre-allocation ended");
     }
 }

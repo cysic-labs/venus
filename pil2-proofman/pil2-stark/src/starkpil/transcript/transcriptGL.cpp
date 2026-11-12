@@ -1,4 +1,5 @@
 #include "transcriptGL.hpp"
+#include "blake3_goldilocks.hpp"
 #include "math.h"
 
 void TranscriptGL::put(Goldilocks::Element *input, uint64_t size)
@@ -17,20 +18,27 @@ void TranscriptGL::_updateState()
     }
     std::memcpy(inputs, pending, transcriptPendingSize * sizeof(Goldilocks::Element));
     std::memcpy(&inputs[transcriptPendingSize], state, transcriptStateSize * sizeof(Goldilocks::Element));
-    switch(arity) {
-        case 2:
-            Poseidon2Goldilocks<8>::hash_full_result_seq(out, inputs);
-            break;
-        case 3:
-            Poseidon2Goldilocks<12>::hash_full_result_seq(out, inputs);
-            break;
-        case 4:
-            Poseidon2Goldilocks<16>::hash_full_result_seq(out, inputs);
-            break;
-        default:
-            zklog.error("TranscriptGL::_updateState: Unsupported arity");
-            exitProcess();
-            exit(-1);
+    switch (get_hash_family()) {
+    case HashFamily::Poseidon1:
+        switch(arity) {
+            case 2: PoseidonGoldilocks<8>::permute((Goldilocks::Element(&)[8])*out, (const Goldilocks::Element(&)[8])*inputs, PoseidonMode::Scalar);   break;
+            case 3: PoseidonGoldilocks<12>::permute((Goldilocks::Element(&)[12])*out, (const Goldilocks::Element(&)[12])*inputs, PoseidonMode::Scalar); break;
+            case 4: PoseidonGoldilocks<16>::permute((Goldilocks::Element(&)[16])*out, (const Goldilocks::Element(&)[16])*inputs, PoseidonMode::Scalar); break;
+            default: zklog.error("TranscriptGL::_updateState: Poseidon1 supports arity 2, 3 or 4"); exitProcess(); exit(-1);
+        }
+        break;
+    case HashFamily::Poseidon2:
+        switch(arity) {
+            case 2: Poseidon2Goldilocks<8>::permute((Goldilocks::Element(&)[8])*out, (const Goldilocks::Element(&)[8])*inputs, Poseidon2Mode::Scalar);   break;
+            case 3: Poseidon2Goldilocks<12>::permute((Goldilocks::Element(&)[12])*out, (const Goldilocks::Element(&)[12])*inputs, Poseidon2Mode::Scalar); break;
+            case 4: Poseidon2Goldilocks<16>::permute((Goldilocks::Element(&)[16])*out, (const Goldilocks::Element(&)[16])*inputs, Poseidon2Mode::Scalar); break;
+            default: zklog.error("TranscriptGL::_updateState: Poseidon2 supports arity 2, 3 or 4"); exitProcess(); exit(-1);
+        }
+        break;
+    case HashFamily::Blake3:
+        zklog.error("TranscriptGL::_updateState: unreachable for blake3");
+        exitProcess();
+        exit(-1);
     }
     out_cursor = transcriptOutSize;
     std::memset(pending, 0, transcriptPendingSize * sizeof(Goldilocks::Element));
@@ -40,6 +48,16 @@ void TranscriptGL::_updateState()
 
 void TranscriptGL::_add1(Goldilocks::Element input)
 {
+    if (get_hash_family() == HashFamily::Blake3)
+    {
+        const uint64_t w = Goldilocks::toU64(input);
+        b3.absorb(&w, 1);
+        b3_xof_valid = false;   // the stream changed; old XOF material is stale
+        b3_offset = 0;
+        b3_ob = 0;
+        return;
+    }
+
     pending[pending_cursor] = input;
     pending_cursor++;
     out_cursor = 0;
@@ -59,6 +77,15 @@ void TranscriptGL::getField(uint64_t* output)
 }
 
 void TranscriptGL::getState(Goldilocks::Element* output) {
+    if (get_hash_family() == HashFamily::Blake3)
+    {
+        // The BLAKE3 digest so far; does not consume, as the sponge does not.
+        uint64_t xof[8];
+        b3.finalize_xof(0, xof);
+        for (uint32_t i = 0; i < transcriptStateSize; ++i)
+            output[i] = Goldilocks::fromU64(xof[i]);
+        return;
+    }
     if(pending_cursor > 0) {
         _updateState();
     }
@@ -66,6 +93,19 @@ void TranscriptGL::getState(Goldilocks::Element* output) {
 }
 
 void TranscriptGL::getState(Goldilocks::Element* output, uint64_t nOutputs) {
+    if (get_hash_family() == HashFamily::Blake3)
+    {
+        if (nOutputs > 8) {
+            zklog.error("TranscriptGL::getState: blake3 yields at most 8 words per XOF block");
+            exitProcess();
+            exit(-1);
+        }
+        uint64_t xof[8];
+        b3.finalize_xof(0, xof);
+        for (uint64_t i = 0; i < nOutputs; ++i)
+            output[i] = Goldilocks::fromU64(xof[i]);
+        return;
+    }
     if(pending_cursor > 0) {
         _updateState();
     }
@@ -74,6 +114,25 @@ void TranscriptGL::getState(Goldilocks::Element* output, uint64_t nOutputs) {
 
 Goldilocks::Element TranscriptGL::getFields1()
 {
+    if (get_hash_family() == HashFamily::Blake3)
+    {
+        // A refill advances only the output-block counter; the root is unchanged.
+        if (!b3_xof_valid)
+        {
+            b3_ob = 0;
+            b3.finalize_xof(b3_ob, b3_xof);
+            b3_offset = 0;
+            b3_xof_valid = true;
+        }
+        else if (b3_offset == 8)
+        {
+            ++b3_ob;
+            b3.finalize_xof(b3_ob, b3_xof);
+            b3_offset = 0;
+        }
+        return Goldilocks::fromU64(b3_xof[b3_offset++]);
+    }
+
     if (out_cursor == 0)
     {
         _updateState();

@@ -7,6 +7,7 @@ const Performance = require('perf_hooks').performance;
 const beautify = require('js-beautify').js;
 const fs = require('fs');
 const units = require('./units.js');
+const COLORS = require("./colors.js");
 
 // TODO:
 // - scopes calls pop/up for inside variables
@@ -72,7 +73,7 @@ module.exports = class Transpiler {
                 _log.size += bytes;
             }
             fs.closeSync(_log.fd);
-            console.log(`  > written ${_log.size} bytes to ${_log.logfile}`);
+            console.log(`  > written ${_log.size} bytes to ${COLORS.filename(_log.logfile)}`);
         }
     }
     #transpile(st) {

@@ -1,0 +1,34 @@
+[package]
+name = "zisk-stream"
+description = "Stream I/O layer (traits and transports) for the ZisK zkVM"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+documentation = { workspace = true }
+categories = { workspace = true }
+
+[lib]
+name = "zisk_stream"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Enabled by the `quic` feature.
+quinn = { version = "0.11", optional = true }
+rustls = { workspace = true, features = ["ring"], optional = true }
+rcgen = { version = "0.14", optional = true }
+tokio = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[features]
+default = []
+# QUIC transport (pulls in quinn + tokio + rustls). Off by default so guest-side
+# consumers (ziskos) stay free of the async/networking stack.
+quic = ["dep:quinn", "dep:tokio", "dep:rustls", "dep:rcgen"]

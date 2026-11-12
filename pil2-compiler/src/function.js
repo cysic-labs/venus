@@ -203,10 +203,17 @@ module.exports = class Function {
         }
 
         // REVIEW: use arg.type, but perphaps we need to do a casting
-        if (lengths.length !== arg.dim) {        
+        if (lengths.length !== arg.dim) {
             console.log(arg);
             console.log(value.dim);
             throw new Error(`Invalid match dimensions on call ${this.name} and parameter ${name} (${lengths.length} !== ${arg.dim})`);
+        }
+        if (arg.type === 'fixed' && value instanceof ExpressionItems.FixedCol) {
+            // fixed columns are passed by reference: bind the argument name to
+            // the caller's column instead of reserving and copying a new one
+            Context.references.declare(name, '&fixed', lengths, {sourceRef: Context.sourceRef});
+            Context.references.setReference(name, value);
+            return false;
         }
         this.declareArgument(name, arg.type, lengths, {sourceRef: Context.sourceRef}, value);
         return false;

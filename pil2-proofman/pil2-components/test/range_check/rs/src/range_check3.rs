@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use witness::{WitnessComponent, execute, define_wc_with_std};
+use proofman_witness::{WitnessComponent, execute, define_wc_with_std};
 
 use proofman_common::{BufferPool, FromTrace, AirInstance, ProofCtx, SetupCtx, ProofmanResult};
 
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use rand::{SeedableRng, rngs::StdRng, RngExt};
 
 use crate::RangeCheck3Trace;
@@ -39,8 +39,8 @@ impl<F: PrimeField64> WitnessComponent<F> for RangeCheck3<F> {
                 trace[i].c1 = F::from_u16(val1);
                 trace[i].c2 = F::from_u16(val2);
 
-                self.std_lib.range_check(range1, val1 as i64, 1);
-                self.std_lib.range_check(range2, val2 as i64, 1);
+                self.std_lib.range_check_one(range1, val1);
+                self.std_lib.range_check_one(range2, val2);
             }
 
             let air_instance = AirInstance::new_from_trace(FromTrace::new(&mut trace));

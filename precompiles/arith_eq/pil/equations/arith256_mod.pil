@@ -9,7 +9,7 @@
 // terms_by_clock: 2
 
 
-const expr eq_arith256_mod_chunks[32];
+const expr air.eq_arith256_mod_chunks[32];
 
 // clock #0
 
@@ -755,9 +755,8 @@ eq_arith256_mod_chunks[31] = - q1 * 15'y2                  // - q1[15] * y2[0]
                              - 14'q1 * 'y2                 // - q1[1] * y2[14]
                              - 15'q1 * y2;                 // - q1[0] * y2[15]
 
-// chunks beyond the cycle, relative to its first clock: they must be zero
 
-const expr eq_arith256_mod_zero_chunks[15];
+const expr air.eq_arith256_mod_zero_chunks[15];
 
 eq_arith256_mod_zero_chunks[ 0] = - q1'15 * y2'                 // - q1[15] * y2[1]
                                   - q1'14 * y2'2                // - q1[14] * y2[2]

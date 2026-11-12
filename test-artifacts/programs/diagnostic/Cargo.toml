@@ -1,0 +1,23 @@
+[package]
+name = "diagnostic"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ziskos.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+zba = []
+zbc = []
+zbkc = []
+zbkx = []
+zba_native = []
+zbc_native = []
+zbkc_native = []
+zbkx_native = []
+zicond_native = []
+c_extension = []

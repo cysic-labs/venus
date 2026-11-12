@@ -2,7 +2,7 @@ use crate::asm_services::CMD_RH_RESPONSE_ID;
 
 use super::{FromResponsePayload, RequestData, ResponseData, ToRequestPayload, CMD_RH_REQUEST_ID};
 
-pub struct RomHistogramRequest {
+pub(crate) struct RomHistogramRequest {
     pub max_steps: u64,
 }
 
@@ -12,7 +12,9 @@ impl ToRequestPayload for RomHistogramRequest {
     }
 }
 
-pub struct RomHistogramResponse {
+// Fields mirror the on-wire ROM histogram response; these document the protocol layout.
+#[allow(dead_code)]
+pub(crate) struct RomHistogramResponse {
     pub result: u8,
     pub allocated_len: u64,
     pub trace_len: u64,
@@ -20,8 +22,9 @@ pub struct RomHistogramResponse {
 }
 
 impl FromResponsePayload for RomHistogramResponse {
+    const RESPONSE_ID: u64 = CMD_RH_RESPONSE_ID;
+
     fn from_response_payload(payload: ResponseData) -> Self {
-        assert!(payload[0] == CMD_RH_RESPONSE_ID,);
         RomHistogramResponse {
             result: payload[1] as u8,
             allocated_len: payload[2],

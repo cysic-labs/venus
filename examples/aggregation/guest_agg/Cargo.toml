@@ -1,9 +1,0 @@
-[package]
-name = "guest-agg"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-byteorder = "1.5.0"
-serde = { version = "1.0", default-features = false, features = ["derive"] }
-ziskos = { path = "../../../ziskos/entrypoint" }

@@ -21,6 +21,7 @@ module.exports = class ExpressionOperationsInfo {
         bor:  { type: 'bit',     label: '|',  precedence:  56, args: 2, commutative: true },
         bxor: { type: 'bit',     label: '^',  precedence:  54, args: 2, commutative: true },
         not:  { type: 'logical', label: '!',  precedence: 100, args: 1, commutative: false },
+        is:   { type: 'type',    label: 'is', precedence:  65, args: 2, commutative: false },
         spread: { type: 'array', label: '...',  precedence: 101, args: 1, commutative: false }
     };
 

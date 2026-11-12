@@ -1,28 +1,29 @@
-// #pragma arg -I pil,../pil2-proofman/pil2-components/lib/std/pil,state-machines,precompiles 
-// #pragma arg -o pil/zisk.pilout 
-// #pragma arg -O fixed-to-file 
-// #pragma arg -u tmp/fixed
-
 require "std_direct.pil"
 
 require "operations.pil"
 require "opids.pil"
 require "config.pil"
 
+require "evm/pil/jump_dest.pil"
+require "evm/pil/jump_dest_compressor_table.pil"
+require "evm/pil/jump_dest_bitmap_table.pil"
 require "dma/pil/dual_range.pil"
-require "rom/pil/rom.pil"
-require "main/pil/main.pil"
 require "mem/pil/mem.pil"
 require "mem/pil/mem_align.pil"
 require "mem/pil/mem_align_byte.pil"
+require "mem/pil/rom_data.pil"
+require "rom/pil/rom.pil"
+require "main/pil/main.pil"
 require "frequent-ops/pil/frequent_ops.pil"
 require "binary/pil/binary.pil"
 require "binary/pil/binary_extension.pil"
 require "binary/pil/binary_add.pil"
+require "binary/pil/binary_add_hi.pil"
 require "arith/pil/arith.pil"
 require "big_int/pil/big_int_add.pil"
 require "arith_eq/pil/arith_eq.pil"
 require "arith_eq_384/pil/arith_eq_384.pil"
+require "twisted_edwards/pil/twisted_edwards.pil"
 require "keccakf/pil/keccakf.pil"
 require "sha256f/pil/sha256f.pil"
 require "dma/pil/dma.pil"
@@ -32,120 +33,169 @@ require "dma/pil/dma_pre_post_table.pil"
 require "dma/pil/dma_byte_cmp_table.pil"
 require "dma/pil/dma_64_aligned.pil"
 require "dma/pil/dma_unaligned.pil"
-require "poseidon2/pil/poseidon2.pil"
+require "poseidon/pil/poseidon.pil"
+require "poseidon/pil/poseidon2_non_native.pil"
+require "poseidon/pil/poseidon2_koalabear.pil"
 require "blake2/pil/blake2br.pil"
+require "blake2/pil/blake2s.pil"
+require "blake3/pil/blake3f.pil"
 
 enable_range_stats();
 
+// Selectors for continuations.
+//
+// Every air that keeps a continuation chain needs ONE of these of its own: the flag gates the global
+// seed of that air's chain, and Dma64Aligned gives each of its aliases its own auto-generated
+// cont_subid, so two aliases sharing a flag would seed two chains while only one of them is
+// instantiated — leaving the other seed with nothing to consume it.
 proofval enable_input_data;
-enable_input_data * (1 - enable_input_data) === 0;
-
 proofval enable_rom_data;
-enable_rom_data * (1 - enable_rom_data) === 0;
-
 proofval enable_dma_64_aligned;
-enable_dma_64_aligned * (1 - enable_dma_64_aligned) === 0;
-
+proofval enable_dma_64_aligned_large;
 proofval enable_dma_64_aligned_inputcpy;
-enable_dma_64_aligned_inputcpy * (1 - enable_dma_64_aligned_inputcpy) === 0;
-
 proofval enable_dma_64_aligned_mem;
-enable_dma_64_aligned_mem * (1 - enable_dma_64_aligned_mem) === 0;
-
+proofval enable_dma_64_aligned_mem_large;
 proofval enable_dma_64_aligned_memcpy;
-enable_dma_64_aligned_memcpy * (1 - enable_dma_64_aligned_memcpy) === 0;
-
 proofval enable_dma_64_aligned_memset;
-enable_dma_64_aligned_memset * (1 - enable_dma_64_aligned_memset) === 0;
-
 proofval enable_dma_unaligned;
+proofval enable_jump_dest;
+
+// Binary constraints to continuations enable proofvals
+enable_input_data * (1 - enable_input_data) === 0;
+enable_rom_data * (1 - enable_rom_data) === 0;
+enable_dma_64_aligned * (1 - enable_dma_64_aligned) === 0;
+enable_dma_64_aligned_large * (1 - enable_dma_64_aligned_large) === 0;
+enable_dma_64_aligned_inputcpy * (1 - enable_dma_64_aligned_inputcpy) === 0;
+enable_dma_64_aligned_mem * (1 - enable_dma_64_aligned_mem) === 0;
+enable_dma_64_aligned_mem_large * (1 - enable_dma_64_aligned_mem_large) === 0;
+enable_dma_64_aligned_memcpy * (1 - enable_dma_64_aligned_memcpy) === 0;
+enable_dma_64_aligned_memset * (1 - enable_dma_64_aligned_memset) === 0;
 enable_dma_unaligned * (1 - enable_dma_unaligned) === 0;
+enable_jump_dest * (1 - enable_jump_dest) === 0;
 
 const int PUBLIC_INPUTS_64_BITS = 32;  // 32 x 64 bits = 2048 bits
 public inputs[PUBLIC_INPUTS_64_BITS * 2]; // 2 x 32-bits = 64 bits
 
-function range_dual_byte(expr byte_a, expr byte_b, expr sel = 1) {
-    lookup_assumes(DUAL_RANGE_BYTE_ID, expressions: [byte_a, byte_b], sel: sel);
+function range_dual_byte(expr byte_a, expr byte_b, expr sel = 1, int sel_is_binary = 0) {
+    lookup_assumes(DUAL_RANGE_BYTE_ID, expressions: [byte_a, byte_b], sel: sel, sel_is_binary: sel_is_binary);
 }
 
 airgroup Zisk {
     // Virtual Tables Configuration
-    set_max_std_tables_bits(20);
-    set_max_num_rows_virtual(1 << 21); // Set the maximum rows for virtual tables
-    set_max_num_virtual_tables(2);
-    set_group_virtual_tables(table_ids: [ARITH_TABLE_ID, ARITH_RANGE_TABLE_ID, ARITH_EQ_LT_TABLE_ID, BINARY_EXTENSION_TABLE_ID, 
-                                         BINARY_TABLE_ID, MEMORY_ALIGN_ROM_ID, KECCAKF_TABLE_ID, DMA_ROM_ID, DMA_PRE_POST_TABLE_ID]);
-    set_group_virtual_tables(table_ids: [BINARY_EXTENSION_FROPS_TABLE_ID, BINARY_FROPS_TABLE_ID, ARITH_FROPS_TABLE_ID]);
+    set_range_check_tables_virtual();
+    set_max_bits_virtual_tables(21);
+    set_num_virtual_tables(2);
+    set_group_virtual_tables([ARITH_FROPS_TABLE_ID, BINARY_FROPS_TABLE_ID, BINARY_EXTENSION_FROPS_TABLE_ID]);
 
-    virtual DualRange(id: DUAL_RANGE_7_BITS_ID, min1: 0, max1: P2_7-1, min2: 0, max2: P2_7-1) alias DualRange7Bits;
-    virtual DualRange(id: DUAL_RANGE_BYTE_ID, min1: 0, max1: P2_8-1, min2: 0, max2: P2_8-1) alias DualByte;
-
-    Dma();
-    Dma(enable: E_DMA_MEMCPY) alias DmaMemCpy;
-    Dma(enable: E_DMA_INPUTCPY) alias DmaInputCpy;
-
-    Dma64Aligned(enable_flag: enable_dma_64_aligned);
-    Dma64Aligned(enable: E_DMA_INPUTCPY, enable_flag: enable_dma_64_aligned_inputcpy) alias Dma64AlignedInputCpy;
-    Dma64Aligned(enable: E_DMA_MEMSET, enable_flag: enable_dma_64_aligned_memset, op_x_row: 8) alias Dma64AlignedMemSet;
-    Dma64Aligned(enable: E_DMA_MEMCPY|E_DMA_MEMCMP|E_DMA_MEMSET, enable_flag: enable_dma_64_aligned_mem) alias Dma64AlignedMem;
-    Dma64Aligned(enable: E_DMA_MEMCPY, enable_flag: enable_dma_64_aligned_memcpy, op_x_row: 8) alias Dma64AlignedMemCpy;
-
-    DmaUnaligned(enable_flag: enable_dma_unaligned);
-
-    DmaPrePost();
-    DmaPrePost(enable: E_DMA_MEMCPY) alias DmaPrePostMemCpy;
-    DmaPrePost(enable: E_DMA_INPUTCPY) alias DmaPrePostInputCpy;
-
-    virtual DmaByteCmpTable();
-    virtual DmaRom();
-    virtual DmaPrePostTable();
     // Main Program
-    Main(N: 2**22);
+    Main(N: 2**22, lanes_x_row: 4);
     Rom(N: 2**22);
 
     // Memory
-    Mem(N: 2**22, base_address: 0xA000_0000, size_mb: 512, large_mem: 1, dual_mem: 1);
-    Mem(N: 2**21, base_address: 0x8000_0000, size_mb: 128, immutable: 1, enable_flag: enable_rom_data) alias RomData;
-    Mem(N: 2**21, base_address: 0x4000_0000, size_mb: 1024, large_mem: 1, free_input_mem: 1, enable_flag: enable_input_data) alias InputData;
+    Mem(N: 2**22, base_address: 0xA000_0000, size_mb: 512, large_mem: 1, dual_mem: 1, lanes_x_row: 4);
+    Mem(N: 2**22, base_address: 0x1000_0000, size_mb: 2048, large_mem: 1, free_input_mem: 1, enable_flag: enable_input_data) alias InputData;
+    RomData(N: 2**22, base_address: 0x9000_0000, size_mb: 128, enable_flag: enable_rom_data, lanes_x_row: 2);
 
     MemAlign(N: 2**21);
+    MemAlign(N: 2**23) alias MemAlignLarge;
+
     MemAlignByte(N: 2**22, read: 1, write: 1);
     MemAlignByte(N: 2**22, read: 1, write: 0) alias MemAlignReadByte;
     MemAlignByte(N: 2**22, read: 0, write: 1) alias MemAlignWriteByte;
+
+    MemAlignByte(N: 2**23, read: 1, write: 1) alias MemAlignByteLarge;
+    MemAlignByte(N: 2**23, read: 1, write: 0) alias MemAlignReadByteLarge;
     virtual MemAlignRom();
-    
+
     // Standard operations
     Arith(N: 2**21);
     virtual ArithTable();
     virtual ArithRangeTable();
-    virtual FrequentOps(2085944, table_id: ARITH_FROPS_TABLE_ID, 
+    virtual FrequentOps(table_id: ARITH_FROPS_TABLE_ID,
                         bin_file: "state-machines/arith/src/arith_frops_fixed.bin") alias ArithFrops;
 
     Binary(N: 2**22);
-    BinaryAdd(N: 2**22);
-    virtual BinaryTable(BINARY_TABLE_SIZE);
-    BinaryExtension(N: 2**22);
-    virtual BinaryExtensionTable(BINARY_EXTENSION_TABLE_SIZE);
+    Binary(N: 2**22, lanes_x_row: 2) alias BinaryLarge;
+    Binary(N: 2**22, lanes_x_row: 4) alias BinaryHuge;
 
-    virtual FrequentOps(13084068, table_id: BINARY_FROPS_TABLE_ID, 
+    BinaryAdd(N: 2**22);
+    BinaryAdd(N: 2**22, lanes_x_row: 2) alias BinaryAddLarge;
+    BinaryAdd(N: 2**22, lanes_x_row: 4) alias BinaryAddHuge;
+
+    BinaryAddHi(N: 2**22, lanes_x_row: 2);
+    BinaryAddHi(N: 2**22, lanes_x_row: 4) alias BinaryAddHiLarge;
+    BinaryAddHi(N: 2**22, lanes_x_row: 8) alias BinaryAddHiHuge;
+
+    BinaryExtension(N: 2**22);
+    BinaryExtension(N: 2**22, lanes_x_row: 2) alias BinaryExtensionLarge;
+
+    virtual BinaryTable();
+    virtual BinaryExtensionTable();
+
+    virtual FrequentOps(table_id: BINARY_FROPS_TABLE_ID,
                         bin_file: "state-machines/binary/src/binary_basic_frops_fixed.bin") alias BinaryBasicFrops;
-    virtual FrequentOps(1607204, table_id: BINARY_EXTENSION_FROPS_TABLE_ID, 
+    virtual FrequentOps(table_id: BINARY_EXTENSION_FROPS_TABLE_ID,
                         bin_file: "state-machines/binary/src/binary_extension_frops_fixed.bin") alias BinaryExtensionFrops;
 
     // Precompiles
     BigIntAdd(N: 2**20, bits: 256, operation_code: OP_ADD256) alias Add256;
+
     ArithEq(N: 2**20);
+    ArithEq(N: 2**21) alias ArithEqLarge;
+    ArithEq(N: 2**20, equations: EQ_ARITH256 + EQ_ARITH256_MOD) alias Arith256X;
+    ArithEq(N: 2**21, equations: EQ_ARITH256 + EQ_ARITH256_MOD) alias Arith256XLarge;
+    ArithEq(N: 2**20, equations: EQ_SECP256K1) alias ArithSecp256K1;
+    ArithEq(N: 2**21, equations: EQ_SECP256K1) alias ArithSecp256K1Large;
+    ArithEq(N: 2**20, equations: EQ_BN254_EC + EQ_BN254_ADD + EQ_BN254_SUB + EQ_BN254_MUL) alias ArithBn254;
+    ArithEq(N: 2**21, equations: EQ_BN254_EC + EQ_BN254_ADD + EQ_BN254_SUB + EQ_BN254_MUL) alias ArithBn254Large;
     ArithEq384(N: 2**20);
-    virtual ArithEqLtTable();
+    ArithEq384(N: 2**21) alias ArithEq384Large;
 
-    Keccakf(N: 2**17, mem_ops_in_parallel: 25);
-    virtual KeccakfTable(KECCAKF_TABLE_SIZE);
+    TwistedEdwards(N: 2**18);
+    virtual ArithEqLtTable(ARITH_EQ_LT_TABLE_SIZE);
 
-    Sha256f(N: 2**18);
+    Keccakf(N: 2**21, lanes_per_row: 5);
+    virtual KeccakfChiTable(KECCAKF_CHI_TABLE_SIZE);
+    virtual KeccakfXor5Table(KECCAKF_XOR5_TABLE_SIZE);
 
-    Poseidon2(N: 2**17);
+    Sha256f(N: 2**19);
 
-    Blake2br(N: 2**18);
+    Poseidon(N: 2**17);
+    Poseidon2NonNative(N: 2**20, OP: OP_POSEIDON2_KOALABEAR, P: KB_P, n: 16, SBOX_DEG: 3, RF: 8, RP: 20,
+                       M4: KB_M4, INT_SCALE: KB_INT_SCALE, D: KB_D_16, RC: KB_RC_16,
+                       IO_SCALE: KB_IO_SCALE)
+        alias Poseidon2KoalaBear;
+
+    Blake2br(N: 2**20);
+    Blake3f(N: 2**20, LANES: 2);
+    Blake2s(N: 2**20);
+    virtual BlakeTable(BLAKE_TABLE_SIZE);
+
+    Dma();
+
+    Dma64Aligned(N: 2**21, enable_flag: enable_dma_64_aligned);
+    Dma64Aligned(N: 2**23, enable_flag: enable_dma_64_aligned_large) alias Dma64AlignedLarge;
+
+    Dma64Aligned(N: 2**21, enable: E_DMA_MEMSET, enable_flag: enable_dma_64_aligned_memset, op_x_row: 8) alias Dma64AlignedMemSet;
+    Dma64Aligned(N: 2**21, enable: E_DMA_MEMCPY|E_DMA_MEMCMP|E_DMA_MEMSET, enable_flag: enable_dma_64_aligned_mem) alias Dma64AlignedMem;
+    Dma64Aligned(N: 2**22, enable: E_DMA_MEMCPY|E_DMA_MEMCMP|E_DMA_MEMSET, enable_flag: enable_dma_64_aligned_mem_large) alias Dma64AlignedMemLarge;
+    Dma64Aligned(N: 2**21, enable: E_DMA_MEMCPY, enable_flag: enable_dma_64_aligned_memcpy, op_x_row: 8) alias Dma64AlignedMemCpy;
+
+    DmaUnaligned(N: 2**21, enable_flag: enable_dma_unaligned);
+
+    DmaPrePost();
+
+    virtual DmaByteCmpTable();
+    virtual DmaRom();
+    virtual DmaPrePostTable();
+
+    // EVM
+    virtual JumpDestCompressorTable();
+    virtual JumpDestBitmapTable();
+    JumpDest(N: 2**21, enable_flag: enable_jump_dest);
+
+    virtual DualRange(id: DUAL_RANGE_7_BITS_ID, min1: 0, max1: P2_7-1, min2: 0, max2: P2_7-1) alias DualRange7Bits;
+    virtual DualRange(id: DUAL_RANGE_BYTE_ID, min1: 0, max1: P2_8-1, min2: 0, max2: P2_8-1) alias DualByte;
 
     // Public Inputs
     for (int i = 0; i < PUBLIC_INPUTS_64_BITS; i++) {

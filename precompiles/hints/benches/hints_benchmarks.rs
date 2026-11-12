@@ -1,18 +1,19 @@
 use anyhow::Result;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use precompiles_hints::{HintHandlers, HintsProcessor};
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use zisk_common::io::StreamError;
 use zisk_common::io::StreamSink;
+use zisk_precomp_hints::{HintHandlers, HintsProcessor};
 
 struct BenchSink {
     received: Arc<Mutex<Vec<Vec<u64>>>>,
 }
 
 impl StreamSink for BenchSink {
-    fn submit(&self, processed: &[u64]) -> Result<()> {
+    fn submit(&self, processed: &[u64]) -> Result<(), StreamError> {
         self.received.lock().unwrap().push(processed.to_vec());
         Ok(())
     }
@@ -233,7 +234,7 @@ fn noop_throughput_benchmark(c: &mut Criterion) {
     struct NullSink;
 
     impl StreamSink for NullSink {
-        fn submit(&self, _processed: &[u64]) -> Result<()> {
+        fn submit(&self, _processed: &[u64]) -> Result<(), StreamError> {
             Ok(())
         }
     }

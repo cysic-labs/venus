@@ -3,10 +3,9 @@
 use crate::{
     syscalls::{
         syscall_bls12_381_complex_add, syscall_bls12_381_complex_mul,
-        syscall_bls12_381_complex_sub, SyscallBls12_381ComplexAddParams,
-        SyscallBls12_381ComplexMulParams, SyscallBls12_381ComplexSubParams, SyscallComplex384,
+        syscall_bls12_381_complex_sub, SyscallComplex384,
     },
-    zisklib::{eq, fcall_bls12_381_fp2_inv, fcall_bls12_381_fp2_sqrt, is_zero, lt},
+    zisklib::{eq, fcall_bls12_381_fp2_inv, fcall_bls12_381_fp2_sqrt, is_one, is_zero, lt},
 };
 
 use super::constants::{NQR_FP2, P, P_MINUS_ONE};
@@ -22,6 +21,11 @@ fn to_syscall_complex_x(limbs: &[u64; 6]) -> SyscallComplex384 {
     SyscallComplex384 { x: *limbs, y: [0u64; 6] }
 }
 
+#[inline]
+fn to_syscall_complex_y(limbs: &[u64; 6]) -> SyscallComplex384 {
+    SyscallComplex384 { x: [0u64; 6], y: *limbs }
+}
+
 /// Helper to convert from syscall representation to array representation
 #[inline]
 fn from_syscall_complex(complex: &SyscallComplex384) -> [u64; 12] {
@@ -31,7 +35,7 @@ fn from_syscall_complex(complex: &SyscallComplex384) -> [u64; 12] {
     result
 }
 
-/// Sign function in Fp2
+/// Sign function in the degree 2 extension of the BLS12-381 curve
 pub fn sgn0_fp2_bls12_381(x: &[u64; 12]) -> u64 {
     let sign_0 = x[0] & 1;
     let zero_0 = is_zero(&x[0..6]) as u64;
@@ -39,7 +43,7 @@ pub fn sgn0_fp2_bls12_381(x: &[u64; 12]) -> u64 {
     sign_0 | (zero_0 & sign_1)
 }
 
-/// Addition in Fp2
+/// Addition in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn add_fp2_bls12_381(
     a: &[u64; 12],
@@ -48,16 +52,16 @@ pub fn add_fp2_bls12_381(
 ) -> [u64; 12] {
     let mut f1 = to_syscall_complex(a);
     let f2 = to_syscall_complex(b);
-    let mut params = SyscallBls12_381ComplexAddParams { f1: &mut f1, f2: &f2 };
     syscall_bls12_381_complex_add(
-        &mut params,
+        &mut f1,
+        &f2,
         #[cfg(feature = "hints")]
         hints,
     );
     from_syscall_complex(&f1)
 }
 
-/// Doubling in Fp2
+/// Doubling in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn dbl_fp2_bls12_381(
     a: &[u64; 12],
@@ -65,16 +69,16 @@ pub fn dbl_fp2_bls12_381(
 ) -> [u64; 12] {
     let mut f1 = to_syscall_complex(a);
     let f2 = to_syscall_complex(a);
-    let mut params = SyscallBls12_381ComplexAddParams { f1: &mut f1, f2: &f2 };
     syscall_bls12_381_complex_add(
-        &mut params,
+        &mut f1,
+        &f2,
         #[cfg(feature = "hints")]
         hints,
     );
     from_syscall_complex(&f1)
 }
 
-/// Negation in Fp2
+/// Negation in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn neg_fp2_bls12_381(
     a: &[u64; 12],
@@ -82,16 +86,16 @@ pub fn neg_fp2_bls12_381(
 ) -> [u64; 12] {
     let mut f1 = to_syscall_complex(a);
     let f2 = to_syscall_complex_x(&P_MINUS_ONE);
-    let mut params = SyscallBls12_381ComplexMulParams { f1: &mut f1, f2: &f2 };
     syscall_bls12_381_complex_mul(
-        &mut params,
+        &mut f1,
+        &f2,
         #[cfg(feature = "hints")]
         hints,
     );
     from_syscall_complex(&f1)
 }
 
-/// Subtraction in Fp2
+/// Subtraction in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn sub_fp2_bls12_381(
     a: &[u64; 12],
@@ -100,16 +104,16 @@ pub fn sub_fp2_bls12_381(
 ) -> [u64; 12] {
     let mut f1 = to_syscall_complex(a);
     let f2 = to_syscall_complex(b);
-    let mut params = SyscallBls12_381ComplexSubParams { f1: &mut f1, f2: &f2 };
     syscall_bls12_381_complex_sub(
-        &mut params,
+        &mut f1,
+        &f2,
         #[cfg(feature = "hints")]
         hints,
     );
     from_syscall_complex(&f1)
 }
 
-/// Multiplication in Fp2
+/// Multiplication in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn mul_fp2_bls12_381(
     a: &[u64; 12],
@@ -118,36 +122,35 @@ pub fn mul_fp2_bls12_381(
 ) -> [u64; 12] {
     let mut f1 = to_syscall_complex(a);
     let f2 = to_syscall_complex(b);
-    let mut params = SyscallBls12_381ComplexMulParams { f1: &mut f1, f2: &f2 };
     syscall_bls12_381_complex_mul(
-        &mut params,
+        &mut f1,
+        &f2,
         #[cfg(feature = "hints")]
         hints,
     );
     from_syscall_complex(&f1)
 }
 
-/// Scalar multiplication in Fp2
+/// Scalar multiplication in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn scalar_mul_fp2_bls12_381(
     a: &[u64; 12],
     b: &[u64; 6],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 12] {
-    let mut f1 =
-        SyscallComplex384 { x: a[0..6].try_into().unwrap(), y: a[6..12].try_into().unwrap() };
-    let f2 = SyscallComplex384 { x: b[0..6].try_into().unwrap(), y: [0, 0, 0, 0, 0, 0] };
+    let mut f1 = to_syscall_complex(a);
+    let f2 = to_syscall_complex_x(b);
 
-    let mut params = SyscallBls12_381ComplexMulParams { f1: &mut f1, f2: &f2 };
     syscall_bls12_381_complex_mul(
-        &mut params,
+        &mut f1,
+        &f2,
         #[cfg(feature = "hints")]
         hints,
     );
     from_syscall_complex(&f1)
 }
 
-/// Squaring in Fp2
+/// Squaring in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn square_fp2_bls12_381(
     a: &[u64; 12],
@@ -155,16 +158,16 @@ pub fn square_fp2_bls12_381(
 ) -> [u64; 12] {
     let mut f1 = to_syscall_complex(a);
     let f2 = to_syscall_complex(a);
-    let mut params = SyscallBls12_381ComplexMulParams { f1: &mut f1, f2: &f2 };
     syscall_bls12_381_complex_mul(
-        &mut params,
+        &mut f1,
+        &f2,
         #[cfg(feature = "hints")]
         hints,
     );
     from_syscall_complex(&f1)
 }
 
-/// Square root in Fp2
+/// Square root in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn sqrt_fp2_bls12_381(
     x: &[u64; 12],
@@ -179,7 +182,7 @@ pub fn sqrt_fp2_bls12_381(
     let is_qr = hint[0] == 1;
     let sqrt: [u64; 12] = hint[1..13].try_into().unwrap();
 
-    // The hint is prover-chosen, so reject non-canonical representatives
+    // Check that the sqrt is canonical
     assert!(lt(&sqrt[0..6], &P) && lt(&sqrt[6..12], &P), "Square root is not canonical");
 
     // Compute sqrt * sqrt
@@ -192,7 +195,7 @@ pub fn sqrt_fp2_bls12_381(
 
     if is_qr {
         // Check that sqrt * sqrt == x
-        assert!(eq(&mul, x));
+        assert!(eq(&mul, x), "Square root verification failed");
         (sqrt, true)
     } else {
         // Check that sqrt * sqrt == x * NQR
@@ -202,19 +205,19 @@ pub fn sqrt_fp2_bls12_381(
             #[cfg(feature = "hints")]
             hints,
         );
-        assert!(eq(&mul, &nqr));
+        assert!(eq(&mul, &nqr), "Square root verification failed");
         (sqrt, false)
     }
 }
 
-/// Inversion in Fp2: returns a⁻¹
+/// Inversion in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn inv_fp2_bls12_381(
     a: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 12] {
     // if a == 0, return 0
-    if eq(a, &[0; 12]) {
+    if is_zero(a) {
         return *a;
     }
 
@@ -228,7 +231,7 @@ pub fn inv_fp2_bls12_381(
         hints,
     );
 
-    // The hint is prover-chosen, so reject non-canonical representatives
+    // Check that the inverse is canonical
     assert!(lt(&inv[0..6], &P) && lt(&inv[6..12], &P), "Inverse is not canonical");
 
     let product = mul_fp2_bls12_381(
@@ -237,24 +240,23 @@ pub fn inv_fp2_bls12_381(
         #[cfg(feature = "hints")]
         hints,
     );
-    assert_eq!(&product[0..6], &[1, 0, 0, 0, 0, 0]);
-    assert_eq!(&product[6..12], &[0, 0, 0, 0, 0, 0]);
+    assert!(is_one(&product), "Inverse verification failed");
 
     inv
 }
 
-/// Conjugation in Fp2
+/// Conjugation in the degree 2 extension of the BLS12-381 curve
 #[inline]
 pub fn conjugate_fp2_bls12_381(
     a: &[u64; 12],
     #[cfg(feature = "hints")] hints: &mut Vec<u64>,
 ) -> [u64; 12] {
-    let mut f1 = SyscallComplex384 { x: a[0..6].try_into().unwrap(), y: [0, 0, 0, 0, 0, 0] };
-    let f2 = SyscallComplex384 { x: [0, 0, 0, 0, 0, 0], y: a[6..12].try_into().unwrap() };
+    let mut f1 = to_syscall_complex_x(&a[0..6].try_into().unwrap());
+    let f2 = to_syscall_complex_y(&a[6..12].try_into().unwrap());
 
-    let mut params = SyscallBls12_381ComplexSubParams { f1: &mut f1, f2: &f2 };
     syscall_bls12_381_complex_sub(
-        &mut params,
+        &mut f1,
+        &f2,
         #[cfg(feature = "hints")]
         hints,
     );

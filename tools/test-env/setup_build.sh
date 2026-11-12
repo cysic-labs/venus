@@ -1,0 +1,644 @@
+#!/usr/bin/env bash
+#
+# Dev orchestrator: drive compile-pil, setup, setup-snark, and stats from a
+# single entry point. Builds locally only — no bucket / network access. An
+# optional local artifact cache (--cache-dir) lets a repeat build reuse a
+# previously built provingKey/ keyed by the input hash, instead of rebuilding.
+# To package the result (provingKey/circom/snark tarballs), use
+# tools/test-env/upload_setup.sh.
+#
+# Modes (mutually exclusive)
+# --------------------------
+#   (default)          run setup --recursive.
+#   --no-aggregation   run setup without -r.
+#   --snark            run setup-snark on top of an existing
+#                      <build-dir>/provingKey/. Errors out if that directory
+#                      is missing — populate it first with setup_build.sh
+#                      (no flag).
+#   --compile-pil      run only fixed-data gen + compile-pil + regenerate
+#                      pil/src/pil_helpers/traces.rs. No setup.
+#   --compressed-final re-run only vadcop_final_compressed on top of an existing
+#                      <build-dir>/provingKey/<name>/vadcop_final/.
+#   --gen-exps-only    (re)generate per-AIR Q-expression CUDA kernels (.exps.so)
+#                      on top of an existing <build-dir>/provingKey/, without
+#                      re-running setup. No-op if nvcc is not on PATH.
+#   --stats            run fixed-data gen + compile-pil + proofman-setup stats.
+#
+# pil-helpers (pil/src/pil_helpers/traces.rs) is regenerated as the last step
+# of compile-pil in every mode that compiles the PIL, so traces.rs stays in
+# sync with the freshly built pil/zisk.pilout. --skip-compile-pil skips both
+# steps together (the on-disk traces.rs is assumed to match the reused pilout).
+#
+# Input hash (the --cache-dir cache key)
+# --------------------------------------
+# An input-side sha256 over:
+#   - every *.pil under  pil/ state-machines/ precompiles/
+#   - every *.pil under  ${PROOFMAN_DIR}/pil2-components/lib/std/pil
+#   - setup/starkstructs.<mode>.json (picked by $HASH_MODE)
+#   - the *_fixed.bin files written by the fixed-data generators
+#   - pil2-compiler ref: the branch override if set, else the dep ref from
+#     ${PROOFMAN_DIR}/package.json
+#   - pil2-stark-setup: a content key over the setup-relevant proofman paths
+#     (setup/ pil2-stark/ provers/starks-lib-c — git tree OIDs + dirty state),
+#     so proofman bumps that only touch prover runtime code keep the same key
+#
+# FORCE_SETUP_BUILD=1 ignores a cache hit and rebuilds (then refreshes the
+# entry) — the escape hatch if a setup-relevant change slipped past the
+# content key's path list.
+#
+# --remote-cache-dir [user@]host:/path (repeatable) names the same cache root on
+# other workers, as the peer's ssh account sees it. Only rsync runs on the peer,
+# so its key can be locked to `rrsync -ro <root>` in authorized_keys; the path
+# is then relative to that root, i.e. /. On a local miss the peers are tried in
+# order and the entry for the key is pulled over rsync/ssh into the local cache,
+# then used as a local hit, so the next run on this host needs no network. A
+# peer that is down or has no entry is skipped; none with it is a plain miss.
+#
+# The pil2-proofman checkout is resolved from `cargo metadata` — whatever cargo
+# compiled into cargo-zisk-dev, be it the git dep's checkout under
+# ~/.cargo/git/checkouts/ or a local path dep. A crates.io dep has no checkout,
+# so its .cargo_vcs_info.json commit is fetched into $ZISK_PROOFMAN_CACHE_DIR
+# (default ~/.zisk/pil2-proofman/<sha>). No env var, nothing to keep in sync.
+
+set -euo pipefail
+
+# Ensure nvcc is reachable for the --gen-exps / --gen-exps-only codegen. The
+# setup binary probes for a bare `nvcc` on PATH; some hosts install CUDA under
+# /usr/local/cuda/bin without adding it to PATH, which would silently skip
+# expression-kernel codegen. Prepend it only when nvcc isn't already found and
+# the CUDA bin dir exists, so this is a no-op on hosts that need neither.
+if ! command -v nvcc >/dev/null 2>&1 && [[ -x /usr/local/cuda/bin/nvcc ]]; then
+    export PATH="/usr/local/cuda/bin:${PATH}"
+fi
+
+usage() {
+  cat <<EOF >&2
+usage: $0 [--build-dir DIR] [--cache-dir DIR] [--remote-cache-dir HOST:PATH]
+         [--recursive-jobs N] [--setup-jobs N]
+         [--skip-compile-pil] [--gen-exps] [--exps-arch SPEC] [--pil2-compiler-branch BRANCH]
+         [-v|-vv|--verbose]
+         [--compile-pil | --no-aggregation | --snark | --compressed-final | --gen-exps-only | --stats | --print-hash]
+
+  --build-dir DIR        Build directory. Default: build/. Used by setup as
+                         output and by --snark / --compressed-final as input.
+  --cache-dir DIR        Local artifact cache root (default/--no-aggregation
+                         only). On a cache hit the matching provingKey/ is
+                         copied into <build-dir> and compile-pil + setup are
+                         skipped; on a miss the fresh build is copied back in.
+                         The cache key is PLATFORM/<input-hash>-<hash-mode>,
+                         so changing any hashed input (see below) or --hash-mode
+                         misses the cache. No bucket / network access — this is
+                         a plain filesystem cache.
+  --remote-cache-dir [user@]host:/path
+                         Cache root of another worker, same layout as
+                         --cache-dir, as the peer's ssh account sees it (with
+                         a key locked to rrsync -ro ROOT, that is /). Repeatable;
+                         peers are tried in order. On a local miss the entry is
+                         pulled from the first peer that has it (rsync over ssh)
+                         into the local cache before building. Only rsync runs
+                         on the peer. Needs --cache-dir. No peer with the entry
+                         => normal miss.
+  --recursive-jobs N     Concurrent recursive1 air pipelines (circom + pil2com).
+                         Default 1. Each job can use several GB; size by RAM.
+                         Also settable via RECURSIVE_JOBS env var.
+  --setup-jobs N         Concurrent non-recursive AIR setups (pil_info + I/O).
+                         Default 1. Cheaper per job than --recursive-jobs.
+                         Also settable via SETUP_JOBS env var.
+  -v, --verbose          Verbose output. Repeat (-vv) or pass twice for
+                         maximum verbosity. Forwarded to compile-pil and stats.
+  --skip-compile-pil     Reuse the existing pil/zisk.pilout instead of
+                         recompiling. Also skips the pil-helpers regen step.
+                         Faster local iteration. With --cache-dir, the cache is
+                         NOT populated (the reused pilout may not match the
+                         computed input hash).
+  --gen-exps             Generate + compile per-AIR Q-expression CUDA kernels
+                         (.exps.so) as a step of the build, after setup. Off by
+                         default; no-op if nvcc is not on PATH. Also settable via
+                         GEN_EXPS=1. With --cache-dir the kernels are baked into
+                         provingKey/ before it is cached, so a later cache hit
+                         reuses them instead of rebuilding — pass --exps-arch
+                         major (portable across GPUs) when populating the cache.
+  --hash-mode MODE       Hash mode the setup is generated with (Poseidon1,
+                         Poseidon2, blake3). Default: blake3. Part of the
+                         --cache-dir key. Also settable via HASH_MODE env var.
+  --exps-arch SPEC       CUDA arch forwarded to gen-exps (both --gen-exps and
+                         --gen-exps-only). Default: auto (detects the host GPU).
+                         Also settable via EXPS_ARCH env var.
+  --pil2-compiler-branch BRANCH
+                         pil2-compiler branch to compile the PIL with. Defaults
+                         to gha_pil2_compiler_branch in Cargo.toml; unset there
+                         too => proofman's own pinned version. Also settable via
+                         PIL2_COMPILER_BRANCH env var.
+  --compile-pil          Run only fixed-data gen + compile-pil + pil-helpers regen
+                         (writes pil/zisk.pilout and pil/src/pil_helpers/).
+                         No setup.
+  --no-aggregation       Setup without -r.
+  --snark                Run setup-snark on top of an existing
+                         <build-dir>/provingKey/. Errors out if missing —
+                         build it locally (./setup_build.sh --build-dir DIR) first.
+  --compressed-final     Re-run only vadcop_final_compressed on top of an
+                         existing <build-dir>/provingKey/<name>/vadcop_final/.
+  --gen-exps-only        (Re)generate per-AIR Q-expression CUDA kernels
+                         (.exps.so) on an existing <build-dir>/provingKey/,
+                         without re-running setup. Errors out if that directory
+                         is missing. No-op if nvcc is not on PATH. (Distinct from
+                         the --gen-exps flag, which runs it during a full setup.)
+  --stats                Run proofman-setup stats.
+  --print-hash           Print the build-input sha256 (the cache key) and exit.
+                         Runs fixed-data generation but no compile-pil / setup.
+
+To package the result (provingKey + circom + snark tarballs), run:
+  (cd tools/test-env && ./upload_setup.sh)
+EOF
+  exit 1
+}
+
+MODE="build"   # build | no_aggregation | snark | compressed_final | gen_exps_only | stats | compile_pil | print_hash
+BUILD_DIR="build"
+CACHE_DIR=""
+REMOTE_CACHE_DIRS=()
+CACHE_HIT=0
+CACHE_ENTRY=""
+# Set to 1 when a cache hit's provingKey has no kernels (stale cache) and we must
+# regenerate them once to keep the hit path's output identical to a miss.
+GEN_EXPS_ON_HIT=0
+# Env defaults; the --recursive-jobs / --setup-jobs CLI flags override these below.
+RECURSIVE_JOBS_ARG="${RECURSIVE_JOBS:-}"
+SETUP_JOBS_ARG="${SETUP_JOBS:-}"
+HASH_MODE="${HASH_MODE:-blake3}"
+SKIP_COMPILE_PIL=0
+VERBOSE_COUNT=0
+# Opt-in: generate + compile per-AIR Q-expression CUDA kernels (.exps.so) during
+# setup. Off by default (matches the setup CLI). No-op if nvcc is not on PATH.
+GEN_EXPS="${GEN_EXPS:-0}"
+# CUDA arch spec forwarded to gen-exps (both the --gen-exps flag and the
+# --gen-exps-only mode). auto detects the host GPU.
+EXPS_ARCH="${EXPS_ARCH:-auto}"
+# pil2-compiler branch override (--pil2-compiler-branch). Empty here => the
+# resolver falls back to gha_pil2_compiler_branch in Cargo.toml.
+PIL2_COMPILER_BRANCH="${PIL2_COMPILER_BRANCH:-}"
+
+set_mode() {
+  if [ "$MODE" != "build" ]; then
+    echo "error: only one of --compile-pil, --no-aggregation, --snark, --compressed-final, --gen-exps-only, --stats, --print-hash may be passed" >&2
+    exit 1
+  fi
+  MODE="$1"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --build-dir)         BUILD_DIR="$2";          shift 2 ;;
+    --cache-dir)         CACHE_DIR="$2";          shift 2 ;;
+    --remote-cache-dir)  REMOTE_CACHE_DIRS+=("$2"); shift 2 ;;
+    --recursive-jobs)    RECURSIVE_JOBS_ARG="$2"; shift 2 ;;
+    --setup-jobs)        SETUP_JOBS_ARG="$2";     shift 2 ;;
+    --hash-mode|--hash)  HASH_MODE="$2";          shift 2 ;;
+    --skip-compile-pil)  SKIP_COMPILE_PIL=1;      shift ;;
+    --gen-exps)          GEN_EXPS=1;              shift ;;
+    --exps-arch)         EXPS_ARCH="$2";          shift 2 ;;
+    --pil2-compiler-branch) PIL2_COMPILER_BRANCH="$2"; shift 2 ;;
+    -v|--verbose)        VERBOSE_COUNT=$((VERBOSE_COUNT + 1)); shift ;;
+    -vv)                 VERBOSE_COUNT=$((VERBOSE_COUNT + 2)); shift ;;
+    --compile-pil)       set_mode compile_pil;       shift ;;
+    --no-aggregation)    set_mode no_aggregation;    shift ;;
+    --snark)             set_mode snark;             shift ;;
+    --compressed-final)  set_mode compressed_final;  shift ;;
+    --gen-exps-only)     set_mode gen_exps_only;     shift ;;
+    --stats)             set_mode stats;             shift ;;
+    --print-hash)        set_mode print_hash;        shift ;;
+    -h|--help)         usage ;;
+    *) echo "unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+if [ "$MODE" = "compile_pil" ] && [ $SKIP_COMPILE_PIL -eq 1 ]; then
+  echo "error: --compile-pil and --skip-compile-pil are contradictory" >&2
+  exit 1
+fi
+
+if [ "${#REMOTE_CACHE_DIRS[@]}" -gt 0 ]; then
+  [ -n "$CACHE_DIR" ] || { echo "error: --remote-cache-dir needs --cache-dir (the pulled entry is stored there)" >&2; exit 1; }
+  # Strict charset: the value ends up as a remote rsync argument, so nothing a
+  # shell could read as syntax gets through.
+  for peer in "${REMOTE_CACHE_DIRS[@]}"; do
+    if ! [[ "$peer" =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+:[A-Za-z0-9._/-]+$ ]]; then
+      echo "error: --remote-cache-dir must be [user@]host:/path (letters, digits, . _ - / only), got '$peer'" >&2
+      exit 1
+    fi
+  done
+fi
+
+VERBOSE_FLAGS=()
+for ((i = 0; i < VERBOSE_COUNT; i++)); do
+  VERBOSE_FLAGS+=(-v)
+done
+
+# blake3 is the setup binary's own default, so it is not passed: CI then also checks
+# that the command without --hash makes a blake3 setup. Any other mode is passed.
+HASH_FLAG=()
+[ "$HASH_MODE" = "blake3" ] || HASH_FLAG=(--hash "$HASH_MODE")
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Repo root. This script no longer lives inside the repo tree (it ships
+# standalone in the test-env image at /home/ziskuser/scripts), so it cannot be
+# derived from SCRIPT_DIR. Prefer ZISK_REPO_DIR (exported by build_setup.sh and
+# set in GHA), then the current directory (callers cd into the repo root before
+# invoking us), and only then fall back to two levels up for legacy in-tree use.
+if [[ -n "${ZISK_REPO_DIR:-}" ]]; then
+  ROOT_DIR="$ZISK_REPO_DIR"
+elif [[ -f "$PWD/Cargo.toml" ]]; then
+  ROOT_DIR="$PWD"
+else
+  ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
+cd "$ROOT_DIR"
+
+# Resolves PROOFMAN_DIR, defines generate_fixed_data / compute_input_hash, and sets
+# VERSION / INCLUDE_PATHS. See setup_common.sh for the contract.
+. "$SCRIPT_DIR/setup_common.sh"
+
+# Install the resolved pil2-compiler override and point the compiler at it via
+# PIL2C_EXEC (which the pil2-stark-setup crate honors first). No-op when there is
+# no override; then proofman's own pinned version is used.
+apply_zisk_compiler_override() {
+  local override
+  override="$(read_zisk_pil2_compiler_override)"
+  [ -n "$override" ] || return 0
+
+  # Dedicated per-version dir (hashed by $override) so we never touch proofman's
+  # checkout and switching versions can't clobber a warm install.
+  local dir="$ROOT_DIR/tmp/pil2-compiler-override/$(printf '%s' "$override" | sha256_hex)"
+  local pkg="$dir/package.json"
+  local pil2c="$dir/node_modules/.bin/pil2com"
+  mkdir -p "$dir"
+
+  # (Re)install only when the probe is missing/dangling — a warm dir must not
+  # need npm, so a --cache-dir hit never shells into node. -f follows the symlink.
+  if [ ! -f "$pil2c" ]; then
+    command -v npm >/dev/null || { echo "npm not on PATH (needed to install pil2-compiler override $override)" >&2; exit 1; }
+    printf '{\n  "private": true,\n  "dependencies": { "pil2-compiler": "%s" }\n}' "$override" > "$pkg"
+    rm -f "$dir/package-lock.json"   # stale lockfile would pin the old version
+    echo "==> installing zisk-pinned pil2-compiler ($override) in $dir" >&2
+    (cd "$dir" && npm install)
+  fi
+
+  # -f matches the Rust resolver's is_file(); a dangling link would be silently
+  # ignored, falling back to proofman's version, so fail loudly instead.
+  [ -f "$pil2c" ] \
+    || { echo "pil2com missing or dangling at $pil2c after npm install (override $override)" >&2; exit 1; }
+  export PIL2C_EXEC="$pil2c"
+  echo "==> using zisk-pinned pil2-compiler: PIL2C_EXEC=$pil2c" >&2
+}
+
+echo "version: $VERSION  setup version: $ZISK_SETUP_VERSION  mode: $MODE" >&2
+
+run_compile_pil() {
+  if [ $SKIP_COMPILE_PIL -eq 1 ]; then
+    [ -f pil/zisk.pilout ] || { echo "--skip-compile-pil set but pil/zisk.pilout is missing" >&2; exit 1; }
+    echo "==> compile-pil (SKIPPED — reusing pil/zisk.pilout and existing pil_helpers)"
+    return
+  fi
+  # Lazy: only the compiling paths need pil2com, so apply the override here rather
+  # than at top level. This keeps --print-hash / --snark / --compressed-final /
+  # --gen-exps-only and a --cache-dir hit (which return before reaching here) from
+  # triggering a network npm install they don't need.
+  apply_zisk_compiler_override
+  echo "==> compile-pil"
+  # --no-proto-fixed-data keeps fixed-column values out of the pilout protobuf
+  # (they live on disk under tmp/fixed/ via --fixed-dir + --fixed-to-file). Avoids
+  # the ~115 GB V8 heap peak on Keccakf-scale PILs.
+  cargo run --release --bin cargo-zisk-dev -- proofman-setup compile-pil \
+    --pil pil/zisk.pil \
+    --include "$INCLUDE_PATHS" \
+    --output pil/zisk.pilout \
+    --fixed-dir tmp/fixed \
+    --fixed-to-file \
+    --no-proto-fixed-data \
+    ${VERBOSE_FLAGS[@]+"${VERBOSE_FLAGS[@]}"}
+
+  run_pil_helpers
+}
+
+# Regenerate pil/src/pil_helpers/{mod.rs,traces.rs} from the freshly compiled
+# pilout. Invokes proofman-cli (from $PROOFMAN_DIR) — it's not in the zisk
+# workspace, so we point cargo at its manifest explicitly. The -o flag
+# overwrites the existing pil_helpers/ directory (it's always present in tree).
+run_pil_helpers() {
+  echo "==> pil-helpers (regenerating pil/src/pil_helpers/traces.rs)"
+  cargo run --release --manifest-path "$PROOFMAN_DIR/Cargo.toml" --bin proofman-cli -- \
+    pil-helpers \
+      --pilout pil/zisk.pilout \
+      --path pil/src \
+      -o
+}
+
+# Generate + compile the per-AIR Q-expression CUDA kernels (.exps.so) into
+# <build-dir>/provingKey/. No-op (exit 0) when nvcc is absent. Called from the
+# build path so the kernels land in provingKey/ *before* it is copied into the
+# cache — a subsequent cache hit then reuses them instead of regenerating.
+#
+# --stark-src is the one setup asset with no env-var escape hatch: gen-exps needs
+# the pil2-stark C++ headers to compile the kernels and defaults them to
+# <CARGO_MANIFEST_DIR>/../../pil2-stark, which only exists when proofman is a
+# git/path dep. Unlike the paths export_proofman_paths handles, this one has to be
+# passed as a flag, so keep it in step with $PROOFMAN_DIR here.
+run_gen_exps() {
+  if ! command -v nvcc >/dev/null 2>&1; then
+    echo "==> gen-exps (SKIPPED — nvcc not on PATH)" >&2
+    return
+  fi
+  echo "==> proofman-setup gen-exps (arch: $EXPS_ARCH)"
+  cargo run --release --bin cargo-zisk-dev -- proofman-setup gen-exps \
+    --proving-key "$BUILD_DIR/provingKey" \
+    --arch "$EXPS_ARCH" \
+    --stark-src "$PROOFMAN_DIR/pil2-stark" \
+    ${VERBOSE_FLAGS[@]+"${VERBOSE_FLAGS[@]}"}
+}
+
+# Non-interactive ssh for the remote cache: CI must never wait on a password or
+# a host-key prompt. The peer's host key must already be in known_hosts: an
+# unknown or changed one fails the connection (exit 255), so a spoofed peer can
+# never hand us a proving key. The caller then falls back to the next peer or
+# to a local build.
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes)
+
+# Pull this key's entry from the cache root of peer $1 ([user@]host:/path) into
+# $CACHE_ENTRY, so the lookup then sees a local hit. The peer only ever runs
+# rsync (the probe is a listing), which is what lets its key be locked to
+# rrsync -ro. Returns 1 on any failure (no ssh/rsync, peer down, no entry,
+# broken transfer): the caller moves on to the next peer, or builds.
+fetch_remote_cache_entry() {
+  local host="${1%%:*}" root="${1#*:}"
+  local remote_entry="${root%/}/$platform/$cache_key"
+  local partial="$CACHE_ENTRY.partial"
+  local rsync_ssh="ssh ${SSH_OPTS[*]}"
+  local tool rc=0 probe_err
+
+  # platform and cache_key join the path; keep the whole of it in the charset
+  # the flag was checked against.
+  if ! [[ "$remote_entry" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    echo "==> remote cache: unsafe remote path '$remote_entry', skipping $host" >&2
+    return 1
+  fi
+
+  for tool in ssh rsync; do
+    command -v "$tool" >/dev/null 2>&1 && continue
+    echo "==> remote cache: $tool not on PATH, skipping $host" >&2
+    return 1
+  done
+
+  # 0: entry present, 23: absent, 255: ssh could not connect.
+  probe_err="$(rsync --list-only -e "$rsync_ssh" "$host:$remote_entry/provingKey/" 2>&1 >/dev/null)" || rc=$?
+  case $rc in
+    0) ;;
+    23) echo "==> remote cache miss: $host:$remote_entry"; return 1 ;;
+    255) echo "==> remote cache: cannot reach $host, skipping" >&2; echo "$probe_err" >&2; return 1 ;;
+    *) echo "==> remote cache: listing $host:$remote_entry failed (rsync exit $rc), skipping" >&2; echo "$probe_err" >&2; return 1 ;;
+  esac
+
+  # Into a .partial dir, renamed only when complete: a cut transfer never leaves
+  # a half entry that a later run takes for a hit. The partial dir is kept so
+  # the next run resumes it.
+  echo "==> remote cache hit: $host:$remote_entry (pulling provingKey)"
+  mkdir -p "$partial"
+  if ! rsync -a --delete --partial -e "$rsync_ssh" \
+       "$host:$remote_entry/provingKey/" "$partial/provingKey/" 1>&2; then
+    echo "==> remote cache: rsync from $host failed, skipping" >&2
+    return 1
+  fi
+  rm -rf "$CACHE_ENTRY"
+  mv "$partial" "$CACHE_ENTRY"
+}
+
+# Replace the cache entry with $BUILD_DIR/provingKey. Staged next to it and
+# renamed at the end, so a peer pulling the entry never sees a half-written one.
+store_cache_entry() {
+  local staging="$CACHE_ENTRY.tmp"
+  rm -rf "$staging" "$CACHE_ENTRY.partial"
+  mkdir -p "$staging"
+  cp -R "$BUILD_DIR/provingKey" "$staging/provingKey"
+  rm -rf "$CACHE_ENTRY"
+  mv "$staging" "$CACHE_ENTRY"
+}
+
+# ----- mode dispatch ---------------------------------------------------------
+
+case "$MODE" in
+
+  compile_pil)
+    generate_fixed_data
+    run_compile_pil
+    echo "done. pil/zisk.pilout and pil/src/pil_helpers/ regenerated."
+    exit 0
+    ;;
+
+  stats)
+    generate_fixed_data
+    run_compile_pil
+    echo "==> proofman-setup stats"
+    cargo run --release --bin cargo-zisk-dev -- proofman-setup stats \
+      --airout pil/zisk.pilout \
+      --starkstructs "$(starkstructs_path)" \
+      ${HASH_FLAG[@]+"${HASH_FLAG[@]}"} \
+      -o tmp/stats.txt \
+      ${VERBOSE_FLAGS[@]+"${VERBOSE_FLAGS[@]}"}
+    echo "stats written to tmp/stats.txt"
+    exit 0
+    ;;
+
+  snark)
+    if [ ! -d "$BUILD_DIR/provingKey" ]; then
+      echo "missing $BUILD_DIR/provingKey/ — populate it first:" >&2
+      echo "  ./setup_build.sh --build-dir $BUILD_DIR    # build locally (from tools/test-env)" >&2
+      exit 1
+    fi
+    echo "using existing $BUILD_DIR/provingKey/"
+
+    PUBLICS_INFO="state-machines/publics.json"
+    [ -f "$PUBLICS_INFO" ] || { echo "missing $PUBLICS_INFO — final.circom needs publics layout (nPublics, chunks, hasProgramVK)" >&2; exit 1; }
+
+    # pilfflonk is the final SNARK for every key, as setup-snark's own default; FINAL_SNARK=plonk
+    # (or fflonk) overrides it, for a poseidon key only: a blake3 key wraps with pilfflonk alone,
+    # and setup-snark refuses the others. Passed explicitly so this script does not follow a
+    # change of that default.
+    FINAL_SNARK="${FINAL_SNARK:-pilfflonk}"
+    SNARK_MODE="$(proving_key_hash_mode "$BUILD_DIR/provingKey")" || exit 1
+    echo "wrapping a $SNARK_MODE proving key with $FINAL_SNARK"
+
+    PTAU_PATH="${PTAU_PATH:-../powersOfTau28_hez_final_24.ptau}"
+    if [ ! -f "$PTAU_PATH" ]; then
+      echo "missing powers-of-tau file: $PTAU_PATH" >&2
+      echo "download it (~18 GB) into the parent folder of the repo with:" >&2
+      echo "  (cd .. && curl -L -O https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_24.ptau)" >&2
+      echo "or point PTAU_PATH=/path/to/ptau at an existing copy." >&2
+      exit 1
+    fi
+
+    echo "==> proofman-setup setup-snark"
+    cargo run --release --bin cargo-zisk-dev -- proofman-setup setup-snark \
+      --build-dir "$BUILD_DIR" \
+      --publics-info "$PUBLICS_INFO" \
+      --powers-of-tau "$PTAU_PATH" \
+      --final-snark "$FINAL_SNARK"
+
+    echo "done. provingKeySnark/ under $BUILD_DIR/ — package with (cd tools/test-env && ./upload_setup.sh)"
+    exit 0
+    ;;
+
+  compressed_final)
+    [ -d "$BUILD_DIR/provingKey" ] || { echo "$BUILD_DIR/provingKey not found — run setup --recursive first" >&2; exit 1; }
+    echo "==> proofman-setup setup-compressed-final"
+    cargo run --release --bin cargo-zisk-dev -- proofman-setup setup-compressed-final --build-dir "$BUILD_DIR"
+    echo "done. vadcop_final_compressed/ regenerated under $BUILD_DIR/provingKey/"
+    echo "to repackage the updated provingKey/: (cd tools/test-env && ./upload_setup.sh)"
+    exit 0
+    ;;
+
+  gen_exps_only)
+    [ -d "$BUILD_DIR/provingKey" ] || { echo "$BUILD_DIR/provingKey not found — run setup first" >&2; exit 1; }
+    if ! command -v nvcc >/dev/null 2>&1; then
+      echo "nvcc not found on PATH — skipping gen-exps (no-op)" >&2
+      exit 0
+    fi
+    echo "==> proofman-setup gen-exps (arch: $EXPS_ARCH)"
+    # Keep --stark-src in step with run_gen_exps (see the comment there).
+    cargo run --release --bin cargo-zisk-dev -- proofman-setup gen-exps \
+      --proving-key "$BUILD_DIR/provingKey" \
+      --arch "$EXPS_ARCH" \
+      --stark-src "$PROOFMAN_DIR/pil2-stark" \
+      ${VERBOSE_FLAGS[@]+"${VERBOSE_FLAGS[@]}"}
+    echo "done. .exps.so kernels regenerated under $BUILD_DIR/provingKey/"
+    echo "to repackage the updated provingKey/: (cd tools/test-env && ./upload_setup.sh)"
+    exit 0
+    ;;
+
+  print_hash)
+    # Keep stdout clean: only compute_input_hash's 64-hex line goes to stdout
+    # (its own progress already goes to stderr). fixed-data generation is noisy, so
+    # send its output to stderr too — consumers capture stdout as the hash.
+    generate_fixed_data 1>&2
+    compute_input_hash
+    exit 0
+    ;;
+
+  build|no_aggregation)
+    generate_fixed_data
+    LOCAL_HASH="$(compute_input_hash)"
+    echo "local input hash: $LOCAL_HASH"
+
+    # ----- local artifact cache lookup (opt-in via --cache-dir) --------------
+    if [ -n "$CACHE_DIR" ]; then
+      # PLATFORM mirrors tools/test-env's get_platform: ZISKUP_PLATFORM override,
+      # else lowercased `uname -s`. The aggregation mode is part of the key so a
+      # recursive build and a --no-aggregation build never collide (the input
+      # hash itself does not encode -r).
+      platform="$(printf '%s' "${ZISKUP_PLATFORM:-$(uname -s)}" | tr '[:upper:]' '[:lower:]')"
+      short_hash="${LOCAL_HASH:0:4}${LOCAL_HASH: -4}"
+      hash_mode="$(printf '%s' "$HASH_MODE" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')"
+      cache_key="${short_hash}-${hash_mode}"
+      [ "$MODE" = "no_aggregation" ] && cache_key="${cache_key}-no-aggregation"
+      CACHE_ENTRY="$CACHE_DIR/$platform/$cache_key"
+
+      if [ "${FORCE_SETUP_BUILD:-0}" = "1" ]; then
+        # The peer is skipped too: a forced rebuild takes no cached entry at all.
+        if [ -d "$CACHE_ENTRY/provingKey" ]; then
+          echo "==> FORCE_SETUP_BUILD=1 — ignoring cache hit at $CACHE_ENTRY (will rebuild, then refresh)"
+        else
+          echo "==> cache miss: $CACHE_ENTRY (will build, then populate)"
+        fi
+      else
+        if [ ! -d "$CACHE_ENTRY/provingKey" ] && [ "${#REMOTE_CACHE_DIRS[@]}" -gt 0 ]; then
+          echo "==> local cache miss: $CACHE_ENTRY, asking ${#REMOTE_CACHE_DIRS[@]} peer(s)"
+          for peer in "${REMOTE_CACHE_DIRS[@]}"; do
+            fetch_remote_cache_entry "$peer" && break
+          done
+        fi
+        if [ -d "$CACHE_ENTRY/provingKey" ]; then
+          echo "==> cache hit: $CACHE_ENTRY (skipping compile-pil + setup)"
+          rm -rf "$BUILD_DIR/provingKey"
+          mkdir -p "$BUILD_DIR"
+          cp -R "$CACHE_ENTRY/provingKey" "$BUILD_DIR/provingKey"
+          CACHE_HIT=1
+        else
+          echo "==> cache miss: $CACHE_ENTRY (will build, then populate)"
+        fi
+      fi
+      # gen-exps kernels are baked into the provingKey during the miss build (see
+      # below) and cached alongside it. With --exps-arch major they carry SASS +
+      # forward-PTX for every major arch, so a cached copy is host-independent and
+      # reusable as-is. On a cache hit we therefore reuse the cached .exps.so
+      # instead of regenerating them — UNLESS the cache predates kernel-caching
+      # and has none, in which case we (re)generate below to keep hit == miss.
+      if [ "$CACHE_HIT" -eq 1 ] && [ "$GEN_EXPS" -eq 1 ] \
+         && ! find "$BUILD_DIR/provingKey" -name '*.exps.so' -print -quit | grep -q .; then
+        echo "==> cache hit lacks .exps.so kernels — generating once (stale cache)"
+        GEN_EXPS_ON_HIT=1
+      fi
+    fi
+    ;;
+
+esac
+
+# ----- build / no-aggregation ------------------------------------------------
+
+if [ "$CACHE_HIT" -eq 0 ]; then
+  run_compile_pil
+
+  if [ "$MODE" = "build" ]; then
+    echo "==> proofman-setup setup --recursive"
+    setup_recursive_flag=(--recursive)
+  else
+    echo "==> proofman-setup setup (no aggregation)"
+    setup_recursive_flag=()
+  fi
+
+  setup_jobs_flags=()
+  [ -n "$RECURSIVE_JOBS_ARG" ] && setup_jobs_flags+=(--recursive-jobs "$RECURSIVE_JOBS_ARG")
+  [ -n "$SETUP_JOBS_ARG" ]     && setup_jobs_flags+=(--setup-jobs "$SETUP_JOBS_ARG")
+
+  rm -rf "$BUILD_DIR/provingKey"
+  cargo run --release --bin cargo-zisk-dev -- proofman-setup setup \
+    --airout pil/zisk.pilout \
+    --build-dir "$BUILD_DIR" \
+    --fixed-dir tmp/fixed \
+    --stark-structs "$(starkstructs_path)" \
+    ${HASH_FLAG[@]+"${HASH_FLAG[@]}"} \
+    ${setup_recursive_flag[@]+"${setup_recursive_flag[@]}"} \
+    ${setup_jobs_flags[@]+"${setup_jobs_flags[@]}"}
+
+  # gen-exps runs as a separate step (not --gen-exps during setup) so the .exps.so
+  # kernels land in provingKey/ *before* it is cached below. With --exps-arch major
+  # they are host-independent, so a later cache hit reuses them verbatim instead of
+  # rebuilding — which is the whole point of the cache.
+  if [ "$GEN_EXPS" -eq 1 ]; then
+    run_gen_exps
+  fi
+
+  # Populate the local cache with the freshly built provingKey, keyed by the
+  # input hash. --skip-compile-pil reuses a prior pilout that may not match the
+  # computed hash, so don't poison the cache in that case.
+  if [ -n "$CACHE_DIR" ] && [ $SKIP_COMPILE_PIL -eq 0 ]; then
+    echo "==> caching provingKey to $CACHE_ENTRY"
+    store_cache_entry
+  fi
+elif [ "$GEN_EXPS_ON_HIT" -eq 1 ]; then
+  # Stale cache (populated before kernels were cached): generate once and refresh
+  # the cache entry so the next hit reuses them.
+  run_gen_exps
+  if [ -n "$CACHE_DIR" ]; then
+    echo "==> refreshing cached provingKey with kernels at $CACHE_ENTRY"
+    store_cache_entry
+  fi
+fi
+
+if [ "$MODE" = "build" ]; then
+  echo "done. to package: (cd tools/test-env && ./upload_setup.sh)" >&2
+else
+  echo "done." >&2
+fi
+
+# Emit the input hash as the final stdout line so callers can capture it
+if [ "$MODE" = "build" ] || [ "$MODE" = "no_aggregation" ]; then
+  echo "$LOCAL_HASH"
+fi

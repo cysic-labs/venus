@@ -23,20 +23,32 @@ namespace Plonk
     void PlonkSetup::reset()
     {
         delete fft;
+        fft = nullptr;
 
+        for (auto &p : polynomials)
+        {
+            delete p.second;
+        }
         polynomials.clear();
+
+        delete[] PTau;
+        PTau = nullptr;
+
+        plonkConstraints.clear();
+        plonkAdditions.clear();
     }
 
     void PlonkSetup::generateZkey(string r1csFilename, string pTauFilename, string zkeyFilename)
     {
         LOG_INFO("PLONK SETUP STARTED");
 
-        // STEP 1. Read PTau file
+        // STEP 1. Read PTau file — open in directRead mode so the entire file
+        // is NOT loaded into RAM; only the required section data is read on demand.
         LOG_INFO("> Opening PTau file");
-        auto fdPtau = openExisting(pTauFilename, "ptau", 1);
+        auto fdPtau = std::unique_ptr<BinFile>(new BinFile(pTauFilename, "ptau", 1, true));
         if (!fdPtau->sectionExists(12))
         {
-            throw new runtime_error("Powers of Tau file is not well prepared. Section 12 missing.");
+            throw runtime_error("Powers of Tau file is not well prepared. Section 12 missing.");
         }
 
         // STEP 2. Read r1cs file
@@ -63,17 +75,10 @@ namespace Plonk
         settings.cirPower = max(FF_T_POL_DEG_MIN, log2((plonkConstraints.size() + 2) - 1) + 1);
         settings.domainSize = 1 << settings.cirPower;
 
-        fft = new FFT<AltBn128::Engine::Fr>(settings.domainSize * 4);
-
-        if (fdPtau->getSectionSize(2) < (settings.domainSize + 6) * sG1)
-        { // TODO! CHECK
-            throw new runtime_error("Powers of Tau is not big enough for this circuit size. Section 2 too small.");
-        }
-        if (fdPtau->getSectionSize(3) < sG2)
-        {
-            throw new runtime_error("Powers of Tau is not well prepared. Section 3 too small.");
-        }
-
+        // Log the circuit settings before the FFT allocation and the Powers-of-Tau
+        // size checks below: if the circuit is too big for the ptau (or the FFT
+        // allocation fails), the operator still sees the circuit power / domain
+        // size / constraint count instead of a bare abort with no context.
         ostringstream ss;
         LOG_INFO("----------------------------");
         LOG_INFO("  PLONK SETUP SETTINGS");
@@ -99,6 +104,17 @@ namespace Plonk
         ss.str("");
         LOG_INFO("----------------------------");
 
+        fft = new FFT<AltBn128::Engine::Fr>(settings.domainSize * 4);
+
+        if (fdPtau->getSectionSize(2) < (settings.domainSize + 6) * sG1)
+        { // TODO! CHECK
+            throw runtime_error("Powers of Tau is not big enough for this circuit size. Section 2 too small.");
+        }
+        if (fdPtau->getSectionSize(3) < 2 * sG2)
+        {
+            throw runtime_error("Powers of Tau is not well prepared. Section 3 too small (requires at least 2 G2 points).");
+        }
+
         // Compute k1 and k2 to be used in the permutation checks
         LOG_INFO("> computing k1 and k2");
         computeK1K2();
@@ -109,10 +125,24 @@ namespace Plonk
         LOG_INFO("PLONK SETUP FINISHED");
     }
 
+    void PlonkSetup::computeConstraintCounts(string r1csFilename, uint64_t &nConstraints, uint64_t &nAdditions)
+    {
+        auto fdR1cs = openExisting(r1csFilename, "r1cs", 1);
+        auto r1csHeader = R1csBinFile::readR1csHeader(*fdR1cs);
+
+        settings.nVars = r1csHeader.nVars;
+        settings.nPublics = r1csHeader.nOutputs + r1csHeader.nPubInputs;
+
+        computeConstraints(*fdR1cs, r1csHeader);
+
+        nConstraints = plonkConstraints.size();
+        nAdditions = plonkAdditions.size();
+    }
+
     void PlonkSetup::computeConstraints(BinFile &r1cs, R1csHeader &r1csHeader)
     {
         // Create r1cs processor
-        const auto r1csProcessor = new R1csConstraintProcessor(E);
+        auto r1csProcessor = new R1csConstraintProcessor(E);
 
         // Add public inputs and outputs
         for (uint64_t i = 0; i < settings.nPublics; i++)
@@ -122,7 +152,7 @@ namespace Plonk
 
         if (!r1cs.sectionExists(R1CS_CONSTRAINTS_SECTION))
         {
-            throw new runtime_error("R1CS file is not well prepared. Section 2 missing.");
+            throw runtime_error("R1CS file is not well prepared. Section 2 missing.");
         }
         // Start reading r1cs constraints section
         r1cs.startReadSection(R1CS_CONSTRAINTS_SECTION);
@@ -134,6 +164,7 @@ namespace Plonk
         }
 
         r1cs.endReadSection(false);
+        delete r1csProcessor;
     }
 
     array<vector<R1csConstraint>, 3> PlonkSetup::readR1csConstraint(R1csHeader &r1csHeader, BinFile &r1cs)
@@ -311,7 +342,7 @@ namespace Plonk
     {
         if (posConstraint > 2)
         {
-            throw new runtime_error("Invalid constraint position during writing witness map");
+            throw runtime_error("Invalid constraint position during writing witness map");
         }
 
         zkeyFile.startWriteSection(sectionNum);
@@ -331,7 +362,7 @@ namespace Plonk
     {
         if (posConstraint < 3 || posConstraint > 7)
         {
-            throw new runtime_error("Invalid constraint position during writing witness map");
+            throw runtime_error("Invalid constraint position during writing witness map");
         }
 
         auto name = posConstraint == 3 ? "QL" : posConstraint == 4 ? "QR"
@@ -339,7 +370,6 @@ namespace Plonk
                                             : posConstraint == 6   ? "QO"
                                                                    : "QC";
 
-        FrElement *buffer_coefs = new FrElement[settings.domainSize];
         FrElement *buffer_evals = new FrElement[settings.domainSize * 4];
         memset(buffer_evals, 0, settings.domainSize * 4 * sizeof(FrElement));
         for (uint64_t i = 0; i < plonkConstraints.size(); i++)
@@ -352,14 +382,16 @@ namespace Plonk
             buffer_evals[i] = value;
         }
 
-        polynomials[name] = Polynomial<AltBn128::Engine>::fromEvaluations(E, fft, buffer_evals, buffer_coefs, settings.domainSize);
+        // fromEvaluations without reservedBuffer: the Polynomial owns and will free its coef buffer
+        polynomials[name] = Polynomial<AltBn128::Engine>::fromEvaluations(E, fft, buffer_evals, settings.domainSize);
         polynomials[name]->fixDegree();
         Evaluations<AltBn128::Engine>(E, fft, buffer_evals, *polynomials[name], settings.domainSize * 4);
 
         zkeyFile.startWriteSection(sectionNum);
-        zkeyFile.write(buffer_coefs, settings.domainSize * sizeof(FrElement));
+        zkeyFile.write(polynomials[name]->coef, settings.domainSize * sizeof(FrElement));
         zkeyFile.write(buffer_evals, settings.domainSize * 4 * sizeof(FrElement));
         zkeyFile.endWriteSection();
+        delete[] buffer_evals;
     }
 
     void PlonkSetup::writeSigma(BinFileWriter &zkeyFile)
@@ -372,10 +404,9 @@ namespace Plonk
         FrElement w = E.fr.one();
         for (uint64_t i = 0; i < settings.domainSize; i++)
         {
-            auto constraint = plonkConstraints[i];
-
             if (i < plonkConstraints.size())
             {
+                auto constraint = plonkConstraints[i];
                 buildSigma(sigma, w, lastSeen, firstPos, constraint.signal_a, i);
                 buildSigma(sigma, w, lastSeen, firstPos, constraint.signal_b, i + settings.domainSize);
                 buildSigma(sigma, w, lastSeen, firstPos, constraint.signal_c, i + settings.domainSize * 2);
@@ -407,18 +438,20 @@ namespace Plonk
         for (uint32_t i = 0; i < 3; i++)
         {
             auto name = "S" + to_string(i + 1);
-            FrElement *buffer_coefs = new FrElement[settings.domainSize];
             FrElement *buffer_evals = new FrElement[settings.domainSize * 4];
             memset(buffer_evals, 0, settings.domainSize * 4 * sizeof(FrElement));
 
-            polynomials[name] = Polynomial<AltBn128::Engine>::fromEvaluations(E, fft, &sigma[i * settings.domainSize], buffer_coefs, settings.domainSize);
+            // fromEvaluations without reservedBuffer: the Polynomial owns and will free its coef buffer
+            polynomials[name] = Polynomial<AltBn128::Engine>::fromEvaluations(E, fft, &sigma[i * settings.domainSize], settings.domainSize);
             polynomials[name]->fixDegree();
             Evaluations<AltBn128::Engine>(E, fft, buffer_evals, *polynomials[name], settings.domainSize * 4);
 
-            zkeyFile.write(buffer_coefs, settings.domainSize * sizeof(FrElement));
+            zkeyFile.write(polynomials[name]->coef, settings.domainSize * sizeof(FrElement));
             zkeyFile.write(buffer_evals, settings.domainSize * 4 * sizeof(FrElement));
+            delete[] buffer_evals;
         }
 
+        delete[] sigma;
         zkeyFile.endWriteSection();
     }
 
@@ -454,7 +487,6 @@ namespace Plonk
     {
         auto l = max(settings.nPublics, (uint64_t)1);
 
-        FrElement *buffer_coefs = new FrElement[settings.domainSize];
         FrElement *buffer_evals = new FrElement[settings.domainSize * 4];
 
         zkeyFile.startWriteSection(Zkey::ZKEY_PL_LAGRANGE_SECTION);
@@ -465,24 +497,27 @@ namespace Plonk
 
             buffer_evals[i] = E.fr.one();
 
-            auto pol = Polynomial<AltBn128::Engine>::fromEvaluations(E, fft, buffer_evals, buffer_coefs, settings.domainSize);
+            // fromEvaluations without reservedBuffer: the Polynomial owns its coef buffer
+            auto pol = Polynomial<AltBn128::Engine>::fromEvaluations(E, fft, buffer_evals, settings.domainSize);
             pol->fixDegree();
             Evaluations<AltBn128::Engine>(E, fft, buffer_evals, *pol, settings.domainSize * 4);
 
-            zkeyFile.write(buffer_coefs, settings.domainSize * sizeof(FrElement));
+            zkeyFile.write(pol->coef, settings.domainSize * sizeof(FrElement));
             zkeyFile.write(buffer_evals, settings.domainSize * 4 * sizeof(FrElement));
+            delete pol;
         }
 
+        delete[] buffer_evals;
         zkeyFile.endWriteSection();
     }
 
     void PlonkSetup::writePtau(BinFileWriter &zkeyFile, BinFile &fdPtau)
     {
-        int nThreads = omp_get_max_threads() / 2;
         PTau = new G1PointAffine[settings.domainSize + 6];
 
-        ThreadUtils::parset(PTau, 0, sizeof(G1PointAffine), nThreads);
-        ThreadUtils::parcpy(PTau, fdPtau.getSectionData(2), (settings.domainSize + 6) * sizeof(G1PointAffine), nThreads);
+        // Read only the required (domainSize + 6) G1 affine points directly from disk
+        // without loading the entire PTau section into RAM.
+        fdPtau.readSectionTo(PTau, 2, 0, (settings.domainSize + 6) * sizeof(G1PointAffine));
 
         zkeyFile.startWriteSection(Zkey::ZKEY_PL_PTAU_SECTION);
         zkeyFile.write(PTau, (settings.domainSize + 6) * sizeof(G1PointAffine));
@@ -550,7 +585,8 @@ namespace Plonk
         zkeyFile.write(&commitAffine, sizeof(G1PointAffine));
 
         G2PointAffine bX_2;
-        memcpy(&bX_2, (G2PointAffine *)ptauFile.getSectionData(3) + 1, sizeof(G2PointAffine));
+        // Read the second G2 element (index 1) from section 3 directly from disk
+        ptauFile.readSectionTo(&bX_2, 3, sizeof(G2PointAffine), sizeof(G2PointAffine));
         zkeyFile.write(&bX_2, sizeof(G2PointAffine));
 
         zkeyFile.endWriteSection();
@@ -597,6 +633,7 @@ namespace Plonk
         FrElement *pol = this->polynomialFromMontgomery(polynomial);
 
         E.g1.multiMulByScalar(value, PTau, (uint8_t *)pol, sizeof(pol[0]), polynomial->getDegree() + 1);
+        delete[] pol;
 
         return value;
     }

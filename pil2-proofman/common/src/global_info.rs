@@ -4,20 +4,30 @@ use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use std::fs;
 
+use crate::hash_family::{self, DEFAULT_HASH_ID};
 use crate::ProofType;
 use crate::{ProofmanResult, ProofmanError};
 
-const FIELD_EXTENSION_WORDS: usize = 3;
-const MAX_GLOBAL_AIR_GROUPS: usize = 1 << 16;
-const MAX_GLOBAL_AIR_INSTANCES: usize = 1 << 17;
-const MAX_GLOBAL_STAGE_COUNT: usize = 64;
-const MAX_GLOBAL_PUBLICS: usize = 1 << 24;
-const MAX_GLOBAL_PROOF_VALUES: usize = 1 << 20;
-const MAX_GLOBAL_CHALLENGES: usize = 1 << 20;
-const MAX_GLOBAL_AGG_VALUES: usize = 1 << 20;
-const MAX_GLOBAL_PUBLIC_LENGTH_ENTRIES: usize = 1 << 24;
-const MAX_GLOBAL_TRANSCRIPT_ARITY: usize = 1 << 20;
-const MAX_GLOBAL_LATTICE_SIZE: usize = 1 << 30;
+fn default_hash_id() -> String {
+    DEFAULT_HASH_ID.to_string()
+}
+
+/// Arities the `recursive2` circuit can be generated for. Larger values are not known to work.
+pub const VALID_AGGREGATION_ARITIES: [usize; 2] = [2, 3];
+
+pub fn is_valid_aggregation_arity(n: usize) -> bool {
+    VALID_AGGREGATION_ARITIES.contains(&n)
+}
+
+/// Arity to assume when a `globalInfo.json` carries no `aggregationArity` at all.
+///
+/// This is Poseidon's value, kept because it is what every key written before the field existed
+/// implied. It is NOT "the default arity": blake3 aggregates at 2, and anything choosing an arity
+/// for a family must call [`crate::hash_family::default_aggregation_arity`] instead. Named apart
+/// from that one so a glob import cannot silently resolve to the wrong one.
+pub fn fallback_aggregation_arity() -> usize {
+    3
+}
 
 #[derive(Clone, Deserialize)]
 pub struct ProofValueMap {
@@ -73,6 +83,30 @@ pub struct GlobalInfo {
 
     #[serde(rename = "transcriptArity")]
     pub transcript_arity: usize,
+
+    /// Proofs each `recursive2` circuit aggregates. Fixed at setup, read back here.
+    #[serde(rename = "aggregationArity", default = "fallback_aggregation_arity")]
+    pub aggregation_arity: usize,
+
+    #[serde(default = "default_hash_id")]
+    pub hash: String,
+
+    /// Whether this proving key carries the `vadcop_final_compressed` stage.
+    ///
+    /// Defaults to `true`, which is what every key written before the flag existed means: the stage
+    /// was unconditional then. A key that skipped it says so, and the loader honours that rather
+    /// than trying to read a starkinfo that was never written.
+    #[serde(rename = "hasCompressedFinal", default = "default_has_compressed_final")]
+    pub has_compressed_final: bool,
+
+    /// Label the consumer passed to setup (`--setup-version`); `None` for keys built without one.
+    /// Proofman never checks it -- the consumer compares it against the version it expects.
+    #[serde(rename = "setupVersion", default)]
+    pub setup_version: Option<String>,
+}
+
+fn default_has_compressed_final() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,12 +116,16 @@ pub struct GlobalInfoAir {
     #[serde(rename = "hasCompressor", default)]
     pub has_compressor: Option<bool>,
 
+    /// Proofs this air's recursive1 verifies in one circuit. Absent means 1.
+    #[serde(rename = "r1BatchSize", default)]
+    pub r1_batch_size: Option<usize>,
+
     pub num_rows: usize,
 }
 
 impl GlobalInfoAir {
     pub fn new(name: String) -> Self {
-        Self { name, has_compressor: None, num_rows: 0 }
+        Self { name, has_compressor: None, r1_batch_size: None, num_rows: 0 }
     }
 }
 
@@ -130,143 +168,44 @@ impl GlobalInfo {
         let updated_global_info_json = serde_json::to_string(&global_info_value)?;
         // Deserialize into GlobalInfo
         let global_info: GlobalInfo = serde_json::from_str(&updated_global_info_json)?;
-        global_info.validate_shape()?;
+        if !hash_family::is_known_family(&global_info.hash) {
+            return Err(ProofmanError::InvalidConfiguration(format!(
+                "unknown hash family {:?}; known: {:?}",
+                global_info.hash,
+                hash_family::FAMILIES
+            )));
+        }
+
+        // Every proving key loads through here, so this catches an arity this build has no
+        // aggregation path for before any consumer chunks proofs or derives MPI tags from it.
+        if !is_valid_aggregation_arity(global_info.aggregation_arity) {
+            return Err(ProofmanError::InvalidConfiguration(format!(
+                "proving key has aggregationArity {}, which this build does not support; valid values: {:?}",
+                global_info.aggregation_arity, VALID_AGGREGATION_ARITIES
+            )));
+        }
+
+        // `hash` has a serde default, `transcriptArity` does not, and the setup writes the latter as
+        // exactly `hash_family::transcript_arity(hash)`. So the two disagreeing means the family is
+        // wrong -- in practice a key written before `hash` existed, which is Poseidon at arity 4 but
+        // takes the default. Catch it here rather than let `set_hash_family_c` below point blake3's
+        // binary-tree kernels at arity-4 trees and fail somewhere unrecognisable.
+        let expected_arity = hash_family::transcript_arity(&global_info.hash) as usize;
+        if global_info.transcript_arity != expected_arity {
+            return Err(ProofmanError::InvalidConfiguration(format!(
+                "proving key has transcriptArity {} but hash family {:?} uses {}; if the key predates \
+                 the `hash` field it is not {:?} -- add the right \"hash\" to {} or rebuild the key",
+                global_info.transcript_arity,
+                global_info.hash,
+                expected_arity,
+                global_info.hash,
+                file_path.display()
+            )));
+        }
+
+        proofman_starks_lib_c::set_hash_family_c(&global_info.hash);
+
         Ok(global_info)
-    }
-
-    /// Number of field elements of the proof values buffer: one per stage 1 value and a field
-    /// extension per value of a later stage.
-    pub fn proof_values_words(&self) -> ProofmanResult<usize> {
-        let mut words = 0usize;
-        for proof_value in self.proof_values_map.iter().flatten() {
-            words = checked_count_add(
-                words,
-                proof_value_words(proof_value.stage),
-                MAX_GLOBAL_PROOF_VALUES * FIELD_EXTENSION_WORDS,
-                "proofValuesMap",
-            )?;
-        }
-        Ok(words)
-    }
-
-    /// Number of field elements of the challenges buffer, a field extension per challenge.
-    pub fn challenge_words(&self) -> ProofmanResult<usize> {
-        let challenges = checked_sum_limited(&self.n_challenges, MAX_GLOBAL_CHALLENGES, "numChallenges")?;
-        challenges
-            .checked_mul(FIELD_EXTENSION_WORDS)
-            .ok_or_else(|| ProofmanError::InvalidSetup("numChallenges word count overflows".into()))
-    }
-
-    /// Checks that the per-airgroup lists agree, that the maps the buffers are sized from are
-    /// consistent, and that every count stays within the limits buffers are allocated for.
-    fn validate_shape(&self) -> ProofmanResult<()> {
-        if self.air_groups.is_empty() {
-            return Err(ProofmanError::InvalidSetup("global info must contain at least one air group".into()));
-        }
-        if self.air_groups.len() > MAX_GLOBAL_AIR_GROUPS {
-            return Err(ProofmanError::InvalidSetup("global info air group count exceeds limit".into()));
-        }
-        if self.airs.len() != self.air_groups.len() {
-            return Err(ProofmanError::InvalidSetup("global info airs length must match air_groups".into()));
-        }
-        if self.agg_types.len() != self.air_groups.len() {
-            return Err(ProofmanError::InvalidSetup("global info aggTypes length must match air_groups".into()));
-        }
-
-        let mut total_airs = 0usize;
-        for (airgroup_id, airs) in self.airs.iter().enumerate() {
-            if airs.is_empty() {
-                return Err(ProofmanError::InvalidSetup(format!(
-                    "air group {airgroup_id} must contain at least one air"
-                )));
-            }
-            total_airs = checked_count_add(total_airs, airs.len(), MAX_GLOBAL_AIR_INSTANCES, "global info air count")?;
-        }
-
-        if self.n_publics > MAX_GLOBAL_PUBLICS {
-            return Err(ProofmanError::InvalidSetup("global info nPublics exceeds limit".into()));
-        }
-        if self.n_challenges.len() > MAX_GLOBAL_STAGE_COUNT {
-            return Err(ProofmanError::InvalidSetup("global info numChallenges stage count exceeds limit".into()));
-        }
-        self.challenge_words()?;
-
-        if self.n_proof_values.len() > MAX_GLOBAL_STAGE_COUNT {
-            return Err(ProofmanError::InvalidSetup("global info numProofValues stage count exceeds limit".into()));
-        }
-        let declared_proof_values =
-            checked_sum_limited(&self.n_proof_values, MAX_GLOBAL_PROOF_VALUES, "numProofValues")?;
-
-        let max_stage = self.n_challenges.len().max(1) as u64;
-        if let Some(proof_values_map) = &self.proof_values_map {
-            if proof_values_map.len() > MAX_GLOBAL_PROOF_VALUES {
-                return Err(ProofmanError::InvalidSetup("global info proofValuesMap exceeds limit".into()));
-            }
-            if !self.n_proof_values.is_empty() && declared_proof_values != proof_values_map.len() {
-                return Err(ProofmanError::InvalidSetup(
-                    "global info numProofValues does not match proofValuesMap length".into(),
-                ));
-            }
-            // Proof values are laid out stage by stage, which get_proof_values_by_stage relies on.
-            let mut previous_stage = 0u64;
-            for (idx, proof_value) in proof_values_map.iter().enumerate() {
-                if proof_value.stage == 0 || proof_value.stage > max_stage {
-                    return Err(ProofmanError::InvalidSetup(format!(
-                        "global info proofValuesMap[{idx}] has invalid stage"
-                    )));
-                }
-                if proof_value.stage < previous_stage {
-                    return Err(ProofmanError::InvalidSetup("global info proofValuesMap stages must be sorted".into()));
-                }
-                previous_stage = proof_value.stage;
-            }
-            self.proof_values_words()?;
-        } else if declared_proof_values != 0 {
-            return Err(ProofmanError::InvalidSetup(
-                "global info numProofValues is nonzero but proofValuesMap is missing".into(),
-            ));
-        }
-
-        if let Some(publics_map) = &self.publics_map {
-            if publics_map.len() > self.n_publics {
-                return Err(ProofmanError::InvalidSetup("global info publicsMap exceeds nPublics".into()));
-            }
-            let mut total_lengths = 0usize;
-            for (idx, public) in publics_map.iter().enumerate() {
-                if public.stage == 0 || public.stage > max_stage {
-                    return Err(ProofmanError::InvalidSetup(format!(
-                        "global info publicsMap[{idx}] has invalid stage"
-                    )));
-                }
-                total_lengths = checked_count_add(
-                    total_lengths,
-                    public.lengths.len(),
-                    MAX_GLOBAL_PUBLIC_LENGTH_ENTRIES,
-                    "publicsMap lengths",
-                )?;
-            }
-        }
-
-        let mut total_agg_values = 0usize;
-        for (airgroup_id, agg_types) in self.agg_types.iter().enumerate() {
-            total_agg_values = checked_count_add(total_agg_values, agg_types.len(), MAX_GLOBAL_AGG_VALUES, "aggTypes")?;
-            for (idx, agg_type) in agg_types.iter().enumerate() {
-                if agg_type.agg_type > 1 {
-                    return Err(ProofmanError::InvalidSetup(format!(
-                        "global info aggTypes[{airgroup_id}][{idx}] has unsupported aggType"
-                    )));
-                }
-            }
-        }
-
-        if self.transcript_arity > MAX_GLOBAL_TRANSCRIPT_ARITY {
-            return Err(ProofmanError::InvalidSetup("global info transcriptArity exceeds limit".into()));
-        }
-        if self.lattice_size.is_some_and(|lattice_size| lattice_size > MAX_GLOBAL_LATTICE_SIZE) {
-            return Err(ProofmanError::InvalidSetup("global info latticeSize exceeds limit".into()));
-        }
-
-        Ok(())
     }
 
     pub fn get_proving_key_path(&self) -> PathBuf {
@@ -284,6 +223,8 @@ impl GlobalInfo {
             ProofType::Compressor => "compressor",
             ProofType::Recursive1 => "recursive1",
             ProofType::Recursive2 => "recursive2",
+            ProofType::VadcopFinal => return self.get_setup_path("vadcop_final"),
+            ProofType::VadcopFinalCompressed => return self.get_setup_path("vadcop_final_compressed"),
             _ => panic!(),
         };
 
@@ -353,6 +294,11 @@ impl GlobalInfo {
         self.airs[airgroup_id][air_id].has_compressor.unwrap_or(false)
     }
 
+    /// Proofs this air's recursive1 verifies in one circuit; 1 for the unbatched circuit.
+    pub fn get_air_r1_batch_size(&self, airgroup_id: usize, air_id: usize) -> usize {
+        self.airs[airgroup_id][air_id].r1_batch_size.unwrap_or(1).max(1)
+    }
+
     pub fn get_n_airs_for_airgroup(&self, airgroup_id: usize) -> usize {
         self.airs[airgroup_id].len()
     }
@@ -369,53 +315,100 @@ impl GlobalInfo {
     }
 }
 
-/// Field elements a proof value of `stage` takes in the proof values buffer: stage 1 values are
-/// base field elements, values of later stages field extensions.
-pub(crate) fn proof_value_words(stage: u64) -> usize {
-    if stage == 1 {
-        1
-    } else {
-        FIELD_EXTENSION_WORDS
-    }
-}
-
-fn checked_count_add(total: usize, count: usize, max: usize, label: &str) -> ProofmanResult<usize> {
-    let next =
-        total.checked_add(count).ok_or_else(|| ProofmanError::InvalidSetup(format!("{label} count overflows")))?;
-    if next > max {
-        return Err(ProofmanError::InvalidSetup(format!("{label} count exceeds limit")));
-    }
-    Ok(next)
-}
-
-fn checked_sum_limited(values: &[usize], max: usize, label: &str) -> ProofmanResult<usize> {
-    values.iter().try_fold(0usize, |total, &value| checked_count_add(total, value, max, label))
-}
-
 #[cfg(test)]
-mod tests {
+mod aggregation_arity_tests {
     use super::*;
 
     #[test]
-    fn proof_values_take_a_field_extension_after_stage_one() {
-        let proof_value = |stage| ProofValueMap { name: String::new(), id: 0, stage };
-        let global_info = GlobalInfo {
-            folder_path: String::new(),
-            name: "zisk".to_string(),
-            airs: vec![vec![GlobalInfoAir::new("Rom".to_string())]],
-            air_groups: vec!["Zisk".to_string()],
-            curve: CurveType::None,
-            lattice_size: None,
-            agg_types: vec![Vec::new()],
-            n_publics: 0,
-            n_challenges: vec![0, 1],
-            n_proof_values: vec![2],
-            proof_values_map: Some(vec![proof_value(1), proof_value(2)]),
-            publics_map: None,
-            transcript_arity: 4,
-        };
+    fn only_two_and_three_are_valid_arities() {
+        assert!(is_valid_aggregation_arity(2));
+        assert!(is_valid_aggregation_arity(3));
+        for n in [0usize, 1, 4, 5, 16] {
+            assert!(!is_valid_aggregation_arity(n), "{n} must be rejected");
+        }
+    }
 
-        assert!(global_info.validate_shape().is_ok());
-        assert_eq!(global_info.proof_values_words().unwrap(), 4);
+    #[test]
+    fn a_key_without_the_field_is_arity_three() {
+        // A key written before the field existed. Must load as 3; Default::default() gives 0.
+        let json = serde_json::json!({
+            "folder_path": "", "name": "t", "airs": [[]], "air_groups": [], "curve": "None",
+            "aggTypes": [], "nPublics": 0, "numChallenges": [0],
+            "transcriptArity": 16
+        });
+        let gi: GlobalInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(gi.aggregation_arity, 3);
+    }
+
+    #[test]
+    fn from_file_rejects_an_unsupported_arity() {
+        // Covers `check_setup`, `prove_air` and `soundness`, not just the full proving path.
+        let dir = std::env::temp_dir().join(format!("gi_arity_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = serde_json::json!({
+            "name": "t", "airs": [[]], "air_groups": [], "curve": "None",
+            "aggTypes": [], "nPublics": 0, "numChallenges": [0],
+            "transcriptArity": 16, "aggregationArity": 4
+        });
+        std::fs::write(dir.join("pilout.globalInfo.json"), serde_json::to_string(&json).unwrap()).unwrap();
+
+        let result = GlobalInfo::from_file(&dir.display().to_string());
+        let Err(err) = result else { panic!("arity 4 must be rejected at load") };
+        assert!(err.to_string().contains("aggregationArity 4"), "unexpected error: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A key written before the `hash` field existed is Poseidon at arity 4, but `hash` has a
+    /// serde default and would take blake3. The transcriptArity it DID write contradicts that, and
+    /// loading must say so instead of pointing blake3's binary-tree kernels at arity-4 trees.
+    #[test]
+    fn from_file_rejects_a_hash_that_contradicts_the_transcript_arity() {
+        let dir = std::env::temp_dir().join(format!("gi_hash_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = serde_json::json!({
+            "name": "t", "airs": [[]], "air_groups": [], "curve": "None",
+            "aggTypes": [], "nPublics": 0, "numChallenges": [0],
+            "transcriptArity": 4, "aggregationArity": 3
+        });
+        std::fs::write(dir.join("pilout.globalInfo.json"), serde_json::to_string(&json).unwrap()).unwrap();
+
+        let Err(err) = GlobalInfo::from_file(&dir.display().to_string()) else {
+            panic!("a key with no `hash` and Poseidon's arity must not load as the default family")
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("transcriptArity 4"), "unexpected error: {msg}");
+
+        // The same key, with the hash it was actually built with, loads.
+        let mut json = json;
+        json["hash"] = serde_json::json!("Poseidon1");
+        std::fs::write(dir.join("pilout.globalInfo.json"), serde_json::to_string(&json).unwrap()).unwrap();
+        assert!(GlobalInfo::from_file(&dir.display().to_string()).is_ok());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_field_round_trips() {
+        let json = serde_json::json!({
+            "folder_path": "", "name": "t", "airs": [[]], "air_groups": [], "curve": "None",
+            "aggTypes": [], "nPublics": 0, "numChallenges": [0],
+            "transcriptArity": 16, "aggregationArity": 2
+        });
+        let gi: GlobalInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(gi.aggregation_arity, 2);
+    }
+
+    #[test]
+    fn the_setup_version_is_optional() {
+        let mut json = serde_json::json!({
+            "folder_path": "", "name": "t", "airs": [[]], "air_groups": [], "curve": "None",
+            "aggTypes": [], "nPublics": 0, "numChallenges": [0],
+            "transcriptArity": 16, "aggregationArity": 2
+        });
+        let gi: GlobalInfo = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(gi.setup_version, None);
+        json["setupVersion"] = serde_json::json!("1.4.0");
+        let gi: GlobalInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(gi.setup_version.as_deref(), Some("1.4.0"));
     }
 }

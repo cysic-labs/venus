@@ -1,6 +1,6 @@
 use std::sync::{RwLock, Arc};
 
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use proofman_common::{BufferPool, DebugInfo, ProofCtx, ProofmanResult, SetupCtx};
 
 pub trait WitnessComponent<F: PrimeField64>: Send + Sync {
@@ -39,7 +39,7 @@ pub trait WitnessComponent<F: PrimeField64>: Send + Sync {
         _buffer_pool: &dyn BufferPool<F>,
     ) -> ProofmanResult<()> {
         for instance_id in instance_ids {
-            pctx.set_witness_ready(*instance_id, false);
+            pctx.announce_witness_ready(*instance_id);
         }
         Ok(())
     }
@@ -98,7 +98,7 @@ macro_rules! define_wc {
 #[macro_export]
 macro_rules! define_wc_with_std {
     ($StructName:ident, $name:expr) => {
-        use pil_std_lib::Std;
+        use pil2_std_lib::Std;
         use std::sync::atomic::{AtomicU64, Ordering};
         pub struct $StructName<F: PrimeField64> {
             std_lib: Arc<Std<F>>,

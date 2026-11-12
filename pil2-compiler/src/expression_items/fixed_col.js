@@ -20,6 +20,10 @@ module.exports = class FixedCol extends ProofItem {
     getTag() {
         return 'fixed';
     }
+    // type installed on a Reference when binding it to this column (setReference)
+    get refType() {
+        return 'fixed';
+    }
     getValue(row) {
         return this.definition.getValue(row);
     }
@@ -67,5 +71,28 @@ module.exports = class FixedCol extends ProofItem {
     }
     fillRowsFrom(value, offset, count) {
         this.definition.fillRowsFrom(value, offset, count);
+    }
+    // NOTE: named *Range on purpose — a method named `isSequence` would shadow
+    // the truthy isSequence protocol property checked by FixedCol.set()
+    isConstantRange(offset, count) {
+        return this.definition.isConstantRange(offset, count);
+    }
+    isSequenceRange(offset, count, delta) {
+        return this.definition.isSequenceRange(offset, count, delta);
+    }
+    signature(offset, count) {
+        return this.definition.signature(offset, count);
+    }
+    areEquals(other, offset, otherOffset, count) {
+        return this.definition.areEquals(other, offset, otherOffset, count);
+    }
+    comparativeSignature(offset, count) {
+        return this.definition.comparativeSignature(offset, count);
+    }
+    compatibleOffset(other, offset, otherOffset, count) {
+        return this.definition.compatibleOffset(other, offset, otherOffset, count);
+    }
+    analyze(offset, count) {
+        return this.definition.analyze(offset, count);
     }
 }

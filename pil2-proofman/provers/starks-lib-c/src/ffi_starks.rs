@@ -1,73 +1,125 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use ::std::os::raw::c_void;
 
-#[cfg(not(feature = "no_lib_link"))]
 use ::std::os::raw::c_char;
 
-#[cfg(feature = "no_lib_link")]
-use tracing::trace;
-
-#[cfg(not(feature = "no_lib_link"))]
 include!("../bindings_starks.rs");
 
-#[cfg(not(feature = "no_lib_link"))]
 use std::ffi::CString;
 
-#[cfg(not(feature = "no_lib_link"))]
 use std::ffi::CStr;
 
-#[cfg(not(feature = "no_lib_link"))]
-static mut PROOFS_DONE: Option<crossbeam_channel::Sender<(u64, String)>> = None;
+/// A proof-done completion crossing the FFI boundary: the `(id, proof_type)` the C++ harvest
+/// reports for a finished proof.
+#[derive(Debug, Clone)]
+pub struct CompletionMsg {
+    pub id: u64,
+    pub proof_type: String,
+}
 
-#[cfg(not(feature = "no_lib_link"))]
+// Read by `on_proof_done` (C++/CUDA harvest threads), written by register/clear. The C++ callback
+// pointer is never nulled, so a late harvest can race a `clear`; the RwLock keeps read-vs-drop
+// exclusive so a send can't drop/free the channel mid-send -> SEGV (status=11).
+static PROOFS_DONE: std::sync::RwLock<Option<crossbeam_channel::Sender<CompletionMsg>>> = std::sync::RwLock::new(None);
+
 extern "C" fn on_proof_done(instance_id: u64, proof_type: *const c_char) {
     let proof_type_str = unsafe { CStr::from_ptr(proof_type).to_string_lossy().into_owned() };
 
-    unsafe {
-        if let Some(ref tx) = PROOFS_DONE {
-            let _ = tx.send((instance_id, proof_type_str));
-        }
+    // Hold the read lock across the send so a concurrent `clear` can't drop the Sender mid-send.
+    // Recover from poison rather than unwind: an unwind out of an `extern "C"` fn aborts.
+    let guard = PROOFS_DONE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref tx) = *guard {
+        let _ = tx.send(CompletionMsg { id: instance_id, proof_type: proof_type_str });
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn register_proof_done_callback_c(tx: crossbeam_channel::Sender<(u64, String)>) {
+pub fn register_proof_done_callback_c(tx: crossbeam_channel::Sender<CompletionMsg>) {
+    // Swap under the write lock: any in-flight `on_proof_done` read has released its guard
+    // before this replaces (and drops) the previous Sender, so no send races the drop.
+    *PROOFS_DONE.write().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     unsafe {
-        PROOFS_DONE = Some(tx);
         register_proof_done_callback(Some(on_proof_done));
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+pub fn compute_const_tree_c(
+    const_path: &str,
+    stark_info_path: &str,
+    const_tree_path: &str,
+    verkey_path: &str,
+) -> [u64; 4] {
+    let c_const = CString::new(const_path).unwrap();
+    let c_stark_info = CString::new(stark_info_path).unwrap();
+    let c_tree = CString::new(const_tree_path).unwrap();
+    let c_verkey = CString::new(verkey_path).unwrap();
+
+    let mut root = [0u64; 4];
+    let status = unsafe {
+        build_const_tree_c(
+            c_const.as_ptr(),
+            c_stark_info.as_ptr(),
+            c_tree.as_ptr(),
+            c_verkey.as_ptr(),
+            root.as_mut_ptr(),
+        )
+    };
+    assert_eq!(
+        status, 0,
+        "build_const_tree_c failed (status {status}) for const {const_path}, starkinfo {stark_info_path}, verkey {verkey_path}"
+    );
+    root
+}
+
+pub fn generate_fflonk_zkey_c(r1cs_file: &str, ptau_file: &str, zkey_file: &str) -> i32 {
+    let c_r1cs = CString::new(r1cs_file).unwrap();
+    let c_ptau = CString::new(ptau_file).unwrap();
+    let c_zkey = CString::new(zkey_file).unwrap();
+    unsafe { fflonk_setup_c(c_r1cs.as_ptr(), c_ptau.as_ptr(), c_zkey.as_ptr()) }
+}
+
+pub fn generate_plonk_zkey_c(r1cs_file: &str, ptau_file: &str, zkey_file: &str) -> i32 {
+    let c_r1cs = CString::new(r1cs_file).unwrap();
+    let c_ptau = CString::new(ptau_file).unwrap();
+    let c_zkey = CString::new(zkey_file).unwrap();
+    unsafe { plonk_setup_c(c_r1cs.as_ptr(), c_ptau.as_ptr(), c_zkey.as_ptr()) }
+}
+
+/// Plonkish gate counts (constraints, additions) for an r1cs file — no ptau
+/// needed. Returns `None` if the file could not be processed.
+pub fn get_plonk_circuit_stats_c(r1cs_file: &str) -> Option<(u64, u64)> {
+    let c_r1cs = CString::new(r1cs_file).unwrap();
+    let mut n_constraints: u64 = 0;
+    let mut n_additions: u64 = 0;
+    let ret = unsafe { plonk_circuit_stats_c(c_r1cs.as_ptr(), &mut n_constraints, &mut n_additions) };
+    (ret == 0).then_some((n_constraints, n_additions))
+}
+
 pub fn initialize_agg_readiness_tracker_c() {
     unsafe {
         initialize_agg_readiness_tracker();
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn free_agg_readiness_tracker_c() {
     unsafe {
         free_agg_readiness_tracker();
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn agg_is_ready_c() -> i32 {
     unsafe { agg_is_ready() }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn reset_agg_readiness_tracker_c() {
     unsafe {
         reset_agg_readiness_tracker();
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn launch_callback_c(instance_id: u64, proof_type: &str) {
     let proof_type_str = CString::new(proof_type).unwrap();
     let proof_type_ptr = proof_type_str.as_ptr() as *mut std::os::raw::c_char;
@@ -76,14 +128,13 @@ pub fn launch_callback_c(instance_id: u64, proof_type: &str) {
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn clear_proof_done_callback_c() {
-    unsafe {
-        PROOFS_DONE = None;
-    }
+    // Take the write lock so the Sender is dropped only when no `on_proof_done` holds the read lock
+    // mid-send. A late harvest after clearing just observes `None` (the C++ pointer is never nulled).
+    *PROOFS_DONE.write().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+#[allow(clippy::too_many_arguments)]
 pub fn stark_info_new_c(
     filename: &str,
     recursive_final: bool,
@@ -91,7 +142,6 @@ pub fn stark_info_new_c(
     verify_constraints: bool,
     verify: bool,
     gpu: bool,
-    preallocate: bool,
 ) -> *mut c_void {
     unsafe {
         let filename = CString::new(filename).unwrap();
@@ -103,80 +153,78 @@ pub fn stark_info_new_c(
             verify_constraints,
             verify,
             gpu,
-            preallocate,
         )
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_map_totaln_c(p_stark_info: *mut c_void) -> u64 {
     unsafe { get_map_total_n(p_stark_info) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn get_map_totaln_contributions_c(p_stark_info: *mut c_void) -> u64 {
-    unsafe { get_map_total_n_contributions(p_stark_info) }
-}
-
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_tree_size_c(p_stark_info: *mut c_void) -> u64 {
     unsafe { get_tree_size(p_stark_info) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_map_totaln_custom_commits_fixed_c(p_stark_info: *mut c_void) -> u64 {
     unsafe { get_map_total_n_custom_commits_fixed(p_stark_info) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_proof_size_c(p_stark_info: *mut c_void) -> u64 {
     unsafe { get_proof_size(p_stark_info) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+pub fn get_n_publics_c(p_stark_info: *mut c_void) -> u64 {
+    unsafe { get_n_publics(p_stark_info) }
+}
+
+pub fn set_hash_family_c(family: &str) {
+    let fam: u8 = match family {
+        "Poseidon1" => 1,
+        "Poseidon2" => 2,
+        "blake3" => 3,
+        other => panic!(
+            "set_hash_family_c: unknown hash family {other:?} (expected \"Poseidon1\", \"Poseidon2\" or \"blake3\")"
+        ),
+    };
+    unsafe { set_hash_family(fam) }
+}
+
 pub fn get_proof_pinned_size_c(p_stark_info: *mut c_void) -> u64 {
     unsafe { get_proof_pinned_size(p_stark_info) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn register_host_memory_c(ptr: *mut c_void, size: u64) -> bool {
     unsafe { register_host_memory(ptr, size) != 0 }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn unregister_host_memory_c(ptr: *mut c_void) {
     unsafe {
         unregister_host_memory(ptr);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn malloc_host_memory_c(size: u64) -> *mut c_void {
-    unsafe { malloc_host_memory(size) }
-}
-
-#[cfg(not(feature = "no_lib_link"))]
-pub fn free_host_memory_c(ptr: *mut c_void) {
+/// Block until the commit work on `stream_id` has completed on the GPU, so a
+/// shared trace buffer whose async H2D copy rode that stream can be safely
+/// reused. No-op on the CPU backend (the symbol is GPU-only; callers gate on
+/// `pctx.gpu`).
+pub fn wait_trace_h2d_done_c(d_buffers: *mut c_void, stream_id: u64) {
     unsafe {
-        free_host_memory(ptr);
+        wait_trace_h2d_done(d_buffers, stream_id);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn set_memory_expressions_c(p_stark_info: *mut c_void, n_tmp1: u64, n_tmp3: u64) {
     unsafe {
         set_memory_expressions(p_stark_info, n_tmp1, n_tmp3);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn stark_info_free_c(p_stark_info: *mut c_void) {
     unsafe {
         stark_info_free(p_stark_info);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn load_const_pols_c(pConstPolsAddress: *mut u8, const_filename: &str, const_size: u64) {
     unsafe {
         let const_filename: CString = CString::new(const_filename).unwrap();
@@ -189,17 +237,14 @@ pub fn load_const_pols_c(pConstPolsAddress: *mut u8, const_filename: &str, const
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_const_size_c(pStarkInfo: *mut c_void) -> u64 {
     unsafe { get_const_size(pStarkInfo) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_const_tree_size_c(pStarkInfo: *mut c_void) -> u64 {
     unsafe { get_const_tree_size(pStarkInfo) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn calculate_words_per_row_c(pStarkInfo: *mut c_void, const_pols_path: &str) -> u64 {
     unsafe {
         let const_pols_path_cstr = CString::new(const_pols_path).unwrap();
@@ -207,7 +252,6 @@ pub fn calculate_words_per_row_c(pStarkInfo: *mut c_void, const_pols_path: &str)
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn load_const_tree_c(
     pStarkInfo: *mut c_void,
     pConstPolsTreeAddress: *mut u8,
@@ -229,14 +273,12 @@ pub fn load_const_tree_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn init_gpu_setup_c(maxBitsExt: u64) {
+pub fn init_gpu_setup_c(arity: u64) {
     unsafe {
-        init_gpu_setup(maxBitsExt);
+        init_gpu_setup(arity);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn pack_const_pols_c(pStarkinfo: *mut c_void, pConstPols: *mut u8, constFile: &str) {
     let const_file_cstr: CString = CString::new(constFile).unwrap();
     unsafe {
@@ -248,7 +290,6 @@ pub fn pack_const_pols_c(pStarkinfo: *mut c_void, pConstPols: *mut u8, constFile
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn tile_const_pols_c(
     pStarkInfo: *mut c_void,
     pConstPols: *mut u8,
@@ -271,14 +312,12 @@ pub fn tile_const_pols_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn prepare_blocks_c(pol: *mut u64, N: u64, nCols: u64, unified_buffer_gpu: *mut c_void) {
     unsafe {
         prepare_blocks(pol, N, nCols, unified_buffer_gpu);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn calculate_const_tree_c(
     pStarkInfo: *mut c_void,
     pConstPols: *mut u8,
@@ -295,7 +334,6 @@ pub fn calculate_const_tree_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn calculate_const_tree_bn128_c(pStarkInfo: *mut c_void, pConstPols: *mut u8, pConstPolsTreeAddress: *mut u8) {
     unsafe {
         calculate_const_tree_bn128(
@@ -306,7 +344,6 @@ pub fn calculate_const_tree_bn128_c(pStarkInfo: *mut c_void, pConstPols: *mut u8
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn write_const_tree_c(pStarkInfo: *mut c_void, pConstPolsTreeAddress: *mut u8, tree_filename: &str) {
     unsafe {
         let tree_filename: CString = CString::new(tree_filename).unwrap();
@@ -319,7 +356,6 @@ pub fn write_const_tree_c(pStarkInfo: *mut c_void, pConstPolsTreeAddress: *mut u
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn write_const_tree_bn128_c(pStarkInfo: *mut c_void, pConstPolsTreeAddress: *mut u8, tree_filename: &str) {
     unsafe {
         let tree_filename: CString = CString::new(tree_filename).unwrap();
@@ -332,7 +368,6 @@ pub fn write_const_tree_bn128_c(pStarkInfo: *mut c_void, pConstPolsTreeAddress: 
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn verify_root_bn128_from_tree_c(tree_filename: &str, expected_root: &str) -> bool {
     unsafe {
         let tree_filename_cstr = CString::new(tree_filename).unwrap();
@@ -345,7 +380,6 @@ pub fn verify_root_bn128_from_tree_c(tree_filename: &str, expected_root: &str) -
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn expressions_bin_new_c(filename: &str, global: bool, verify: bool) -> *mut c_void {
     unsafe {
         let filename = CString::new(filename).unwrap();
@@ -354,52 +388,37 @@ pub fn expressions_bin_new_c(filename: &str, global: bool, verify: bool) -> *mut
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn validate_expressions_bin_c(p_expressions_bin: *mut c_void, p_stark_info: *mut c_void) {
-    unsafe {
-        validate_expressions_bin(p_expressions_bin, p_stark_info);
-    }
-}
-
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_max_n_tmp1_c(p_expressions_bin: *mut c_void) -> u64 {
     unsafe { get_max_n_tmp1(p_expressions_bin) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_max_n_tmp3_c(p_expressions_bin: *mut c_void) -> u64 {
     unsafe { get_max_n_tmp3(p_expressions_bin) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_max_n_args_c(p_expressions_bin: *mut c_void) -> u64 {
     unsafe { get_max_args(p_expressions_bin) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_max_n_ops_c(p_expressions_bin: *mut c_void) -> u64 {
     unsafe { get_max_ops(p_expressions_bin) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_operations_quotient_c(p_expressions_bin: *mut c_void, p_stark_info: *mut c_void) -> u64 {
     unsafe { get_operations_quotient(p_expressions_bin, p_stark_info) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn expressions_bin_free_c(p_expressions_bin: *mut c_void) {
     unsafe {
         expressions_bin_free(p_expressions_bin);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn n_hint_ids_by_name_c(p_expressions_bin: *mut c_void, hint_name: &str) -> u64 {
     let name = CString::new(hint_name).unwrap();
     unsafe { n_hints_by_name(p_expressions_bin, name.as_ptr() as *mut std::os::raw::c_char) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_hint_ids_by_name_c(p_expressions_bin: *mut c_void, hint_ids: *mut u64, hint_name: &str) {
     let name = CString::new(hint_name).unwrap();
     unsafe {
@@ -407,7 +426,6 @@ pub fn get_hint_ids_by_name_c(p_expressions_bin: *mut c_void, hint_ids: *mut u64
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn get_hint_field_c(
     p_setup_ctx: *mut c_void,
@@ -440,13 +458,11 @@ pub fn get_hint_field_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_hint_field_values_c(p_setup_ctx: *mut c_void, hint_id: u64, hint_field_name: &str) -> u64 {
     let field_name = CString::new(hint_field_name).unwrap();
     unsafe { get_hint_field_values(p_setup_ctx, hint_id, field_name.as_ptr() as *mut std::os::raw::c_char) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_hint_field_sizes_c(
     p_setup_ctx: *mut c_void,
     hint_field_values: *mut c_void,
@@ -466,7 +482,6 @@ pub fn get_hint_field_sizes_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn mul_hint_fields_c(
     p_setup_ctx: *mut c_void,
@@ -512,7 +527,6 @@ pub fn mul_hint_fields_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn acc_hint_field_c(
     p_setup_ctx: *mut c_void,
@@ -540,7 +554,6 @@ pub fn acc_hint_field_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn acc_mul_hint_fields_c(
     p_setup_ctx: *mut c_void,
@@ -575,7 +588,6 @@ pub fn acc_mul_hint_fields_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn update_airgroupvalue_c(
     p_setup_ctx: *mut c_void,
@@ -607,7 +619,6 @@ pub fn update_airgroupvalue_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn set_hint_field_c(
     p_setup_ctx: *mut c_void,
     p_params: *mut u8,
@@ -627,7 +638,6 @@ pub fn set_hint_field_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_hint_field_id_c(p_setup_ctx: *mut c_void, hint_id: u64, hint_field_name: &str) -> u64 {
     unsafe {
         let field_name = CString::new(hint_field_name).unwrap();
@@ -635,27 +645,29 @@ pub fn get_hint_field_id_c(p_setup_ctx: *mut c_void, hint_id: u64, hint_field_na
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn calculate_impols_expressions_c(p_setup: *mut c_void, step: u64, p_steps_params: *mut u8) {
     unsafe {
         calculate_impols_expressions(p_setup, step, p_steps_params as *mut std::os::raw::c_void);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn calculate_witness_expressions_c(p_setup: *mut c_void, p_steps_params: *mut u8) {
     unsafe {
         calculate_witness_expr(p_setup, p_steps_params as *mut std::os::raw::c_void);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn custom_commit_size_c(p_setup: *mut c_void, commit_id: u64) -> u64 {
     unsafe { custom_commit_size(p_setup, commit_id) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn load_custom_commit_c(setup: *mut c_void, commit_id: u64, buffer: *mut u8, buffer_file: &str) {
+pub fn load_custom_commit_c(
+    setup: *mut c_void,
+    commit_id: u64,
+    buffer: *mut u8,
+    buffer_file: &str,
+    words_per_row: u64,
+) {
     let buffer_file_name = CString::new(buffer_file).unwrap();
     unsafe {
         load_custom_commit(
@@ -663,11 +675,11 @@ pub fn load_custom_commit_c(setup: *mut c_void, commit_id: u64, buffer: *mut u8,
             commit_id,
             buffer as *mut std::os::raw::c_void,
             buffer_file_name.as_ptr() as *mut std::os::raw::c_char,
+            words_per_row,
         );
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn write_custom_commit_c(
     root: *mut u8,
@@ -695,7 +707,6 @@ pub fn write_custom_commit_c(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(not(feature = "no_lib_link"))]
 pub fn commit_witness_c(
     p_setup: *mut c_void,
     p_params: *mut u8,
@@ -704,7 +715,10 @@ pub fn commit_witness_c(
     air_id: u64,
     root: *mut u8,
     d_buffers: *mut c_void,
+    custom_commits_fixed_path: &str,
 ) -> u64 {
+    let custom_commits_path_name = CString::new(custom_commits_fixed_path).unwrap();
+    let custom_commits_path_ptr = custom_commits_path_name.as_ptr() as *mut std::os::raw::c_char;
     unsafe {
         commit_witness(
             p_setup,
@@ -714,30 +728,27 @@ pub fn commit_witness_c(
             air_id,
             root as *mut std::os::raw::c_void,
             d_buffers,
+            custom_commits_path_ptr,
         )
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_n_constraints_c(p_setup: *mut c_void) -> u64 {
     unsafe { get_n_constraints(p_setup) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_constraints_lines_sizes_c(p_setup: *mut c_void, constraints_sizes: *mut u64) {
     unsafe {
         get_constraints_lines_sizes(p_setup, constraints_sizes);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_constraints_lines_c(p_setup: *mut c_void, constraints_lines: *mut *mut u8) {
     unsafe {
         get_constraints_lines(p_setup, constraints_lines);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn initialize_instance_c(
     p_setup: *mut c_void,
     airgroup_id: u64,
@@ -745,7 +756,10 @@ pub fn initialize_instance_c(
     instance_id: u64,
     p_steps_params: *mut u8,
     d_buffers: *mut c_void,
+    custom_commits_fixed_path: &str,
 ) -> u64 {
+    let custom_commits_path_name = CString::new(custom_commits_fixed_path).unwrap();
+    let custom_commits_path_ptr = custom_commits_path_name.as_ptr() as *mut std::os::raw::c_char;
     unsafe {
         initialize_instance(
             p_setup,
@@ -754,11 +768,11 @@ pub fn initialize_instance_c(
             instance_id,
             p_steps_params as *mut std::os::raw::c_void,
             d_buffers,
+            custom_commits_path_ptr,
         )
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn calculate_trace_instance_c(
     p_setup: *mut c_void,
     airgroup_id: u64,
@@ -779,7 +793,6 @@ pub fn calculate_trace_instance_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn verify_constraints_c(
     p_setup: *mut c_void,
     airgroup_id: u64,
@@ -802,26 +815,22 @@ pub fn verify_constraints_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_n_global_constraints_c(p_global_constraints_bin: *mut c_void) -> u64 {
     unsafe { get_n_global_constraints(p_global_constraints_bin) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_global_constraints_lines_sizes_c(p_global_constraints_bin: *mut c_void, global_constraints_sizes: *mut u64) {
     unsafe {
         get_global_constraints_lines_sizes(p_global_constraints_bin, global_constraints_sizes);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_global_constraints_lines_c(p_global_constraints_bin: *mut c_void, global_constraints_lines: *mut *mut u8) {
     unsafe {
         get_global_constraints_lines(p_global_constraints_bin, global_constraints_lines);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn verify_global_constraints_c(
     global_info_file: &str,
     p_global_constraints_bin: *mut c_void,
@@ -847,7 +856,6 @@ pub fn verify_global_constraints_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn get_hint_field_global_constraints_c(
     global_info_file: &str,
@@ -882,7 +890,6 @@ pub fn get_hint_field_global_constraints_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_hint_field_global_constraints_values_c(
     p_global_constraints_bin: *mut c_void,
     hint_id: u64,
@@ -898,7 +905,6 @@ pub fn get_hint_field_global_constraints_values_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_hint_field_global_constraints_sizes_c(
     global_info_file: &str,
     p_global_constraints_bin: *mut c_void,
@@ -924,7 +930,6 @@ pub fn get_hint_field_global_constraints_sizes_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn set_hint_field_global_constraints_c(
     global_info_file: &str,
     p_global_constraints_bin: *mut c_void,
@@ -950,7 +955,6 @@ pub fn set_hint_field_global_constraints_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn gen_proof_c(
     p_setup: *mut c_void,
@@ -962,10 +966,13 @@ pub fn gen_proof_c(
     air_id: u64,
     instance_id: u64,
     d_buffers: *mut c_void,
-    skip_recalculation: bool,
     stream_id: u64,
     const_pols_path: &str,
     const_tree_path: &str,
+    custom_commits_fixed_path: &str,
+    // true: seed the transcript from this AIR's own verkey + publics instead of the
+    // global challenge (self-contained proof, no contributions phase).
+    self_contained: bool,
 ) -> u64 {
     let proof_file_name = CString::new(proof_file).unwrap();
     let proof_file_ptr = proof_file_name.as_ptr() as *mut std::os::raw::c_char;
@@ -975,6 +982,9 @@ pub fn gen_proof_c(
 
     let const_tree_filename_name = CString::new(const_tree_path).unwrap();
     let const_tree_filename_ptr = const_tree_filename_name.as_ptr() as *mut std::os::raw::c_char;
+
+    let custom_commits_path_name = CString::new(custom_commits_fixed_path).unwrap();
+    let custom_commits_path_ptr = custom_commits_path_name.as_ptr() as *mut std::os::raw::c_char;
 
     unsafe {
         gen_proof(
@@ -987,15 +997,15 @@ pub fn gen_proof_c(
             proof_buffer,
             proof_file_ptr,
             d_buffers,
-            skip_recalculation,
             stream_id,
             const_filename_ptr,
             const_tree_filename_ptr,
+            custom_commits_path_ptr,
+            self_contained,
         )
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn get_stream_proofs_c(d_buffers: *mut c_void) {
     unsafe {
@@ -1003,7 +1013,6 @@ pub fn get_stream_proofs_c(d_buffers: *mut c_void) {
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn get_stream_proofs_non_blocking_c(d_buffers: *mut c_void) {
     unsafe {
@@ -1011,7 +1020,6 @@ pub fn get_stream_proofs_non_blocking_c(d_buffers: *mut c_void) {
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn get_stream_id_proof_c(d_buffers: *mut c_void, stream_id: u64) {
     unsafe {
@@ -1019,27 +1027,6 @@ pub fn get_stream_id_proof_c(d_buffers: *mut c_void, stream_id: u64) {
     }
 }
 
-/// Reserves `stream_id` for proving `instance_id` from the stage-1 commitment the stream already
-/// holds. Returns false when the stream no longer holds a completed commitment of that instance.
-#[cfg(not(feature = "no_lib_link"))]
-#[allow(clippy::too_many_arguments)]
-pub fn claim_ready_instance_c(
-    d_buffers: *mut c_void,
-    stream_id: u64,
-    instance_id: u64,
-    airgroup_id: u64,
-    air_id: u64,
-) -> bool {
-    unsafe { claim_ready_instance(d_buffers, stream_id, instance_id, airgroup_id, air_id) != 0 }
-}
-
-#[cfg(not(feature = "no_lib_link"))]
-#[allow(clippy::too_many_arguments)]
-pub fn direct_registered_h2d_done_c(d_buffers: *mut c_void, stream_id: u64) -> bool {
-    unsafe { direct_registered_h2d_done(d_buffers, stream_id) != 0 }
-}
-
-#[cfg(not(feature = "no_lib_link"))]
 #[allow(clippy::too_many_arguments)]
 pub fn gen_recursive_proof_c(
     p_setup_ctx: *mut c_void,
@@ -1059,6 +1046,8 @@ pub fn gen_recursive_proof_c(
     const_tree_path: &str,
     proof_type: &str,
     force_recursive_stream: bool,
+    recurser_id: &str,
+    stream_id: u64,
 ) -> u64 {
     let proof_file_name = CString::new(proof_file).unwrap();
     let proof_file_ptr = proof_file_name.as_ptr() as *mut std::os::raw::c_char;
@@ -1071,6 +1060,9 @@ pub fn gen_recursive_proof_c(
 
     let proof_type_name = CString::new(proof_type).unwrap();
     let proof_type_ptr = proof_type_name.as_ptr() as *mut std::os::raw::c_char;
+
+    let recurser_id_name = CString::new(recurser_id).unwrap();
+    let recurser_id_ptr = recurser_id_name.as_ptr() as *mut std::os::raw::c_char;
 
     unsafe {
         gen_recursive_proof(
@@ -1091,11 +1083,70 @@ pub fn gen_recursive_proof_c(
             const_tree_filename_ptr,
             proof_type_ptr,
             force_recursive_stream,
+            recurser_id_ptr,
+            stream_id,
         )
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+/// [`reserve_best_stream_nonblock_c`]: no stream in the current phase can ever hold the launch.
+pub const STREAM_NEVER_FITS: u32 = u32::MAX - 1;
+
+/// Scheduler: reserve the best free stream for this key without blocking.
+/// Returns `u32::MAX` when nothing is free right now (caller retries), [`STREAM_NEVER_FITS`] when
+/// nothing ever will be.
+pub fn reserve_best_stream_nonblock_c(
+    d_buffers: *mut c_void,
+    airgroup_id: u64,
+    air_id: u64,
+    proof_type: &str,
+    recursive: bool,
+    force_recursive: bool,
+) -> u32 {
+    let proof_type_name = CString::new(proof_type).unwrap();
+    let proof_type_ptr = proof_type_name.as_ptr() as *mut std::os::raw::c_char;
+    unsafe { reserve_best_stream_nonblock(d_buffers, airgroup_id, air_id, proof_type_ptr, recursive, force_recursive) }
+}
+
+/// Scheduler warm fast path: reserve `stream_id` iff it is free right now *and* its buffer size
+/// class holds this air. Returns true on success.
+pub fn reserve_stream_if_free_c(
+    d_buffers: *mut c_void,
+    stream_id: u32,
+    airgroup_id: u64,
+    air_id: u64,
+    proof_type: &str,
+    force_recursive: bool,
+) -> bool {
+    let proof_type_name = CString::new(proof_type).unwrap();
+    let proof_type_ptr = proof_type_name.as_ptr() as *mut std::os::raw::c_char;
+
+    unsafe { reserve_stream_if_free(d_buffers, stream_id, airgroup_id, air_id, proof_type_ptr, force_recursive) != 0 }
+}
+
+/// Give back a reservation the caller bailed out of. A reserved stream reads as busy to every
+/// selection pass, so failing without this would strand the slot for the process lifetime. Work
+/// already queued on the stream drains before it is reused. Only releases a stream still in the
+/// reserved state, so it is safe to call unconditionally on an error path.
+pub fn release_stream_reservation_c(d_buffers: *mut c_void, stream_id: u32) {
+    unsafe { release_stream_reservation(d_buffers, stream_id) }
+}
+
+pub fn calculate_const_tree_fixed_c(
+    p_setup_ctx: *mut c_void,
+    airgroup_id: u64,
+    air_id: u64,
+    proof_type: &str,
+    d_buffers: *mut c_void,
+) {
+    let proof_type_name = CString::new(proof_type).unwrap();
+    let proof_type_ptr = proof_type_name.as_ptr() as *mut std::os::raw::c_char;
+
+    unsafe {
+        calculate_const_tree_fixed(p_setup_ctx, airgroup_id, air_id, proof_type_ptr, d_buffers);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn gen_recursive_proof_final_c(
     p_setup_ctx: *mut c_void,
@@ -1132,66 +1183,13 @@ pub fn gen_recursive_proof_final_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn read_exec_file_c(exec_data: *mut u64, exec_file: *const i8, nCols: u64) {
-    unsafe {
-        read_exec_file(exec_data, exec_file as *mut std::os::raw::c_char, nCols);
-    }
+/// Fills the trace cells the witness scatter (`getWitnessTrace`) leaves unmapped, from the boundary cells it
+/// placed. No-op when the setup's exec file carries no band section, so it is safe to call
+/// unconditionally. Returns the number of bands expanded.
+pub fn expand_gate_bands_c(witness: *mut u8, exec_data: *mut u64, n_cols: u64, exec_words: u64, n: u64) -> u64 {
+    unsafe { expand_gate_bands(witness as *mut std::os::raw::c_void, exec_data, n_cols, exec_words, n) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-#[allow(clippy::too_many_arguments)]
-pub fn get_committed_pols_c(
-    circomWitness: *mut u8,
-    exec_data: *mut u64,
-    witness: *mut u8,
-    pPublics: *mut u8,
-    sizeWitness: u64,
-    N: u64,
-    nPublics: u64,
-    nCols: u64,
-) {
-    unsafe {
-        get_committed_pols(
-            circomWitness as *mut std::os::raw::c_void,
-            exec_data,
-            witness as *mut std::os::raw::c_void,
-            pPublics as *mut std::os::raw::c_void,
-            sizeWitness,
-            N,
-            nPublics,
-            nCols,
-        );
-    }
-}
-
-#[cfg(not(feature = "no_lib_link"))]
-#[allow(clippy::too_many_arguments)]
-pub fn get_committed_pols_validated_c(
-    circomWitness: *mut u8,
-    exec_data: *mut u64,
-    witness: *mut u8,
-    pPublics: *mut u8,
-    sizeWitness: u64,
-    N: u64,
-    nPublics: u64,
-    nCols: u64,
-) {
-    unsafe {
-        get_committed_pols_validated(
-            circomWitness as *mut std::os::raw::c_void,
-            exec_data,
-            witness as *mut std::os::raw::c_void,
-            pPublics as *mut std::os::raw::c_void,
-            sizeWitness,
-            N,
-            nPublics,
-            nCols,
-        );
-    }
-}
-
-#[cfg(not(feature = "no_lib_link"))]
 pub fn add_publics_aggregation_c(proof: *mut u8, offset: u64, publics: *mut u8, nPublics: u64) {
     unsafe {
         add_publics_aggregation(
@@ -1203,14 +1201,12 @@ pub fn add_publics_aggregation_c(proof: *mut u8, offset: u64, publics: *mut u8, 
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn init_final_snark_prover_c(zkeyFile: &str) -> *mut c_void {
+pub fn init_final_snark_prover_c(zkeyFile: &str, d_buffers_recursivef: *mut c_void) -> *mut c_void {
     let zkey_file_name = CString::new(zkeyFile).unwrap();
     let zkey_file_ptr = zkey_file_name.as_ptr() as *mut std::os::raw::c_char;
-    unsafe { init_final_snark_prover(zkey_file_ptr) }
+    unsafe { init_final_snark_prover(zkey_file_ptr, d_buffers_recursivef) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_snark_protocol_id_c(snark_prover: *mut c_void) -> u64 {
     if snark_prover.is_null() {
         return 0;
@@ -1218,33 +1214,60 @@ pub fn get_snark_protocol_id_c(snark_prover: *mut c_void) -> u64 {
     unsafe { get_snark_protocol_id(snark_prover) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+pub fn free_recursivef_proof_c(zkin: *mut c_void) {
+    unsafe { free_recursivef_proof(zkin) }
+}
+
 pub fn free_final_snark_prover_c(snark_prover: *mut c_void) {
     unsafe { free_final_snark_prover(snark_prover) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn pre_allocate_final_snark_prover_c(
     snark_prover: *mut c_void,
     unified_buffer_gpu: *mut c_void,
-    unified_buffer_size: u64,
+    d_buffers_recursivef: *mut c_void,
 ) {
-    unsafe { pre_allocate_final_snark_prover(snark_prover, unified_buffer_gpu, unified_buffer_size) }
+    unsafe { pre_allocate_final_snark_prover(snark_prover, unified_buffer_gpu, d_buffers_recursivef) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+/// The recursivef's device prover buffer of `d_buffers_recursivef`, grown to `bytes` if it holds
+/// fewer and is its own, for a final SNARK prover that proves in it after the recursivef, as
+/// [`pre_allocate_final_snark_prover_c`] does PLONK's: `Ok((buffer, its bytes))`. `Err(most)` if it
+/// cannot grow, `most` the bytes it could hold; `Err(0)` if it is not its own (carved from proofman's
+/// unified buffer) or there are none (the CPU).
+pub fn reserve_recursivef_aux_trace_c(
+    d_buffers_recursivef: *mut c_void,
+    bytes: u64,
+) -> Result<(*mut c_void, u64), u64> {
+    let mut held = 0u64;
+    // SAFETY: `d_buffers_recursivef` is null or the recursivef's device buffers, as the C side
+    // takes them, and `held` a u64 it writes.
+    let buffer = unsafe { reserve_recursivef_aux_trace(d_buffers_recursivef, bytes, &mut held) };
+    if buffer.is_null() {
+        Err(held)
+    } else {
+        Ok((buffer, held))
+    }
+}
+
 pub fn gen_final_snark_proof_c(
     prover: *mut c_void,
     circomWitnessFinal: *mut u8,
     proof: *mut u8,
     publics_snark: *mut u8,
+    d_buffers_recursivef: *mut c_void,
 ) {
     unsafe {
-        gen_final_snark_proof(prover, circomWitnessFinal as *mut std::os::raw::c_void, proof, publics_snark);
+        gen_final_snark_proof(
+            prover,
+            circomWitnessFinal as *mut std::os::raw::c_void,
+            proof,
+            publics_snark,
+            d_buffers_recursivef,
+        );
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn snark_proof_bytes_to_json_c(proof_bytes: &[u8], public_bytes: &[u8], protocol_id: i32) -> (String, String) {
     unsafe {
         let mut proof_json_ptr: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -1285,14 +1308,12 @@ pub fn snark_proof_bytes_to_json_c(proof_bytes: &[u8], public_bytes: &[u8], prot
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn set_log_level_c(level: u64) {
     unsafe {
         setLogLevel(level);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn stark_verify_c(
     verkey: &str,
     p_proof: *mut u64,
@@ -1318,7 +1339,6 @@ pub fn stark_verify_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn stark_verify_bn128_c(
     verkey: &str,
     p_proof: *mut c_void,
@@ -1332,7 +1352,6 @@ pub fn stark_verify_bn128_c(
     unsafe { stark_verify_bn128(p_proof, p_stark_info, p_expressions_bin, verkey_file_ptr, p_publics as *mut c_void) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn stark_verify_from_file_c(
     verkey: &str,
     proof: &str,
@@ -1361,7 +1380,6 @@ pub fn stark_verify_from_file_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn write_fixed_cols_bin_c(
     binfile: &str,
     airgroup: &str,
@@ -1383,19 +1401,16 @@ pub fn write_fixed_cols_bin_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_omp_max_threads_c() -> u64 {
     unsafe { get_omp_max_threads() }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn set_omp_num_threads_c(num_threads: u64) {
     unsafe {
         set_omp_num_threads(num_threads);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn gen_device_buffers_c(
     node_rank: u32,
     node_n_processes: u32,
@@ -1412,7 +1427,25 @@ pub fn gen_device_buffers_c(
     unsafe { gen_device_buffers(node_rank, node_n_processes, numa_nodes.as_ptr(), arity, max_n_bits_ext) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+pub fn use_packed_trace_c(d_commit_buffers: *mut ::std::os::raw::c_void, packed_trace: bool) {
+    unsafe {
+        use_packed_trace(d_commit_buffers, packed_trace);
+    }
+}
+
+pub fn register_instruction_table_c(
+    d_commit_buffers: *mut ::std::os::raw::c_void,
+    airgroup_id: u64,
+    air_id: u64,
+    table: &[u64],
+    num_entries: u64,
+    words_per_entry: u64,
+) {
+    unsafe {
+        register_instruction_table(d_commit_buffers, airgroup_id, air_id, table.as_ptr(), num_entries, words_per_entry);
+    }
+}
+
 pub fn gen_device_buffers_recursivef_c(
     p_setup_ctx: *mut u8,
     prover_buffer_size: u64,
@@ -1431,63 +1464,177 @@ pub fn gen_device_buffers_recursivef_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn free_device_buffers_recursivef_c(d_buffers: *mut c_void) {
     unsafe { free_device_buffers_recursivef(d_buffers) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-#[allow(clippy::too_many_arguments)]
 pub fn gen_device_streams_c(
     d_buffers: *mut ::std::os::raw::c_void,
-    n_streams: u64,
+    aux_trace_sizes: &[u64],
     n_recursive_streams: u64,
-    max_size_buffer: u64,
     max_size_buffer_aggregation: u64,
     max_pinned_proof_size: u64,
-    transcript_arity: u64,
+    merkle_tree_arity: u64,
 ) -> u64 {
     unsafe {
         gen_device_streams(
             d_buffers,
-            n_streams,
+            aux_trace_sizes.len() as u64,
             n_recursive_streams,
-            max_size_buffer,
+            aux_trace_sizes.as_ptr(),
             max_size_buffer_aggregation,
             max_pinned_proof_size,
-            transcript_arity,
+            merkle_tree_arity,
         )
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+#[allow(clippy::too_many_arguments)]
 pub fn alloc_device_large_buffers_c(
     d_buffers: *mut ::std::os::raw::c_void,
-    aux_trace_area: u64,
     aux_trace_recursive_area: u64,
     const_pols_area: u64,
     const_pols_aggregation_area: u64,
+    unified_buffer_pad_area: u64,
+    prefetch_region_area: u64,
+    // Phase-A recursion alias offset (elements) over the basic stream, 0 = none.
+    phase_a_alias_offset: u64,
+    late_region_bytes: u64,
+    // Streaming-commit slots, carved at the bottom of the aux area; the size is rounded up to 1 MiB.
+    n_slots: u64,
+    slot_bytes: u64,
+    // The headroom the plan was made with; the CUDA graphs get what it holds above PROOFMAN_GPU_MIN_HEADROOM_MB.
+    headroom_bytes: u64,
 ) {
     unsafe {
         alloc_device_large_buffers(
             d_buffers,
-            aux_trace_area,
             aux_trace_recursive_area,
             const_pols_area,
             const_pols_aggregation_area,
+            unified_buffer_pad_area,
+            prefetch_region_area,
+            phase_a_alias_offset,
+            late_region_bytes,
+            n_slots,
+            slot_bytes,
+            headroom_bytes,
         );
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-#[allow(clippy::too_many_arguments)]
-pub fn get_instances_ready_c(d_buffers: *mut ::std::os::raw::c_void, instances_ready: *mut i64) {
+pub fn configure_prefetch_zone_c(d_buffers: *mut ::std::os::raw::c_void, witness_bytes: u64, n_units: u32) {
+    unsafe { configure_prefetch_zone(d_buffers, witness_bytes, n_units) }
+}
+
+/// Stage a witness into the prefetch zone ahead of its commit. Returns the zone's GPU, or -1 when
+/// there is no zone or no free run; the commit then uploads for itself. `host_sync` waits for the
+/// H2D, which a caller about to recycle `trace` needs; otherwise the commit waits for it on device.
+#[cfg(not(feature = "cpu-only"))]
+pub fn stage_witness_c(
+    d_buffers: *mut c_void,
+    instance_id: u64,
+    trace: *mut c_void,
+    total_size: u64,
+    host_sync: bool,
+) -> i64 {
+    unsafe { stage_witness(d_buffers, instance_id, trace, total_size, host_sync) }
+}
+
+#[cfg(feature = "cpu-only")]
+pub fn stage_witness_c(
+    _d_buffers: *mut c_void,
+    _instance_id: u64,
+    _trace: *mut c_void,
+    _total_size: u64,
+    _host_sync: bool,
+) -> i64 {
+    -1
+}
+
+/// Drop a staging whose commit already ran, so its slot goes back to the zone.
+#[cfg(not(feature = "cpu-only"))]
+pub fn release_staged_witness_c(d_buffers: *mut c_void, instance_id: u64) {
+    unsafe { release_staged_witness(d_buffers, instance_id) }
+}
+
+#[cfg(feature = "cpu-only")]
+pub fn release_staged_witness_c(_d_buffers: *mut c_void, _instance_id: u64) {}
+
+pub fn get_mops_floor_bytes_c() -> u64 {
+    unsafe { get_mops_floor_bytes() }
+}
+
+pub fn get_post_alloc_headroom_bytes_c() -> u64 {
+    unsafe { get_post_alloc_headroom_bytes() }
+}
+
+/// Carves the aggregation const cache's LRU slots; returns its end offset (elements).
+pub fn configure_const_slot_cache_c(
+    d_buffers: *mut ::std::os::raw::c_void,
+    big_elems: u64,
+    normal_elems: u64,
+    n_lru: u32,
+) -> u64 {
+    unsafe { configure_const_slot_cache(d_buffers, big_elems, normal_elems, n_lru) }
+}
+
+/// Appends a pinned slot for the set `key`; returns the cache's new end offset (elements).
+pub fn pin_const_slot_c(d_buffers: *mut ::std::os::raw::c_void, key: i64, elems: u64) -> u64 {
+    unsafe { pin_const_slot(d_buffers, key, elems) }
+}
+
+/// Basic fixed pols stay in pinned host memory and are read in place (they did not fit the GPU).
+pub fn set_basic_fixed_on_host_c(d_buffers: *mut ::std::os::raw::c_void, on_host: bool) {
+    unsafe { set_basic_fixed_on_host(d_buffers, on_host) }
+}
+
+/// Keeps a set's packed const pols in pinned host memory for the const cache under `key`, the set's
+/// identity (see `const_set_key`), and marks the air cached.
+pub fn load_host_const_pols_c(
+    airgroup_id: u64,
+    air_id: u64,
+    proof_type: &str,
+    key: i64,
+    const_filename: &str,
+    const_size: u64,
+    d_buffers: *mut ::std::os::raw::c_void,
+) {
+    let proof_type_name = CString::new(proof_type).unwrap();
+    let const_filename_name = CString::new(const_filename).unwrap();
     unsafe {
-        get_instances_ready(d_buffers, instances_ready);
+        load_host_const_pols(
+            airgroup_id,
+            air_id,
+            proof_type_name.as_ptr() as *mut c_char,
+            key,
+            const_filename_name.as_ptr() as *mut c_char,
+            const_size,
+            d_buffers,
+        )
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+pub fn set_pipeline_mode_c(d_buffers: *mut ::std::os::raw::c_void, enable: bool) {
+    unsafe { set_pipeline_mode(d_buffers, enable) }
+}
+
+pub fn configure_phase_b_c(d_buffers: *mut ::std::os::raw::c_void) {
+    unsafe { configure_phase_b(d_buffers) }
+}
+
+pub fn set_phase_b_c(d_buffers: *mut ::std::os::raw::c_void, state: u32) -> i64 {
+    unsafe { set_phase_b(d_buffers, state) }
+}
+
+pub fn dump_pipeline_state_c(d_buffers: *mut ::std::os::raw::c_void) {
+    unsafe { dump_pipeline_state(d_buffers) }
+}
+
+pub fn harvest_pipeline_c(d_buffers: *mut ::std::os::raw::c_void) {
+    unsafe { harvest_pipeline(d_buffers) }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn reset_device_streams_c(d_buffers: *mut ::std::os::raw::c_void) {
     unsafe {
@@ -1495,39 +1642,175 @@ pub fn reset_device_streams_c(d_buffers: *mut ::std::os::raw::c_void) {
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn check_device_memory_c(node_rank: u32, node_size: u32) -> u64 {
     unsafe { check_device_memory(node_rank, node_size) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn get_num_gpus_c() -> u64 {
     unsafe { get_num_gpus() }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-/// Returns the prover's unified GPU buffer of the current device and its size in bytes.
-pub fn get_unified_buffer_gpu_c(d_buffers: *mut ::std::os::raw::c_void) -> (*mut ::std::os::raw::c_void, u64) {
-    let mut unified_buffer_size = 0;
-    let unified_buffer = unsafe { get_unified_buffer_gpu(d_buffers, &mut unified_buffer_size) };
-    (unified_buffer, unified_buffer_size)
+pub fn set_gpu_mode_c(use_gpu: bool) -> bool {
+    unsafe { set_gpu_mode(use_gpu) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn alloc_fixed_pols_buffer_gpu_c(d_buffers: *mut ::std::os::raw::c_void) {
+pub fn get_unified_buffer_gpu_c(d_buffers: *mut ::std::os::raw::c_void) -> *mut ::std::os::raw::c_void {
+    unsafe { get_unified_buffer_gpu(d_buffers) }
+}
+
+pub fn get_unified_buffer_gpu_size_c(d_buffers: *mut ::std::os::raw::c_void) -> u64 {
+    unsafe { get_unified_buffer_gpu_size(d_buffers) }
+}
+
+pub fn acquire_first_gpu_buffer_c(d_buffers: *mut ::std::os::raw::c_void) {
+    unsafe { acquire_first_gpu_buffer(d_buffers) }
+}
+
+pub fn release_first_gpu_buffer_c(d_buffers: *mut ::std::os::raw::c_void) {
+    unsafe { release_first_gpu_buffer(d_buffers) }
+}
+
+pub fn is_first_gpu_buffer_borrowed_c(d_buffers: *mut ::std::os::raw::c_void) -> bool {
+    unsafe { is_first_gpu_buffer_borrowed(d_buffers) != 0 }
+}
+
+/// Device of the first GPU (my_gpu_ids[0]); not always 0 (NUMA can reorder).
+pub fn get_first_gpu_id_c(d_buffers: *mut ::std::os::raw::c_void) -> u32 {
+    unsafe { get_first_gpu_id(d_buffers) }
+}
+
+/// Unified buffer of the first GPU (my_gpu_ids[0]). Does not touch the caller's current device.
+pub fn get_first_gpu_buffer_c(d_buffers: *mut ::std::os::raw::c_void) -> *mut ::std::os::raw::c_void {
+    unsafe { get_first_gpu_buffer(d_buffers) }
+}
+
+/// A carve boundary of the unified buffer, numbered as `get_layout_offset_gpu`'s switch reads it.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug)]
+pub enum LayoutBoundary {
+    Late = 0,
+    Prefetch = 1,
+    AuxBase = 2,
+    MopsBase = 3,
+    AggBase = 4,
+    End = 5,
+    RecursiveBase = 6,
+}
+
+/// Byte offset of a carve boundary in each GPU's unified buffer (0 on the CPU backend).
+pub fn get_layout_offset_c(d_buffers: *mut ::std::os::raw::c_void, which: LayoutBoundary) -> u64 {
+    unsafe { get_layout_offset(d_buffers, which as u32) }
+}
+
+/// After a snark's carve of GPU 0: drop its const-cache tags, late region and every stream's cached consts.
+pub fn restore_after_carve_c(d_buffers: *mut ::std::os::raw::c_void) {
+    unsafe { restore_after_carve(d_buffers) }
+}
+
+/// Test knob: fill GPU 0's whole unified buffer with 0xFF, as a snark carve would leave it.
+pub fn debug_clobber_unified_c(d_buffers: *mut ::std::os::raw::c_void) {
+    unsafe { debug_clobber_unified(d_buffers) }
+}
+
+/// Drop every stream's const-reuse identity, so its next proof reloads the constants cached in aux.
+pub fn invalidate_stream_contexts_c(d_buffers: *mut ::std::os::raw::c_void) {
+    unsafe { invalidate_stream_contexts(d_buffers) }
+}
+
+pub fn stream_commit_pause_c() {
+    unsafe { stream_commit_pause() }
+}
+
+pub fn get_stream_commit_slots_c(d_buffers: *mut ::std::os::raw::c_void) -> u64 {
+    unsafe { get_stream_commit_slots(d_buffers) }
+}
+
+/// GPUs this process drives (not the node's device count).
+pub fn get_stream_commit_gpus_c(d_buffers: *mut ::std::os::raw::c_void) -> u64 {
+    unsafe { get_stream_commit_gpus(d_buffers) }
+}
+
+/// One air's slot bytes (its commit area with the col-major tail, then its scratch). None when no
+/// slot can commit the air. `input_bytes`: a GPU-witness air's staged-input bound (0 otherwise).
+#[allow(clippy::too_many_arguments)]
+pub fn stream_commit_slot_bytes_c(
+    p_setup: *mut c_void,
+    airgroup_id: u64,
+    air_id: u64,
+    n_bits: u64,
+    n_bits_ext: u64,
+    n_cols: u64,
+    words_per_row: u64,
+    input_bytes: u64,
+    packed: bool,
+    indexed: bool,
+) -> Option<u64> {
+    let bytes = unsafe {
+        stream_commit_slot_bytes(
+            p_setup,
+            airgroup_id,
+            air_id,
+            n_bits,
+            n_bits_ext,
+            n_cols,
+            words_per_row,
+            input_bytes,
+            packed as u64,
+            indexed as u64,
+        )
+    };
+    (bytes != 0).then_some(bytes)
+}
+
+/// Enable the slots `alloc_device_large_buffers_c` carved.
+pub fn configure_stream_commit_slots_c(d_buffers: *mut ::std::os::raw::c_void) {
+    unsafe { configure_stream_commit_slots(d_buffers) }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn commit_witness_streaming_c(
+    d_buffers: *mut ::std::os::raw::c_void,
+    slot_idx: u64,
+    instance_id: u64,
+    airgroup_id: u64,
+    air_id: u64,
+    packed: *mut ::std::os::raw::c_void,
+    n_bits: u64,
+    n_bits_ext: u64,
+    n_cols: u64,
+    words_per_row: u64,
+    col_widths: *mut ::std::os::raw::c_void,
+    root: *mut ::std::os::raw::c_void,
+    // StepsParams: the slot stages publics and value pools from it. Null fails the commit of an air
+    // with values whose lookups or hints are evaluated on the slot.
+    params: *mut ::std::os::raw::c_void,
+) -> i64 {
     unsafe {
-        alloc_fixed_pols_buffer_gpu(d_buffers);
+        commit_witness_streaming(
+            d_buffers,
+            slot_idx,
+            instance_id,
+            airgroup_id,
+            air_id,
+            packed,
+            n_bits,
+            n_bits_ext,
+            n_cols,
+            words_per_row,
+            col_widths,
+            root,
+            params,
+        )
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn free_fixed_pols_buffer_gpu_c(d_buffers: *mut ::std::os::raw::c_void) {
-    unsafe {
-        free_fixed_pols_buffer_gpu(d_buffers);
-    }
+pub fn get_unified_buffer_gpu_for_recursivef_c(
+    d_buffers: *mut ::std::os::raw::c_void,
+    d_buffers_recursivef: *mut ::std::os::raw::c_void,
+) -> *mut ::std::os::raw::c_void {
+    unsafe { get_unified_buffer_gpu_for_recursivef(d_buffers, d_buffers_recursivef) }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn load_fixed_pols_recursivef_c(
     pSetupCtx: *mut ::std::os::raw::c_void,
     pConstTree: *mut ::std::os::raw::c_void,
@@ -1538,14 +1821,15 @@ pub fn load_fixed_pols_recursivef_c(
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
 pub fn free_device_buffers_c(d_buffers: *mut ::std::os::raw::c_void) {
     unsafe {
         free_device_buffers(d_buffers);
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
+/// `exec_data`/`exec_words` carry the whole `.exec` file, whose tail holds the gate bands the
+/// GPU expander needs. Pass a null pointer and 0 for setups without one (basic airs).
+#[allow(clippy::too_many_arguments)]
 pub fn load_device_setup_c(
     airgroup_id: u64,
     air_id: u64,
@@ -1554,6 +1838,8 @@ pub fn load_device_setup_c(
     d_buffers: *mut ::std::os::raw::c_void,
     verkey_root: *mut u8,
     packed_info: *mut ::std::os::raw::c_void,
+    exec_data: *mut u64,
+    exec_words: u64,
 ) {
     let proof_type_name = CString::new(proof_type).unwrap();
     let proof_type_ptr = proof_type_name.as_ptr() as *mut std::os::raw::c_char;
@@ -1567,12 +1853,66 @@ pub fn load_device_setup_c(
             d_buffers,
             verkey_root as *mut std::os::raw::c_void,
             packed_info,
+            exec_data,
+            exec_words,
+        );
+    }
+}
+
+/// Upload an air's packed custom commit into its reserved const-buffer slot, on every GPU or the first.
+#[allow(clippy::too_many_arguments)]
+pub fn upload_custom_commit_packed_c(
+    airgroup_id: u64,
+    air_id: u64,
+    proof_type: &str,
+    custom_file: &str,
+    words_per_row: u64,
+    p_setup_ctx: *mut c_void,
+    d_buffers: *mut ::std::os::raw::c_void,
+    only_first_gpu: bool,
+) {
+    let proof_type_name = CString::new(proof_type).unwrap();
+    let custom_file_name = CString::new(custom_file).unwrap();
+    unsafe {
+        upload_custom_commit_packed(
+            airgroup_id,
+            air_id,
+            proof_type_name.as_ptr() as *mut std::os::raw::c_char,
+            custom_file_name.as_ptr() as *mut std::os::raw::c_char,
+            words_per_row,
+            p_setup_ctx,
+            d_buffers,
+            only_first_gpu,
+        );
+    }
+}
+
+/// Record the const-buffer slot reserved for an air's packed custom commits. Called for every air,
+/// shared slot or not, so a slot-sharing air also learns the offset.
+pub fn reserve_custom_commit_slot_c(
+    airgroup_id: u64,
+    air_id: u64,
+    proof_type: &str,
+    offset: u64,
+    reserved_words: u64,
+    d_buffers: *mut ::std::os::raw::c_void,
+    only_first_gpu: bool,
+) {
+    let proof_type_name = CString::new(proof_type).unwrap();
+    unsafe {
+        reserve_custom_commit_slot(
+            airgroup_id,
+            air_id,
+            proof_type_name.as_ptr() as *mut std::os::raw::c_char,
+            offset,
+            reserved_words,
+            d_buffers,
+            only_first_gpu,
         );
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(not(feature = "no_lib_link"))]
 pub fn load_device_const_pols_c(
     airgroup_id: u64,
     air_id: u64,
@@ -1580,16 +1920,13 @@ pub fn load_device_const_pols_c(
     d_buffers: *mut ::std::os::raw::c_void,
     const_filename: &str,
     const_size: u64,
-    const_tree_filename: &str,
-    const_tree_size: u64,
     proof_type: &str,
     only_first_gpu: bool,
+    // This air shares its slot with one already uploaded: record the offsets, transfer nothing.
+    already_loaded: bool,
 ) {
     let const_filename_name = CString::new(const_filename).unwrap();
     let const_filename_ptr = const_filename_name.as_ptr() as *mut std::os::raw::c_char;
-
-    let const_tree_filename_name = CString::new(const_tree_filename).unwrap();
-    let const_tree_filename_ptr = const_tree_filename_name.as_ptr() as *mut std::os::raw::c_char;
 
     let proof_type_name = CString::new(proof_type).unwrap();
     let proof_type_ptr = proof_type_name.as_ptr() as *mut std::os::raw::c_char;
@@ -1602,1072 +1939,349 @@ pub fn load_device_const_pols_c(
             d_buffers,
             const_filename_ptr,
             const_size,
-            const_tree_filename_ptr,
-            const_tree_size,
             proof_type_ptr,
             only_first_gpu,
+            already_loaded,
         );
     }
 }
 
-#[cfg(not(feature = "no_lib_link"))]
-pub fn prewarm_const_tree_host_cache_c(const_tree_filename: &str, const_tree_size: u64) -> bool {
-    let const_tree_filename_name = CString::new(const_tree_filename).unwrap();
-    let const_tree_filename_ptr = const_tree_filename_name.as_ptr() as *mut std::os::raw::c_char;
-
-    unsafe { prewarm_const_tree_host_cache(const_tree_filename_ptr, const_tree_size) != 0 }
+// ---- Prover-side multiplicities -------------------------------------------------------------
+// Geometry is registered once; the host accumulator pointer is passed per call and never retained
+// on the C++ side, so Rust stays free to reallocate or reset its accumulator.
+pub fn register_mul_vt_c(
+    airgroup_id: u64,
+    air_id: u64,
+    num_rows: u64,
+    num_cols: u64,
+    table_ids: &[u64],
+    acc_bases: &[u64],
+) {
+    assert_eq!(table_ids.len(), acc_bases.len(), "register_mul_vt_c: one acc base per table id");
+    unsafe {
+        register_mul_vt(
+            airgroup_id,
+            air_id,
+            num_rows,
+            num_cols,
+            table_ids.as_ptr(),
+            acc_bases.as_ptr(),
+            table_ids.len() as u64,
+        );
+    }
 }
 
-// ------------------------
-// MOCK METHODS FOR TESTING
-// ------------------------
-#[cfg(feature = "no_lib_link")]
-pub fn launch_callback_c(_instance_id: u64, _proof_type: &str) {
-    trace!("{}: ··· {}", "ffi     ", "launch_callback: This is a mock call because there is no linked library");
+/// A witness kernel's entry point, as `ZISK_GPU_WITNESS_ENTRIES` generates it.
+///
+/// Enqueue-only: no allocation, no synchronisation, one launch on `stream`; anything else breaks
+/// the CUDA graph capture of the commit path. Arguments: device inputs, their count, commit slot,
+/// device id (-1 = current) and `cudaStream_t`. Returns 0 on success.
+///
+/// Declared here because this crate is below proofman-common, which re-exports it.
+pub type GpuWitnessFillFn = unsafe extern "C" fn(
+    d_ops: *const c_void,
+    num_ops: u64,
+    d_dst: *mut u64,
+    device_id: i32,
+    stream: *mut c_void,
+) -> i32;
+
+/// Forget every registered kernel, so a later prover in the process does not inherit them.
+pub fn gpu_witness_clear_c(d_buffers: *mut c_void) {
+    unsafe { gpu_witness_clear(d_buffers) }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn register_proof_done_callback_c(_tx: crossbeam_channel::Sender<(u64, String)>) {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "register_proof_done_callback: This is a mock call because there is no linked library"
-    );
+/// Whether a kernel is registered for this air, i.e. the prover produces its witness on the
+/// device. The single source of truth for staging kernel inputs vs filling a trace.
+pub fn gpu_witness_is_registered_c(d_buffers: *mut c_void, airgroup_id: u64, air_id: u64) -> bool {
+    unsafe { gpu_witness_is_registered(d_buffers, airgroup_id, air_id) == 1 }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn initialize_agg_readiness_tracker_c() {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "initialize_agg_readiness_tracker: This is a mock call because there is no linked library"
-    );
+/// Declare that this air's stage-1 witness comes from `fill`, not a host upload.
+pub fn gpu_witness_register_c(
+    d_buffers: *mut c_void,
+    airgroup_id: u64,
+    air_id: u64,
+    bytes_per_op: u64,
+    input_bytes_max: u64,
+    emits: i32,
+    fill: GpuWitnessFillFn,
+) {
+    unsafe { gpu_witness_register(d_buffers, airgroup_id, air_id, bytes_per_op, input_bytes_max, emits, fill) }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn free_agg_readiness_tracker_c() {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "free_agg_readiness_tracker: This is a mock call because there is no linked library"
-    );
+/// How many airs the C++ side has registered.
+pub fn gpu_witness_count_c(d_buffers: *mut c_void) -> u64 {
+    unsafe { gpu_witness_count(d_buffers) }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn agg_is_ready_c() -> i32 {
-    0
+/// Virtual range-check tables the prover can compute itself, as (table id, bias) pairs.
+pub fn mul_register_range_tables_c(table_ids: &[u64], biases: &[i64]) {
+    assert_eq!(table_ids.len(), biases.len(), "mul_register_range_tables_c: one bias per table id");
+    unsafe { mul_register_range_tables(table_ids.as_ptr(), biases.as_ptr(), table_ids.len() as u64) }
+}
+/// Hand down an exact-match key->row map.
+pub fn mul_register_table_map_c(table_id: u64, kv: &[u64], n_key: usize, slots: u64) {
+    unsafe { mul_register_table_map(table_id, kv.as_ptr(), kv.len() as u64, slots, n_key as u64) }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn reset_agg_readiness_tracker_c() {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "reset_agg_readiness_tracker: This is a mock call because there is no linked library"
-    );
+pub fn mul_migrated_tables_c() -> Vec<u64> {
+    // The C side returns the total and writes at most `cap`: size first, then fill.
+    let mut out = Vec::new();
+    loop {
+        let n = unsafe { mul_migrated_tables(out.as_mut_ptr(), out.len() as u64) } as usize;
+        if n <= out.len() {
+            out.truncate(n);
+            return out;
+        }
+        out.resize(n, 0);
+    }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn clear_proof_done_callback_c() {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "_clear_proof_done_callback: This is a mock call because there is no linked library"
-    );
+/// The C registry's name for an air (`mulAirKey`): air ids repeat across airgroups.
+fn mul_air_key(airgroup_id: u64, air_id: u64) -> u64 {
+    (airgroup_id << 32) | air_id
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn stark_info_new_c(
-    _filename: &str,
-    _recursive_final: bool,
-    _recursive: bool,
-    _verify_constraints: bool,
-    _verify: bool,
-    _gpu: bool,
-    _preallocate: bool,
-) -> *mut c_void {
-    trace!("··· {}", "starkinfo_new: This is a mock call because there is no linked library");
-    std::ptr::null_mut()
+/// Whether the prover counts any table of the air. An air where it counts none needs no host
+/// accumulator at all.
+pub fn mul_air_has_owned_c(airgroup_id: u64, air_id: u64) -> bool {
+    unsafe { mul_air_has_owned(mul_air_key(airgroup_id, air_id)) != 0 }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn get_map_totaln_c(_p_stark_info: *mut c_void) -> u64 {
-    trace!("··· {}", "get_map_totaln: This is a mock call because there is no linked library");
-    100000000
+/// Allow the device to export table traces by itself. Only sound when no cross-rank reduction is
+/// needed, since the device accumulator holds this process's counts alone.
+pub fn mul_set_device_export_c(enabled: bool) {
+    unsafe { mul_set_device_export(enabled as u64) }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn get_map_totaln_contributions_c(_p_stark_info: *mut c_void) -> u64 {
-    trace!("··· {}", "get_map_totaln_contributions: This is a mock call because there is no linked library");
-    100000000
+/// Whether the device owns every table of the air, so the host must not build its trace.
+pub fn mul_air_device_owned_c(airgroup_id: u64, air_id: u64) -> bool {
+    unsafe { mul_air_device_owned(mul_air_key(airgroup_id, air_id)) != 0 }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn get_tree_size_c(_p_stark_info: *mut c_void) -> u64 {
-    trace!("{}: ··· {}", "ffi     ", "get_tree_size: This is a mock call because there is no linked library");
-    100000000
+/// `mul_sync_commits_c`: whether the prover's counts can be trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MulSync {
+    Ok,
+    Short,      // fewer commits than instances before the deadline
+    Extra,      // more: one counted twice
+    OutOfTable, // lookups decoded outside their table, or a selector >= 2^32
+    Unknown(u64),
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn get_const_offset_c(_p_stark_info: *mut c_void) -> u64 {
-    trace!("··· {}", "get_const_offset: This is a mock call because there is no linked library");
-    100000000
+/// Check, once every instance has launched its scatter, that the counts can be used. The table's
+/// own commit reads the accumulator on the device, so this is the ordering point that makes it
+/// complete.
+pub fn mul_sync_commits_c(expected_commits: u64) -> MulSync {
+    match unsafe { mul_sync_commits(expected_commits) } {
+        0 => MulSync::Ok,
+        1 => MulSync::Short,
+        2 => MulSync::Extra,
+        3 => MulSync::OutOfTable,
+        s => MulSync::Unknown(s),
+    }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn get_proof_size_c(_p_stark_info: *mut c_void) -> u64 {
-    trace!("··· {}", "get_proof_size: This is a mock call because there is no linked library");
-    100000000
+/// Instances that have counted their lookups this proof.
+pub fn mul_commit_count_c() -> u64 {
+    unsafe { mul_commit_count() }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn get_proof_pinned_size_c(_p_stark_info: *mut c_void) -> u64 {
-    trace!("··· {}", "get_pinned_proof_size: This is a mock call because there is no linked library");
-    100000000
+/// Call after `mul_sync_commits_c`.
+///
+/// # Safety
+/// `host_acc` must point to at least the registered `nCounters` u64 for this air, valid for the
+/// duration of the call. The C++ side does not retain it.
+pub unsafe fn mul_fold_c(airgroup_id: u64, air_id: u64, host_acc: *mut u64) {
+    unsafe { mul_fold(mul_air_key(airgroup_id, air_id), host_acc) }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn register_host_memory_c(_ptr: *mut c_void, _size: u64) -> bool {
-    trace!("··· {}", "register_host_memory: This is a mock call because there is no linked library");
-    false
+/// # Safety
+/// `d_buffers` must be the live device-buffers pointer.
+pub unsafe fn mul_alloc_c(d_buffers: *mut c_void) {
+    unsafe { mul_alloc(d_buffers) }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn unregister_host_memory_c(_ptr: *mut c_void) {
-    trace!("··· {}", "unregister_host_memory: This is a mock call because there is no linked library");
+/// Count one instance's lookups straight from its filled witness, for paths that never commit
+/// (verify-constraints, debug), where the commit hook does not run. `aux_ready`: stage 2 and the
+/// im-pols are computed.
+/// # Safety
+/// `p_setup` and `steps_params` must be live for the duration of the call; neither is retained.
+pub unsafe fn mul_scatter_c(
+    p_setup: *mut c_void,
+    steps_params: *mut u8,
+    airgroup_id: u64,
+    air_id: u64,
+    aux_ready: bool,
+) {
+    unsafe { mul_scatter(p_setup, steps_params as *mut c_void, airgroup_id, air_id, aux_ready as u64) }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn malloc_host_memory_c(_size: u64) -> *mut c_void {
-    trace!("··· {}", "malloc_host_memory: This is a mock call because there is no linked library");
-    std::ptr::null_mut()
+/// Whether the air looks up any table the prover counts.
+pub fn mul_air_has_jobs_c(p_setup: *mut c_void, airgroup_id: u64, air_id: u64) -> bool {
+    unsafe { mul_air_has_jobs(p_setup, airgroup_id, air_id) != 0 }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn free_host_memory_c(_ptr: *mut c_void) {
-    trace!("··· {}", "free_host_memory: This is a mock call because there is no linked library");
+/// Late-region bytes per GPU (the multiplicity mirrors; the slot scratch lives in the slots).
+pub fn late_region_bytes_c(with_peers: bool) -> u64 {
+    unsafe { late_region_bytes(with_peers as u64) }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn set_memory_expressions_c(_p_stark_info: *mut c_void, _n_tmp1: u64, _n_tmp3: u64) {
-    trace!("··· {}", "set_memory_expressions: This is a mock call because there is no linked library");
+/// Why the air's lookups into prover-owned tables cannot be counted, if they cannot.
+pub fn mul_air_plan_error_c(p_setup: *mut c_void, airgroup_id: u64, air_id: u64) -> Option<String> {
+    let n = unsafe { mul_air_plan_error(p_setup, airgroup_id, air_id, std::ptr::null_mut(), 0) } as usize;
+    if n == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; n];
+    unsafe { mul_air_plan_error(p_setup, airgroup_id, air_id, buf.as_mut_ptr() as *mut c_char, n as u64) };
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn get_map_totaln_custom_commits_fixed_c(_p_stark_info: *mut c_void) -> u64 {
-    trace!("··· {}", "get_map_totaln: This is a mock call because there is no linked library");
-    100000000
+/// Whether such a lookup reads a stage-2 or im-pol value.
+pub fn mul_air_reads_aux_c(p_setup: *mut c_void, airgroup_id: u64, air_id: u64) -> bool {
+    unsafe { mul_air_reads_aux(p_setup, airgroup_id, air_id) != 0 }
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn get_custom_commit_id_c(_p_stark_info: *mut c_void, _name: &str) -> u64 {
-    trace!("··· {}", "get_custom_commit_id: This is a mock call because there is no linked library");
-    100000000
+/// Per proves-side lookup of a table air, in hint order: the stage-1 column its multiplicity is
+/// (`None` when it is not a plain one) and its tuple length.
+pub fn mul_proves_hints_c(p_setup: *mut c_void) -> Vec<(Option<usize>, usize)> {
+    let n = unsafe { mul_proves_hints(p_setup, std::ptr::null_mut(), std::ptr::null_mut(), 0) } as usize;
+    let (mut cols, mut lens) = (vec![0i64; n], vec![0u64; n]);
+    unsafe { mul_proves_hints(p_setup, cols.as_mut_ptr(), lens.as_mut_ptr(), n as u64) };
+    cols.into_iter().zip(lens).map(|(c, l)| (usize::try_from(c).ok(), l as usize)).collect()
 }
 
-#[cfg(feature = "no_lib_link")]
-pub fn stark_info_free_c(_p_stark_info: *mut c_void) {
-    trace!("··· {}", "starkinfo_free: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn load_const_pols_c(_pConstPolsAddress: *mut u8, _const_filename: &str, _const_size: u64) {
-    trace!("··· {}", "load_const_pols: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_const_tree_size_c(_pStarkInfo: *mut c_void) -> u64 {
-    trace!("··· {}", "get_const_tree_size: This is a mock call because there is no linked library");
-    1000000
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_const_size_c(_pStarkInfo: *mut c_void) -> u64 {
-    trace!("··· {}", "get_const_size: This is a mock call because there is no linked library");
-    1000000
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn calculate_words_per_row_c(_pStarkInfo: *mut c_void, _const_pols_path: &str) -> u64 {
-    trace!("··· {}", "calculate_words_per_row: This is a mock call because there is no linked library");
-    100
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn load_const_tree_c(
-    _pStarkInfo: *mut c_void,
-    _pConstPolsTreeAddress: *mut u8,
-    _tree_filename: &str,
-    _const_tree_size: u64,
-    _verkey_path: &str,
+/// Rows `r0..r0 + bus.len()` of proves-side lookup `k`, evaluated from the air's row-major fixed
+/// columns: bus ids into `bus`, the leading `len` tuple elements row-major into `tuple`. False when
+/// a field does not compile or reads anything but fixed columns.
+pub fn mul_eval_proves_hint_c(
+    p_setup: *mut c_void,
+    k: usize,
+    const_pols: &[u64],
+    r0: usize,
+    bus: &mut [u64],
+    tuple: &mut [u64],
+    len: usize,
 ) -> bool {
-    trace!("··· {}", "load_const_tree: This is a mock call because there is no linked library");
-    true
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn init_gpu_setup_c(_maxBitsExt: u64) {
-    trace!("··· {}", "init_gpu_setup: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn pack_const_pols_c(_pStarkinfo: *mut c_void, _pConstPols: *mut u8, _constFile: &str) {
-    trace!("··· {}", "pack_const_pols: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn tile_const_pols_c(
-    _pStarkinfo: *mut c_void,
-    _pConstPols: *mut u8,
-    _constFile: &str,
-    _pConstTree: *mut u8,
-    _constTreeFile: &str,
-    _unified_buffer_gpu: *mut c_void,
-) {
-    trace!("··· {}", "tile_const_pols: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn prepare_blocks_c(_pol: *mut u64, _N: u64, _nCols: u64, _unified_buffer_gpu: *mut c_void) {
-    trace!("··· {}", "prepare_blocks: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn calculate_const_tree_c(
-    _pStarkInfo: *mut c_void,
-    _pConstPols: *mut u8,
-    _pConstPolsTreeAddress: *mut u8,
-    _unified_buffer_gpu: *mut c_void,
-) {
-    trace!("··· {}", "calculate_const_tree: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn calculate_const_tree_bn128_c(_pStarkInfo: *mut c_void, _pConstPols: *mut u8, _pConstPolsTreeAddress: *mut u8) {
-    trace!("··· {}", "calculate_const_tree: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn write_const_tree_c(_pStarkInfo: *mut c_void, _pConstPolsTreeAddress: *mut u8, _tree_filename: &str) {
-    trace!("··· {}", "write_const_tree: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn write_const_tree_bn128_c(_pStarkInfo: *mut c_void, _pConstPolsTreeAddress: *mut u8, _tree_filename: &str) {
-    trace!("··· {}", "write_const_tree_bn128: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn verify_root_bn128_from_tree_c(_tree_filename: &str, _expected_root: &str) -> bool {
-    trace!("··· {}", "verify_root_bn128_from_tree: This is a mock call because there is no linked library");
-    true
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn expressions_bin_new_c(_filename: &str, _global: bool, _verify: bool) -> *mut c_void {
-    std::ptr::null_mut()
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn validate_expressions_bin_c(_p_expressions_bin: *mut c_void, _p_stark_info: *mut c_void) {}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_max_n_tmp1_c(_p_expressions_bin: *mut c_void) -> u64 {
-    10000
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_max_n_tmp3_c(_p_expressions_bin: *mut c_void) -> u64 {
-    10000
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_max_n_args_c(_p_expressions_bin: *mut c_void) -> u64 {
-    10000
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_max_n_ops_c(_p_expressions_bin: *mut c_void) -> u64 {
-    10000
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_operations_quotient_c(_p_expressions_bin: *mut c_void, _p_stark_info: *mut c_void) -> u64 {
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn expressions_bin_free_c(_p_expressions_bin: *mut c_void) {}
-
-#[cfg(feature = "no_lib_link")]
-pub fn n_hint_ids_by_name_c(_p_expressions_bin: *mut c_void, _hint_name: &str) -> u64 {
-    trace!("··· {}", "n_hint_ids_by_name: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_hint_ids_by_name_c(_p_expressions_bin: *mut c_void, _hint_ids: *mut u64, _hint_name: &str) {
-    trace!("··· {}", "get_hint_ids_by_name: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn get_hint_field_c(
-    _p_setup_ctx: *mut c_void,
-    _airgroup_id: u64,
-    _air_id: u64,
-    _p_steps_params: *mut u8,
-    _hint_field_values: *mut c_void,
-    _hint_id: u64,
-    _hint_field_name: &str,
-    _hint_options: *mut u8,
-    _d_buffers: *mut c_void,
-    _stream_id: u64,
-    _constant: bool,
-) {
-    trace!("··· {}", "get_hint_field: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_hint_field_sizes_c(
-    _p_setup_ctx: *mut c_void,
-    _hint_field_values: *mut c_void,
-    _hint_id: u64,
-    _hint_field_name: &str,
-    _hint_options: *mut u8,
-) {
-    trace!("··· {}", "get_hint_field_sizes: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_hint_field_values_c(_p_setup_ctx: *mut c_void, _hint_id: u64, _hint_field_name: &str) -> u64 {
-    trace!("··· {}", "get_hint_field_values: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn mul_hint_fields_c(
-    _p_setup_ctx: *mut c_void,
-    _p_steps_params: *mut u8,
-    _n_hints: u64,
-    _hint_id: *mut u64,
-    _hint_field_dest: Vec<&str>,
-    _hint_field_name1: Vec<&str>,
-    _hint_field_name2: Vec<&str>,
-    _hint_options1: *mut *mut u8,
-    _hint_options2: *mut *mut u8,
-) {
-    trace!("··· {}", "mul_hint_fields: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn acc_hint_field_c(
-    _p_setup_ctx: *mut c_void,
-    _p_steps_params: *mut u8,
-    _hint_id: u64,
-    _hint_field_dest: &str,
-    _hint_field_airgroupvalue: &str,
-    _hint_field_name: &str,
-    _add: bool,
-) {
-    trace!("··· {}", "acc_hint_fields: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn acc_mul_hint_fields_c(
-    _p_setup_ctx: *mut c_void,
-    _p_steps_params: *mut u8,
-    _hint_id: u64,
-    _hint_field_dest: &str,
-    _hint_field_airgroupvalue: &str,
-    _hint_field_name1: &str,
-    _hint_field_name2: &str,
-    _hint_options1: *mut u8,
-    _hint_options2: *mut u8,
-    _add: bool,
-) {
-    trace!("··· {}", "acc_mul_hint_fields: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn update_airgroupvalue_c(
-    _p_setup_ctx: *mut c_void,
-    _p_steps_params: *mut u8,
-    _hint_id: u64,
-    _hint_field_airgroupvalue: &str,
-    _hint_field_name1: &str,
-    _hint_field_name2: &str,
-    _hint_options1: *mut u8,
-    _hint_options2: *mut u8,
-    _add: bool,
-) -> u64 {
-    trace!("··· {}", "update_airgroupvalue: This is a mock call because there is no linked library");
-    10000
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn set_hint_field_c(
-    _p_setup_ctx: *mut c_void,
-    _p_params: *mut u8,
-    _values: *mut u8,
-    _hint_id: u64,
-    _hint_field_name: &str,
-) -> u64 {
-    trace!("··· {}", "set_hint_field: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_hint_field_id_c(_p_setup_ctx: *mut c_void, _hint_id: u64, _hint_field_name: &str) -> u64 {
-    trace!("··· {}", "get_hint_field_id: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn calculate_impols_expressions_c(_p_setup: *mut c_void, _step: u64, _p_steps_params: *mut u8) {
-    trace!("··· {}", "calculate_impols_expression: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn calculate_witness_expressions_c(_p_setup: *mut c_void, _p_steps_params: *mut u8) {
-    trace!("··· {}", "calculate_witness_expressions: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn custom_commit_size_c(_p_setup: *mut c_void, _commit_id: u64) -> u64 {
-    trace!("{}: ··· {}", "ffi     ", "custom_commit_size: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn load_custom_commit_c(_p_setup: *mut c_void, _commit_id: u64, _buffer: *mut u8, _tree_file: &str) {
-    trace!("··· {}", "load_custom_commit: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn write_custom_commit_c(
-    _root: *mut u8,
-    _arity: u64,
-    _n_bits: u64,
-    _n_bits_ext: u64,
-    _n_cols: u64,
-    _d_buffers: *mut c_void,
-    _buffer: *mut u8,
-    _buffer_file: &str,
-) {
-    trace!("··· {}", "write_custom_commit: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn commit_witness_c(
-    _p_setup: *mut c_void,
-    _p_params: *mut u8,
-    _instance_id: u64,
-    _airgroup_id: u64,
-    _air_id: u64,
-    _root: *mut u8,
-    _d_buffers: *mut c_void,
-) -> u64 {
-    trace!("{}: ··· {}", "ffi     ", "commit_witness: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_n_constraints_c(_p_setup: *mut c_void) -> u64 {
-    trace!("··· {}", "get_n_constraints: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_constraints_lines_sizes_c(_p_setup: *mut c_void, _constraints_sizes: *mut u64) {
-    trace!("··· {}", "get_constraints_lines_sizes: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_constraints_lines_c(_p_setup: *mut c_void, _constraints_lines: *mut *mut u8) {
-    trace!("··· {}", "get_constraints_lines: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn initialize_instance_c(
-    _p_setup: *mut c_void,
-    _airgroup_id: u64,
-    _air_id: u64,
-    _instance_id: u64,
-    _p_steps_params: *mut u8,
-    _d_buffers: *mut c_void,
-) -> u64 {
-    trace!("··· {}", "initialize_instance: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn calculate_trace_instance_c(
-    _p_setup: *mut c_void,
-    _airgroup_id: u64,
-    _air_id: u64,
-    _p_steps_params: *mut u8,
-    _d_buffers: *mut c_void,
-    _stream_id: u64,
-) {
-    trace!("··· {}", "calculate_trace_instance: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn verify_constraints_c(
-    _p_setup: *mut c_void,
-    _airgroup_id: u64,
-    _air_id: u64,
-    _p_steps_params: *mut u8,
-    _constraints_info: *mut c_void,
-    _d_buffers: *mut c_void,
-    _stream_id: u64,
-) {
-    trace!("··· {}", "verify_constraints: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_n_global_constraints_c(_p_global_constraints_bin: *mut c_void) -> u64 {
-    trace!("··· {}", "get_n_global_constraints: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_global_constraints_lines_sizes_c(
-    _p_global_constraints_bin: *mut c_void,
-    _global_constraints_sizes: *mut u64,
-) {
-    trace!("··· {}", "get_global_constraints_lines_sizes: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_global_constraints_lines_c(_p_global_constraints_bin: *mut c_void, _global_constraints_lines: *mut *mut u8) {
-    trace!("··· {}", "get_global_constraints_lines: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn verify_global_constraints_c(
-    _global_info_file: &str,
-    _p_global_constraints_bin: *mut c_void,
-    _publics: *mut u8,
-    _challenges: *mut u8,
-    _proof_values: *mut u8,
-    _airgroupvalues: *mut *mut u8,
-    _global_constraints_info: *mut c_void,
-) {
-    trace!("··· {}", "verify_global_constraints: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn get_hint_field_global_constraints_c(
-    _global_info_file: &str,
-    _p_global_constraints_bin: *mut c_void,
-    _hint_field_values: *mut c_void,
-    _publics: *mut u8,
-    _challenges: *mut u8,
-    _proof_values: *mut u8,
-    _airgroupvalues: *mut *mut u8,
-    _hint_id: u64,
-    _hint_field_name: &str,
-    _print_expression: bool,
-) {
-    trace!("··· {}", "get_hint_field_global_constraints: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_hint_field_global_constraints_values_c(
-    _p_global_constraints_bin: *mut c_void,
-    _hint_id: u64,
-    _hint_field_name: &str,
-) -> u64 {
-    trace!(
-        "··· {}",
-        "get_hint_field_global_constraints_values: This is a mock call because there is no linked library"
-    );
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_hint_field_global_constraints_sizes_c(
-    _global_info_file: &str,
-    _p_global_constraints_bin: *mut c_void,
-    _hint_field_values: *mut c_void,
-    _hint_id: u64,
-    _hint_field_name: &str,
-    _print_expression: bool,
-) {
-    trace!("··· {}", "get_hint_field_global_constraints_sizes: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn set_hint_field_global_constraints_c(
-    _global_info_file: &str,
-    _p_global_constraints_bin: *mut c_void,
-    _proof_values: *mut u8,
-    _values: *mut u8,
-    _hint_id: u64,
-    _hint_field_name: &str,
-) -> u64 {
-    trace!("··· {}", "set_hint_field_global_constraints: This is a mock call because there is no linked library");
-    100000
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn gen_proof_c(
-    _p_setup_ctx: *mut c_void,
-    _p_params: *mut u8,
-    _p_global_challenge: *mut u8,
-    _proof_buffer: *mut u64,
-    _proof_file: &str,
-    _airgroup_id: u64,
-    _air_id: u64,
-    _instance_id: u64,
-    _d_buffers: *mut c_void,
-    _skip_recalculation: bool,
-    _stream_id: u64,
-    _const_pols_path: &str,
-    _const_tree_path: &str,
-) -> u64 {
-    trace!("{}: ··· {}", "ffi     ", "gen_proof: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn get_proof_c(
-    _p_setup: *mut c_void,
-    _proof_buffer: *mut u64,
-    _proof_file: &str,
-    _thread_id: u64,
-    _airgroup_id: u64,
-    _air_id: u64,
-    _instance_id: u64,
-    _d_buffers: *mut c_void,
-    _mpi_node_rank: u32,
-) {
-    trace!("{}: ··· {}", "ffi     ", "get_proof: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn get_stream_proofs_c(_d_buffers: *mut c_void) {
-    trace!("{}: ··· {}", "ffi     ", "get_stream_proofs: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn get_stream_proofs_non_blocking_c(_d_buffers: *mut c_void) {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "get_stream_proofs_non_blocking: This is a mock call because there is no linked library"
-    );
-}
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn get_stream_id_proof_c(_d_buffers: *mut c_void, _stream_id: u64) {
-    trace!("{}: ··· {}", "ffi     ", "get_stream_id_proof: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn claim_ready_instance_c(
-    _d_buffers: *mut c_void,
-    _stream_id: u64,
-    _instance_id: u64,
-    _airgroup_id: u64,
-    _air_id: u64,
-) -> bool {
-    trace!("{}: ··· {}", "ffi     ", "claim_ready_instance: This is a mock call because there is no linked library");
-    false
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn direct_registered_h2d_done_c(_d_buffers: *mut c_void, _stream_id: u64) -> bool {
-    true
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn gen_recursive_proof_c(
-    _p_setup_ctx: *mut c_void,
-    _p_address: *mut u8,
-    _p_aux_trace: *mut u8,
-    _p_const_pols: *mut u8,
-    _p_const_tree: *mut u8,
-    _p_public_inputs: *mut u8,
-    _proof_buffer: *mut u64,
-    _proof_file: &str,
-    _airgroup_id: u64,
-    _air_id: u64,
-    _instance_id: u64,
-    _vadcop: bool,
-    _d_buffers: *mut c_void,
-    _const_pols_path: &str,
-    _const_tree_path: &str,
-    _proof_type: &str,
-    _force_recursive_stream: bool,
-) -> u64 {
-    trace!("{}: ··· {}", "ffi     ", "gen_recursive_proof: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn gen_recursive_proof_final_c(
-    _p_setup_ctx: *mut c_void,
-    _p_witness: *mut u8,
-    _p_aux_trace: *mut u8,
-    _p_const_pols: *mut u8,
-    _p_const_tree: *mut u8,
-    _p_public_inputs: *mut u8,
-    _proof_file: &str,
-    _airgroup_id: u64,
-    _air_id: u64,
-    _instance_id: u64,
-    _prover_buffer_size: u64,
-    _d_buffers: *mut u8,
-) -> *mut c_void {
-    trace!("··· {}", "gen_recursive_proof_final: This is a mock call because there is no linked library");
-    std::ptr::null_mut()
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn read_exec_file_c(_exec_data: *mut u64, _exec_file: *const i8, _nCols: u64) {
-    trace!("{}: ··· {}", "ffi     ", "read_exec_file: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn get_committed_pols_c(
-    _circomWitness: *mut u8,
-    _exec_data: *mut u64,
-    _witness: *mut u8,
-    _pPublics: *mut u8,
-    _sizeWitness: u64,
-    _N: u64,
-    _nPublics: u64,
-    _nCols: u64,
-) {
-    trace!("··· {}", "get_committed_pols: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn get_committed_pols_validated_c(
-    _circomWitness: *mut u8,
-    _exec_data: *mut u64,
-    _witness: *mut u8,
-    _pPublics: *mut u8,
-    _sizeWitness: u64,
-    _N: u64,
-    _nPublics: u64,
-    _nCols: u64,
-) {
-    trace!("··· {}", "get_committed_pols_validated: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn add_publics_aggregation_c(_proof: *mut u8, _offset: u64, _publics: *mut u8, _nPublics: u64) {
-    trace!("{}: ··· {}", "ffi     ", "add_publics_aggregation: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn init_final_snark_prover_c(_zkeyFile: &str) -> *mut c_void {
-    trace!("··· {}", "init_final_snark_prover: This is a mock call because there is no linked library");
-    std::ptr::null_mut()
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_snark_protocol_id_c(_snark_prover: *mut c_void) -> u64 {
-    trace!("··· {}", "get_snark_protocol_id: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn free_final_snark_prover_c(_snark_prover: *mut c_void) {
-    trace!("··· {}", "free_final_snark_prover: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn pre_allocate_final_snark_prover_c(
-    _snark_prover: *mut c_void,
-    _unified_buffer_gpu: *mut c_void,
-    _unified_buffer_size: u64,
-) {
-    trace!("··· {}", "pre_allocate_final_snark_prover: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn gen_final_snark_proof_c(
-    _prover: *mut c_void,
-    _circomWitnessFinal: *mut u8,
-    _proof: *mut u8,
-    _publics_snark: *mut u8,
-) {
-    trace!("··· {}", "gen_final_snark_proof: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn snark_proof_bytes_to_json_c(_proof_bytes: &[u8], _public_bytes: &[u8], _protocol_id: i32) -> (String, String) {
-    trace!("··· {}", "snark_proof_bytes_to_json: This is a mock call because there is no linked library");
-    ("{}".to_string(), "{}".to_string())
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn set_log_level_c(_level: u64) {
-    trace!("··· {}", "set_log_level: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn stark_verify_c(
-    _verkey: &str,
-    _p_proof: *mut u64,
-    _p_stark_info: *mut c_void,
-    _p_expressions_bin: *mut c_void,
-    _p_publics: *mut u8,
-    _p_proof_values: *mut u8,
-    _p_challenges: *mut u8,
-) -> bool {
-    trace!("··· {}", "stark_verify_c: This is a mock call because there is no linked library");
-    true
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn stark_verify_bn128_c(
-    _verkey: &str,
-    _p_proof: *mut c_void,
-    _p_stark_info: *mut c_void,
-    _p_expressions_bin: *mut c_void,
-    _p_publics: *mut u8,
-) -> bool {
-    trace!("··· {}", "stark_verify_bn128_c: This is a mock call because there is no linked library");
-    false
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn stark_verify_from_file_c(
-    _verkey: &str,
-    _proof: &str,
-    _p_stark_info: *mut c_void,
-    _p_expressions_bin: *mut c_void,
-    _p_publics: *mut u8,
-    _p_proof_values: *mut u8,
-    _p_challenges: *mut u8,
-) -> bool {
-    trace!("··· {}", "stark_verify_from_file_c: This is a mock call because there is no linked library");
-    true
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn write_fixed_cols_bin_c(
-    _binfile: &str,
-    _airgroup: &str,
-    _air: &str,
-    _n: u64,
-    _n_fixed_pols: u64,
-    _fixed_pols_info: *mut c_void,
-) {
-    trace!("··· {}", "write_fixed_cols_bi: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_omp_max_threads() -> u64 {
-    trace!("··· {}", "get_omp_max_threads: This is a mock call because there is no linked library");
-    1
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn set_omp_num_threads(_num_threads: u64) {
-    trace!("··· {}", "set_omp_num_threads: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn gen_device_buffers_c(
-    _node_rank: u32,
-    _node_n_processes: u32,
-    _numa_nodes: &[i32],
-    _arity: u32,
-    _max_n_bits_ext: u32,
-) -> *mut ::std::os::raw::c_void {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "gen_device_commit_buffers: This is a mock call because there is no linked library"
-    );
-    std::ptr::null_mut()
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn gen_device_buffers_recursivef_c(
-    _p_setup_ctx: *mut u8,
-    _prover_buffer_size: u64,
-    _d_commit_buffers: *mut u8,
-    _verkey: &str,
-) -> *mut u8 {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "gen_device_buffers_recursivef: This is a mock call because there is no linked library"
-    );
-    std::ptr::null_mut()
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn free_device_buffers_recursivef_c(_d_buffers: *mut c_void) {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "free_device_buffers_recursivef: This is a mock call because there is no linked library"
-    );
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn gen_device_streams_c(
-    _d_buffers: *mut ::std::os::raw::c_void,
-    _n_streams: u64,
-    _n_recursive_streams: u64,
-    _max_size_buffer: u64,
-    _max_size_buffer_aggregation: u64,
-    _max_pinned_proof_size: u64,
-    _transcript_arity: u64,
-) -> u64 {
-    trace!("{}: ··· {}", "ffi     ", "set_max_size_thread: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn alloc_device_large_buffers_c(
-    _d_buffers: *mut ::std::os::raw::c_void,
-    _aux_trace_area: u64,
-    _aux_trace_recursive_area: u64,
-    _const_pols_area: u64,
-    _const_pols_aggregation_area: u64,
-) {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "alloc_device_large_buffers: This is a mock call because there is no linked library"
-    );
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn get_instances_ready_c(_d_buffers: *mut ::std::os::raw::c_void, _instances_ready: *mut i64) {
-    trace!("{}: ··· {}", "ffi     ", "get_instances_ready: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn reset_device_streams_c(_d_buffers: *mut ::std::os::raw::c_void) {
-    trace!("{}: ··· {}", "ffi     ", "reset_device_streams: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn check_device_memory_c(_node_rank: u32, _node_size: u32) -> u64 {
-    trace!("{}: ··· {}", "ffi     ", "check_device_memory: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_num_gpus_c() -> u64 {
-    trace!("{}: ··· {}", "ffi     ", "get_num_gpus: This is a mock call because there is no linked library");
-    0
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn get_unified_buffer_gpu_c(_d_buffers: *mut ::std::os::raw::c_void) -> (*mut ::std::os::raw::c_void, u64) {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "get_unified_buffer_gpu: This is a mock call because there is a linked library but the function is not implemented"
-    );
-    (std::ptr::null_mut(), 0)
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn alloc_fixed_pols_buffer_gpu_c(_d_buffers: *mut ::std::os::raw::c_void) {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "alloc_fixed_pols_buffer_gpu: This is a mock call because there is no linked library"
-    );
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn free_fixed_pols_buffer_gpu_c(_d_buffers: *mut ::std::os::raw::c_void) {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "free_fixed_pols_buffer_gpu: This is a mock call because there is no linked library"
-    );
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn load_fixed_pols_recursivef_c(
-    _pSetupCtx: *mut ::std::os::raw::c_void,
-    _pConstTree: *mut ::std::os::raw::c_void,
-    _d_buffers: *mut ::std::os::raw::c_void,
-) {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "load_fixed_pols_recursivef: This is a mock call because there is no linked library"
-    );
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn free_device_buffers_c(_d_buffers: *mut ::std::os::raw::c_void) {
-    trace!("{}: ··· {}", "ffi     ", "free_device_buffers: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn load_device_setup_c(
-    _airgroup_id: u64,
-    _air_id: u64,
-    _proof_type: &str,
-    _p_setup: *mut ::std::os::raw::c_void,
-    _d_buffers: *mut ::std::os::raw::c_void,
-    _verkey_root: *mut u8,
-    _packed_info: *mut ::std::os::raw::c_void,
-) {
-    trace!("{}: ··· {}", "ffi     ", "load_device_setup: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-#[allow(clippy::too_many_arguments)]
-pub fn load_device_const_pols_c(
-    _airgroup_id: u64,
-    _air_id: u64,
-    _initial_offset: u64,
-    _d_buffers: *mut ::std::os::raw::c_void,
-    _const_filename: &str,
-    _const_size: u64,
-    _const_tree_filename: &str,
-    _const_tree_size: u64,
-    _proof_type: &str,
-    _only_first_gpu: bool,
-) {
-    trace!("{}: ··· {}", "ffi     ", "load_device_const_pols: This is a mock call because there is no linked library");
-}
-
-#[cfg(feature = "no_lib_link")]
-pub fn prewarm_const_tree_host_cache_c(_const_tree_filename: &str, _const_tree_size: u64) -> bool {
-    trace!(
-        "{}: ··· {}",
-        "ffi     ",
-        "prewarm_const_tree_host_cache: This is a mock call because there is no linked library"
-    );
-    false
+    assert_eq!(tuple.len(), bus.len() * len, "mul_eval_proves_hint_c: one tuple per bus id");
+    unsafe {
+        mul_eval_proves_hint(
+            p_setup,
+            k as u64,
+            const_pols.as_ptr(),
+            const_pols.len() as u64,
+            r0 as u64,
+            (r0 + bus.len()) as u64,
+            bus.as_mut_ptr(),
+            tuple.as_mut_ptr(),
+            len as u64,
+        ) != 0
+    }
+}
+
+pub fn mul_reset_c() {
+    unsafe { mul_reset() }
+}
+
+/// Forget every multiplicity registration; only before any proof allocated from it.
+pub fn mul_clear_registry_c() {
+    unsafe { mul_clear_registry() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snark_proof_bytes_to_json_c;
+
+    /// The protocol ids of `snark_proof_bytes_to_json` (pil2-stark/src/rapidsnark/zkey.hpp).
+    const PLONK_PROTOCOL_ID: i32 = 2;
+    const FFLONK_PROTOCOL_ID: i32 = 10;
+
+    /// BN128's base field modulus q and scalar field modulus r, most significant limb first.
+    const Q: [u64; 4] = [0x30644e72e131a029, 0xb85045b68181585d, 0x97816a916871ca8d, 0x3c208c16d87cfd47];
+    const R: [u64; 4] = [0x30644e72e131a029, 0xb85045b68181585d, 0x2833e84879b97091, 0x43e1f593f0000001];
+
+    /// q − 1, r and r − 1 in decimal. Read in Fr, as the coordinates were, q − 1 printed as
+    /// 147946756881789318990833708069417712965 and r as 0.
+    const Q_MINUS_1: &str = "21888242871839275222246405745257275088696311157297823662689037894645226208582";
+    const R_DEC: &str = "21888242871839275222246405745257275088548364400416034343698204186575808495617";
+    const R_MINUS_1: &str = "21888242871839275222246405745257275088548364400416034343698204186575808495616";
+
+    /// `limbs` minus `sub`, as the 32 big-endian bytes `SnarkProof::toBytes` writes an element in.
+    fn be(limbs: [u64; 4], sub: u64) -> Vec<u8> {
+        assert!(limbs[3] >= sub);
+        let mut limbs = limbs;
+        limbs[3] -= sub;
+        limbs.iter().flat_map(|limb| limb.to_be_bytes()).collect()
+    }
+
+    /// A small element, big-endian.
+    fn small(value: u64) -> Vec<u8> {
+        be([0, 0, 0, value], 0)
+    }
+
+    /// The bytes of a proof with `n_commitments` points and `n_evaluations` evaluations: the first
+    /// point `(q − 1, r)`, both coordinates in [r, q), the second `(r − 1, 1)`, the others and the
+    /// evaluations small, and the first evaluation r − 1; and their JSON, `[x, y, "1"]` per point.
+    fn proof(n_commitments: usize, n_evaluations: usize) -> (Vec<u8>, Vec<[String; 3]>, Vec<String>) {
+        let mut bytes = Vec::new();
+        let mut points = Vec::new();
+        for i in 0..n_commitments as u64 {
+            let (x, y, json) = match i {
+                0 => (be(Q, 1), be(R, 0), [Q_MINUS_1.to_string(), R_DEC.to_string()]),
+                1 => (be(R, 1), small(1), [R_MINUS_1.to_string(), "1".to_string()]),
+                _ => (small(i + 1), small(2 * i + 2), [(i + 1).to_string(), (2 * i + 2).to_string()]),
+            };
+            bytes.extend(x);
+            bytes.extend(y);
+            let [x, y] = json;
+            points.push([x, y, "1".to_string()]);
+        }
+        let mut evaluations = Vec::new();
+        for j in 0..n_evaluations as u64 {
+            let (bytes_j, json) =
+                if j == 0 { (be(R, 1), R_MINUS_1.to_string()) } else { (small(j + 7), (j + 7).to_string()) };
+            bytes.extend(bytes_j);
+            evaluations.push(json);
+        }
+        (bytes, points, evaluations)
+    }
+
+    fn point_json(key: &str, point: &[String; 3]) -> String {
+        format!("\"{key}\":[\"{}\",\"{}\",\"{}\"]", point[0], point[1], point[2])
+    }
+
+    /// The coordinates of a commitment are elements of Fq, not Fr: one in [r, q) prints whole, as
+    /// snarkjs reads it, and one below r, as every coordinate of most proofs, prints as before.
+    /// The evaluations and the publics are elements of Fr.
+    #[test]
+    fn a_proof_prints_its_coordinates_in_the_base_field() {
+        let publics = [be(R, 1), small(5)].concat();
+        let commitments = ["A", "B", "C", "Z", "T1", "T2", "T3", "Wxi", "Wxiw"];
+        let evaluation_keys = ["eval_a", "eval_b", "eval_c", "eval_s1", "eval_s2", "eval_zw"];
+        let (bytes, points, evaluations) = proof(commitments.len(), evaluation_keys.len());
+        let (json, publics_json) = snark_proof_bytes_to_json_c(&bytes, &publics, PLONK_PROTOCOL_ID);
+        assert_eq!(publics_json, format!("[\"{R_MINUS_1}\",\"5\"]"));
+        for (key, point) in commitments.iter().zip(&points) {
+            assert!(json.contains(&point_json(key, point)), "{key}: {json}");
+        }
+        for (key, value) in evaluation_keys.iter().zip(&evaluations) {
+            assert!(json.contains(&format!("\"{key}\":\"{value}\"")), "{key}: {json}");
+        }
+        assert!(json.contains("\"protocol\":\"plonk\"") && json.contains("\"curve\":\"bn128\""), "{json}");
+
+        // FFLONK's, under "polynomials" and "evaluations".
+        let commitments = ["C1", "C2", "W1", "W2"];
+        let evaluation_keys =
+            ["ql", "qr", "qm", "qo", "qc", "s1", "s2", "s3", "a", "b", "c", "z", "zw", "t1w", "t2w", "inv"];
+        let (bytes, points, evaluations) = proof(commitments.len(), evaluation_keys.len());
+        let (json, _) = snark_proof_bytes_to_json_c(&bytes, &publics, FFLONK_PROTOCOL_ID);
+        let polynomials: Vec<String> = commitments.iter().zip(&points).map(|(key, p)| point_json(key, p)).collect();
+        assert!(json.contains(&format!("\"polynomials\":{{{}}}", polynomials.join(","))), "{json}");
+        let mut by_key: Vec<_> = evaluation_keys.iter().zip(&evaluations).collect();
+        by_key.sort();
+        let evaluations: Vec<String> = by_key.iter().map(|(key, value)| format!("\"{key}\":\"{value}\"")).collect();
+        assert!(json.contains(&format!("\"evaluations\":{{{}}}", evaluations.join(","))), "{json}");
+    }
 }

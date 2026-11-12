@@ -1,13 +1,25 @@
 // Copyright Supranational LLC
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
+//
+// Modified 2026 by Roger Taule: added the GOLDILOCKS_ZISK variant — PLONKY2 roots of unity (so NTT
+// twiddles match the pil2 prover's Goldilocks::W) but with the LDE coset generator set to SHIFT=7
+// (the prover's coset), instead of PLONKY2's group_gen. Lets the LDE coset be correct by construction
+// with no runtime re-seed of partial_group_gen_powers.
 
 const int S = 32;
 
-#ifdef GOLDILOCKS_PLONKY2
+#if defined(GOLDILOCKS_PLONKY2) || defined(GOLDILOCKS_ZISK)
 
+// GOLDILOCKS_ZISK: prover coset SHIFT=7 (and 7^-1). GOLDILOCKS_PLONKY2: PLONKY2's own group_gen.
+// The roots of unity below are shared (both use the PLONKY2 roots == prover Goldilocks::W).
+#ifdef GOLDILOCKS_ZISK
+const fr_t group_gen = fr_t(0x0000000000000007);
+const fr_t group_gen_inverse = fr_t(0x249249246db6db6e);
+#else
 const fr_t group_gen = fr_t(0xc65c18b67785d900);
 const fr_t group_gen_inverse = fr_t(0xb1ddc963fcd29ccc);
+#endif
 
 const fr_t forward_roots_of_unity[S + 1] = {
     fr_t(0x0000000000000001),

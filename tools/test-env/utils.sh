@@ -2,6 +2,9 @@
 
 # Export PATH to include ZisK binaries
 export PATH="$PATH:$HOME/.zisk/bin"
+# cargo-zisk verify finds pilfflonk's JS verifier through PILFFLONK_JS, which ziskup exports
+# from ~/.bashrc: non-interactive shells never read it.
+export PILFFLONK_JS="${PILFFLONK_JS:-$HOME/.zisk/zisk/pilfflonk-js}"
 
 # Colors
 if [ -t 1 ]; then
@@ -52,8 +55,13 @@ warn() {
 }
 
 err() {
-    echo "${RED}❌ Error: $1${RESET}" >&2
-    press_any_key
+    local message="$1"
+    local skip_press_any_key="${2:-false}"
+
+    echo "${RED}❌ Error: ${message}${RESET}" >&2
+    if [[ "${skip_press_any_key}" != "true" ]]; then
+        press_any_key
+    fi
     return 1
 }
 
@@ -66,8 +74,14 @@ tolower() {
 }
 
 # load_env: Load environment variables from .env file, without overwriting existing ones
+#
+# Arguments:
+#   $1…$n (optional) — Names of the variables to process. When provided, only
+#       those variables are loaded from .env; any other keys are skipped. When
+#       omitted, every variable in .env is processed.
 load_env() {
-    local zisk_repo_dir=$1
+    # Optional allow-list of variable names to process
+    local -a __wanted_vars=("$@")
 
     # Check if .env file exists
     if [[ ! -f ".env" ]]; then
@@ -87,22 +101,37 @@ load_env() {
             continue
         fi
 
-        # Try to get the value from Cargo.toml (takes precedence)
-        key_value=$(get_var_from_cargo_toml "$key") || return 1
-
-        if [[ -n "$key_value" ]]; then
-            # If defined in Cargo.toml, export it (overrides anything else)
-            export "$key=$key_value"
-            [[ "$key_value" != "0" ]] && __env_print_lines+=(" - [Cargo] ${key} = ${key_value}")
-        elif [[ -z "${!key}" ]]; then
-            # If not already defined, set the value from the .env file if ZISK_GHA is not set
-            if ! is_gha; then
-                export "$key=$value"
-                [[ "$value" != "0" ]] && __env_print_lines+=(" -  [.env] ${key} = ${value}")
+        # If an allow-list was provided, skip variables not in it (except control vars)
+        if (( ${#__wanted_vars[@]} > 0 )) && [[ "$key" != "DISABLE_ENV_CONFIRM" ]]; then
+            local __is_wanted=0
+            local __w
+            for __w in "${__wanted_vars[@]}"; do
+                if [[ "$__w" == "$key" ]]; then
+                    __is_wanted=1
+                    break
+                fi
+            done
+            if (( __is_wanted == 0 )); then
+                continue
             fi
+        fi
+
+        # Precedence (highest first): already-set env var, then .env, then Cargo.toml.
+        if [[ -n "${!key}" ]]; then
+            # Already defined in the shell/CI environment: keep current value.
+            __env_print_lines+=(" - [shell] ${key} = ${!key}")
+        elif [[ -n "$value" ]] && ! is_gha; then
+            # Value from .env (skipped under ZISK_GHA, where the environment and
+            # Cargo.toml drive configuration).
+            export "$key=$value"
+            __env_print_lines+=(" -  [.env] ${key} = ${value}")
         else
-            # Already defined in the shell: keep current value
-            [[ "${!key}" != "0" ]] && __env_print_lines+=(" - [shell] ${key} = ${!key}")
+            # Fall back to Cargo.toml.
+            key_value=$(get_var_from_cargo_toml "$key") || return 1
+            if [[ -n "$key_value" ]]; then
+                export "$key=$key_value"
+                __env_print_lines+=(" - [Cargo] ${key} = ${key_value}")
+            fi
         fi
     done < .env
 
@@ -157,7 +186,7 @@ is_proving_key_installed() {
 
 # is_gha: Check if the script is running in a GitHub Actions environment
 is_gha() {
-    [[ "$ZISK_GHA" == "1" ]]
+    [[ "${ZISK_GHA:-}" == "1" ]]
 }
 
 # get_var_list_to_array: fills a bash array with items from a comma-separated env var
@@ -254,29 +283,6 @@ get_var_from_cargo_toml() {
     local var_lc
     var_lc="$(printf '%s' "$var_name" | tr '[:upper:]' '[:lower:]')"
 
-    # Special case: pil2_proofman_branch
-    # Assumption: the "proofman = { ... }" entry is a single line and contains "pil2-proofman" in the URL
-    if [[ "$var_lc" == "pil2_proofman_branch" ]]; then
-        # Find the single line starting with "proofman =" that references pil2-proofman
-        local proof_line
-        proof_line="$(LC_ALL=C grep -E '^[[:space:]]*proofman[[:space:]]*=' "$file")"
-
-        if [[ -n "$proof_line" ]]; then
-            local branch
-            # Try to extract branch in three formats: "value", 'value', or unquoted value
-            branch=$(printf '%s' "$proof_line" | LC_ALL=C sed -nE 's/.*branch[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p')
-            [[ -z "$branch" ]] && branch=$(printf '%s' "$proof_line" | LC_ALL=C sed -nE "s/.*branch[[:space:]]*=[[:space:]]*'([^']*)'.*/\1/p")
-            [[ -z "$branch" ]] && branch=$(printf '%s' "$proof_line" | LC_ALL=C sed -nE 's/.*branch[[:space:]]*=[[:space:]]*([^,}[:space:]]+).*/\1/p')
-
-            if [[ -n "$branch" ]]; then
-                echo "$branch"
-                return
-            fi
-            # If no branch found, fall back to the standard variable lookup below
-        fi
-        # If no proofman line found, fall back to the standard variable lookup below
-    fi
-
     # Always add prefix "gha_"
     local prefixed_var="gha_${var_lc}"
 
@@ -296,11 +302,233 @@ get_var_from_cargo_toml() {
 
 # get_zisk_repo_dir: returns the ZisK repository directory
 get_zisk_repo_dir() {
-    if [[ -n "${ZISK_REPO_DIR}" ]]; then
+    if [[ -n "${ZISK_REPO_DIR:-}" ]]; then
         echo "${ZISK_REPO_DIR}"
     else
-        echo "${WORKSPACE_DIR}/zisk"
+        echo "${WORKSPACE_DIR:-${PWD}}/zisk"
     fi
+}
+
+# ensure_submodules: Check out a repo's git submodules (idempotent, no-op without
+# .gitmodules). Required when a submodule is wired as a Cargo `path` dependency —
+# e.g. zisk-eth-client's third_party/ziskethone — since cargo resolves paths before
+# any build runs and fails outright when the files are missing.
+# Usage: ensure_submodules <repo_dir>
+ensure_submodules() {
+    local repo_dir="$1"
+
+    if [[ ! -f "${repo_dir}/.gitmodules" ]]; then
+        return 0
+    fi
+    ensure git -C "${repo_dir}" submodule update --init --recursive || return 1
+}
+
+# ZEC_GUEST selects the zisk-eth-client guest to build and prove: ziskethone
+# (default) or reth.
+ZEC_GUEST_DEFAULT="ziskethone"
+
+# resolve_zec_guest: validate ZEC_GUEST and export ZEC_GUEST_DIR, ZEC_ELF and
+# ZEC_INPUTS for it. Call it after load_env.
+#
+# ziskethone's ELF is committed in zisk-eth-client instead of being built here,
+# and its client emits no hints (`emits_hints() == false`), so ENABLE_HINTS is
+# pinned to 0 for it.
+resolve_zec_guest() {
+    ZEC_GUEST="$(tolower "${ZEC_GUEST:-${ZEC_GUEST_DEFAULT}}")"
+
+    local repo_dir="${WORKSPACE_DIR}/zisk-eth-client"
+
+    case "${ZEC_GUEST}" in
+        ziskethone)
+            ZEC_GUEST_DIR="${repo_dir}/bin/guests/stateless-validator-ziskethone"
+            ZEC_ELF="${ZEC_GUEST_DIR}/elf/zec-ziskethone.elf"
+            ;;
+        reth)
+            ZEC_GUEST_DIR="${repo_dir}/bin/guests/stateless-validator-reth"
+            ZEC_ELF="${ZEC_GUEST_DIR}/target/elf/riscv64ima-zisk-zkvm-elf/release/zec-reth"
+            ;;
+        *)
+            err "Unsupported ZEC_GUEST '${ZEC_GUEST}' (expected 'ziskethone' or 'reth')"
+            return 1
+            ;;
+    esac
+    ZEC_INPUTS="${ZEC_GUEST_DIR}/inputs"
+
+    export ZEC_GUEST ZEC_GUEST_DIR ZEC_ELF ZEC_INPUTS
+
+    if [[ "${ZEC_GUEST}" == "ziskethone" ]]; then
+        if [[ "${ENABLE_HINTS:-}" == "1" ]]; then
+            warn "ziskethone emits no hints; forcing ENABLE_HINTS=0"
+        fi
+        export ENABLE_HINTS=0
+    fi
+
+    info "zisk-eth-client guest: ${ZEC_GUEST} (ELF: ${ZEC_ELF})"
+}
+
+# zec_guest_inputs: retarget a comma-separated BLOCK_INPUTS_* variable, in place,
+# at the active guest. Every client's inputs come from the same blocks and differ
+# only in the suffix (mainnet_<block>_<txs>_<mgas>_zec_<client>.bin), so one
+# BLOCK_INPUTS_* value serves any ZEC_GUEST. A block with no input committed for
+# the chosen guest is reported later by verify_files_exist.
+# Usage: zec_guest_inputs BLOCK_INPUTS_SINGLE
+zec_guest_inputs() {
+    local __varname="$1"
+
+    local -a __items=()
+    get_var_list_to_array __items "${__varname}"
+    if (( ${#__items[@]} == 0 )); then
+        return 0
+    fi
+
+    local out="" item retargeted
+    for item in "${__items[@]}"; do
+        retargeted=$(printf '%s' "${item}" \
+            | sed -E "s/_zec_[A-Za-z0-9]+\.bin$/_zec_${ZEC_GUEST}.bin/")
+        if [[ "${retargeted}" != "${item}" ]]; then
+            info "Retargeting input '${item}' -> '${retargeted}' (ZEC_GUEST=${ZEC_GUEST})"
+        fi
+        out+="${out:+,}${retargeted}"
+    done
+
+    export "${__varname}=${out}"
+}
+
+# file_sha256: print a file's SHA-256 (sha256sum on Linux, shasum on macOS).
+# Usage: file_sha256 <path>
+file_sha256() {
+    local f="$1"
+
+    [[ -f "$f" ]] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$f" | cut -d' ' -f1
+    else
+        shasum -a 256 "$f" | cut -d' ' -f1
+    fi
+}
+
+# Set to 1 by patch_cargo_dep as soon as it rewrites a manifest. Repointing a
+# git dependency to a local path changes that package's source, which the
+# committed Cargo.lock cannot describe, so cargo *must* re-resolve and `--locked`
+# would abort the build. cargo_locked_flags reads this to decide whether the
+# lock can still be pinned.
+CARGO_DEPS_PATCHED=0
+
+# cargo_locked_flags: sets CARGO_LOCKED_FLAGS to `(--locked)` when no manifest
+# has been repointed, so a Cargo.lock that does not match its manifest fails the
+# build instead of being silently re-resolved (which is how a third-party
+# dependency can drift to a version the pre-generated input files were not
+# produced with). Clears it, with a warning, once patch_cargo_dep has run.
+# Usage: cargo_locked_flags; cargo build ${CARGO_LOCKED_FLAGS[@]+"${CARGO_LOCKED_FLAGS[@]}"}
+cargo_locked_flags() {
+    if [[ "${CARGO_DEPS_PATCHED:-0}" == "1" ]]; then
+        CARGO_LOCKED_FLAGS=()
+        warn "Not passing --locked: a dependency was repointed to a local path, so Cargo.lock has to be re-resolved"
+    else
+        CARGO_LOCKED_FLAGS=(--locked)
+    fi
+}
+
+# verify_cargo_lock: Fail if a repository's committed Cargo.lock does not match its
+# committed Cargo.toml. `cargo metadata --locked` resolves without building and
+# aborts when the lock would have to be updated, which is the same guarantee
+# `cargo build --locked` gives. Call it on the freshly cloned checkout, *before*
+# patch_cargo_dep runs: once a dependency is repointed to a local path the lock has
+# to be re-resolved by construction and the check no longer means anything.
+# Usage: verify_cargo_lock <manifest_dir>
+verify_cargo_lock() {
+    local manifest_dir="$1"
+
+    info "Verifying Cargo.lock is up to date in ${manifest_dir}..."
+    if ! (cd "${manifest_dir}" && cargo metadata --locked --format-version 1 > /dev/null); then
+        err "Cargo.lock in ${manifest_dir} is out of date with its Cargo.toml. Commit a regenerated lock instead of letting the build re-resolve it."
+        return 1
+    fi
+}
+
+# patch_cargo_dep: Repoint a git dependency in a Cargo.toml to a local path.
+# Comments out the existing `<crate> = { git = ... }` line and inserts (idempotently)
+# a `<crate> = { path = "<local_path>" }` entry right after it. A crates.io
+# dependency is left untouched (no-op); a missing one is an error.
+# Relies on the SED_PARAMS global set up by the caller.
+# Usage: patch_cargo_dep <cargo_toml> <crate_name> <local_path>
+patch_cargo_dep() {
+    local cargo_toml="$1"
+    local crate="$2"
+    local dep_path="$3"
+
+    if [[ ! -f "${cargo_toml}" ]]; then
+        err "Cargo.toml not found: ${cargo_toml}"
+        return 1
+    fi
+
+    # Escape regex-special characters in the crate name for sed/grep patterns.
+    local crate_re
+    crate_re=$(printf '%s' "${crate}" | sed 's/[.[\*^$+?{}|()\/]/\\&/g')
+
+    # Only an active git dependency is repointed. Templates keep the alternatives
+    # (git / local path) commented out next to the live one, so the decision has to
+    # come from the uncommented line: a crates.io version is the published dep the
+    # test is meant to build against, and a path is already patched. Both no-ops.
+    local orig_line
+    orig_line=$(grep -m1 -E "^[[:space:]]*${crate_re}[[:space:]]*=" "${cargo_toml}" || true)
+    if [[ -z "${orig_line}" ]]; then
+        err "No active '${crate}' dependency found in ${cargo_toml}"
+        return 1
+    fi
+    if ! printf '%s' "${orig_line}" | grep -qE "=[[:space:]]*[{][[:space:]]*git"; then
+        info "'${crate}' is not an active git dependency in ${cargo_toml} (${orig_line}): leaving it unchanged"
+        return 0
+    fi
+
+    if [[ ! -f "${dep_path}/Cargo.toml" ]]; then
+        err "Local path for '${crate}' not found: ${dep_path}/Cargo.toml. Make sure the ZisK repo is available."
+        return 1
+    fi
+
+    # Carry over `default-features` / `features` from the git line; dropping them
+    # rebuilds the dep with default features only (e.g. `input` loses `cli`, so
+    # `Client` stops deriving clap's ValueEnum).
+    local extra_opts="" opt frag
+    for opt in 'default-features[[:space:]]*=[[:space:]]*(true|false)' \
+               'features[[:space:]]*=[[:space:]]*\[[^]]*\]'; do
+        frag=$(printf '%s' "${orig_line}" | grep -oE "${opt}" | head -n1 || true)
+        [[ -n "${frag}" ]] && extra_opts+=", ${frag}"
+    done
+
+    local new_line="${crate} = { path = \"${dep_path}\"${extra_opts} }"
+
+    # Comment out the git dependency line and add a local path entry right below it, in a
+    # single substitution. The `# &` keeps the original line as a comment; the `\<newline>`
+    # form (a backslash followed by a real newline) is portable across GNU and BSD/macOS sed.
+    # Expand SED_PARAMS defensively: `${SED_PARAMS[@]+"${SED_PARAMS[@]}"}` yields
+    # nothing (instead of erroring) when it is unset, so the function is safe under
+    # `set -u`. The fallback below then fills in GNU/BSD defaults.
+    local sed_params=(${SED_PARAMS[@]+"${SED_PARAMS[@]}"})
+    if [[ ${#sed_params[@]} -eq 0 ]]; then
+        if [[ "$(uname -s)" == "Darwin" ]]; then
+            sed_params=(-i "" -E)
+        else
+            sed_params=(-i -E)
+        fi
+    fi
+
+    ensure sed "${sed_params[@]}" \
+        "s~^${crate_re}[[:space:]]*=[[:space:]]*[{][[:space:]]*git.*~# &\\
+${new_line}~" \
+        "${cargo_toml}" || return 1
+
+    # Verify the patch was applied correctly.
+    if ! grep -qE "^#[[:space:]]*${crate_re}[[:space:]]*=[[:space:]]*[{][[:space:]]*git" "${cargo_toml}"; then
+        err "Failed to comment '${crate} = { git = ... }' line in ${cargo_toml}"
+        return 1
+    fi
+    if ! grep -qF "${new_line}" "${cargo_toml}"; then
+        err "Failed to add ${crate} path entry pointing to ${dep_path} in ${cargo_toml}"
+        return 1
+    fi
+
+    CARGO_DEPS_PATCHED=1
 }
 
 # format_duration_ms: format milliseconds to HH:MM:SS.mmm
@@ -369,14 +597,13 @@ run_timed() {
 get_platform || return 1
 # Sets PROFILE and PREF_SHELL based on the current shell
 get_shell_and_profile || return 1
-# Ensure profile is loaded
-touch $PROFILE
-source "$PROFILE"
+
+source "$HOME/.cargo/env"
 
 # Define directories
 ZISK_DIR="$HOME/.zisk"
 ZISK_BIN_DIR="$ZISK_DIR/bin"
-WORKSPACE_DIR="${HOME}/workspace"
+WORKSPACE_DIR="${WORKSPACE_DIR:-${HOME}/workspace}"
 OUTPUT_DIR="${HOME}/output"
 
 # Ensure directories exists

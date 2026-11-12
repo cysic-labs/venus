@@ -1,22 +1,21 @@
-use fields::PrimeField64;
+use proofman_fields::PrimeField64;
 use zisk_pil::{
-    Dma64AlignedInputCpyTrace, Dma64AlignedMemCpyTrace, Dma64AlignedMemSetTrace,
-    Dma64AlignedMemTrace, Dma64AlignedTrace, DmaMemCpyTrace, DmaPrePostMemCpyTrace,
-    DmaPrePostTrace, DmaTrace, DmaUnalignedTrace,
+    Dma64AlignedLargeTrace, Dma64AlignedMemCpyTrace, Dma64AlignedMemLargeTrace,
+    Dma64AlignedMemSetTrace, Dma64AlignedMemTrace, Dma64AlignedTrace, DmaPrePostTrace, DmaTrace,
+    DmaUnalignedTrace,
 };
 
 pub fn get_dma_air_name<F: PrimeField64>(air_id: usize) -> &'static str {
     match air_id {
-        DmaTrace::<F>::AIR_ID => "Dma",
-        DmaMemCpyTrace::<F>::AIR_ID => "DmaMemCpy",
-        DmaPrePostTrace::<F>::AIR_ID => "DmaPrePost",
-        DmaPrePostMemCpyTrace::<F>::AIR_ID => "DmaPrePostMemCpy",
-        Dma64AlignedTrace::<F>::AIR_ID => "Dma64Aligned",
-        Dma64AlignedMemSetTrace::<F>::AIR_ID => "Dma64AlignedMemSet",
-        Dma64AlignedMemCpyTrace::<F>::AIR_ID => "Dma64AlignedMemCpy",
-        Dma64AlignedInputCpyTrace::<F>::AIR_ID => "Dma64AlignedInputCpy",
-        Dma64AlignedMemTrace::<F>::AIR_ID => "Dma64AlignedMem",
-        DmaUnalignedTrace::<F>::AIR_ID => "DmaUnaligned",
+        DmaTrace::<()>::AIR_ID => "Dma",
+        DmaPrePostTrace::<()>::AIR_ID => "DmaPrePost",
+        Dma64AlignedTrace::<()>::AIR_ID => "Dma64Aligned",
+        Dma64AlignedLargeTrace::<()>::AIR_ID => "Dma64AlignedLarge",
+        Dma64AlignedMemSetTrace::<()>::AIR_ID => "Dma64AlignedMemSet",
+        Dma64AlignedMemCpyTrace::<()>::AIR_ID => "Dma64AlignedMemCpy",
+        Dma64AlignedMemTrace::<()>::AIR_ID => "Dma64AlignedMem",
+        Dma64AlignedMemLargeTrace::<()>::AIR_ID => "Dma64AlignedMemLarge",
+        DmaUnalignedTrace::<()>::AIR_ID => "DmaUnaligned",
         _ => "Unknown",
     }
 }

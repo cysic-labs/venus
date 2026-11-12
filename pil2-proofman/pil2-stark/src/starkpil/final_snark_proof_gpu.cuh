@@ -17,7 +17,10 @@ struct IFinalSnarkProverGPU {
 
     virtual uint32_t nPublics() const = 0;
 
-    virtual void preAllocate(void * unified_buffer_gpu, uint64_t unified_buffer_size) {}
+    virtual void preAllocate(void * unified_buffer_gpu) {}
+
+    // Device bytes preAllocate needs when given an external buffer (0 = none).
+    virtual uint64_t requiredUnifiedBufferSize() { return 0; }
 };
 
 // GPU Prover classes
@@ -25,7 +28,7 @@ class PlonkFinalProverGPU : public IFinalSnarkProverGPU {
     PlonkGPU::PlonkProverGPU<AltBn128::Engine> prover_;
     uint32_t nPublics_;
 public:
-    PlonkFinalProverGPU(BinFileUtils::BinFile* fdZkey) : prover_(AltBn128::Engine::engine) {
+    PlonkFinalProverGPU(BinFileUtils::BinFile* fdZkey, int gpuId = 0) : prover_(AltBn128::Engine::engine, gpuId) {
         prover_.setZkey(fdZkey);
         nPublics_ = prover_.getNPublic();
     }
@@ -37,9 +40,9 @@ public:
 
     uint32_t nPublics() const override { return nPublics_; }
 
-    void preAllocate(void * unified_buffer_gpu, uint64_t unified_buffer_size) override {
-        prover_.preAllocate(unified_buffer_gpu, unified_buffer_size);
-    }
+    void preAllocate(void * unified_buffer_gpu) override { prover_.preAllocate(unified_buffer_gpu); }
+
+    uint64_t requiredUnifiedBufferSize() override { return prover_.computeUnifiedBufferSize(); }
 };
 
 class FflonkFinalProverGPU : public IFinalSnarkProverGPU {
@@ -67,8 +70,9 @@ struct FinalSnarkGPU {
 };
 
 int getProtocolIdFromBinFileGPU(BinFileUtils::BinFile *fdZkey);
-std::unique_ptr<IFinalSnarkProverGPU> initFinalSnarkProverGPU(BinFileUtils::BinFile *fdZkey);
+std::unique_ptr<IFinalSnarkProverGPU> initFinalSnarkProverGPU(BinFileUtils::BinFile *fdZkey, int gpuId = 0);
 void genFinalSnarkProofGPU(void *proverSnark, void *circomWitnessFinal, uint8_t* proof, uint8_t* publicsSnark);
-void preAllocateFinalSnarkProverGPU(void *snark_prover, void* unified_buffer_gpu, uint64_t unified_buffer_size);
+void preAllocateFinalSnarkProverGPU(void *snark_prover, void* unified_buffer_gpu);
+uint64_t getFinalSnarkProverRequiredGpuSizeGPU(void *snark_prover);
 
 #endif // FINAL_SNARK_PROOF_GPU_CUH

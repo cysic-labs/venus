@@ -1,13 +1,16 @@
-use std::{mem::MaybeUninit, sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc}};
+use std::{
+    mem::MaybeUninit,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+};
 
-use witness::{execute, WitnessComponent};
+use proofman_witness::{execute, WitnessComponent};
 use proofman_common::{BufferPool, FromTrace, AirInstance, ProofCtx, SetupCtx, ProofmanResult};
 
-use fields::PrimeField64;
-use rand::{
-    rngs::StdRng,
-    Rng, SeedableRng,
-};
+use proofman_fields::PrimeField64;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use crate::Table7Trace;
 
@@ -40,9 +43,7 @@ impl Table7 {
     }
 }
 
-impl<F: PrimeField64> WitnessComponent<F> for Table7
-
-{
+impl<F: PrimeField64> WitnessComponent<F> for Table7 {
     execute!(Table7Trace, 1);
 
     fn calculate_witness(
@@ -53,7 +54,7 @@ impl<F: PrimeField64> WitnessComponent<F> for Table7
         instance_ids: &[usize],
         _n_cores: usize,
         buffer_pool: &dyn BufferPool<F>,
-    ) -> ProofmanResult<()>{
+    ) -> ProofmanResult<()> {
         if stage == 1 {
             let instance_id = self.instance_id.load(Ordering::Relaxed) as usize;
 
@@ -61,12 +62,10 @@ impl<F: PrimeField64> WitnessComponent<F> for Table7
                 return;
             }
 
-            
-
             self.calculated.store(true, Ordering::Relaxed);
 
             let buffer_size = self.num_cols * self.num_rows;
-            let mut buffer = create_buffer_fast::<F>(buffer_size);
+            let mut buffer = vec![F::ZERO; buffer_size];
             buffer.par_chunks_mut(self.num_cols).enumerate().for_each(|(row, chunk)| {
                 for (col, vec) in self.multiplicities.iter().enumerate() {
                     chunk[col] = F::from_u64(vec[row].load(Ordering::Relaxed));
@@ -75,9 +74,9 @@ impl<F: PrimeField64> WitnessComponent<F> for Table7
 
             let setup = sctx.get_setup(self.airgroup_id, self.air_id)?;
             let n_cols = setup.stark_info.map_sections_n["cm1"] as usize;
-            let air_instance = AirInstance::new(TraceInfo::new(self.airgroup_id, self.air_id, n_cols, buffer, false, false));
+            let air_instance =
+                AirInstance::new(TraceInfo::new(self.airgroup_id, self.air_id, n_cols, buffer, false, false));
             pctx.add_air_instance(air_instance, instance_id);
-            
         }
     }
 }

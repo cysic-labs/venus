@@ -1,0 +1,1068 @@
+//! gRPC transport layer.
+//!
+//! Contains the tonic-generated proto types and proto ↔ domain conversions.
+//! The blocking client wrapper and job lifecycle types live in the SDK
+//! (`sdk/src/remote/client.rs` and `sdk/src/remote/job.rs`).
+
+/// Tonic-generated proto types for `zisk.coordinator.v1`.
+pub mod proto {
+    #![allow(clippy::large_enum_variant)]
+    // Generated code — the proto definitions are the source of truth.
+    #![allow(missing_docs)]
+    // The generated services name the deprecated extended API's messages.
+    #![allow(deprecated)]
+    tonic::include_proto!("zisk.coordinator.v1");
+}
+
+pub use proto::zisk_coordinator_api_client::ZiskCoordinatorApiClient;
+pub use proto::zisk_coordinator_api_ext_client::ZiskCoordinatorApiExtClient;
+pub use proto::zisk_coordinator_api_ext_server::{
+    ZiskCoordinatorApiExt, ZiskCoordinatorApiExtServer,
+};
+pub use proto::zisk_coordinator_api_server::{ZiskCoordinatorApi, ZiskCoordinatorApiServer};
+
+use crate::dto::{
+    DomainAggregateProofsRequest, DomainAggregationProgramSpec, DomainAirInstanceCount,
+    DomainAsmExecution, DomainExecuteRequest, DomainExecutionStats, DomainExecutorTime,
+    DomainInputChunk, DomainInputKind, DomainJobEvent, DomainJobEventCancelled,
+    DomainJobEventCompleted, DomainJobEventFailed, DomainJobEventProgress, DomainJobEventQueued,
+    DomainJobEventStarted, DomainJobEventWaitingForInput, DomainJobFailure, DomainJobKind,
+    DomainJobKindResponse, DomainJobPhase, DomainJobStatus, DomainNormalizeCircuit, DomainProof,
+    DomainProofKind, DomainProveRequest, DomainSetupAggregationProgramRequest, DomainSetupRequest,
+    DomainWrapRequest, RegisterAggregationProgramRequestDto, RegisterAggregationProgramResponseDto,
+    RegisterGuestProgramRequestDto, RegisterGuestProgramResponseDto,
+};
+use anyhow::Result;
+use prost_types::Timestamp;
+use proto::*;
+use uuid::Uuid;
+use zisk_common::RandomSeed;
+
+impl From<RegisterGuestProgramRequestDto> for RegisterGuestProgramRequest {
+    fn from(dto: RegisterGuestProgramRequestDto) -> Self {
+        Self { zisk_elf: dto.zisk_elf }
+    }
+}
+
+impl tonic::IntoRequest<RegisterGuestProgramRequest> for RegisterGuestProgramRequestDto {
+    fn into_request(self) -> tonic::Request<RegisterGuestProgramRequest> {
+        tonic::Request::new(self.into())
+    }
+}
+
+impl From<RegisterGuestProgramRequest> for RegisterGuestProgramRequestDto {
+    fn from(req: RegisterGuestProgramRequest) -> Self {
+        Self { zisk_elf: req.zisk_elf }
+    }
+}
+
+impl From<RegisterGuestProgramResponseDto> for RegisterGuestProgramResponse {
+    fn from(dto: RegisterGuestProgramResponseDto) -> Self {
+        Self { hash_id: dto.hash_id }
+    }
+}
+
+impl From<RegisterGuestProgramResponse> for RegisterGuestProgramResponseDto {
+    fn from(resp: RegisterGuestProgramResponse) -> Self {
+        Self { hash_id: resp.hash_id }
+    }
+}
+
+impl From<DomainAggregationProgramSpec> for AggregationProgramSpec {
+    fn from(s: DomainAggregationProgramSpec) -> Self {
+        Self {
+            normalize: s.normalize.map(|n| NormalizeCircuit { body: n.body }),
+            aggregate_publics_body: s.aggregate_publics_body,
+            n_free: s.n_free,
+            n_publics_agg: s.n_publics_agg,
+            program_vks: s
+                .program_vks
+                .into_iter()
+                .map(|vk| ProgramVk { limbs: vk.to_vec() })
+                .collect(),
+        }
+    }
+}
+
+impl From<AggregationProgramSpec> for DomainAggregationProgramSpec {
+    fn from(s: AggregationProgramSpec) -> Self {
+        Self {
+            normalize: s.normalize.map(|n| DomainNormalizeCircuit { body: n.body }),
+            aggregate_publics_body: s.aggregate_publics_body,
+            n_free: s.n_free,
+            n_publics_agg: s.n_publics_agg,
+            program_vks: s.program_vks.into_iter().map(program_vk_from_proto).collect(),
+        }
+    }
+}
+
+/// A `ProgramVk` off the wire must carry exactly 4 limbs; pad/truncate defensively
+/// so a malformed spec can't panic. A wrong length changes the derived
+/// `recurser_id`, which the worker's id check rejects — no silent acceptance.
+fn program_vk_from_proto(vk: ProgramVk) -> [String; 4] {
+    let mut limbs = vk.limbs;
+    limbs.resize(4, String::from("0"));
+    [limbs[0].clone(), limbs[1].clone(), limbs[2].clone(), limbs[3].clone()]
+}
+
+impl From<RegisterAggregationProgramRequestDto> for RegisterAggregationProgramRequest {
+    fn from(dto: RegisterAggregationProgramRequestDto) -> Self {
+        Self { recurser_id: dto.recurser_id, spec: Some(dto.spec.into()) }
+    }
+}
+
+impl tonic::IntoRequest<RegisterAggregationProgramRequest>
+    for RegisterAggregationProgramRequestDto
+{
+    fn into_request(self) -> tonic::Request<RegisterAggregationProgramRequest> {
+        tonic::Request::new(self.into())
+    }
+}
+
+impl TryFrom<RegisterAggregationProgramRequest> for RegisterAggregationProgramRequestDto {
+    type Error = String;
+
+    fn try_from(req: RegisterAggregationProgramRequest) -> std::result::Result<Self, Self::Error> {
+        let spec = req.spec.ok_or_else(|| "register_recurser.spec must be set".to_string())?;
+        Ok(Self { recurser_id: req.recurser_id, spec: spec.into() })
+    }
+}
+
+impl From<RegisterAggregationProgramResponseDto> for RegisterAggregationProgramResponse {
+    fn from(dto: RegisterAggregationProgramResponseDto) -> Self {
+        Self { recurser_id: dto.recurser_id }
+    }
+}
+
+impl From<RegisterAggregationProgramResponse> for RegisterAggregationProgramResponseDto {
+    fn from(resp: RegisterAggregationProgramResponse) -> Self {
+        Self { recurser_id: resp.recurser_id }
+    }
+}
+
+impl tonic::IntoRequest<JobRequestMessage> for DomainJobKind {
+    fn into_request(self) -> tonic::Request<JobRequestMessage> {
+        tonic::Request::new(JobRequestMessage {
+            job_kind: Some(self.into()),
+            metadata: Default::default(),
+        })
+    }
+}
+
+fn datetime_to_ts(dt: chrono::DateTime<chrono::Utc>) -> Timestamp {
+    Timestamp { seconds: dt.timestamp(), nanos: dt.timestamp_subsec_nanos() as i32 }
+}
+
+fn ts_to_datetime(ts: Timestamp) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone;
+    chrono::Utc.timestamp_opt(ts.seconds, ts.nanos as u32).single()
+}
+
+fn parse_uuid(s: &str) -> Result<Uuid> {
+    Uuid::parse_str(s).map_err(|e| anyhow::anyhow!("invalid UUID '{}': {e}", s))
+}
+
+impl From<DomainProofKind> for ProofKind {
+    fn from(kind: DomainProofKind) -> Self {
+        match kind {
+            DomainProofKind::Stark => ProofKind::Stark,
+            DomainProofKind::StarkMinimal => ProofKind::StarkMinimal,
+            DomainProofKind::Snark => ProofKind::Plonk,
+        }
+    }
+}
+
+impl TryFrom<i32> for DomainProofKind {
+    type Error = i32;
+
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match ProofKind::try_from(value).unwrap_or(ProofKind::Unspecified) {
+            ProofKind::Stark => Ok(DomainProofKind::Stark),
+            ProofKind::StarkMinimal => Ok(DomainProofKind::StarkMinimal),
+            ProofKind::Plonk => Ok(DomainProofKind::Snark),
+            _ => Err(value),
+        }
+    }
+}
+
+impl From<zisk_common::SnarkProtocol> for SnarkProtocol {
+    fn from(protocol: zisk_common::SnarkProtocol) -> Self {
+        match protocol {
+            zisk_common::SnarkProtocol::Plonk => SnarkProtocol::Plonk,
+            zisk_common::SnarkProtocol::Pilfflonk => SnarkProtocol::Pilfflonk,
+        }
+    }
+}
+
+/// Encodes an optional SNARK protocol for the wire.
+fn snark_protocol_to_wire(protocol: Option<zisk_common::SnarkProtocol>) -> Option<i32> {
+    protocol.map(|protocol| SnarkProtocol::from(protocol).into())
+}
+
+/// Decodes an optional wire SNARK protocol: unset or unspecified asks for any, and an unknown one
+/// is rejected rather than taken for any.
+fn snark_protocol_from_wire(
+    protocol: Option<i32>,
+) -> std::result::Result<Option<zisk_common::SnarkProtocol>, String> {
+    match protocol.map(SnarkProtocol::try_from) {
+        None | Some(Ok(SnarkProtocol::Unspecified)) => Ok(None),
+        Some(Ok(SnarkProtocol::Plonk)) => Ok(Some(zisk_common::SnarkProtocol::Plonk)),
+        Some(Ok(SnarkProtocol::Pilfflonk)) => Ok(Some(zisk_common::SnarkProtocol::Pilfflonk)),
+        Some(Err(unknown)) => Err(format!("invalid snark_protocol {}", unknown.0)),
+    }
+}
+
+impl From<DomainJobPhase> for JobPhase {
+    fn from(phase: DomainJobPhase) -> Self {
+        match phase {
+            DomainJobPhase::Contributions => JobPhase::Contributions,
+            DomainJobPhase::Prove => JobPhase::Prove,
+            DomainJobPhase::Recurse => JobPhase::Recurse,
+        }
+    }
+}
+
+impl DomainInputKind {
+    /// The most bytes a request carries inline, its input and its hints together. A request is
+    /// one gRPC message, which the coordinator server and the client both cap at 128 MiB
+    /// (`max_decoding/encoding_message_size`), and the 1 MiB left holds the rest of it: the
+    /// program hash, the seed, the metadata (at most 32 entries of about 1 KiB) and the framing.
+    /// Larger data goes through the job's push streams (`PushJobInput`, `PushJobHintsInput`).
+    pub const MAX_INLINE_BYTES: usize = (128 - 1) * 1024 * 1024;
+
+    /// Wrap `data` as an inline input chunk, refusing more than [`Self::MAX_INLINE_BYTES`].
+    pub fn try_inline(data: Vec<u8>) -> anyhow::Result<Self> {
+        if data.len() > Self::MAX_INLINE_BYTES {
+            anyhow::bail!(
+                "input is {} bytes, more than the {} bytes a request carries inline; \
+                 push it through the job's input stream (PushJobInput) instead",
+                data.len(),
+                Self::MAX_INLINE_BYTES
+            );
+        }
+        Ok(DomainInputKind::Inline(DomainInputChunk { data }))
+    }
+}
+
+impl From<InputChunk> for DomainInputChunk {
+    fn from(val: InputChunk) -> Self {
+        DomainInputChunk { data: val.data }
+    }
+}
+
+impl From<DomainInputChunk> for InputChunk {
+    fn from(chunk: DomainInputChunk) -> Self {
+        InputChunk { data: chunk.data }
+    }
+}
+
+impl TryFrom<InputKind> for DomainInputKind {
+    type Error = String;
+
+    fn try_from(input: InputKind) -> std::result::Result<Self, Self::Error> {
+        let kind = input.kind.ok_or_else(|| "input.kind must be set".to_string())?;
+        match kind {
+            input_kind::Kind::Inline(chunk) => Ok(DomainInputKind::Inline(chunk.into())),
+            input_kind::Kind::StreamUri(uri) => Ok(DomainInputKind::StreamUri(uri)),
+        }
+    }
+}
+
+impl From<DomainInputKind> for InputKind {
+    fn from(domain: DomainInputKind) -> Self {
+        match domain {
+            DomainInputKind::Inline(chunk) => {
+                InputKind { kind: Some(input_kind::Kind::Inline(chunk.into())) }
+            }
+            DomainInputKind::StreamUri(uri) => {
+                InputKind { kind: Some(input_kind::Kind::StreamUri(uri)) }
+            }
+        }
+    }
+}
+
+impl From<DomainProof> for Proof {
+    fn from(proof: DomainProof) -> Self {
+        Proof {
+            proof_id: proof.proof_id.to_string(),
+            hash_id: proof.hash_id,
+            verification_key: proof.verification_key,
+            proof_kind: ProofKind::from(proof.proof_kind).into(),
+            data: proof.data,
+            public_inputs: proof.public_inputs,
+            started_at: proof.started_at.map(datetime_to_ts),
+            completed_at: proof.completed_at.map(datetime_to_ts),
+            random_seed: random_seed_to_wire(proof.random_seed),
+        }
+    }
+}
+
+impl TryFrom<Proof> for DomainProof {
+    type Error = String;
+
+    fn try_from(p: Proof) -> std::result::Result<Self, Self::Error> {
+        Ok(DomainProof {
+            proof_id: parse_uuid(&p.proof_id).map_err(|e| format!("invalid proof_id: {e}"))?,
+            hash_id: p.hash_id,
+            verification_key: p.verification_key,
+            proof_kind: DomainProofKind::try_from(p.proof_kind)
+                .map_err(|_| format!("invalid proof_kind {}", p.proof_kind))?,
+            data: p.data,
+            public_inputs: p.public_inputs,
+            started_at: p.started_at.and_then(ts_to_datetime),
+            completed_at: p.completed_at.and_then(ts_to_datetime),
+            random_seed: random_seed_from_wire(p.random_seed)?,
+        })
+    }
+}
+
+impl TryFrom<JobKind> for DomainJobKind {
+    type Error = String;
+
+    fn try_from(kind: JobKind) -> std::result::Result<Self, Self::Error> {
+        let inner = kind.kind.ok_or_else(|| "job_kind.kind must be set".to_string())?;
+
+        match inner {
+            job_kind::Kind::Setup(r) => Ok(DomainJobKind::Setup(DomainSetupRequest {
+                hash_id: r.hash_id,
+                program_name: r.program_name,
+                with_hints: r.with_hints,
+                emulator_only: r.emulator_only,
+            })),
+            job_kind::Kind::Prove(r) => Ok(DomainJobKind::Prove(r.try_into()?)),
+            job_kind::Kind::Wrap(r) => {
+                let proof = DomainProof::try_from(
+                    r.proof.ok_or_else(|| "wrap.proof must be set".to_string())?,
+                )
+                .map_err(|e| format!("invalid wrap.proof: {e}"))?;
+                let proof_dest = DomainProofKind::try_from(r.proof_dest)
+                    .map_err(|_| "invalid proof_dest".to_string())?;
+                let snark_protocol = snark_protocol_from_wire(r.snark_protocol)?;
+                let wrap_timeout = r.wrap_timeout.and_then(ts_to_datetime);
+                Ok(DomainJobKind::Wrap(DomainWrapRequest {
+                    proof,
+                    proof_dest,
+                    snark_protocol,
+                    wrap_timeout,
+                }))
+            }
+            job_kind::Kind::Execute(r) => Ok(DomainJobKind::Execute(r.try_into()?)),
+            job_kind::Kind::SetupAggregationProgram(r) => {
+                Ok(DomainJobKind::SetupAggregationProgram(DomainSetupAggregationProgramRequest {
+                    recurser_id: r.recurser_id,
+                }))
+            }
+            job_kind::Kind::AggregateProofs(r) => {
+                let root_c = if r.root_c_recurser_agg.is_empty() {
+                    None
+                } else if r.root_c_recurser_agg.len() == 4 {
+                    Some([
+                        r.root_c_recurser_agg[0],
+                        r.root_c_recurser_agg[1],
+                        r.root_c_recurser_agg[2],
+                        r.root_c_recurser_agg[3],
+                    ])
+                } else {
+                    return Err(format!(
+                        "aggregate_proofs.root_c_recurser_agg must be 0 or 4 limbs; got {}",
+                        r.root_c_recurser_agg.len()
+                    ));
+                };
+                Ok(DomainJobKind::AggregateProofs(DomainAggregateProofsRequest {
+                    recurser_id: r.recurser_id,
+                    proof_a: r.proof_a,
+                    proof_b: r.proof_b,
+                    free_inputs_a: r.free_inputs_a,
+                    free_inputs_b: r.free_inputs_b,
+                    root_c_recurser_agg: root_c,
+                }))
+            }
+        }
+    }
+}
+
+impl From<DomainJobKind> for JobKind {
+    fn from(domain: DomainJobKind) -> Self {
+        use job_kind::Kind;
+        let kind = match domain {
+            DomainJobKind::Setup(r) => Kind::Setup(SetupRequest {
+                hash_id: r.hash_id,
+                program_name: r.program_name,
+                with_hints: r.with_hints,
+                emulator_only: r.emulator_only,
+            }),
+            DomainJobKind::Prove(r) => Kind::Prove(r.into()),
+            DomainJobKind::Wrap(r) => Kind::Wrap(WrapRequest {
+                proof: Some(r.proof.into()),
+                proof_dest: ProofKind::from(r.proof_dest).into(),
+                wrap_timeout: r.wrap_timeout.map(datetime_to_ts),
+                snark_protocol: snark_protocol_to_wire(r.snark_protocol),
+            }),
+            DomainJobKind::Execute(r) => Kind::Execute(r.into()),
+            DomainJobKind::SetupAggregationProgram(r) => {
+                Kind::SetupAggregationProgram(SetupAggregationProgramRequest {
+                    recurser_id: r.recurser_id,
+                })
+            }
+            DomainJobKind::AggregateProofs(r) => Kind::AggregateProofs(AggregateProofsRequest {
+                recurser_id: r.recurser_id,
+                proof_a: r.proof_a,
+                proof_b: r.proof_b,
+                free_inputs_a: r.free_inputs_a,
+                free_inputs_b: r.free_inputs_b,
+                root_c_recurser_agg: r.root_c_recurser_agg.map(|l| l.to_vec()).unwrap_or_default(),
+            }),
+        };
+        JobKind { kind: Some(kind) }
+    }
+}
+
+/// Encodes an optional seed for the wire.
+fn random_seed_to_wire(seed: Option<RandomSeed>) -> Option<Vec<u8>> {
+    seed.map(|s| s.as_bytes().to_vec())
+}
+
+/// Decodes an optional wire seed, rejecting any length other than 32 bytes.
+fn random_seed_from_wire(seed: Option<Vec<u8>>) -> std::result::Result<Option<RandomSeed>, String> {
+    seed.map(|bytes| RandomSeed::try_from(bytes.as_slice()).map_err(|e| e.to_string())).transpose()
+}
+
+impl From<DomainProveRequest> for ProveRequest {
+    fn from(r: DomainProveRequest) -> Self {
+        ProveRequest {
+            hash_id: r.hash_id,
+            input: Some(InputKind::from(r.input)),
+            proof_timeout: r.proof_timeout.map(datetime_to_ts),
+            proof_dest: ProofKind::from(r.proof_dest).into(),
+            hints: r.hints.map(InputKind::from),
+            random_seed: random_seed_to_wire(r.random_seed),
+            snark_protocol: snark_protocol_to_wire(r.snark_protocol),
+        }
+    }
+}
+
+impl TryFrom<ProveRequest> for DomainProveRequest {
+    type Error = String;
+
+    fn try_from(r: ProveRequest) -> std::result::Result<Self, Self::Error> {
+        let input = r.input.ok_or_else(|| "input must be set".to_string())?.try_into()?;
+        let proof_timeout = r.proof_timeout.and_then(ts_to_datetime);
+        let proof_dest = DomainProofKind::try_from(r.proof_dest).unwrap_or(DomainProofKind::Stark);
+        let hints = r.hints.map(|h| h.try_into()).transpose()?;
+        let seed = random_seed_from_wire(r.random_seed)?;
+        let snark_protocol = snark_protocol_from_wire(r.snark_protocol)?;
+        Ok(DomainProveRequest {
+            hash_id: r.hash_id,
+            input,
+            hints,
+            random_seed: seed,
+            proof_timeout,
+            proof_dest,
+            snark_protocol,
+        })
+    }
+}
+
+impl From<DomainExecuteRequest> for ExecuteRequest {
+    fn from(r: DomainExecuteRequest) -> Self {
+        ExecuteRequest {
+            hash_id: r.hash_id,
+            input: Some(InputKind::from(r.input)),
+            execute_timeout: r.execute_timeout.map(datetime_to_ts),
+            hints: r.hints.map(InputKind::from),
+            random_seed: random_seed_to_wire(r.random_seed),
+        }
+    }
+}
+
+impl TryFrom<ExecuteRequest> for DomainExecuteRequest {
+    type Error = String;
+
+    fn try_from(r: ExecuteRequest) -> std::result::Result<Self, Self::Error> {
+        let input = r.input.ok_or_else(|| "input must be set".to_string())?.try_into()?;
+        let execute_timeout = r.execute_timeout.and_then(ts_to_datetime);
+        let hints = r.hints.map(|h| h.try_into()).transpose()?;
+        let seed = random_seed_from_wire(r.random_seed)?;
+        Ok(DomainExecuteRequest {
+            hash_id: r.hash_id,
+            input,
+            hints,
+            random_seed: seed,
+            execute_timeout,
+        })
+    }
+}
+
+// The deprecated extended API's conversions, kept with it.
+#[allow(deprecated)]
+impl TryFrom<DomainJobKind> for JobKindExt {
+    type Error = String;
+
+    fn try_from(domain: DomainJobKind) -> std::result::Result<Self, Self::Error> {
+        use job_kind_ext::Kind;
+        let kind = match domain {
+            DomainJobKind::Prove(r) => Kind::Prove(r.into()),
+            DomainJobKind::Execute(r) => Kind::Execute(r.into()),
+            _ => return Err("extended API accepts only prove or execute jobs".to_string()),
+        };
+        Ok(JobKindExt { kind: Some(kind) })
+    }
+}
+
+#[allow(deprecated)]
+impl TryFrom<JobKindExt> for DomainJobKind {
+    type Error = String;
+
+    fn try_from(ext: JobKindExt) -> std::result::Result<Self, Self::Error> {
+        use job_kind_ext::Kind;
+        match ext.kind.ok_or_else(|| "job_kind must be set".to_string())? {
+            Kind::Prove(r) => Ok(DomainJobKind::Prove(r.try_into()?)),
+            Kind::Execute(r) => Ok(DomainJobKind::Execute(r.try_into()?)),
+        }
+    }
+}
+
+impl From<DomainExecutionStats> for ExecutionStats {
+    fn from(stats: DomainExecutionStats) -> Self {
+        ExecutionStats {
+            steps: stats.steps,
+            duration_nanos: stats.duration_nanos,
+            cost_per_type: Some(CostPerType {
+                main: stats.main_cost,
+                opcode: stats.opcode_cost,
+                memory: stats.memory_cost,
+                precompile: stats.precompile_cost,
+                tables: stats.tables_cost,
+                other: stats.other_cost,
+            }),
+            executor_time: Some(ExecutorTime {
+                total_duration: stats.executor_time.total_duration,
+                execution_duration: stats.executor_time.execution_duration,
+                count_and_plan_duration: stats.executor_time.count_and_plan_duration,
+                count_and_plan_mo_duration: stats.executor_time.count_and_plan_mo_duration,
+                asm: stats.executor_time.asm.map(|a| AsmExecution { time: a.time, mhz: a.mhz }),
+            }),
+            plan: stats
+                .plan
+                .into_iter()
+                .map(|p| AirInstanceCount {
+                    airgroup_id: p.airgroup_id as u32,
+                    air_id: p.air_id as u32,
+                    count: p.count,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<DomainJobKindResponse> for JobKindResponse {
+    fn from(value: DomainJobKindResponse) -> Self {
+        use job_kind_response::Kind;
+        let kind = match value {
+            DomainJobKindResponse::Setup { vk, hash_mode } => {
+                Kind::Setup(SetupResponse { vk, hash_mode })
+            }
+            DomainJobKindResponse::Prove { proof, stats } => {
+                Kind::Prove(ProveResponse { proof: Some(proof.into()), stats: Some(stats.into()) })
+            }
+            DomainJobKindResponse::Wrap(proof) => {
+                Kind::Wrap(WrapResponse { proof: Some(proof.into()) })
+            }
+            DomainJobKindResponse::Execute { stats, public_outputs, random_seed: seed } => {
+                Kind::Execute(ExecuteResponse {
+                    stats: Some(stats.into()),
+                    public_outputs,
+                    random_seed: random_seed_to_wire(seed),
+                })
+            }
+            DomainJobKindResponse::SetupAggregationProgram { vk, hash_mode } => {
+                Kind::SetupAggregationProgram(SetupAggregationProgramResponse { vk, hash_mode })
+            }
+            DomainJobKindResponse::AggregateProofs(proof) => {
+                Kind::AggregateProofs(AggregateProofsResponse { proof: Some(proof.into()) })
+            }
+        };
+        JobKindResponse { kind: Some(kind) }
+    }
+}
+
+impl From<&DomainJobStatus> for JobStatus {
+    fn from(status: &DomainJobStatus) -> Self {
+        let s = match status {
+            DomainJobStatus::Queued => job_status::Status::Queued(JobStatusQueued {}),
+            DomainJobStatus::Running(phase) => job_status::Status::Running(JobStatusRunning {
+                phase: phase.as_ref().map(|p| JobPhase::from(p.clone()).into()),
+            }),
+            DomainJobStatus::WaitingForInput => {
+                job_status::Status::WaitingForInput(JobStatusWaitingForInput {})
+            }
+            DomainJobStatus::Completed => job_status::Status::Completed(JobStatusCompleted {}),
+            DomainJobStatus::Failed(f) => {
+                job_status::Status::Failed(JobStatusFailed { failure: Some(f.into()) })
+            }
+            DomainJobStatus::Cancelled => job_status::Status::Cancelled(JobStatusCancelled {}),
+        };
+        JobStatus { status: Some(s) }
+    }
+}
+
+impl From<&DomainJobFailure> for JobFailure {
+    fn from(failure: &DomainJobFailure) -> Self {
+        use job_failure::Kind;
+        let kind = match failure {
+            DomainJobFailure::Timeout { phase, limit } => Kind::Timeout(JobFailureTimeout {
+                phase: phase.as_ref().map(|p| JobPhase::from(p.clone()).into()),
+                limit: Some(prost_types::Duration { seconds: limit.as_secs() as i64, nanos: 0 }),
+            }),
+            DomainJobFailure::Input { reason } => {
+                Kind::Input(JobFailureInput { reason: reason.clone() })
+            }
+            DomainJobFailure::Execution { reason } => {
+                Kind::Execution(JobFailureExecution { reason: reason.clone() })
+            }
+            DomainJobFailure::Internal { trace_id } => {
+                Kind::Internal(JobFailureInternal { trace_id: trace_id.clone() })
+            }
+            DomainJobFailure::Cancelled => Kind::Cancelled(JobFailureCancelled {}),
+        };
+        JobFailure { kind: Some(kind) }
+    }
+}
+
+impl From<DomainJobFailure> for JobFailure {
+    fn from(failure: DomainJobFailure) -> Self {
+        use job_failure::Kind;
+        let kind = match failure {
+            DomainJobFailure::Timeout { phase, limit } => Kind::Timeout(JobFailureTimeout {
+                phase: phase.map(|p| JobPhase::from(p).into()),
+                limit: Some(prost_types::Duration { seconds: limit.as_secs() as i64, nanos: 0 }),
+            }),
+            DomainJobFailure::Input { reason } => Kind::Input(JobFailureInput { reason }),
+            DomainJobFailure::Execution { reason } => {
+                Kind::Execution(JobFailureExecution { reason })
+            }
+            DomainJobFailure::Internal { trace_id } => {
+                Kind::Internal(JobFailureInternal { trace_id })
+            }
+            DomainJobFailure::Cancelled => Kind::Cancelled(JobFailureCancelled {}),
+        };
+        JobFailure { kind: Some(kind) }
+    }
+}
+
+impl From<DomainJobEvent> for JobEvent {
+    fn from(event: DomainJobEvent) -> Self {
+        use job_event::Event;
+        let inner = match event {
+            DomainJobEvent::Queued(e) => Event::Queued(JobEventQueued {
+                job_id: e.job_id.to_string(),
+                timestamp: Some(datetime_to_ts(e.timestamp)),
+            }),
+            DomainJobEvent::Started(e) => Event::Started(JobEventStarted {
+                job_id: e.job_id.to_string(),
+                timestamp: Some(datetime_to_ts(e.timestamp)),
+            }),
+            DomainJobEvent::Progress(e) => Event::Progress(JobEventProgress {
+                job_id: e.job_id.to_string(),
+                phase: JobPhase::from(e.phase).into(),
+                timestamp: Some(datetime_to_ts(e.timestamp)),
+            }),
+            DomainJobEvent::WaitingForInput(e) => Event::WaitingForInput(JobEventWaitingForInput {
+                job_id: e.job_id.to_string(),
+                timestamp: Some(datetime_to_ts(e.timestamp)),
+            }),
+            DomainJobEvent::Completed(e) => Event::Completed(JobEventCompleted {
+                job_id: e.job_id.to_string(),
+                result: Some(e.result.into()),
+                timestamp: Some(datetime_to_ts(e.timestamp)),
+            }),
+            DomainJobEvent::Cancelled(e) => Event::Cancelled(JobEventCancelled {
+                job_id: e.job_id.to_string(),
+                timestamp: Some(datetime_to_ts(e.timestamp)),
+            }),
+            DomainJobEvent::Failed(e) => Event::Failed(JobEventFailed {
+                job_id: e.job_id.to_string(),
+                failure: Some(e.failure.into()),
+                timestamp: Some(datetime_to_ts(e.timestamp)),
+            }),
+        };
+        JobEvent { event: Some(inner) }
+    }
+}
+
+impl From<ExecutionStats> for DomainExecutionStats {
+    fn from(stats: ExecutionStats) -> Self {
+        let cost = stats.cost_per_type.unwrap_or_default();
+        let et = stats.executor_time.unwrap_or_default();
+        DomainExecutionStats {
+            steps: stats.steps,
+            duration_nanos: stats.duration_nanos,
+            main_cost: cost.main,
+            opcode_cost: cost.opcode,
+            memory_cost: cost.memory,
+            precompile_cost: cost.precompile,
+            tables_cost: cost.tables,
+            other_cost: cost.other,
+            executor_time: DomainExecutorTime {
+                total_duration: et.total_duration,
+                execution_duration: et.execution_duration,
+                count_and_plan_duration: et.count_and_plan_duration,
+                count_and_plan_mo_duration: et.count_and_plan_mo_duration,
+                asm: et.asm.map(|a| DomainAsmExecution { time: a.time, mhz: a.mhz }),
+            },
+            plan: stats
+                .plan
+                .into_iter()
+                .map(|p| DomainAirInstanceCount {
+                    airgroup_id: p.airgroup_id as usize,
+                    air_id: p.air_id as usize,
+                    count: p.count,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<i32> for DomainJobPhase {
+    type Error = String;
+
+    fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
+        match JobPhase::try_from(value) {
+            Ok(JobPhase::Contributions) => Ok(DomainJobPhase::Contributions),
+            Ok(JobPhase::Prove) => Ok(DomainJobPhase::Prove),
+            Ok(JobPhase::Recurse) => Ok(DomainJobPhase::Recurse),
+            _ => Err(format!("invalid job phase: {value}")),
+        }
+    }
+}
+
+impl TryFrom<JobPhase> for DomainJobPhase {
+    type Error = String;
+
+    fn try_from(phase: JobPhase) -> std::result::Result<Self, Self::Error> {
+        match phase {
+            JobPhase::Contributions => Ok(DomainJobPhase::Contributions),
+            JobPhase::Prove => Ok(DomainJobPhase::Prove),
+            JobPhase::Recurse => Ok(DomainJobPhase::Recurse),
+            _ => Err(format!("invalid job phase: {:?}", phase)),
+        }
+    }
+}
+
+impl TryFrom<JobFailure> for DomainJobFailure {
+    type Error = String;
+
+    fn try_from(failure: JobFailure) -> std::result::Result<Self, Self::Error> {
+        use job_failure::Kind;
+        match failure.kind.ok_or_else(|| "job_failure.kind must be set".to_string())? {
+            Kind::Timeout(t) => {
+                let phase = t.phase.map(DomainJobPhase::try_from).transpose()?;
+                let limit = t
+                    .limit
+                    .map(|d| std::time::Duration::new(d.seconds as u64, d.nanos as u32))
+                    .unwrap_or_default();
+                Ok(DomainJobFailure::Timeout { phase, limit })
+            }
+            Kind::Input(i) => Ok(DomainJobFailure::Input { reason: i.reason }),
+            Kind::Execution(e) => Ok(DomainJobFailure::Execution { reason: e.reason }),
+            Kind::Internal(i) => Ok(DomainJobFailure::Internal { trace_id: i.trace_id }),
+            Kind::Cancelled(_) => Ok(DomainJobFailure::Cancelled),
+        }
+    }
+}
+
+impl TryFrom<JobStatus> for DomainJobStatus {
+    type Error = String;
+
+    fn try_from(status: JobStatus) -> std::result::Result<Self, Self::Error> {
+        use job_status::Status;
+        match status.status.ok_or_else(|| "job_status.status must be set".to_string())? {
+            Status::Queued(_) => Ok(DomainJobStatus::Queued),
+            Status::Running(r) => {
+                let phase = r.phase.map(DomainJobPhase::try_from).transpose()?;
+                Ok(DomainJobStatus::Running(phase))
+            }
+            Status::WaitingForInput(_) => Ok(DomainJobStatus::WaitingForInput),
+            Status::Completed(_) => Ok(DomainJobStatus::Completed),
+            Status::Failed(f) => {
+                let failure = f
+                    .failure
+                    .ok_or_else(|| "failed status must have failure".to_string())?
+                    .try_into()?;
+                Ok(DomainJobStatus::Failed(failure))
+            }
+            Status::Cancelled(_) => Ok(DomainJobStatus::Cancelled),
+        }
+    }
+}
+
+impl TryFrom<JobKindResponse> for DomainJobKindResponse {
+    type Error = String;
+
+    fn try_from(resp: JobKindResponse) -> std::result::Result<Self, Self::Error> {
+        use job_kind_response::Kind;
+        match resp.kind.ok_or_else(|| "job_kind_response.kind must be set".to_string())? {
+            Kind::Setup(r) => Ok(DomainJobKindResponse::Setup { vk: r.vk, hash_mode: r.hash_mode }),
+            Kind::Prove(r) => {
+                let proof =
+                    r.proof.ok_or_else(|| "prove.proof must be set".to_string())?.try_into()?;
+                let stats = r.stats.map(DomainExecutionStats::from).unwrap_or_default();
+                Ok(DomainJobKindResponse::Prove { proof, stats })
+            }
+            Kind::Wrap(r) => {
+                let proof =
+                    r.proof.ok_or_else(|| "wrap.proof must be set".to_string())?.try_into()?;
+                Ok(DomainJobKindResponse::Wrap(proof))
+            }
+            Kind::Execute(r) => {
+                let stats = r.stats.map(DomainExecutionStats::from).unwrap_or_default();
+                let seed = random_seed_from_wire(r.random_seed)?;
+                Ok(DomainJobKindResponse::Execute {
+                    stats,
+                    public_outputs: r.public_outputs,
+                    random_seed: seed,
+                })
+            }
+            Kind::SetupAggregationProgram(r) => {
+                Ok(DomainJobKindResponse::SetupAggregationProgram {
+                    vk: r.vk,
+                    hash_mode: r.hash_mode,
+                })
+            }
+            Kind::AggregateProofs(r) => {
+                let proof = r
+                    .proof
+                    .ok_or_else(|| "aggregate_proofs.proof must be set".to_string())?
+                    .try_into()?;
+                Ok(DomainJobKindResponse::AggregateProofs(proof))
+            }
+        }
+    }
+}
+
+impl TryFrom<JobEvent> for DomainJobEvent {
+    type Error = String;
+
+    fn try_from(event: JobEvent) -> std::result::Result<Self, Self::Error> {
+        use job_event::Event;
+        match event.event.ok_or_else(|| "job_event.event must be set".to_string())? {
+            Event::Queued(e) => Ok(DomainJobEvent::Queued(DomainJobEventQueued {
+                job_id: parse_uuid(&e.job_id).map_err(|e| format!("{e}"))?,
+                timestamp: e.timestamp.and_then(ts_to_datetime).unwrap_or_else(chrono::Utc::now),
+            })),
+            Event::Started(e) => Ok(DomainJobEvent::Started(DomainJobEventStarted {
+                job_id: parse_uuid(&e.job_id).map_err(|e| format!("{e}"))?,
+                timestamp: e.timestamp.and_then(ts_to_datetime).unwrap_or_else(chrono::Utc::now),
+            })),
+            Event::Progress(e) => Ok(DomainJobEvent::Progress(DomainJobEventProgress {
+                job_id: parse_uuid(&e.job_id).map_err(|e| format!("{e}"))?,
+                phase: DomainJobPhase::try_from(e.phase())?,
+                timestamp: e.timestamp.and_then(ts_to_datetime).unwrap_or_else(chrono::Utc::now),
+            })),
+            Event::WaitingForInput(e) => {
+                Ok(DomainJobEvent::WaitingForInput(DomainJobEventWaitingForInput {
+                    job_id: parse_uuid(&e.job_id).map_err(|e| format!("{e}"))?,
+                    timestamp: e
+                        .timestamp
+                        .and_then(ts_to_datetime)
+                        .unwrap_or_else(chrono::Utc::now),
+                }))
+            }
+            Event::Completed(e) => {
+                let result = e
+                    .result
+                    .ok_or_else(|| "completed event must have result".to_string())?
+                    .try_into()?;
+                Ok(DomainJobEvent::Completed(DomainJobEventCompleted {
+                    job_id: parse_uuid(&e.job_id).map_err(|err| format!("{err}"))?,
+                    result,
+                    timestamp: e
+                        .timestamp
+                        .and_then(ts_to_datetime)
+                        .unwrap_or_else(chrono::Utc::now),
+                }))
+            }
+            Event::Cancelled(e) => Ok(DomainJobEvent::Cancelled(DomainJobEventCancelled {
+                job_id: parse_uuid(&e.job_id).map_err(|e| format!("{e}"))?,
+                timestamp: e.timestamp.and_then(ts_to_datetime).unwrap_or_else(chrono::Utc::now),
+            })),
+            Event::Failed(e) => {
+                let failure = e
+                    .failure
+                    .ok_or_else(|| "failed event must have failure".to_string())?
+                    .try_into()?;
+                Ok(DomainJobEvent::Failed(DomainJobEventFailed {
+                    job_id: parse_uuid(&e.job_id).map_err(|err| format!("{err}"))?,
+                    failure,
+                    timestamp: e
+                        .timestamp
+                        .and_then(ts_to_datetime)
+                        .unwrap_or_else(chrono::Utc::now),
+                }))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `JobRequestMessage` derived `Eq` and `Hash` before it had `metadata`; `build.rs` keeps them.
+    #[test]
+    fn job_request_message_keeps_deriving_eq_and_hash() {
+        fn derives_eq_and_hash<T: Eq + std::hash::Hash>() {}
+        derives_eq_and_hash::<JobRequestMessage>();
+    }
+
+    fn prove_request(seed: Option<RandomSeed>) -> DomainProveRequest {
+        DomainProveRequest {
+            hash_id: "hash".to_string(),
+            input: DomainInputKind::Inline(DomainInputChunk { data: vec![1, 2, 3] }),
+            hints: None,
+            random_seed: seed,
+            proof_timeout: None,
+            proof_dest: DomainProofKind::Stark,
+            snark_protocol: None,
+        }
+    }
+
+    const SNARK_PROTOCOLS: [Option<zisk_common::SnarkProtocol>; 3] = [
+        None,
+        Some(zisk_common::SnarkProtocol::Plonk),
+        Some(zisk_common::SnarkProtocol::Pilfflonk),
+    ];
+
+    #[test]
+    fn prove_request_snark_protocol_round_trips() {
+        for protocol in SNARK_PROTOCOLS {
+            let request = DomainProveRequest {
+                proof_dest: DomainProofKind::Snark,
+                snark_protocol: protocol,
+                ..prove_request(None)
+            };
+            let wire = ProveRequest::from(request);
+            assert_eq!(DomainProveRequest::try_from(wire).unwrap().snark_protocol, protocol);
+        }
+    }
+
+    #[test]
+    fn wrap_request_snark_protocol_round_trips() {
+        for protocol in SNARK_PROTOCOLS {
+            let request = DomainWrapRequest {
+                proof: DomainProof {
+                    proof_id: Uuid::nil(),
+                    hash_id: String::new(),
+                    verification_key: vec![],
+                    proof_kind: DomainProofKind::Snark,
+                    data: vec![1, 2, 3],
+                    public_inputs: vec![],
+                    started_at: None,
+                    completed_at: None,
+                    random_seed: None,
+                },
+                proof_dest: DomainProofKind::Snark,
+                snark_protocol: protocol,
+                wrap_timeout: None,
+            };
+            let wire = JobKind::from(DomainJobKind::Wrap(request));
+            match DomainJobKind::try_from(wire).unwrap() {
+                DomainJobKind::Wrap(decoded) => assert_eq!(decoded.snark_protocol, protocol),
+                other => panic!("expected a wrap request, got {other:?}"),
+            }
+        }
+    }
+
+    /// A client older than the field sends none, and 0 is unspecified: both ask for any protocol.
+    #[test]
+    fn an_unspecified_snark_protocol_asks_for_any() {
+        let mut wire = ProveRequest::from(prove_request(None));
+        assert_eq!(wire.snark_protocol, None);
+        wire.snark_protocol = Some(SnarkProtocol::Unspecified.into());
+        assert_eq!(DomainProveRequest::try_from(wire).unwrap().snark_protocol, None);
+    }
+
+    #[test]
+    fn an_unknown_snark_protocol_is_rejected() {
+        let mut wire = ProveRequest::from(prove_request(None));
+        wire.snark_protocol = Some(99);
+        assert!(DomainProveRequest::try_from(wire).is_err());
+    }
+
+    #[test]
+    fn prove_request_seed_round_trips() {
+        let seed = RandomSeed::new([5; RandomSeed::LEN]);
+        for seed in [Some(seed), None] {
+            let wire = ProveRequest::from(prove_request(seed));
+            assert_eq!(DomainProveRequest::try_from(wire).unwrap().random_seed, seed);
+        }
+    }
+
+    #[test]
+    fn proof_envelope_seed_round_trips() {
+        let seed = Some(RandomSeed::new([6; RandomSeed::LEN]));
+        let proof = DomainProof {
+            proof_id: Uuid::nil(),
+            hash_id: "hash".to_string(),
+            verification_key: vec![],
+            proof_kind: DomainProofKind::Stark,
+            data: vec![1, 2, 3],
+            public_inputs: vec![],
+            started_at: None,
+            completed_at: None,
+            random_seed: seed,
+        };
+        assert_eq!(DomainProof::try_from(Proof::from(proof)).unwrap().random_seed, seed);
+    }
+
+    #[test]
+    fn execute_response_seed_round_trips() {
+        let seed = Some(RandomSeed::new([8; RandomSeed::LEN]));
+        let response = DomainJobKindResponse::Execute {
+            stats: DomainExecutionStats::default(),
+            public_outputs: vec![],
+            random_seed: seed,
+        };
+        match DomainJobKindResponse::try_from(JobKindResponse::from(response)).unwrap() {
+            DomainJobKindResponse::Execute { random_seed: decoded, .. } => {
+                assert_eq!(decoded, seed)
+            }
+            other => panic!("expected an execute response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prove_request_rejects_a_seed_of_the_wrong_length() {
+        let mut wire = ProveRequest::from(prove_request(None));
+        wire.random_seed = Some(vec![0; RandomSeed::LEN - 1]);
+        assert!(DomainProveRequest::try_from(wire).is_err());
+    }
+
+    #[test]
+    fn try_inline_takes_up_to_the_inline_limit() {
+        assert!(DomainInputKind::try_inline(vec![0; DomainInputKind::MAX_INLINE_BYTES]).is_ok());
+        assert!(
+            DomainInputKind::try_inline(vec![0; DomainInputKind::MAX_INLINE_BYTES + 1]).is_err()
+        );
+    }
+
+    /// An input of exactly 128 MiB used to pass as inline, and its request then failed in the
+    /// transport, past the gRPC message limit. The largest request the inline limit lets
+    /// through, with every other field at its largest, must fit that limit.
+    #[test]
+    fn the_largest_inline_request_fits_a_grpc_message() {
+        use prost::Message;
+
+        let mut request = prove_request(Some(RandomSeed::new([1; RandomSeed::LEN])));
+        request.hash_id = "f".repeat(64);
+        request.proof_timeout = Some(chrono::Utc::now());
+        request.input = DomainInputKind::Inline(DomainInputChunk {
+            data: vec![0; DomainInputKind::MAX_INLINE_BYTES],
+        });
+        // The server's metadata caps: 32 entries, keys of 128 bytes and values of 1 KiB.
+        let metadata = (0..32).map(|i| (format!("{i:0>128}"), "v".repeat(1024))).collect();
+        let message =
+            JobRequestMessage { job_kind: Some(DomainJobKind::Prove(request).into()), metadata };
+        assert!(message.encoded_len() <= 128 * 1024 * 1024, "{} bytes", message.encoded_len());
+    }
+}

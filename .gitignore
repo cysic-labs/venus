@@ -1,20 +1,8 @@
-# Python
-__pycache__/
-
 # Cargo build
 **/target
-!/lib-c/target/
-/lib-c/target/*
-!/lib-c/target/release/
-/lib-c/target/release/*
-!/lib-c/target/release/clib.a
-!/lib-float/target/
-/lib-float/target/*
-!/lib-float/target/release/
-/lib-float/target/release/*
-!/lib-float/target/release/clib.a
 
 /*.tar.gz
+/*.json.gz
 /riscof
 /build*
 /proofs*
@@ -34,15 +22,28 @@ __pycache__/
 /lib-c/c/lib
 /lib-float/c/build
 /logs
+/state-machines/mem-cpp/cu/CudaArch.mk
 state-machines/frequent-ops/src/frequent_ops_fixed.bin
 state-machines/arith/src/arith_frops_fixed.bin
 state-machines/binary/src/binary_basic_frops_fixed.bin
 state-machines/binary/src/binary_extension_frops_fixed.bin
+precompiles/evm/src/jump_dest_bitmap_table_fixed.bin
 reth-inputs/
 /hints
 /benchmark
-pil2-proofman/pil2-stark/lib/
-
-# AI Automation flow
-.claude
-**/superpowers/*
+dist/
+# ziskasm/lang/c/package.sh scratch build dir
+build-pkg/
+package-lock.json
+/emulator-asm/src/dma/test/build_light/
+/emulator-asm/src/dma/test/test_dma
+/emulator-asm/src/dma/test/test_dma_light
+/emulator-asm/src/evm/test/build_light/
+/emulator-asm/src/evm/test/test_jump_dest
+/emulator-asm/src/evm/test/test_jump_dest_light
+/state-machines/mem-cpp/cpp/build/
+# Venus monorepo
+/temp/
+/pil2-proofman/pil2-stark/lib/
+/pil2-proofman/pil2-stark/src/bn128/src/ffiasm/*.o
+/lib-c/c/src/ffiasm/*.o

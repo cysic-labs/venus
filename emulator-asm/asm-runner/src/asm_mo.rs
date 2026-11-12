@@ -1,10 +1,11 @@
 use std::fmt::Debug;
 
-use crate::{AsmShmemChunk, AsmShmemHeader};
+use crate::AsmShmemHeader;
+use zisk_common::Plan;
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct AsmMOHeader {
+pub(crate) struct AsmMOHeader {
     pub version: u64,
     pub exit_code: u64,
     pub shmem_allocated_size: u64,
@@ -20,14 +21,42 @@ impl AsmShmemHeader for AsmMOHeader {
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct AsmMOChunk {
+pub(crate) struct AsmMOChunk {
     pub end: u64,
+    /// Words of memory-ops data that follow: tagged 8-byte words, one per read, two per write or
+    /// block record, 2 + n per value block.
     pub mem_ops_size: u64,
 }
 
-// SAFETY: repr(C) struct of u64 fields.
-unsafe impl AsmShmemChunk for AsmMOChunk {
-    fn payload_len(&self) -> u64 {
-        self.mem_ops_size
-    }
+/// Type of buffer used on GPU MO count and plan.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum GpuBufferSource {
+    /// Execution is finally delegated to the CPU path.
+    #[default]
+    Cpu,
+    /// Uses the provided pil2-proofman prover buffer.
+    Borrowed {
+        /// Raw pointer to the buffer.
+        ptr: usize,
+        /// Buffer size in bytes.
+        size: usize,
+        /// Device the buffer lives on (proofman's my_gpu_ids[0]); not always 0.
+        gpu_id: u32,
+    },
+    /// The buffer is allocated and owned by the runner.
+    SelfAllocated,
+}
+
+/// The memory instances this process owns, by family: segment ids for Mem, RomData and
+/// InputData, the plans (with their checkpoints) for the MemAlign airs.
+#[derive(Default)]
+pub struct OwnedMemInstances<'a> {
+    /// Segment ids of the owned `Mem` instances.
+    pub ram: Vec<u32>,
+    /// Segment ids of the owned `RomData` instances.
+    pub rom: Vec<u32>,
+    /// Segment ids of the owned `InputData` instances.
+    pub input: Vec<u32>,
+    /// The owned MemAlign plans, with their checkpoints.
+    pub align: Vec<&'a Plan>,
 }

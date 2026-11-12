@@ -28,3 +28,24 @@ pub const SYSCALL_DMA_MEMSET_ID: u16 = 0x816;
 pub const SYSCALL_SECP256R1_ADD_ID: u16 = 0x817;
 pub const SYSCALL_SECP256R1_DBL_ID: u16 = 0x818;
 pub const SYSCALL_BLAKE2B_ROUND_ID: u16 = 0x819;
+pub const SYSCALL_PROFILE_ID: u16 = 0x81A;
+pub const SYSCALL_POSEIDON1_ID: u16 = 0x81B;
+pub const SYSCALL_JUMP_DEST_ID: u16 = 0x81C;
+pub const SYSCALL_BABYJUBJUB_ADD_ID: u16 = 0x81D;
+pub const SYSCALL_BLAKE3F_ID: u16 = 0x81E;
+pub const SYSCALL_BLAKE2SF_ID: u16 = 0x81F;
+pub const SYSCALL_ED25519_ADD_ID: u16 = 0x820;
+pub const SYSCALL_POSEIDON2_KOALABEAR_ID: u16 = 0x821;
+
+/// blake2b `extended_arg`: round index (bits 0..3), state and m from the previous round of the
+/// call (`BLAKE2B_RD_CHAIN`), to the next one (`BLAKE2B_WR_CHAIN`), steps back to it (bits 6..).
+pub const BLAKE2B_ROUND_MASK: u64 = 0xF;
+pub const BLAKE2B_RD_CHAIN: u64 = 1 << 4;
+pub const BLAKE2B_WR_CHAIN: u64 = 1 << 5;
+pub const BLAKE2B_GAP_SHIFT: u64 = 6;
+/// Steps back to the previous round of a chain whose rounds are consecutive instructions.
+pub const BLAKE2B_GAP: u64 = 1 << BLAKE2B_GAP_SHIFT;
+/// Flags of the first, middle and last round of such a chain.
+pub const BLAKE2B_CHAIN_FIRST: u64 = BLAKE2B_WR_CHAIN;
+pub const BLAKE2B_CHAIN_MID: u64 = BLAKE2B_RD_CHAIN | BLAKE2B_WR_CHAIN | BLAKE2B_GAP;
+pub const BLAKE2B_CHAIN_LAST: u64 = BLAKE2B_RD_CHAIN | BLAKE2B_GAP;

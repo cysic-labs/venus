@@ -1,11 +1,12 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use zisk_distributed_common::Environment;
-use zisk_distributed_common::{ComputeCapacity, LoggingConfig, WorkerId};
+use zisk_cluster_common::Environment;
+use zisk_cluster_common::{ComputeCapacity, LoggingConfig, WorkerId};
 
 /// Worker Service Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerServiceConfig {
     /// Worker configuration
     pub worker: WorkerConfig,
@@ -19,9 +20,48 @@ pub struct WorkerServiceConfig {
 
     /// Logging configuration
     pub logging: LoggingConfig,
+
+    /// What the worker reports to its coordinator about its host and processes
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
+/// The telemetry the worker reports with its heartbeats: its processes' memory, the host's ZisK
+/// shared memory, its cgroup's memory and CPU, its start-up times, and how its last run ended
+/// when it ended itself. Informational; nothing about the jobs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryConfig {
+    /// Whether the worker reports it. On by default; `--no-telemetry` turns it off.
+    #[serde(default = "TelemetryConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Seconds between two reports.
+    #[serde(default = "TelemetryConfig::default_interval")]
+    pub interval_seconds: u64,
+}
+
+impl TelemetryConfig {
+    /// On by default (serde default).
+    pub const fn default_enabled() -> bool {
+        true
+    }
+
+    /// Every 10 seconds by default (serde default).
+    pub const fn default_interval() -> u64 {
+        10
+    }
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self { enabled: Self::default_enabled(), interval_seconds: Self::default_interval() }
+    }
+}
+
+/// Worker identity and capacity settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerConfig {
     /// Worker ID (optional, will auto-generate if not provided)
     pub worker_id: WorkerId,
@@ -36,13 +76,17 @@ pub struct WorkerConfig {
     pub inputs_folder: PathBuf,
 }
 
+/// Which coordinator the worker connects to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoordinatorConfig {
     /// Coordinator URL to connect to
     pub url: String,
 }
 
+/// Connection resilience settings (reconnect interval, heartbeat timeout).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConnectionConfig {
     /// Reconnection interval in seconds
     #[serde(default = "ConnectionConfig::default_reconnect_interval")]
@@ -58,10 +102,12 @@ impl ConnectionConfig {
     const DEFAULT_HEARTBEAT_TIMEOUT: u64 = 30;
 
     // These are needed for serde's `default` attribute
+    /// Default reconnection interval, in seconds (serde default).
     pub const fn default_reconnect_interval() -> u64 {
         Self::DEFAULT_RECONNECT_INTERVAL
     }
 
+    /// Default heartbeat timeout, in seconds (serde default).
     pub const fn default_heartbeat_timeout() -> u64 {
         Self::DEFAULT_HEARTBEAT_TIMEOUT
     }
@@ -77,25 +123,18 @@ impl Default for ConnectionConfig {
 }
 
 impl WorkerServiceConfig {
+    /// Load the worker configuration from built-in defaults, an optional TOML
+    /// file (or `ZISK_WORKER_CONFIG_PATH`), and the given argument overrides.
+    /// A random worker id is generated when none is provided.
     pub async fn load(
         config: Option<String>,
         coordinator_url: Option<String>,
         worker_id: Option<String>,
         compute_capacity: Option<u32>,
-        inputs_folder: Option<PathBuf>,
+        no_telemetry: bool,
     ) -> Result<Self> {
         // Config file is now optional - if not provided, defaults will be used
         let config = config.or_else(|| std::env::var("ZISK_WORKER_CONFIG_PATH").ok());
-
-        // Check inputs folder exists if provided
-        if let Some(ref path) = inputs_folder {
-            if !path.exists() || !path.is_dir() {
-                anyhow::bail!(
-                    "Inputs folder does not exist or is not a directory: {}",
-                    path.display()
-                );
-            }
-        }
 
         // Generate a random worker ID
         let random_worker_id = format!("{}", uuid::Uuid::new_v4().simple());
@@ -105,7 +144,7 @@ impl WorkerServiceConfig {
             .set_default("worker.compute_capacity.compute_units", 10)?
             .set_default("worker.environment", "development")?
             .set_default("worker.inputs_folder", ".")?
-            .set_default("coordinator.url", zisk_distributed_coordinator::Config::default_url())?
+            .set_default("coordinator.url", zisk_coordinator::Config::default_url())?
             .set_default("connection.reconnect_interval_seconds", 5)?
             .set_default("connection.heartbeat_timeout_seconds", 30)?
             .set_default("logging.level", "info")?
@@ -128,11 +167,8 @@ impl WorkerServiceConfig {
                 builder.set_override("worker.compute_capacity.compute_units", compute_capacity)?;
         }
 
-        if let Some(inputs_folder) = inputs_folder {
-            builder = builder.set_override(
-                "worker.inputs_folder",
-                inputs_folder.to_string_lossy().to_string(),
-            )?;
+        if no_telemetry {
+            builder = builder.set_override("telemetry.enabled", false)?;
         }
 
         let config = builder.build()?;
@@ -142,51 +178,40 @@ impl WorkerServiceConfig {
 }
 
 /// Configuration for initializing a Prover Service
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct ProverServiceConfigDto {
-    pub elf: PathBuf,
+    /// Path to prebuilt ASM binaries; `None` uses the default cache.
     pub asm: Option<PathBuf>,
-    pub hints: bool,
+    /// Use the pure-Rust emulator backend instead of ASM.
     pub emulator: bool,
+    /// Path to the proving key; `None` uses the default.
     pub proving_key: Option<PathBuf>,
-    pub asm_port: Option<u16>,
+    /// Path to the SNARK proving key; `None` uses the default.
+    pub proving_key_snark: Option<PathBuf>,
+    /// Unlock mapped memory for the ASM shared-memory regions.
     pub unlock_mapped_memory: bool,
+    /// Write the ASM emulator output to a file instead of shared memory.
     pub asm_out_file: bool,
+    /// Verbosity level (`0` = quiet).
     pub verbose: u8,
+    /// Constraint-debug selector (see the prover backend's debug info).
     pub debug: Option<Option<String>>,
-    pub verify_constraints: bool,
-    pub aggregation: bool,
-    pub preallocate: bool,
+    /// Cap on concurrent proving streams.
     pub max_streams: Option<usize>,
+    /// Cap on concurrent recursive (aggregation) streams.
+    pub max_recursive_streams: Option<usize>,
+    /// Size of the witness-generation thread pool.
     pub number_threads_witness: Option<usize>,
+    /// Cap on witnesses kept in memory at once.
     pub max_witness_stored: Option<usize>,
-    pub shared_tables: bool,
-    pub rma: bool,
+    /// Prefer lower memory usage over speed.
     pub minimal_memory: bool,
-}
-
-impl Default for ProverServiceConfigDto {
-    fn default() -> Self {
-        Self {
-            elf: PathBuf::new(),
-            asm: None,
-            hints: false,
-            emulator: false,
-            proving_key: None,
-            asm_port: None,
-            unlock_mapped_memory: false,
-            asm_out_file: false,
-            verbose: 0,
-            debug: None,
-            verify_constraints: false,
-            aggregation: false,
-            preallocate: false,
-            max_streams: None,
-            number_threads_witness: None,
-            max_witness_stored: None,
-            shared_tables: false,
-            rma: true,
-            minimal_memory: false,
-        }
-    }
+    /// Use the GPU proving path.
+    pub gpu: bool,
+    /// Prove final SNARKs, of the protocol of the SNARK proving key.
+    pub snark: bool,
+    /// Preload the SNARK proving key.
+    pub preload_snark: bool,
+    /// Use the CPU MOPs
+    pub cpu_mops: bool,
 }

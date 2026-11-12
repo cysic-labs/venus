@@ -40,6 +40,10 @@ pub fn secp256k1_fn_inv_c(params: &[u64], result: &mut [u64]) -> i32 {
     run_on_linux!(InverseFnEc(&params[0], &mut result[0]))
 }
 
+pub fn secp256r1_fn_inv_c(params: &[u64], result: &mut [u64]) -> i32 {
+    run_on_linux!(InverseFnEcR1(&params[0], &mut result[0]))
+}
+
 pub fn secp256k1_fp_parity_sqrt_c(params: &[u64], parity: u64, result: &mut [u64]) -> i32 {
     run_on_linux!(SqrtFpEcParity(&params[0], parity, &mut result[0]))
 }
@@ -78,4 +82,10 @@ pub fn arith256_mod_c(
 
 pub fn add256(a: &[u64; 4], b: &[u64; 4], cin: u64, c: &mut [u64; 4]) -> i32 {
     run_on_linux!(Add256(&a[0], &b[0], cin, &mut c[0]))
+}
+
+/// Poseidon2 KoalaBear (`POSEIDON2_KOALABEAR`) on a state of 16 lanes packed two per word, each in
+/// Montgomery form: 0, or -1 (state untouched) if a lane is not canonical.
+pub fn poseidon2_koalabear_c(state: &mut [u64; 8]) -> i32 {
+    run_on_linux!(poseidon2_koalabear(&mut state[0]))
 }

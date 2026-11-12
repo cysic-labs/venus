@@ -52,57 +52,13 @@
 
 use std::fmt::Display;
 
-use anyhow::Result;
+use crate::error::{CommonError, Result};
 
-/// Largest hint payload accepted from a hint stream, in bytes. Partial hints accumulate up to
-/// the declared length, so the header length is bounded before any data is buffered.
-const MAX_HINT_PAYLOAD_BYTES: usize = 0x400000;
-
-// === CONTROL CODES ===
-pub const CTRL_START: u32 = 0x0000;
-pub const CTRL_END: u32 = 0x0001;
-pub const CTRL_CANCEL: u32 = 0x0002;
-pub const CTRL_ERROR: u32 = 0x0003;
-
-// === INPUT HINT CODES ===
-pub const HINT_INPUT: u32 = 0xF0000;
-
-// === BUILT-IN HINT CODES ===
-// SHA256 hint codes
-pub const HINT_SHA256: u32 = 0x0100;
-
-// BN254 hint codes
-pub const HINT_BN254_G1_ADD: u32 = 0x0200;
-pub const HINT_BN254_G1_MUL: u32 = 0x0201;
-pub const HINT_BN254_PAIRING_CHECK: u32 = 0x0205;
-
-// Secp256k1 hint codes
-pub const HINT_SECP256K1_ECDSA_ADDRESS_RECOVER: u32 = 0x0300;
-pub const HINT_SECP256K1_ECDSA_VERIFY_ADDRESS_RECOVER: u32 = 0x0301;
-
-// Secp256r1 hint codes
-pub const HINT_SECP256R1_ECDSA_VERIFY: u32 = 0x0380;
-
-// BLS12-381 hint codes
-pub const HINT_BLS12_381_G1_ADD: u32 = 0x0400;
-pub const HINT_BLS12_381_G1_MSM: u32 = 0x0401;
-pub const HINT_BLS12_381_G2_ADD: u32 = 0x0405;
-pub const HINT_BLS12_381_G2_MSM: u32 = 0x0406;
-pub const HINT_BLS12_381_PAIRING_CHECK: u32 = 0x040A;
-pub const HINT_BLS12_381_FP_TO_G1: u32 = 0x0410;
-pub const HINT_BLS12_381_FP2_TO_G2: u32 = 0x0411;
-
-// Modular exponentiation hint codes
-pub const HINT_MODEXP: u32 = 0x0500;
-
-// KZG hint codes
-pub const HINT_VERIFY_KZG_PROOF: u32 = 0x0600;
-
-// Keccak256 hint codes
-pub const HINT_KECCAK256: u32 = 0x0700;
-
-// Blake2b hint codes
-pub const HINT_BLAKE2B_COMPRESS: u32 = 0x0800;
+// Hint code constants live in `zisk-definitions` (a dependency-free, `no_std` leaf
+// crate) so the guest-side `ziskos` crate can share them without pulling in this
+// crate's prover stack. Re-exported here so existing `zisk_common::HINT_*`
+// consumers keep working unchanged.
+pub use zisk_definitions::hints::*;
 
 /// Control code variants for stream control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,7 +87,7 @@ impl Display for CtrlHint {
 }
 
 impl TryFrom<u32> for CtrlHint {
-    type Error = anyhow::Error;
+    type Error = CommonError;
 
     fn try_from(value: u32) -> Result<Self> {
         match value {
@@ -139,7 +95,7 @@ impl TryFrom<u32> for CtrlHint {
             CTRL_END => Ok(Self::End),
             CTRL_CANCEL => Ok(Self::Cancel),
             CTRL_ERROR => Ok(Self::Error),
-            _ => Err(anyhow::anyhow!("Invalid control code: {:#x}", value)),
+            _ => Err(CommonError::InvalidHint(format!("Invalid control code: {:#x}", value))),
         }
     }
 }
@@ -165,10 +121,10 @@ pub enum BuiltInHint {
     Bn254PairingCheck = HINT_BN254_PAIRING_CHECK,
 
     // Secp256k1 hint types.
-    /// secp256k1 ECDSA address recovery.
-    Secp256k1EcdsaAddressRecover = HINT_SECP256K1_ECDSA_ADDRESS_RECOVER,
-    /// secp256k1 ECDSA signature verification and address recovery.
-    Secp256k1EcdsaVerifyAddressRecover = HINT_SECP256K1_ECDSA_VERIFY_ADDRESS_RECOVER,
+    /// secp256k1 ECDSA recovery returning raw 64-byte public key (matches zkvm_secp256k1_ecrecover).
+    Secp256k1Ecrecover = HINT_SECP256K1_ECRECOVER,
+    /// secp256k1 ECDSA signature verification (matches zkvm_secp256k1_verify).
+    Secp256k1EcdsaVerify = HINT_SECP256K1_ECDSA_VERIFY,
 
     // Secp256r1 hint types.
     /// secp256r1 (P-256) signature verification.
@@ -193,6 +149,18 @@ pub enum BuiltInHint {
     // Modular exponentiation hint types.
     /// Modular exponentiation.
     ModExp = HINT_MODEXP,
+    /// 256-bit modular multiplication (EVM MULMOD opcode).
+    MulMod256 = HINT_MULMOD256,
+    /// 256-bit modular reduction.
+    ReduceMod256 = HINT_REDUCE_MOD256,
+    /// 256-bit modular addition.
+    AddMod256 = HINT_ADD_MOD256,
+    /// 256-bit modular squaring.
+    SquareMod256 = HINT_SQUARE_MOD256,
+    /// 256-bit modular exponentiation.
+    PowMod256 = HINT_POW_MOD256,
+    /// 256-bit modular inverse.
+    InvMod256 = HINT_INV_MOD256,
 
     // KZG hint types.
     /// Verify KZG proof.
@@ -205,6 +173,10 @@ pub enum BuiltInHint {
     // Blake2b hint types.
     /// Blake2b compression function.
     Blake2bCompress = HINT_BLAKE2B_COMPRESS,
+
+    // RIPEMD-160 hint types.
+    /// RIPEMD-160 hash (pure software implementation, no ZK circuit witness).
+    Ripemd160 = HINT_RIPEMD160,
 }
 
 impl Display for BuiltInHint {
@@ -219,10 +191,8 @@ impl Display for BuiltInHint {
             BuiltInHint::Bn254G1Mul => "BN254_G1_MUL",
             BuiltInHint::Bn254PairingCheck => "BN254_PAIRING_CHECK",
             // Secp256k1 Hints
-            BuiltInHint::Secp256k1EcdsaAddressRecover => "SECP256K1_ECDSA_ADDRESS_RECOVER",
-            BuiltInHint::Secp256k1EcdsaVerifyAddressRecover => {
-                "SECP256K1_ECDSA_VERIFY_ADDRESS_RECOVER"
-            }
+            BuiltInHint::Secp256k1Ecrecover => "SECP256K1_ECRECOVER",
+            BuiltInHint::Secp256k1EcdsaVerify => "SECP256K1_ECDSA_VERIFY",
             // Secp256r1 Hints
             BuiltInHint::Secp256r1EcdsaVerify => "SECP256R1_ECDSA_VERIFY",
             // BLS12-381 Hints
@@ -235,12 +205,20 @@ impl Display for BuiltInHint {
             BuiltInHint::Bls12_381Fp2ToG2 => "BLS12_381_FP2_TO_G2",
             // Modular Exponentiation Hint
             BuiltInHint::ModExp => "MODEXP",
+            BuiltInHint::MulMod256 => "MULMOD256",
+            BuiltInHint::ReduceMod256 => "REDUCE_MOD256",
+            BuiltInHint::AddMod256 => "ADD_MOD256",
+            BuiltInHint::SquareMod256 => "SQUARE_MOD256",
+            BuiltInHint::PowMod256 => "POW_MOD256",
+            BuiltInHint::InvMod256 => "INV_MOD256",
             // KZG Hint
             BuiltInHint::VerifyKzgProof => "VERIFY_KZG_PROOF",
             // Keccak256 Hint
             BuiltInHint::Keccak256 => "KECCAK256",
             // Blake2b Hint
             BuiltInHint::Blake2bCompress => "BLAKE2B_COMPRESS",
+            // RIPEMD-160 Hint
+            BuiltInHint::Ripemd160 => "RIPEMD160",
         };
 
         write!(f, "{} ({:#x})", name, *self as u32)
@@ -248,7 +226,7 @@ impl Display for BuiltInHint {
 }
 
 impl TryFrom<u32> for BuiltInHint {
-    type Error = anyhow::Error;
+    type Error = CommonError;
 
     fn try_from(value: u32) -> Result<Self> {
         match value {
@@ -261,10 +239,8 @@ impl TryFrom<u32> for BuiltInHint {
             HINT_BN254_G1_MUL => Ok(Self::Bn254G1Mul),
             HINT_BN254_PAIRING_CHECK => Ok(Self::Bn254PairingCheck),
             // Secp256k1 Hints
-            HINT_SECP256K1_ECDSA_ADDRESS_RECOVER => Ok(Self::Secp256k1EcdsaAddressRecover),
-            HINT_SECP256K1_ECDSA_VERIFY_ADDRESS_RECOVER => {
-                Ok(Self::Secp256k1EcdsaVerifyAddressRecover)
-            }
+            HINT_SECP256K1_ECRECOVER => Ok(Self::Secp256k1Ecrecover),
+            HINT_SECP256K1_ECDSA_VERIFY => Ok(Self::Secp256k1EcdsaVerify),
             // Secp256r1 Hints
             HINT_SECP256R1_ECDSA_VERIFY => Ok(Self::Secp256r1EcdsaVerify),
             // BLS12-381 Hints
@@ -277,13 +253,21 @@ impl TryFrom<u32> for BuiltInHint {
             HINT_BLS12_381_FP2_TO_G2 => Ok(Self::Bls12_381Fp2ToG2),
             // Modular Exponentiation Hint
             HINT_MODEXP => Ok(Self::ModExp),
+            HINT_MULMOD256 => Ok(Self::MulMod256),
+            HINT_REDUCE_MOD256 => Ok(Self::ReduceMod256),
+            HINT_ADD_MOD256 => Ok(Self::AddMod256),
+            HINT_SQUARE_MOD256 => Ok(Self::SquareMod256),
+            HINT_POW_MOD256 => Ok(Self::PowMod256),
+            HINT_INV_MOD256 => Ok(Self::InvMod256),
             // KZG Hint
             HINT_VERIFY_KZG_PROOF => Ok(Self::VerifyKzgProof),
             // Keccak256 Hint
             HINT_KECCAK256 => Ok(Self::Keccak256),
             // Blake2b Hint
             HINT_BLAKE2B_COMPRESS => Ok(Self::Blake2bCompress),
-            _ => Err(anyhow::anyhow!("Invalid built-in hint code: {:#x}", value)),
+            // RIPEMD-160 Hint
+            HINT_RIPEMD160 => Ok(Self::Ripemd160),
+            _ => Err(CommonError::InvalidHint(format!("Invalid built-in hint code: {:#x}", value))),
         }
     }
 }
@@ -311,7 +295,7 @@ impl Display for HintCode {
 }
 
 impl TryFrom<u32> for HintCode {
-    type Error = anyhow::Error;
+    type Error = CommonError;
 
     fn try_from(value: u32) -> Result<Self> {
         // Try CtrlCode first
@@ -323,7 +307,7 @@ impl TryFrom<u32> for HintCode {
             return Ok(HintCode::BuiltIn(builtin));
         }
         // Unknown codes return error - custom codes handled separately
-        Err(anyhow::anyhow!("Unknown hint code: {:#x}", value))
+        Err(CommonError::InvalidHint(format!("Unknown hint code: {:#x}", value)))
     }
 }
 
@@ -348,12 +332,8 @@ impl HintCode {
             HintCode::BuiltIn(BuiltInHint::Bn254G1Mul) => HINT_BN254_G1_MUL,
             HintCode::BuiltIn(BuiltInHint::Bn254PairingCheck) => HINT_BN254_PAIRING_CHECK,
             // Secp256k1 Hints
-            HintCode::BuiltIn(BuiltInHint::Secp256k1EcdsaAddressRecover) => {
-                HINT_SECP256K1_ECDSA_ADDRESS_RECOVER
-            }
-            HintCode::BuiltIn(BuiltInHint::Secp256k1EcdsaVerifyAddressRecover) => {
-                HINT_SECP256K1_ECDSA_VERIFY_ADDRESS_RECOVER
-            }
+            HintCode::BuiltIn(BuiltInHint::Secp256k1Ecrecover) => HINT_SECP256K1_ECRECOVER,
+            HintCode::BuiltIn(BuiltInHint::Secp256k1EcdsaVerify) => HINT_SECP256K1_ECDSA_VERIFY,
             // Secp256r1 Hints
             HintCode::BuiltIn(BuiltInHint::Secp256r1EcdsaVerify) => HINT_SECP256R1_ECDSA_VERIFY,
             // BLS12-381 Hints
@@ -366,6 +346,12 @@ impl HintCode {
             HintCode::BuiltIn(BuiltInHint::Bls12_381Fp2ToG2) => HINT_BLS12_381_FP2_TO_G2,
             // Modular Exponentiation Hint
             HintCode::BuiltIn(BuiltInHint::ModExp) => HINT_MODEXP,
+            HintCode::BuiltIn(BuiltInHint::MulMod256) => HINT_MULMOD256,
+            HintCode::BuiltIn(BuiltInHint::ReduceMod256) => HINT_REDUCE_MOD256,
+            HintCode::BuiltIn(BuiltInHint::AddMod256) => HINT_ADD_MOD256,
+            HintCode::BuiltIn(BuiltInHint::SquareMod256) => HINT_SQUARE_MOD256,
+            HintCode::BuiltIn(BuiltInHint::PowMod256) => HINT_POW_MOD256,
+            HintCode::BuiltIn(BuiltInHint::InvMod256) => HINT_INV_MOD256,
             // KZG Hint
             HintCode::BuiltIn(BuiltInHint::VerifyKzgProof) => HINT_VERIFY_KZG_PROOF,
             // Keccak256 Hint
@@ -373,6 +359,8 @@ impl HintCode {
 
             // Blake2b Hint
             HintCode::BuiltIn(BuiltInHint::Blake2bCompress) => HINT_BLAKE2B_COMPRESS,
+            // RIPEMD-160 Hint
+            HintCode::BuiltIn(BuiltInHint::Ripemd160) => HINT_RIPEMD160,
 
             // Custom Hints
             HintCode::Custom(code) => code,
@@ -410,7 +398,7 @@ pub enum PrecompileHintParseResult {
 /// Represents a single precompile hint parsed from a `u64` slice.
 ///
 /// A hint consists of a type identifier and associated data. The hint type
-/// determines how the data should be processed by the [`PrecompileHintsProcessor`].
+/// determines how the data should be processed by the precompile hints processor.
 pub struct PrecompileHint {
     /// The type of hint, determining how the data should be processed.
     pub hint_code: HintCode,
@@ -456,6 +444,11 @@ impl PrecompileHint {
     /// * `PrecompileHintParseResult::Complete` - Successfully parsed a complete hint
     /// * `PrecompileHintParseResult::Partial` - Parsed header but slice doesn't contain all data
     /// * `Err` - If the slice is empty, index is out of bounds or hint code is invalid
+    ///
+    /// # Errors
+    ///
+    /// - [`CommonError::OutOfBounds`] if the slice is empty or the index is out of bounds.
+    /// - [`CommonError::InvalidHint`] if the hint code is unrecognized and `allow_custom` is `false`.
     #[inline(always)]
     pub fn from_u64_slice(
         slice: &[u64],
@@ -465,10 +458,7 @@ impl PrecompileHint {
     ) -> Result<(PrecompileHintParseResult, usize)> {
         // If we have a partial hint, continue accumulating from it
         if let Some(partial_hint) = partial {
-            if idx > slice.len() {
-                return Err(anyhow::anyhow!("Slice too short or index out of bounds"));
-            }
-            let available = slice.len() - idx;
+            let available = slice.len().checked_sub(idx).ok_or(CommonError::OutOfBounds)?;
 
             if available >= partial_hint.remaining_u64s {
                 // We have enough data to complete the hint
@@ -506,7 +496,7 @@ impl PrecompileHint {
 
         // No partial hint, parse from scratch
         if slice.len() <= idx {
-            return Err(anyhow::anyhow!("Slice too short or index out of bounds"));
+            return Err(CommonError::OutOfBounds);
         }
 
         let header = slice[idx];
@@ -514,12 +504,6 @@ impl PrecompileHint {
         // Extract length from lower 32 bits
         let length = header & 0xFFFFFFFF;
         let length_bytes = length as usize;
-        if length_bytes > MAX_HINT_PAYLOAD_BYTES {
-            return Err(anyhow::anyhow!(
-                "Hint payload of {length_bytes} bytes exceeds the limit of \
-                 {MAX_HINT_PAYLOAD_BYTES} bytes"
-            ));
-        }
 
         // Calculate how many u64s are needed to hold length
         let num_u64s = length.div_ceil(8) as usize;

@@ -5,31 +5,24 @@ source "./test_elf.sh"
 main() {
     info "▶️  Running $(basename "$0") script..."
 
-    ELF_FILE="eth-client/elf/zec-reth.elf"
-    INPUTS_PATH="eth-client/inputs"
-    test_elf "${ELF_FILE}" "${INPUTS_PATH}" "BLOCK_INPUTS" "BLOCK_INPUTS_DISTRIBUTED" "Ethereum blocks" || return 1
+    info "Loading environment variables..."
+    # Load environment variables from .env file (only the ones used by this script)
+    load_env BLOCK_INPUTS_SINGLE BLOCK_INPUTS_MPI DISABLE_PROVE ONLY_CPU MPI_PROCESSES MPI_THREADS PROVE_FLAGS ZEC_GUEST || return 1
 
-    # DIR="./path"
+    resolve_zec_guest || return 1
 
-    # if [[ ! -d "$DIR" ]]; then
-    # echo "Directory '$DIR' does not exist"
-    # exit 1
-    # fi
+    cd "${WORKSPACE_DIR}" || return 1
 
-    # BLOCK_FOLDER_INPUTS=""
+    info "Verifying zec-${ZEC_GUEST} ELF exists..."
+    if [[ ! -f "${ZEC_ELF}" ]]; then
+        err "zec-${ZEC_GUEST} ELF not found: ${ZEC_ELF}. Please run build_zec_guest.sh first."
+        return 1
+    fi
 
-    # for file in "$DIR"/*; do
-    # if [[ -f "$file" ]]; then
-    #     filename=$(basename "$file")
-    #     BLOCK_FOLDER_INPUTS+="$filename:"
-    # fi
-    # done
+    zec_guest_inputs BLOCK_INPUTS_SINGLE || return 1
+    zec_guest_inputs BLOCK_INPUTS_MPI || return 1
 
-    # BLOCK_FOLDER_INPUTS=${BLOCK_FOLDER_INPUTS%:}
-
-    # export BLOCK_FOLDER_INPUTS
-
-    # echo "BLOCK_FOLDER_INPUTS=$BLOCK_FOLDER_INPUTS"
+    test_elf "${ZEC_ELF}" "${ZEC_INPUTS}" "BLOCK_INPUTS" "Ethereum blocks" || return 1
 }
 
 main

@@ -6,24 +6,31 @@
 #include <string>
 #include <cuda_runtime.h>
 #include <vector>
+#include <map>
+#include <mutex>
 #ifndef __GOLDILOCKS_ENV__
 #include "zklog.hpp"
 #endif
 
-#define LOG_TIME_GPU 0
+#define LOG_TIME_GPU 1
 
 struct TimerEntry {
     cudaEvent_t start = nullptr;
     cudaEvent_t stop = nullptr;
     float timeMs = -1.0f;
+    // Nesting level at the first start(): sections wrap each other, and a flat log of them
+    // reads as double counting.
+    uint32_t depth = 0;
 };
 
 class TimerGPU {
 public:
     std::unordered_map<std::string, TimerEntry> timers;
     std::unordered_map<std::string, std::vector<TimerEntry>> multiTimers;
-    std::unordered_map<std::string, TimerEntry*> activeCategoryTimers;
+    std::unordered_map<std::string, size_t> activeCategoryTimers;
     std::vector<std::string> order;
+    // Open sections, innermost last; only its size is used, as the next section's depth.
+    std::vector<std::string> openSections;
     cudaStream_t stream = nullptr;
 
     TimerGPU() = default;
@@ -31,7 +38,51 @@ public:
 
     void init(cudaStream_t s) { stream = s; }
 
+    // Per-device event pool reused across timers: cudaEventCreate/Destroy take the driver lock.
+    static std::mutex& eventPoolMutex() { static std::mutex m; return m; }
+    static std::map<int, std::vector<cudaEvent_t>>& eventPool() {
+        static std::map<int, std::vector<cudaEvent_t>> p;
+        return p;
+    }
+    int device = -1;
+
+    // Fill the current device's pool up front, so the first job creates none on its hot path.
+    static void prewarmEvents(size_t n) {
+        int dev = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess) return;
+        std::lock_guard<std::mutex> lk(eventPoolMutex());
+        auto& v = eventPool()[dev];
+        while (v.size() < n) {
+            cudaEvent_t e;
+            if (cudaEventCreate(&e) != cudaSuccess) return;
+            v.push_back(e);
+        }
+    }
+
+    // Pooled only once its last record completed: a pending one could be re-recorded by another
+    // stream. cudaEventDestroy defers the release of a pending event itself. Both run in the
+    // event's own context: teardown may reach here with another GPU current.
+    void releaseEvent(cudaEvent_t event) {
+        if (event == nullptr) return;
+        int prev = -1;
+        const bool switched = device >= 0 && cudaGetDevice(&prev) == cudaSuccess && prev != device &&
+                              cudaSetDevice(device) == cudaSuccess;
+        if (device >= 0 && cudaEventQuery(event) == cudaSuccess) {
+            std::lock_guard<std::mutex> lk(eventPoolMutex());
+            eventPool()[device].push_back(event);
+        } else {
+            cudaEventDestroy(event);
+        }
+        if (switched) cudaSetDevice(prev);
+    }
+
     bool createEvent(cudaEvent_t& event) {
+        if (device < 0 && cudaGetDevice(&device) != cudaSuccess) device = -1;
+        if (device >= 0) {
+            std::lock_guard<std::mutex> lk(eventPoolMutex());
+            auto& v = eventPool()[device];
+            if (!v.empty()) { event = v.back(); v.pop_back(); return true; }
+        }
         cudaError_t err = cudaEventCreate(&event);
         if (err != cudaSuccess) {
 #ifndef __GOLDILOCKS_ENV__
@@ -42,17 +93,38 @@ public:
         return true;
     }
 
+    // A cudaEventRecord issued inside a cudagraph body becomes a graph node bound to this handle,
+    // which clear()/clearCategories() then destroys while the cached graph still replays it.
+    bool capturing() const {
+        if (stream == nullptr) return false;
+        cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+        return cudaStreamIsCapturing(stream, &status) == cudaSuccess && status != cudaStreamCaptureStatusNone;
+    }
+
+    // Events are recorded only when their output can be seen: the timer logs at trace level,
+    // and recording below it measured ~0.8% of proof time for nothing.
+    static bool on() {
+#ifdef __GOLDILOCKS_ENV__
+        return true;
+#else
+        return CPlusPlusLogging::Logger::getInstance(CPlusPlusLogging::LOG_TYPE::CONSOLE)->getLogLevel() == CPlusPlusLogging::LOG_LEVEL_TRACE;
+#endif
+    }
+
     void start(const std::string& name) {
+        if (!on() || capturing()) return;
         if (timers.find(name) == timers.end()) {
             cudaEvent_t start, stop;
             if (!createEvent(start) || !createEvent(stop)) return;
-            timers[name] = {start, stop, -1.0f};
+            timers[name] = {start, stop, -1.0f, (uint32_t)openSections.size()};
             order.push_back(name);
         }
+        openSections.push_back(name);
         cudaEventRecord(timers[name].start, stream);
     }
 
     void stop(const std::string& name) {
+        if (!on() || capturing()) return;
         auto it = timers.find(name);
         if (it == timers.end()) {
 #ifndef __GOLDILOCKS_ENV__
@@ -61,27 +133,31 @@ public:
             return;
         }
         cudaEventRecord(it->second.stop, stream);
+        for (size_t i = openSections.size(); i-- > 0;) {
+            if (openSections[i] == name) { openSections.erase(openSections.begin() + i); break; }
+        }
     }
 
     void startCategory(const std::string& name) {
+        if (!on() || capturing()) return;
         if (activeCategoryTimers.find(name) != activeCategoryTimers.end()) {
 #ifndef __GOLDILOCKS_ENV__
             zklog.error("TimerGPU::startCategory called without stop for previous timer: " + name);
 #endif
-            return;
+            activeCategoryTimers.erase(name);
         }
 
         cudaEvent_t start, stop;
         if (!createEvent(start) || !createEvent(stop)) return;
 
-        multiTimers[name].emplace_back(TimerEntry{start, stop, -1.0f});
-        TimerEntry& entry = multiTimers[name].back();
-
-        activeCategoryTimers[name] = &entry;
-        cudaEventRecord(entry.start, stream);
+        auto& entries = multiTimers[name];
+        entries.emplace_back(TimerEntry{start, stop, -1.0f});
+        activeCategoryTimers[name] = entries.size() - 1;
+        cudaEventRecord(entries.back().start, stream);
     }
 
     void stopCategory(const std::string& name) {
+        if (!on() || capturing()) return;
         auto it = activeCategoryTimers.find(name);
         if (it == activeCategoryTimers.end()) {
 #ifndef __GOLDILOCKS_ENV__
@@ -89,14 +165,20 @@ public:
 #endif
             return;
         }
-        cudaEventRecord(it->second->stop, stream);
+        auto entriesIt = multiTimers.find(name);
+        if (entriesIt != multiTimers.end() && it->second < entriesIt->second.size()) {
+            cudaEventRecord(entriesIt->second[it->second].stop, stream);
+        }
         activeCategoryTimers.erase(it);
     }
 
     void syncAndCompute(const std::string& name) {
         auto& entry = timers.at(name);
         cudaEventSynchronize(entry.stop);
-        cudaEventElapsedTime(&entry.timeMs, entry.start, entry.stop);
+        if (cudaEventElapsedTime(&entry.timeMs, entry.start, entry.stop) != cudaSuccess) {
+            cudaGetLastError();   // clear sticky error
+            entry.timeMs = 0.0f;  // don't propagate garbage
+        }
     }
 
     float getTimeMs(const std::string& name) {
@@ -117,7 +199,10 @@ public:
         for (auto& entry : it->second) {
             if (entry.timeMs < 0.0f) {
                 cudaEventSynchronize(entry.stop);
-                cudaEventElapsedTime(&entry.timeMs, entry.start, entry.stop);
+                if (cudaEventElapsedTime(&entry.timeMs, entry.start, entry.stop) != cudaSuccess) {
+                    cudaGetLastError();   // clear sticky error
+                    entry.timeMs = 0.0f;  // don't propagate garbage
+                }
             }
             total += entry.timeMs / 1000.0;
         }
@@ -130,7 +215,25 @@ public:
         for (const auto& name : order) {
             auto& entry = timers[name];
             if (entry.timeMs < 0.0f) syncAndCompute(name);
-            zklog.trace("<-- " + name + " : " + std::to_string(entry.timeMs / 1000.0f) + " s");
+            zklog.trace("<-- " + std::string(2 * entry.depth, ' ') + name + " : " + std::to_string(entry.timeMs / 1000.0f) + " s");
+        }
+        if (order.empty()) {
+            for (auto& [category, entries] : multiTimers) {
+                double total_sec = 0.0;
+                for (auto& entry : entries) {
+                    if (entry.timeMs < 0.0f) {
+                        cudaEventSynchronize(entry.stop);
+                        if (cudaEventElapsedTime(&entry.timeMs, entry.start, entry.stop) != cudaSuccess) {
+                            cudaGetLastError();   // clear sticky error
+                            entry.timeMs = 0.0f;  // don't propagate garbage
+                        }
+                    }
+                    total_sec += entry.timeMs / 1000.0;
+                }
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(6) << total_sec;
+                zklog.trace("<-- " + category + " (category) : " + oss.str() + " s");
+            }
         }
 #endif
     }
@@ -140,60 +243,97 @@ public:
             for (auto& entry : entries) {
                 if (entry.timeMs < 0.0f) {
                     cudaEventSynchronize(entry.stop);
-                    cudaEventElapsedTime(&entry.timeMs, entry.start, entry.stop);
+                    if (cudaEventElapsedTime(&entry.timeMs, entry.start, entry.stop) != cudaSuccess) {
+                        cudaGetLastError();   // clear sticky error
+                        entry.timeMs = 0.0f;  // don't propagate garbage
+                    }
                 }
             }
         }
     }
 
-    void clear() {
-        for (auto& [_, entry] : timers) {
-            cudaEventDestroy(entry.start);
-            cudaEventDestroy(entry.stop);
-        }
-        timers.clear();
-        order.clear();
+    // Clear stale open categories/sections so an aborted job can't leak state into the next.
+    void resetCategories() {
+        activeCategoryTimers.clear();
+        openSections.clear();
+    }
 
+    // Drop recorded categories so the next window's report covers only that window: the prove
+    // path records some before the proof opens (the load phase).
+    void clearCategories() {
         for (auto& [_, entries] : multiTimers) {
             for (auto& entry : entries) {
-                cudaEventDestroy(entry.start);
-                cudaEventDestroy(entry.stop);
+                releaseEvent(entry.start);
+                releaseEvent(entry.stop);
             }
         }
         multiTimers.clear();
         activeCategoryTimers.clear();
     }
 
+    void clear() {
+        for (auto& [_, entry] : timers) {
+            releaseEvent(entry.start);
+            releaseEvent(entry.stop);
+        }
+        timers.clear();
+        order.clear();
+        openSections.clear();
+
+        for (auto& [_, entries] : multiTimers) {
+            for (auto& entry : entries) {
+                releaseEvent(entry.start);
+                releaseEvent(entry.stop);
+            }
+        }
+        multiTimers.clear();
+        activeCategoryTimers.clear();
+    }
+
+    // Copy/wait categories, reported apart from SM work.
+    static bool isTransferCategory(const std::string& c) {
+        return c == "H2D_COPY" || c == "D2H_COPY" || c == "STAGED_WAIT" || c == "STAGED_D2D" || c == "LOAD_TREE_WAIT";
+    }
+
     void logCategoryContributions(const std::string& total_name) {
 #ifndef __GOLDILOCKS_ENV__
         if (timers.find(total_name) == timers.end()) return;
 
+        // clearCategories() at the proof window's start means everything left belongs to
+        // total_name, so the percentages below are against the right denominator: categories
+        // recorded during the load phase used to be divided by the proof's own span.
         double time_total = getTimeSec(total_name);
         if (multiTimers.empty()) return;
-        zklog.trace("     KERNELS CONTRIBUTIONS:");
 
-        std::vector<std::pair<std::string, double>> category_times;
-        double accounted_time = 0.0;
-
+        std::vector<std::pair<std::string, double>> kernel_times, transfer_times;
         for (const auto& [category, entries] : multiTimers) {
-            double total_sec = getCategoryTotalTimeSec(category);
-            accounted_time += total_sec;
-            category_times.emplace_back(category, total_sec);
+            double t = getCategoryTotalTimeSec(category);
+            (isTransferCategory(category) ? transfer_times : kernel_times).emplace_back(category, t);
         }
 
-        std::sort(category_times.begin(), category_times.end(),
-                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        auto byDesc = [](const auto& a, const auto& b) { return a.second > b.second; };
+        std::sort(kernel_times.begin(), kernel_times.end(), byDesc);
+        std::sort(transfer_times.begin(), transfer_times.end(), byDesc);
+
         std::ostringstream oss;
-        for (const auto& [category, total_sec] : category_times) {
-           oss << std::fixed << std::setprecision(4) << total_sec << "s (" << std::setprecision(2) << (total_sec / time_total) * 100.0 << "%)";
-            zklog.trace("        " + category + std::string(15 - std::min<size_t>(15, category.size()), ' ') + ":  " + oss.str());
-            oss.str("");
-            oss.clear();
+        auto dump = [&](const std::vector<std::pair<std::string, double>>& v) {
+            for (const auto& [category, total_sec] : v) {
+               oss << std::fixed << std::setprecision(4) << total_sec << "s (" << std::setprecision(2) << (total_sec / time_total) * 100.0 << "%)";
+                zklog.trace("        " + category + std::string(15 - std::min<size_t>(15, category.size()), ' ') + ":  " + oss.str());
+                oss.str("");
+                oss.clear();
+            }
+        };
+        if (!kernel_times.empty()) {
+            zklog.trace("     KERNELS CONTRIBUTIONS:");
+            dump(kernel_times);
         }
-
-        double other_time = std::max(0.0, time_total - accounted_time);
-        oss << std::fixed << std::setprecision(4) << other_time << "s (" << std::setprecision(2)<< (other_time / time_total) * 100.0 << "%)";
-        zklog.trace("        OTHER" + std::string(15 - 5, ' ') + ":  " + oss.str());
+        // Printed apart: copy engine and stalls on it. Counted in the percentages, but not added to
+        // kernel time.
+        if (!transfer_times.empty()) {
+            zklog.trace("     TRANSFERS / STALLS (copy engine, not GPU compute):");
+            dump(transfer_times);
+        }
 #endif
     }
 
@@ -234,6 +374,10 @@ inline std::string makeTimerName(const std::string& base, int id) {
 
 #define TimerResetGPU(timer) (timer.clear())
 
+#define TimerResetCategoriesGPU(timer) (timer.resetCategories())
+
+#define TimerClearCategoriesGPU(timer) (timer.clearCategories())
+
 #define TimerGetElapsedCategoryGPU(timer, category) \
     (timer.getCategoryTotalTimeSec(#category))
 
@@ -252,10 +396,13 @@ inline std::string makeTimerName(const std::string& base, int id) {
 #define TimerSyncAndLogAllGPU(timer, instance_id, airgroup_id, air_id)
 #define TimerSyncCategoriesGPU(timer)
 #define TimerResetGPU(timer)
+#define TimerResetCategoriesGPU(timer)
+#define TimerClearCategoriesGPU(timer)
 #define TimerGetElapsedCategoryGPU(timer, category) 0.0
 #define TimerLogCategoryContributionsGPU(timer, total_name)
 #define TimerSyncCategoriesGPU(timer)
 #define TimerResetGPU(timer)
+#define TimerResetCategoriesGPU(timer)
 #define TimerGetElapsedCategoryGPU(timer, category) 0.0
 #define TimerLogCategoryContributionsGPU(timer, total_name)
 #endif

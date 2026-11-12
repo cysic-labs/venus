@@ -1,0 +1,124 @@
+pragma circom 2.1.0;
+pragma custom_templates;
+
+
+function CMulAddF(ina, inb, inc) {
+
+    var A = (ina[0] + ina[1])  * (inb[0] + inb[1]);
+    var B = (ina[0] + ina[2])  * (inb[0] + inb[2]);
+    var C = (ina[1] + ina[2])  * (inb[1] + inb[2]);
+    var D = ina[0]*inb[0];
+    var E = ina[1]*inb[1];
+    var F = ina[2]*inb[2];
+    var G = D-E;
+
+    var out[3];
+
+    out[0] = C+G-F+inc[0];
+    out[1] = A+C-E-E-D+inc[1];
+    out[2] = B-G+inc[2];
+    return out;
+}
+
+// Evaluate a Polynomial of degree 4 (with 5 coefficients) and each coefficient made of 3 values at x using Horner's rule
+// Given the polynomial p(x) = coefs[4]*x⁴ + coefs[3]*x³ + coefs[2]*x² + coefs[1]*x + coefs[0], we can calculate
+// its value by doing p(x) = ((((coefs[4]*x + coefs[3])*x + coefs[2])*x + coefs[1])*x + coefs[0]) 
+// `s` = x*x and `acc` = coefs[4]*s + coefs[3]*x + coefs[2], so out = acc*s + coefs[1]*x + coefs[0].
+// An air that binds them checks the evaluation at degree 3 where Horner needs 6; one that does not
+// binds nothing to them. See evpol4Estrin in circuits/evpol.pil.
+template custom extern_c EvPol4() {
+    signal input coefs[5][3]; // Coeficients in the extended field
+    signal input x[3]; // Point at which we are evaluating the polynomial
+    signal output out[3];
+    signal output s[3];
+    signal output acc[3];
+
+    // One Estrin chain: out falls out of the same products as s and acc.
+    var zero[3] = [0, 0, 0];
+    var sv[3] = CMulAddF(x, x, zero);
+    var hi[3] = CMulAddF(coefs[4], sv, CMulAddF(coefs[3], x, coefs[2]));
+    s <-- sv;
+    acc <-- hi;
+    out <-- CMulAddF(hi, sv, CMulAddF(coefs[1], x, coefs[0]));
+}
+
+/*
+    Evaluate a polynomial of degree n at point x using Horner's rule.
+    Notice that Horner's rule can be split in different polynomials, one simply need to use as first coefficient 
+    of the subsequent polynomial the evaluation result of the previous one.
+    The idea is to use the custom template EvPol4 to evaluate a potentially much bigger polynomial
+*/
+template EvalPol(n) {
+    signal input pol[n][3];
+    signal input x[3];
+    signal output out[3];
+
+    // Split n in batches of 4 coefficients
+    // From 1 to 4 coefficients-> 1 
+    // From 5 to 8 coefficients -> 2
+    // ...
+    // Note: if n = 0 -> 0
+    var nEvs4 = (n + 3)\4;
+
+    component evs4[nEvs4];
+
+    // Calculate the evaluations of the polynomials using EvPol4
+    for (var i=nEvs4-1; i>=0; i--) {
+        evs4[i] = EvPol4();
+        for (var j=0; j<4; j++) {
+            // Add the coefficients for the EvPol. If there are not enough inputs to fulfill the 4 slots, add zeros
+            if (i*4+j < n) {
+                evs4[i].coefs[j] <== pol[i*4+j];
+            } else {
+                evs4[i].coefs[j] <== [0,0,0];
+            }
+        }
+        // For the first iteration we will set the coefficient of the highest term to zero. Otherwise we will use the result 
+        // of the previous evaluation.
+        if (i == nEvs4-1) {
+            evs4[i].coefs[4] <== [0,0,0];
+        } else {
+            evs4[i].coefs[4] <== evs4[i+1].out;
+        }
+        evs4[i].x <== x;
+    }
+
+    // The air that placed the gate is the only consumer of the intermediates.
+    for (var i = 0; i < nEvs4; i++) {
+        for (var j = 0; j < 3; j++) {
+            _ <== evs4[i].s[j];
+            _ <== evs4[i].acc[j];
+        }
+    }
+
+    // If n = 0 return an empty array. Otherwise return the evaluation of the polynomial
+    if (n==0) {
+        out <== [0,0,0];
+    } else {
+        out <== evs4[0].out;
+    }
+}
+
+/*
+    Evaluate a polynomial with coefficients in Fp³ at a point x of the BASE field Fp, with Horner's rule.
+    With x ∈ Fp the three coordinates never mix, so each Horner step is three independent products
+        acc[e] <-- acc[e]·x + pol[i][e],    e = 0, 1, 2
+    i.e. 3(n−1) plain constraints in all.
+*/
+template EvalPolBase(n) {
+    assert(n >= 1);
+    signal input pol[n][3];
+    signal input x;
+    signal output out[3];
+
+    // acc[i] holds the evaluation of the polynomial formed by the i+1 highest coefficients
+    signal acc[n][3];
+    acc[0] <== pol[n-1];
+    for (var i = 1; i < n; i++) {
+        for (var e = 0; e < 3; e++) {
+            acc[i][e] <== acc[i-1][e] * x + pol[n-1-i][e];
+        }
+    }
+
+    out <== acc[n-1];
+}

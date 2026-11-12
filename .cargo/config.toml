@@ -1,0 +1,24 @@
+# Export the host binary's symbols to dlopen'd plugins.
+#
+# Proving-key `.so` files (e.g. `recursive1.so`) reference GMP symbols but
+# do not list libgmp in their `DT_NEEDED` — they expect the loading process
+# to already provide GMP. Without `--export-dynamic`, Rust binaries do not
+# expose their statically-linked symbols to libraries opened via `dlopen`,
+# causing runtime errors like:
+#
+#   symbol lookup error: .../recursive1.so: undefined symbol: __gmpz_init_set_ui
+#
+# Linux-only: macOS uses a different export model and the affected `.so`
+# files are Linux-targeted anyway.
+[target.'cfg(target_os = "linux")']
+# adx/bmi2 are what gate ark-ff's hand-written 256-bit Montgomery assembly -- the `asm` feature
+# alone is inert without them. They are requested by name rather than through `target-cpu=native`
+# on purpose: this file is tracked, so it also applies to the release build, and `release.yml`
+# publishes that binary for arbitrary machines. `native` would pin the artifact to whatever the
+# GitHub runner happened to be, which is not even stable between runs (the ubuntu-22.04 pool mixes
+# Ice Lake, which has AVX-512, with EPYC, which does not) -- an artifact built on the former
+# SIGILLs on the latter. `+bmi2,+adx` is a fixed Broadwell/Zen1 baseline instead.
+#
+# For a local benchmark, pass `native` through the environment rather than editing this file:
+#   RUSTFLAGS="-C target-cpu=native" cargo build --release
+rustflags = ["-C", "link-arg=-Wl,--export-dynamic", "-C", "target-feature=+bmi2,+adx"]

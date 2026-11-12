@@ -5,11 +5,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use zisk_cluster_common::StreamMessageKind;
 use zisk_common::{
-    io::StreamProcessor, CtrlHint, HintCode, PartialPrecompileHint, PrecompileHint,
-    PrecompileHintParseResult,
+    io::{StreamError, StreamProcessor},
+    CtrlHint, HintCode, PartialPrecompileHint, PrecompileHint, PrecompileHintParseResult,
 };
-use zisk_distributed_common::StreamMessageKind;
 
 type AsyncDispatcher = Arc<
     dyn Fn(u32, StreamMessageKind, Vec<u8>) -> Pin<Box<dyn Future<Output = ()> + Send>>
@@ -17,6 +17,8 @@ type AsyncDispatcher = Arc<
         + Sync,
 >;
 
+/// Relays precompile hints from a job's workers to their consumers, batching
+/// and re-sequencing partial hint payloads across message boundaries.
 pub struct PrecompileHintsRelay {
     sequence_number: Arc<AtomicU32>,
     dispatcher: AsyncDispatcher,
@@ -27,6 +29,8 @@ pub struct PrecompileHintsRelay {
 }
 
 impl PrecompileHintsRelay {
+    /// Create a relay that forwards each `(sequence, kind, payload)` batch to
+    /// the given async `dispatcher`.
     pub fn new<F, Fut>(dispatcher: F) -> Self
     where
         F: Fn(u32, StreamMessageKind, Vec<u8>) -> Fut + Send + Sync + 'static,
@@ -49,6 +53,9 @@ impl PrecompileHintsRelay {
         }
     }
 
+    /// Process one batch of hint words, dispatching any complete hints and
+    /// buffering the trailing partial. `first_batch` resets cross-batch state.
+    /// Returns whether the hint stream's control-end marker was seen.
     pub fn process_hints(&self, hints: &[u64], first_batch: bool) -> Result<bool> {
         let mut has_ctrl_start = false;
         let mut has_ctrl_end = false;
@@ -148,8 +155,8 @@ impl PrecompileHintsRelay {
 }
 
 impl StreamProcessor for PrecompileHintsRelay {
-    fn process_hints(&self, data: &[u64], first_batch: bool) -> Result<bool> {
-        self.process_hints(data, first_batch)
+    fn process_hints(&self, data: &[u64], first_batch: bool) -> Result<bool, StreamError> {
+        self.process_hints(data, first_batch).map_err(StreamError::other)
     }
 
     fn reset(&self) {

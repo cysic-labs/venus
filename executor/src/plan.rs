@@ -1,0 +1,169 @@
+//! [`PlanPhase`] — pure planning over `ExecutionOutput`.
+//!
+//! Split into [`PlanPhase::run_main`], [`PlanPhase::run_secondary_mt`] and
+//! [`PlanPhase::await_mem_plans`].
+//! Instance materialization + SM configuration live on [`crate::WitnessPhase`];
+//! cost accounting lives on [`crate::ProofmanAdapter`].
+
+mod assigner;
+
+pub use assigner::*;
+
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use crate::error::ExecutorResult;
+use proofman_fields::PrimeField64;
+use proofman_util::{timer_start_info, timer_stop_and_log_info};
+use zisk_common::{stats_begin, stats_end, ExecutorStatsHandle, Plan, StatsScope};
+use zisk_sm_main::MainPlanner;
+
+use crate::sm::plan_sec;
+use crate::{BackendArtifacts, CountersChunkMetrics};
+
+/// What the memory-ops runner hands back when it joins, after the minimal trace.
+pub struct MemPlanArtifacts {
+    /// The memory-side plans (Mem, MemAlign, RomData, InputData).
+    pub mem_plans: Vec<Plan>,
+    /// Wall-clock waiting on the MO runner.
+    pub count_and_plan_mo_duration: Duration,
+    /// Bytes of the borrowed GPU buffer the mem-ops planner used for this block
+    pub gpu_mops_used_bytes: Option<u64>,
+    /// The block's device memory witness, to fill once the memory instances are placed.
+    pub device_witness: Option<zisk_asm_runner::DeviceMemWitness>,
+}
+
+/// Pure-planning phase actor. Owns chunk size only.
+pub struct PlanPhase<F: PrimeField64> {
+    chunk_size: u64,
+    _marker: std::marker::PhantomData<F>,
+}
+
+impl<F: PrimeField64> PlanPhase<F> {
+    pub fn new(chunk_size: u64) -> Self {
+        Self { chunk_size, _marker: std::marker::PhantomData }
+    }
+
+    /// Minimal-trace chunk size this phase plans with.
+    pub fn chunk_size(&self) -> u64 {
+        self.chunk_size
+    }
+
+    /// Plan the main SM instances. Pure: depends only on the chunk count.
+    pub fn plan_main(num_chunks: usize, chunk_size: u64) -> ExecutorResult<Vec<Plan>> {
+        Ok(MainPlanner::plan_count(num_chunks, chunk_size)?)
+    }
+
+    /// Plan the secondary SM instances from per-chunk counters via static dispatch.
+    pub fn plan_secondary(
+        counters: &mut CountersChunkMetrics,
+        num_chunks: usize,
+        is_asm_emulator: bool,
+    ) -> BTreeMap<usize, Vec<Plan>> {
+        plan_sec::<F>(counters, num_chunks, is_asm_emulator)
+    }
+
+    /// Plan main only. No bundle / pctx / registry contact.
+    #[allow(unused_variables)]
+    pub fn run_main(
+        &self,
+        num_chunks: usize,
+        stats: &ExecutorStatsHandle,
+        exec_scope: &StatsScope,
+    ) -> ExecutorResult<Vec<Plan>> {
+        stats_begin!(stats, exec_scope, _main_plan_scope, "MAIN_PLAN", 0);
+        timer_start_info!(PLAN_MAIN);
+        let plans = Self::plan_main(num_chunks, self.chunk_size)?;
+        timer_stop_and_log_info!(PLAN_MAIN);
+        stats_end!(stats, &_main_plan_scope);
+        Ok(plans)
+    }
+
+    /// Plan the secondaries the minimal trace determines. No bundle / pctx / registry contact.
+    #[allow(unused_variables)]
+    pub fn run_secondary_mt(
+        &self,
+        counters: &mut CountersChunkMetrics,
+        num_chunks: usize,
+        is_asm_emulator: bool,
+        stats: &ExecutorStatsHandle,
+        exec_scope: &StatsScope,
+    ) -> ExecutorResult<(BTreeMap<usize, Vec<Plan>>, Duration)> {
+        stats_begin!(stats, exec_scope, _secn_plan_scope, "SECN_PLAN", 0);
+        timer_start_info!(PLAN_SECONDARY);
+        let start_partial = Instant::now();
+
+        let secn_planning = Self::plan_secondary(counters, num_chunks, is_asm_emulator);
+
+        let count_and_plan_duration = start_partial.elapsed();
+        timer_stop_and_log_info!(PLAN_SECONDARY);
+        stats_end!(stats, &_secn_plan_scope);
+        Ok((secn_planning, count_and_plan_duration))
+    }
+
+    /// Join the memory-ops runner and take its plans. No bundle / pctx / registry contact.
+    #[allow(unused_variables)]
+    pub fn await_mem_plans(
+        &self,
+        backend: &mut BackendArtifacts,
+        stats: &ExecutorStatsHandle,
+        exec_scope: &StatsScope,
+    ) -> ExecutorResult<MemPlanArtifacts> {
+        timer_start_info!(WAIT_PLAN_MEM_CPP);
+        let mo_start = Instant::now();
+
+        stats_begin!(stats, exec_scope, _mo_wait_scope, "MO_PLAN_WAIT", 0);
+        let (mem_plans, gpu_mops_used_bytes, device_witness) = backend.await_mem_plans()?;
+        stats_end!(stats, &_mo_wait_scope);
+
+        let count_and_plan_mo_duration = mo_start.elapsed();
+        timer_stop_and_log_info!(WAIT_PLAN_MEM_CPP);
+
+        Ok(MemPlanArtifacts {
+            mem_plans,
+            count_and_plan_mo_duration,
+            gpu_mops_used_bytes,
+            device_witness,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proofman_fields::Goldilocks;
+    use zisk_pil::{MAIN_AIR_IDS, MAIN_STEPS_PER_SEGMENT, ZISK_AIRGROUP_ID};
+
+    type F = Goldilocks;
+
+    #[test]
+    fn plan_main_empty_traces_yields_empty_plan() {
+        let plans = PlanPhase::<F>::plan_main(0, MAIN_STEPS_PER_SEGMENT as u64)
+            .expect("empty traces planned ok");
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn plan_main_single_full_trace_yields_one_plan() {
+        let plans = PlanPhase::<F>::plan_main(1, MAIN_STEPS_PER_SEGMENT as u64).expect("ok");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].airgroup_id, ZISK_AIRGROUP_ID);
+        assert_eq!(plans[0].air_id, MAIN_AIR_IDS[0]);
+    }
+
+    #[test]
+    fn plan_main_segments_via_ceil_div() {
+        let plans = PlanPhase::<F>::plan_main(3, (MAIN_STEPS_PER_SEGMENT as u64) / 2).expect("ok");
+        assert_eq!(plans.len(), 2);
+    }
+
+    #[test]
+    fn plan_main_rejects_non_power_of_two_chunk_size() {
+        match PlanPhase::<F>::plan_main(1, 3) {
+            Ok(_) => panic!("non-power-of-two chunk_size must error"),
+            Err(err) => {
+                assert!(err.to_string().to_lowercase().contains("power of two"));
+            }
+        }
+    }
+}

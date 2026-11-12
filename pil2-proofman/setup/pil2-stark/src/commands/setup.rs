@@ -1,0 +1,735 @@
+//! Non-recursive setup command: the main orchestrator for the setup pipeline.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use rayon::prelude::*;
+
+use pil2_pilout::pilout::{self as pb};
+use prost::Message;
+use crate::output::global_info::{build_global_info_json, write_global_constraints, write_global_info_json};
+use crate::pil::prepare::PrepareOptions;
+use crate::commands::recursive_setup::run_recursive_setup;
+use crate::types::stark_struct::{generate_basic_stark_struct, StarkStructsConfig};
+use crate::output::stark_info::{build_starkinfo_output, collect_opening_points, solve_low_degree_test};
+
+/// Setup options parsed from CLI args.
+pub struct SetupOptions {
+    pub airout_path: String,
+    pub build_dir: String,
+    pub fixed_dir: Option<String>,
+    pub stark_structs_path: Option<String>,
+    pub recursive: bool,
+    /// Maximum number of recursive1 air pipelines to run in parallel (default 1 = serial).
+    /// Each concurrent pipeline runs one circom compile + pil2com at a time.
+    /// Rule of thumb: set to available_RAM_GB / per_air_peak_RAM_GB.
+    pub recursive_jobs: usize,
+    /// Maximum number of AIRs to process in parallel during non-recursive setup (default 1 = serial).
+    /// Each slot runs pil_info + file I/O for one AIR.
+    /// Rule of thumb: set to available_RAM_GB / per_air_peak_RAM_GB.
+    pub setup_jobs: usize,
+    /// Optional path to write per-AIR stats (same format as `proofman-setup stats`).
+    /// If None, no stats file is written.
+    pub stats_output_path: Option<String>,
+    pub hash: String,
+    /// Proofs each recursive2 circuit aggregates. 2 or 3.
+    pub agg_arity: usize,
+    /// Build the `vadcop_final_compressed` stage. Defaults per family -- see
+    /// `hash_family::compressed_final_by_default` -- and can be added later with the
+    /// `setup-compressed-final` subcommand.
+    pub compressed_final: bool,
+    /// Label written as `setupVersion` in globalInfo.json; the consumer (ZisK) checks it at load.
+    pub setup_version: Option<String>,
+    /// Pin every recursive air to 2^N rows (see the CLI flag).
+    pub recursive_n_bits: Option<usize>,
+    /// Generate + compile per-AIR Q-expression CUDA kernels (`.exps.so`) at the
+    /// end of setup. No-op (logged) if `nvcc` is not on PATH.
+    pub gen_exps: bool,
+    /// CUDA arch spec for `--gen-exps`: `auto` | `major` | e.g. `89,120` / `sm_120`.
+    pub exps_arch: String,
+    /// Skip an AIR whose Q has more than this many ops (stays on the interpreter).
+    pub exps_cap: usize,
+    /// Fixed ops/chunk for every AIR; `None` => the no-spill autotuner.
+    pub exps_chunk: Option<usize>,
+    /// pil2-stark source root for the nvcc includes; `None` resolves relative to
+    /// the exps-codegen crate.
+    pub exps_stark_src: Option<String>,
+}
+
+/// The exps-codegen settings the setup commands generate a key's Q kernels with.
+pub(crate) fn exps_config(archspec: &str) -> proofman_exps_codegen::GenConfig {
+    proofman_exps_codegen::GenConfig {
+        cap: 60000,
+        chunk: None,
+        archspec: archspec.to_string(),
+        stark_src: None,
+        keep_dir: None,
+        dry_run: false,
+        optimize: true,
+    }
+}
+
+/// True if the CUDA `nvcc` compiler is resolvable the way the expression
+/// codegen resolves it (PATH, `$CUDA_HOME/bin`, `/usr/local/cuda/bin`). Used
+/// to gate `--gen-exps` so a setup run on a machine without the CUDA toolchain
+/// skips expression-kernel codegen cleanly instead of erroring mid-compile.
+pub(crate) fn nvcc_present() -> bool {
+    proofman_exps_codegen::nvcc_present()
+}
+
+/// Run the non-recursive setup pipeline.
+pub fn run_setup(opts: &SetupOptions) -> Result<()> {
+    proofman_starks_lib_c::set_hash_family_c(&opts.hash);
+    let pilout_data = fs::read(&opts.airout_path)?;
+    let pilout = pb::PilOut::decode(pilout_data.as_slice())?;
+    let pilout_name = pilout.name.clone().unwrap_or_else(|| "pilout".to_string());
+
+    // Only stage-1 proofValues are bound (via the global challenge); reject the rest.
+    if let Some(bad) =
+        pilout.symbols.iter().find(|sym| sym.r#type == pb::SymbolType::ProofValue as i32 && sym.stage.unwrap_or(1) != 1)
+    {
+        anyhow::bail!(
+            "proofValue '{}' is stage {}; only stage-1 proofValues are supported",
+            bad.name,
+            bad.stage.unwrap_or(1)
+        );
+    }
+
+    // The provers absorb airgroupvalues only after root 2, so stages above 2 would be unbound.
+    if let Some(bad) = pilout
+        .symbols
+        .iter()
+        .find(|sym| sym.r#type == pb::SymbolType::AirGroupValue as i32 && sym.stage.unwrap_or(1) > 2)
+    {
+        anyhow::bail!(
+            "airgroupValue '{}' is stage {}; only stage 1 and 2 airgroupValues are supported",
+            bad.name,
+            bad.stage.unwrap_or(1)
+        );
+    }
+
+    let settings_map: StarkStructsConfig = if let Some(ref settings_path) = opts.stark_structs_path {
+        let data = fs::read_to_string(settings_path)?;
+        StarkStructsConfig::from_json_str(&data)?
+    } else {
+        StarkStructsConfig::default()
+    };
+    // A malformed "recursion" entry should fail here, not after the per-air setup has run.
+    settings_map.recursion_settings()?;
+
+    struct AirWorkItem {
+        ag_idx: usize,
+        air_idx: usize,
+        airgroup_name: String,
+        air_name: String,
+        num_rows: usize,
+    }
+
+    let mut work_items = Vec::new();
+    for (ag_idx, airgroup) in pilout.air_groups.iter().enumerate() {
+        let airgroup_name = airgroup.name.clone().unwrap_or_else(|| format!("airgroup_{}", ag_idx));
+        for (air_idx, air) in airgroup.airs.iter().enumerate() {
+            let air_name = air.name.clone().unwrap_or_else(|| format!("air_{}", air_idx));
+            let num_rows = air.num_rows.unwrap_or(0) as usize;
+            if num_rows == 0 {
+                tracing::warn!("Skipping air '{}' with numRows=0", air_name);
+                continue;
+            }
+            work_items.push(AirWorkItem { ag_idx, air_idx, airgroup_name: airgroup_name.clone(), air_name, num_rows });
+        }
+    }
+
+    tracing::info!("Processing {} AIRs", work_items.len());
+
+    let pilout = Arc::new(pilout);
+    let settings_map = Arc::new(settings_map);
+    let build_dir = opts.build_dir.clone();
+    let fixed_dir = opts.fixed_dir.clone();
+    let pilout_name_shared = pilout_name.clone();
+
+    // Always write globalConstraints first — run_recursive_setup reads them from disk.
+    // globalInfo.json is written now only for the non-recursive path; for recursive it is
+    // written once at the end after hasCompressor flags are known.
+    write_global_constraints(&pilout, &pilout_name, &opts.build_dir, &settings_map)?;
+    if !opts.recursive {
+        write_global_info_json(
+            &pilout,
+            &pilout_name,
+            &opts.build_dir,
+            &settings_map,
+            &opts.hash,
+            opts.agg_arity,
+            opts.compressed_final,
+            opts.setup_version.as_deref(),
+            &Default::default(),
+        )?;
+    }
+
+    // Thread pool for per-AIR processing.  setup_jobs > 1 enables parallel AIR
+    // pipelines; each gets the 64 MB stack that pil_info requires.
+    let air_pool =
+        rayon::ThreadPoolBuilder::new().num_threads(opts.setup_jobs.max(1)).stack_size(64 * 1024 * 1024).build()?;
+
+    // Each entry: (ag_idx, air_idx, airgroup_name, air_name, summary, im_pols_info)
+    type StatsEntry = (usize, usize, String, String, String, (Vec<String>, Vec<String>));
+
+    let results: Vec<Result<StatsEntry>> = air_pool.install(|| {
+        work_items
+            .par_iter()
+            .map(|item| {
+                // A span, not just a log line: with setup_jobs > 1 the pipelines interleave, and
+                // every line pil_info, the const-tree builder and the expression codegen emit from
+                // inside here would otherwise be unattributable. Entering it prefixes them all.
+                let _span = tracing::info_span!("air", name = %item.air_name).entered();
+                let n_bits = log2_usize(item.num_rows);
+                tracing::info!("Computing setup for air '{}'", item.air_name);
+
+                let air_settings = settings_map.resolve(&item.airgroup_name, &item.air_name);
+
+                let stark_struct = generate_basic_stark_struct(&air_settings, n_bits, &opts.hash);
+
+                let files_dir = PathBuf::from(&build_dir)
+                    .join("provingKey")
+                    .join(&pilout_name_shared)
+                    .join(&item.airgroup_name)
+                    .join("airs")
+                    .join(&item.air_name)
+                    .join("air");
+                fs::create_dir_all(&files_dir)?;
+
+                let const_path = files_dir.join(format!("{}.const", item.air_name));
+
+                // A path that cannot produce `.const` must drop any file an earlier run
+                // left, or the `const_path.exists()` check below builds the const tree
+                // and verkey from stale fixed columns and still exits 0. The verkey pair
+                // goes too: it is only rewritten when `.const` exists.
+                let drop_stale_const = |why: &str| -> Result<()> {
+                    let mut dropped = false;
+                    for stale in [
+                        const_path.clone(),
+                        files_dir.join(format!("{}.verkey.json", item.air_name)),
+                        files_dir.join(format!("{}.verkey.bin", item.air_name)),
+                    ] {
+                        if stale.exists() {
+                            fs::remove_file(&stale)
+                                .with_context(|| format!("removing stale {} ({})", stale.display(), why))?;
+                            dropped = true;
+                        }
+                    }
+                    if dropped {
+                        tracing::warn!(
+                            "Air '{}': dropped stale .const/.verkey in {} — {}",
+                            item.air_name,
+                            files_dir.display(),
+                            why
+                        );
+                    }
+                    Ok(())
+                };
+
+                // `.const` comes from `<fixed_dir>/<air>.fixed` when present, else from the
+                // pilout's inline fixed_cols. An air whose fixed columns neither source can
+                // supply is an error: without `.const` there is no verkey, and the key would
+                // only fail at prove time.
+                let air = &pilout.air_groups[item.ag_idx].airs[item.air_idx];
+                let fixed_file = fixed_dir.as_ref().map(|fd| Path::new(fd).join(format!("{}.fixed", item.air_name)));
+                if let Some(src) = fixed_file.as_ref().filter(|src| src.exists()) {
+                    fs::copy(src, &const_path)?;
+                } else if air.fixed_cols.is_empty() {
+                    tracing::debug!("Air '{}': no fixed columns — skipping .const generation", item.air_name);
+                    drop_stale_const("the air has no fixed columns")?;
+                } else if air.fixed_cols.iter().all(|fc| !fc.values.is_empty()) {
+                    crate::io::fixed_cols::write_const_file(
+                        const_path.to_str().unwrap_or(""),
+                        air,
+                        &[], // no external plonk polynomial values needed
+                    )?;
+                    tracing::info!(
+                        "Generated .const from pilout inline fixed_cols for air '{}' ({} columns, {} rows)",
+                        item.air_name,
+                        air.fixed_cols.len(),
+                        air.num_rows.unwrap_or(0)
+                    );
+                } else {
+                    drop_stale_const("its fixed columns have no source")?;
+                    match fixed_file {
+                        Some(src) => anyhow::bail!(
+                            "Air '{}': fixed file not found: {} (its fixed columns are not inline in the pilout)",
+                            item.air_name,
+                            src.display()
+                        ),
+                        None => anyhow::bail!(
+                            "Air '{}': some fixed columns have no inline values in the pilout; \
+                             provide --fixed-dir (-u) with its .fixed file",
+                            item.air_name
+                        ),
+                    }
+                }
+
+                let starkinfo_path = files_dir.join(format!("{}.starkinfo.json", item.air_name));
+
+                let prepare_opts = PrepareOptions { debug: false, im_pols_stages: false, inplace_stage_commit: true };
+                let pil_result =
+                    crate::pil::info::pil_info(&pilout, item.ag_idx, item.air_idx, &stark_struct, &prepare_opts)?;
+                let setup_result = &pil_result.setup;
+                let pil_code = &pil_result.pil_code;
+
+                let opening_points = collect_opening_points(setup_result);
+                let ldt = solve_low_degree_test(&stark_struct, pil_code.fri_batch_size.max(1) as u64);
+
+                let starkinfo_output = build_starkinfo_output(
+                    setup_result,
+                    &stark_struct,
+                    pil_code,
+                    &opening_points,
+                    &ldt,
+                    item.ag_idx,
+                    item.air_idx,
+                    Some(proofman_common::circuit_type_of(item.ag_idx as u64, item.air_idx as u64 + 1)),
+                    &item.air_name,
+                    pil_result.c_exp_id,
+                    pil_result.deep_exp_id,
+                    pil_result.q_deg,
+                );
+
+                // Say which low-degree test this air runs, with the solved schedule.
+                tracing::info!(
+                    "Air '{}' low-degree test: {}",
+                    item.air_name,
+                    starkinfo_output.stark_struct.low_degree_test.describe()
+                );
+
+                let starkinfo_json = crate::output::json::to_json_string(&starkinfo_output)?;
+                fs::write(&starkinfo_path, &starkinfo_json)?;
+
+                fs::write(
+                    files_dir.join(format!("{}.expressionsinfo.json", item.air_name)),
+                    &crate::output::json::to_json_string(&pil_code.expressions_info)?,
+                )?;
+                fs::write(
+                    files_dir.join(format!("{}.verifierinfo.json", item.air_name)),
+                    &crate::output::json::to_json_string(&pil_code.verifier_info)?,
+                )?;
+
+                let verkey_json_path = files_dir.join(format!("{}.verkey.json", item.air_name));
+                if const_path.exists() {
+                    let const_root = crate::proving_key::bctree::compute_const_tree(
+                        const_path.to_str().unwrap_or(""),
+                        starkinfo_path.to_str().unwrap_or(""),
+                        verkey_json_path.to_str().unwrap_or(""),
+                    )?;
+                    let verkey_bin: Vec<u8> = const_root.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    fs::write(files_dir.join(format!("{}.verkey.bin", item.air_name)), &verkey_bin)?;
+                }
+
+                write_bin_files_from_pil_code(
+                    &starkinfo_json,
+                    &pil_code.expressions_info,
+                    &pil_code.verifier_info,
+                    &files_dir.join(format!("{}.bin", item.air_name)),
+                    &files_dir.join(format!("{}.verifier.bin", item.air_name)),
+                )?;
+
+                tracing::info!("Setup for air '{}' complete", item.air_name);
+                Ok((
+                    item.ag_idx,
+                    item.air_idx,
+                    item.airgroup_name.clone(),
+                    item.air_name.clone(),
+                    pil_result.summary.clone(),
+                    pil_result.im_pols_info.clone(),
+                ))
+            })
+            .collect()
+    });
+
+    let mut stats_entries: Vec<StatsEntry> = Vec::new();
+    for result in results {
+        stats_entries.push(result?);
+    }
+
+    if let Some(ref stats_path) = opts.stats_output_path {
+        // Sort by (ag_idx, air_idx) so the file is deterministic regardless of parallel order.
+        stats_entries.sort_by_key(|(ag, air, ..)| (*ag, *air));
+
+        if let Some(parent) = std::path::PathBuf::from(stats_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        let mut stats_lines: Vec<String> = Vec::new();
+        for (_, _, airgroup_name, air_name, summary, (base_field, extended_field)) in &stats_entries {
+            stats_lines.push(format!("Airgroup: {} Air: {}", airgroup_name, air_name));
+            stats_lines.push(format!("Summary: {}", summary));
+            if !base_field.is_empty() {
+                stats_lines.push("Intermediate polynomials baseField:".to_string());
+                for pol in base_field {
+                    stats_lines.push(format!("    {}", pol));
+                }
+            }
+            if !extended_field.is_empty() {
+                stats_lines.push("Intermediate polynomials extendedField:".to_string());
+                for pol in extended_field {
+                    stats_lines.push(format!("    {}", pol));
+                }
+            }
+            stats_lines.push(String::new());
+        }
+
+        fs::write(stats_path, stats_lines.join("\n"))?;
+        tracing::info!("Stats written to {}", stats_path);
+    }
+
+    if opts.recursive {
+        tracing::info!("Starting recursive setup...");
+        let global_info_base = build_global_info_json(
+            &pilout,
+            &pilout_name,
+            &settings_map,
+            &opts.hash,
+            opts.agg_arity,
+            opts.compressed_final,
+            opts.setup_version.as_deref(),
+            &Default::default(),
+        );
+        let summary = run_recursive_setup(&pilout, &pilout_name, opts, &settings_map, global_info_base)?;
+
+        // Build final settings map: start from user-supplied settings and overlay any
+        // hasCompressor flags auto-detected at runtime via NeedsCompressorError.
+        // Then write globalInfo.json exactly once with the complete information.
+        let mut final_settings: StarkStructsConfig = (*settings_map).clone();
+        for air_name in &summary.airs_with_compressor {
+            final_settings.set_has_compressor(air_name);
+        }
+        write_global_info_json(
+            &pilout,
+            &pilout_name,
+            &opts.build_dir,
+            &final_settings,
+            &opts.hash,
+            opts.agg_arity,
+            opts.compressed_final,
+            opts.setup_version.as_deref(),
+            &summary.r1_batch_sizes,
+        )?;
+        tracing::info!("Wrote globalInfo.json with hasCompressor flags and recursive1 batch sizes");
+    }
+
+    if opts.gen_exps {
+        let gen_opts = crate::commands::gen_exps::GenExpsOptions {
+            proving_key: std::path::PathBuf::from(&opts.build_dir).join("provingKey"),
+            arch: opts.exps_arch.clone(),
+            cap: opts.exps_cap,
+            chunk: opts.exps_chunk,
+            stark_src: opts.exps_stark_src.clone().map(std::path::PathBuf::from),
+        };
+        // Non-fatal: setup itself succeeded and the provingKey is valid; the
+        // prover falls back to the interpreter for any AIR without a .so.
+        if let Err(e) = crate::commands::gen_exps::run_gen_exps(&gen_opts) {
+            tracing::error!("Expression kernel codegen failed (continuing): {:#}", e);
+        }
+    }
+
+    tracing::info!("Setup complete");
+    Ok(())
+}
+
+/// Write binary files using in-memory generate_pil_code structs (no disk round-trip).
+fn write_bin_files_from_pil_code(
+    starkinfo_json: &str,
+    expressions_info: &crate::pil::gen_code::ExpressionsInfo,
+    verifier_info: &crate::pil::gen_code::VerifierInfo,
+    bin_output: &Path,
+    verifier_bin_output: &Path,
+) -> Result<()> {
+    use crate::types::stark_info::StarkInfo;
+
+    let si_json: serde_json::Value = serde_json::from_str(starkinfo_json)?;
+    let stark_info = StarkInfo::from_json(&si_json)?;
+
+    let ei = crate::types::stark_info::ExpressionsInfo::try_from(expressions_info)?;
+    crate::io::bin_file::write_expressions_bin_file(bin_output.to_str().unwrap_or(""), &stark_info, &ei)?;
+
+    let vi = crate::types::stark_info::VerifierInfo::try_from(verifier_info)?;
+    crate::io::bin_file::write_verifier_expressions_bin_file(
+        verifier_bin_output.to_str().unwrap_or(""),
+        &stark_info,
+        &vi,
+    )?;
+
+    Ok(())
+}
+
+/// Compute floor(log2(n)) for a nonzero usize.
+fn log2_usize(n: usize) -> usize {
+    assert!(n > 0, "log2_usize: n must be positive");
+    (usize::BITS - 1 - n.leading_zeros()) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pil2_pilout::pilout as pb;
+    use prost::Message;
+
+    #[test]
+    fn setup_options_has_gen_exps_fields() {
+        // Compile-level guard: the new gen-exps fields exist with the expected types.
+        let o = SetupOptions {
+            airout_path: String::new(),
+            build_dir: String::new(),
+            fixed_dir: None,
+            stark_structs_path: None,
+            recursive: false,
+            recursive_jobs: 1,
+            setup_jobs: 1,
+            stats_output_path: None,
+            hash: "Poseidon2".to_string(),
+            agg_arity: 3,
+            recursive_n_bits: None,
+            compressed_final: true,
+            setup_version: None,
+            gen_exps: false,
+            exps_arch: "auto".to_string(),
+            exps_cap: 60000,
+            exps_chunk: None,
+            exps_stark_src: None,
+        };
+        assert!(!o.gen_exps);
+        assert_eq!(o.exps_arch, "auto");
+        assert_eq!(o.exps_cap, 60000);
+        assert!(o.exps_chunk.is_none());
+    }
+
+    #[test]
+    fn nvcc_present_returns_bool_without_panicking() {
+        // Can't assert true/false (host-dependent), but it must not panic and
+        // must never be false when nvcc is on PATH (the generator looks there first).
+        let got = nvcc_present();
+        if which::which("nvcc").is_ok() {
+            assert!(got);
+        }
+    }
+
+    // Build a minimal pilout (one empty air) carrying one ProofValue symbol at `stage`.
+    fn pilout_with_proof_value(stage: Option<u32>) -> Vec<u8> {
+        let pilout_proto = pb::PilOut {
+            name: Some("pvtest".to_string()),
+            air_groups: vec![pb::AirGroup {
+                name: Some("G".to_string()),
+                airs: vec![pb::Air { name: Some("A".to_string()), num_rows: Some(0), ..Default::default() }],
+                ..Default::default()
+            }],
+            symbols: vec![pb::Symbol {
+                name: "pv".to_string(),
+                r#type: pb::SymbolType::ProofValue as i32,
+                stage,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = Vec::new();
+        pilout_proto.encode(&mut buf).unwrap();
+        buf
+    }
+
+    fn setup_opts_for(pilout_path: &str, build_dir: &str) -> SetupOptions {
+        SetupOptions {
+            airout_path: pilout_path.to_string(),
+            build_dir: build_dir.to_string(),
+            fixed_dir: None,
+            stark_structs_path: None,
+            recursive: false,
+            recursive_jobs: 1,
+            setup_jobs: 1,
+            stats_output_path: None,
+            hash: "Poseidon2".to_string(),
+            agg_arity: 3,
+            recursive_n_bits: None,
+            compressed_final: true,
+            setup_version: None,
+            gen_exps: false,
+            exps_arch: "auto".to_string(),
+            exps_cap: 60000,
+            exps_chunk: None,
+            exps_stark_src: None,
+        }
+    }
+
+    // A stage-2 proof value is absorbed into no transcript and bound by no AIR, so setup
+    // must reject it, naming the symbol and its stage. A stage-1 (or stageless) proof value
+    // is folded into the global challenge and must be accepted.
+    #[test]
+    fn rejects_non_stage_1_proof_values() {
+        for stage in [Some(2u32), Some(0u32)] {
+            let tmp = std::env::temp_dir().join(format!("pil2_pv_reject_{}_{}", stage.unwrap(), std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let build_dir = tmp.join("build");
+            std::fs::create_dir_all(&build_dir).unwrap();
+            let pilout_path = tmp.join("test.pilout");
+            std::fs::write(&pilout_path, pilout_with_proof_value(stage)).unwrap();
+
+            let err = run_setup(&setup_opts_for(pilout_path.to_str().unwrap(), build_dir.to_str().unwrap()))
+                .expect_err("stage != 1 proof value must be rejected");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("pv"), "error must name the symbol: {msg}");
+            assert!(msg.contains("stage"), "error must mention the stage: {msg}");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+
+    #[test]
+    fn accepts_stage_1_and_stageless_proof_values() {
+        for stage in [Some(1u32), None] {
+            let tmp = std::env::temp_dir().join(format!("pil2_pv_ok_{:?}_{}", stage, std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let build_dir = tmp.join("build");
+            std::fs::create_dir_all(&build_dir).unwrap();
+            let pilout_path = tmp.join("test.pilout");
+            std::fs::write(&pilout_path, pilout_with_proof_value(stage)).unwrap();
+
+            // The single air has num_rows 0 and is skipped, so setup reaches completion:
+            // the proof-value guard is the only thing that could reject, and it must not.
+            let result = run_setup(&setup_opts_for(pilout_path.to_str().unwrap(), build_dir.to_str().unwrap()));
+            assert!(result.is_ok(), "stage-1/stageless proof value must be accepted: {:#}", result.unwrap_err());
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+
+    // An air whose fixed column has no inline values needs a `.fixed` file; without one setup
+    // must fail rather than write a key with no `.const`/verkey for that air.
+    #[test]
+    fn rejects_air_with_unsourced_fixed_columns() {
+        let pilout_proto = pb::PilOut {
+            name: Some("fixedtest".to_string()),
+            air_groups: vec![pb::AirGroup {
+                name: Some("G".to_string()),
+                airs: vec![pb::Air {
+                    name: Some("A".to_string()),
+                    num_rows: Some(4),
+                    fixed_cols: vec![pb::FixedCol { values: vec![] }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let tmp = std::env::temp_dir().join(format!("pil2_fixed_missing_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let build_dir = tmp.join("build");
+        let fixed_dir = tmp.join("fixed");
+        std::fs::create_dir_all(&build_dir).unwrap();
+        std::fs::create_dir_all(&fixed_dir).unwrap();
+        let pilout_path = tmp.join("test.pilout");
+        std::fs::write(&pilout_path, pilout_proto.encode_to_vec()).unwrap();
+
+        let mut opts = setup_opts_for(pilout_path.to_str().unwrap(), build_dir.to_str().unwrap());
+        let msg = format!("{:#}", run_setup(&opts).expect_err("no --fixed-dir must be rejected"));
+        assert!(msg.contains("'A'") && msg.contains("--fixed-dir"), "{msg}");
+
+        opts.fixed_dir = Some(fixed_dir.to_str().unwrap().to_string());
+        let msg = format!("{:#}", run_setup(&opts).expect_err("missing .fixed must be rejected"));
+        assert!(msg.contains("'A'") && msg.contains("A.fixed"), "{msg}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_run_setup_writes_global_files_before_airs() {
+        let pilout_proto = pb::PilOut {
+            name: Some("globaltest".to_string()),
+            air_groups: vec![pb::AirGroup {
+                name: Some("TestGroup".to_string()),
+                airs: vec![pb::Air { name: Some("TestAir".to_string()), num_rows: Some(0), ..Default::default() }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let tmp = std::env::temp_dir().join(format!("pil2_run_setup_global_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let build_dir = tmp.join("build");
+        std::fs::create_dir_all(&build_dir).unwrap();
+        let pilout_path = tmp.join("test.pilout");
+        let mut buf = Vec::new();
+        pilout_proto.encode(&mut buf).unwrap();
+        std::fs::write(&pilout_path, &buf).unwrap();
+
+        let opts = SetupOptions {
+            airout_path: pilout_path.to_str().unwrap().to_string(),
+            build_dir: build_dir.to_str().unwrap().to_string(),
+            fixed_dir: None,
+            stark_structs_path: None,
+            recursive: false,
+            recursive_jobs: 1,
+            setup_jobs: 1,
+            stats_output_path: None,
+            hash: "Poseidon2".to_string(),
+            agg_arity: 3,
+            recursive_n_bits: None,
+            compressed_final: true,
+            setup_version: None,
+            gen_exps: false,
+            exps_arch: "auto".to_string(),
+            exps_cap: 60000,
+            exps_chunk: None,
+            exps_stark_src: None,
+        };
+        let result = run_setup(&opts);
+        assert!(result.is_ok(), "run_setup should succeed: {:#}", result.unwrap_err());
+        let pk = build_dir.join("provingKey");
+        assert!(pk.join("pilout.globalInfo.json").exists());
+        assert!(pk.join("pilout.globalConstraints.json").exists());
+        assert!(pk.join("pilout.globalConstraints.bin").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_run_setup_err_with_global_files_surviving() {
+        let pilout_proto = pb::PilOut {
+            name: Some("pilout.globalInfo.json".to_string()),
+            air_groups: vec![pb::AirGroup {
+                name: Some("G".to_string()),
+                airs: vec![pb::Air { name: Some("A".to_string()), num_rows: Some(4), ..Default::default() }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let tmp = std::env::temp_dir().join(format!("pil2_err_global_survive_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let build_dir = tmp.join("build");
+        std::fs::create_dir_all(&build_dir).unwrap();
+        let pilout_path = tmp.join("collision.pilout");
+        let mut buf = Vec::new();
+        pilout_proto.encode(&mut buf).unwrap();
+        std::fs::write(&pilout_path, &buf).unwrap();
+
+        let opts = SetupOptions {
+            airout_path: pilout_path.to_str().unwrap().to_string(),
+            build_dir: build_dir.to_str().unwrap().to_string(),
+            fixed_dir: None,
+            stark_structs_path: None,
+            recursive: false,
+            recursive_jobs: 1,
+            setup_jobs: 1,
+            stats_output_path: None,
+            hash: "Poseidon2".to_string(),
+            agg_arity: 3,
+            recursive_n_bits: None,
+            compressed_final: true,
+            setup_version: None,
+            gen_exps: false,
+            exps_arch: "auto".to_string(),
+            exps_cap: 60000,
+            exps_chunk: None,
+            exps_stark_src: None,
+        };
+        assert!(run_setup(&opts).is_err());
+        let pk = build_dir.join("provingKey");
+        assert!(pk.join("pilout.globalInfo.json").exists());
+        assert!(pk.join("pilout.globalConstraints.json").exists());
+        assert!(pk.join("pilout.globalConstraints.bin").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
