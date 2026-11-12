@@ -212,7 +212,8 @@ impl<F: PrimeField64> WitnessPhase<F> {
         // Built outside the write lock, which is then held only for the inserts.
         let mut built = Vec::with_capacity(plans.len());
         {
-            let secn_instances = state.instance_set.secn_instances.read_or_poison("secn_instances")?;
+            let secn_instances =
+                state.instance_set.secn_instances.read_or_poison("secn_instances")?;
             for plan in plans {
                 let global_id =
                     plan.global_id.ok_or(ExecutorError::SecnPlanMissing { phase: "populate" })?;
@@ -224,10 +225,14 @@ impl<F: PrimeField64> WitnessPhase<F> {
         let built = built
             .into_iter()
             .map(|(global_id, plan)| {
-                Ok((global_id, Arc::from(self.sm_bundle.build_instance(InstanceCtx::new(global_id, plan))?)))
+                Ok((
+                    global_id,
+                    Arc::from(self.sm_bundle.build_instance(InstanceCtx::new(global_id, plan))?),
+                ))
             })
             .collect::<ExecutorResult<Vec<(usize, Arc<dyn Instance<F>>)>>>()?;
-        let mut secn_instances = state.instance_set.secn_instances.write_or_poison("secn_instances")?;
+        let mut secn_instances =
+            state.instance_set.secn_instances.write_or_poison("secn_instances")?;
         for (global_id, instance) in built {
             if let Entry::Vacant(e) = secn_instances.entry(global_id) {
                 e.insert(instance);

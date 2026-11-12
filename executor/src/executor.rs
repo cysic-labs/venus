@@ -22,7 +22,9 @@ use crate::{
 };
 use proofman_common::{lease_pool, BufferPool, ProofCtx, ProofmanError, ProofmanResult, SetupCtx};
 use proofman_fields::PrimeField64;
-use proofman_util::{timer_start_info, timer_stop_and_log_info, timer_start_debug, timer_stop_and_log_debug};
+use proofman_util::{
+    timer_start_debug, timer_start_info, timer_stop_and_log_debug, timer_stop_and_log_info,
+};
 use proofman_witness::{WitnessComponent, WitnessManager};
 use zisk_asm_runner::OwnedMemInstances;
 use zisk_pil::{INPUT_DATA_AIR_IDS, MEM_AIR_IDS, ROM_DATA_AIR_IDS};
