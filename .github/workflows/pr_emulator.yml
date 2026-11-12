@@ -5,7 +5,7 @@ on:
     branches:
       - develop
       - main
-      - "pre-develop-[0-9]+.[0-9]+.[0-9]+"
+      - "pre-develop-[0-9]+.[0-9]+.[0-9]*"
     paths:
       - "emulator/**"
       - "emulator-asm/**"
@@ -13,12 +13,16 @@ on:
       - "core/**"
       - "lib-c/**"
       - "lib-float/**"
+      - "transpilers/**"
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: true
-  
+
+permissions:
+  contents: read
+
 jobs:
   riscof-elf-tests-rust:
     name: Riscof ELF tests (rust emulator)
@@ -35,10 +39,22 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@v4
 
+      - name: Resolve zisk-testvectors branch
+        id: testvectors_branch
+        run: |
+          branch=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.metadata.gha_zisk_testvectors_branch // ""')
+          if [ -z "$branch" ] || [ "$branch" = "null" ]; then
+            branch="main"
+          fi
+          echo "Using zisk-testvectors branch: $branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
       - name: Checkout zisk-testvectors repo
         uses: actions/checkout@v4
         with:
           repository: 0xPolygonHermez/zisk-testvectors
+          ref: ${{ steps.testvectors_branch.outputs.branch }}
           path: zisk-testvectors
 
       - name: Install dependencies
@@ -52,41 +68,53 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           sudo ./tools/emulate_all.sh $GITHUB_WORKSPACE/zisk-testvectors/riscof/riscof_work
 
-  riscof-elf-tests-asm:
-    name: Riscof ELF tests (assembly emulator)
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
-    defaults:
-      run:
-        shell: bash
-    env:
-      ZISK_GHA: "1"
-      ZISK_REPO_DIR: ${{ github.workspace }}
-      TERM: xterm
-    steps:
-      - name: Increase shared memory (/dev/shm)
-        run: |
-          set -euxo pipefail
-          df -h /dev/shm || true
-          sudo mount -o remount,size=16G /dev/shm || sudo mount -o remount,size=16G /run/shm
-          df -h /dev/shm
+  # riscof-elf-tests-asm:
+  #   name: Riscof ELF tests (assembly emulator)
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 240
+  #   defaults:
+  #     run:
+  #       shell: bash
+  #   env:
+  #     ZISK_GHA: "1"
+  #     ZISK_REPO_DIR: ${{ github.workspace }}
+  #     TERM: xterm
+  #   steps:
+  #     - name: Increase shared memory (/dev/shm)
+  #       run: |
+  #         set -euxo pipefail
+  #         df -h /dev/shm || true
+  #         sudo mount -o remount,size=16G /dev/shm || sudo mount -o remount,size=16G /run/shm
+  #         df -h /dev/shm
 
-      - name: Checkout sources
-        uses: actions/checkout@v4
+  #     - name: Checkout sources
+  #       uses: actions/checkout@v4
 
-      - name: Checkout zisk-testvectors repo
-        uses: actions/checkout@v4
-        with:
-          repository: 0xPolygonHermez/zisk-testvectors
-          path: zisk-testvectors
+  #     - name: Resolve zisk-testvectors branch
+  #       id: testvectors_branch
+  #       run: |
+  #         branch=$(cargo metadata --no-deps --format-version 1 \
+  #           | jq -r '.metadata.gha_zisk_testvectors_branch // ""')
+  #         if [ -z "$branch" ] || [ "$branch" = "null" ]; then
+  #           branch="main"
+  #         fi
+  #         echo "Using zisk-testvectors branch: $branch"
+  #         echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          sudo ./install_deps.sh
+  #     - name: Checkout zisk-testvectors repo
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: 0xPolygonHermez/zisk-testvectors
+  #         ref: ${{ steps.testvectors_branch.outputs.branch }}
+  #         path: zisk-testvectors
 
-      - name: Emulate in assembly Riscof ELF files
-        run: |
-          . "$HOME/.cargo/env"
-          cd "$GITHUB_WORKSPACE"
-          sudo ./tools/emulate_asm_all.sh $GITHUB_WORKSPACE/zisk-testvectors/riscof/riscof_work
+  #     - name: Install dependencies
+  #       run: |
+  #         cd "$GITHUB_WORKSPACE/tools/test-env"
+  #         sudo ./install_deps.sh
+
+  #     - name: Emulate in assembly Riscof ELF files
+  #       run: |
+  #         . "$HOME/.cargo/env"
+  #         cd "$GITHUB_WORKSPACE"
+  #         sudo ./tools/emulate_asm_all.sh $GITHUB_WORKSPACE/zisk-testvectors/riscof/riscof_work

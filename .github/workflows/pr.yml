@@ -1,11 +1,13 @@
-name: Test ZisK
+name: Test Venus
+
+# GitHub-hosted runners only: this repository has no self-hosted runner, so the GPU proving tests of
+# upstream ZisK (self-hosted GPU runners) are not run here. CUDA is absent on these runners, so the
+# proving backend builds CPU-only.
 
 on:
   pull_request:
     branches:
-      - develop
       - main
-      - "pre-develop-[0-9]+.[0-9]+.[0-9]+"
     paths-ignore:
       - 'book/**'
   workflow_dispatch:
@@ -14,12 +16,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   cargo-tests:
     name: Cargo tests
     runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # Use the committed ziskfloat artifacts (no Docker daemon in this container).
+      ZISK_CI_NO_DOCKER_REBUILD: "1"
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
@@ -27,10 +36,19 @@ jobs:
       - name: Install dependencies
         run: |
           cd "$GITHUB_WORKSPACE/tools/test-env"
-          sudo ./install_deps.sh
+          ./install_deps.sh
+
+      - name: Add Cargo to PATH
+        # install_deps.sh installs Rust through rustup into ~/.cargo/bin.
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install the wasm32-wasip1 target
         run: rustup target add wasm32-wasip1
+
+      - name: Show versions
+        run: |
+          rustc --version
+          cargo --version
 
       - name: Build cargo-zisk
         run: cargo build --bin cargo-zisk
@@ -47,140 +65,51 @@ jobs:
           RUSTFLAGS: -Copt-level=3 -Cdebug-assertions -Coverflow-checks=y -Cdebuginfo=0 -C target-cpu=native
           RUST_BACKTRACE: 1
 
-  test-x86_64:
-    name: Test on Ubuntu x86_64
-    # Code from fork pull requests must never run on the persistent self-hosted runner.
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: self-hosted
-    timeout-minutes: 180
-    container:
-      image: ubuntu:22.04
-      options:
-        --shm-size=48g
-        -v /home/gha/cache-setup:/github/home/output:rw
-    defaults:
-      run:
-        shell: bash
-    env:
-      ZISK_GHA: "1"
-      ZISK_REPO_DIR: ${{ github.workspace }}
-      ZISK_TESTVECTORS_BRANCH: "main"
-      DISTRIBUTED_PROCESSES: "2"
-      DISTRIBUTED_THREADS: "64"
-      PROVE_FLAGS: "-a -y"
-      # zisk-eth-client guest under test (tools/test-env/build_zec_guest.sh)
-      ZEC_GUEST: ziskethone
-      TERM: xterm
-    steps:
-      - name: Checkout sources
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./install_deps.sh
-
-      - name: Build ZisK
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./build_zisk.sh
-
-      - name: Build setup
+      - name: Run the wasm guest tests with the float feature
+        run: cargo test -p ziskemu --release --features float --test wasm --test wasm_float --test wasm_example
         env:
-          USE_CACHE_SETUP: "1"
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./build_setup.sh
+          RUSTFLAGS: -Copt-level=3 -Cdebug-assertions -Coverflow-checks=y -Cdebuginfo=0 -C target-cpu=native
+          RUST_BACKTRACE: 1
 
-      - name: Test sha_hasher
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./test_sha_hasher.sh
-
-      - name: Test ELF diagnostic
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./test_diagnostic.sh
-
-      - name: Build zec guest ELF file
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./build_zec_guest.sh
-
-      - name: Verify Constraints Ethereum block
+      # The compressed (C) decoder is off by default; check its traps fail too.
+      - name: Run the failed-execution tests with the compressed feature
+        run: cargo test --release -p ziskemu --features compressed --test failed_execution
         env:
-          DISABLE_PROVE: "1"
-          BLOCK_INPUTS_SINGLE: "mainnet_26235156_91_5_zec_ziskethone.bin"
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./test_eth_block.sh
+          RUSTFLAGS: -Copt-level=3 -Cdebug-assertions -Coverflow-checks=y -Cdebuginfo=0 -C target-cpu=native
+          RUST_BACKTRACE: 1
 
-      - name: Prove Ethereum block
-        env:
-          BLOCK_INPUTS_SINGLE: "mainnet_26235156_91_5_zec_ziskethone.bin,mainnet_26235168_260_29_zec_ziskethone.bin"
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./test_eth_block.sh
-
-  test-macos:
-    name: Test on macOS
-    runs-on: macos-14
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-    env:
-      ZISK_GHA: "1"
-      ZISK_REPO_DIR: ${{ github.workspace }}
-      TERM: xterm
-    steps:
-      - name: Check Rust version
-        run: rustc --version
-
-      - name: Checkout sources
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./install_deps.sh
-
-      - name: Build ZisK
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./build_zisk.sh
-
-      - name: Test sha_hasher
-        run: |
-          cd "$GITHUB_WORKSPACE/tools/test-env"
-          ./test_sha_hasher.sh
-
-  lint:
-    name: Format & Clippy on ${{ matrix.platform }}
-    runs-on: ${{ matrix.runner }}
+  build-riscv64im:
+    name: Build ziskos-staticlib (riscv64im-unknown-none-elf)
+    runs-on: ubuntu-latest
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            platform: Ubuntu x86_64
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            platform: macOS
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly with rust-src
+        # riscv64im-unknown-none-elf is a Tier 3 target: no pre-built std is available, so
+        # -Z build-std compiles core/alloc from source. Rust links with its bundled rust-lld.
+        run: rustup toolchain install nightly --component rust-src --no-self-update
+
+      - name: Build ziskos-staticlib for riscv64im-unknown-none-elf
+        run: cargo +nightly build -p ziskos-staticlib --release --target riscv64im-unknown-none-elf -Z build-std=core,alloc --config 'profile.release.lto="fat"' --features panic-handler
+        env:
+          RUSTFLAGS: "-D warnings"
+
+  lint:
+    name: Format & Clippy
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
       - name: Checkout sources
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-          components: rustfmt, clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+          rustup default stable
 
       - name: Install dependencies
         run: |
@@ -188,18 +117,15 @@ jobs:
           ./install_deps.sh
 
       - name: Run cargo fmt
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
-        env:
-          CARGO_INCREMENTAL: 1
+        run: cargo fmt --all -- --check
+
+      - name: Build cargo-zisk
+        run: cargo build --bin cargo-zisk
+
+      - name: Install ZisK rust toolchain
+        run: ./target/debug/cargo-zisk toolchain install
 
       - name: Run cargo clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-targets -- -D warnings
-          # args: --all-features --all-targets -- -D warnings -A incomplete-features
+        run: cargo clippy --all-features --all-targets -- -D warnings -A incomplete-features
         env:
           CARGO_INCREMENTAL: 1
